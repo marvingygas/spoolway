@@ -4734,25 +4734,25 @@ enum Mode {
     /// the file and what to fix. Unlike [`Mode::Outcome`] it is closed by
     /// `esc` and nothing else, which its own key row says.
     PlanNotDeleted(Notice),
-    /// The options menu's new job or edit job schedule and pipeline popups
-    /// over the routines pane `nav` describes: new job writing a job for
-    /// the routine highlighted when it was picked, edit job rewriting that
-    /// routine's job, opened on its own values. The popups, their keys and
+    /// The options menu's edit schedule popups, the schedule then the
+    /// pipeline, over the routines pane `nav` describes: writing a new job
+    /// for the routine highlighted when it was picked when it has none, or
+    /// rewriting that routine's job, opened on its own values. The popups, their keys and
     /// the save live in [`super::jobs::NewJobWalk`], and `esc` on either
     /// comes back here having written nothing.
     NewJob {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
     },
-    /// Edit job on a job whose routine is not a listed one: the routine
-    /// picker over the routines pane `nav` describes, one answer per
+    /// Edit schedule on a job whose routine is not a listed one: the
+    /// routine picker over the routines pane `nav` describes, one answer per
     /// routine folder and nothing else, so a job is never pointed at a task
     /// file or a subfolder again. `enter` opens the schedule and pipeline
     /// popups of [`Mode::NewJob`] with `job` moved onto the folder under
     /// `cursor`; `esc` goes back to the pane having written nothing.
     ///
-    /// `folders` is the routines as they were when edit job was picked, by
-    /// name and path, held for the same reason [`Mode::DeletePending`] holds
+    /// `folders` is the routines as they were when edit schedule was
+    /// picked, by name and path, held for the same reason [`Mode::DeletePending`] holds
     /// its set: the popup is drawn with no routines list to read.
     PickRoutine {
         nav: RoutineNav,
@@ -4760,7 +4760,7 @@ enum Mode {
         folders: Vec<(String, std::path::PathBuf)>,
         cursor: usize,
     },
-    /// What new job or edit job saved, over the routines pane —
+    /// What edit schedule saved, over the routines pane —
     /// [`super::jobs::saved_notice`].
     /// Apart from [`Mode::Outcome`] only in its key line, which names the one
     /// key the popup reads rather than the pane's under it. `enter` closes it
@@ -4819,8 +4819,8 @@ impl OptionsMenu {
 
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open task, `g`
-/// gate, `t` trial, `s` save as routine, and the routines tab's `n` new job
-/// and `x` delete routine. Delete on the pending screen and open plan never
+/// gate, `t` trial, `s` save as routine, and the routines tab's `n`, now
+/// edit schedule, and `x` delete routine. Delete on the pending screen and open plan never
 /// had a key of their own, and neither did the routines tab's job items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
@@ -4832,7 +4832,7 @@ enum RowOption {
     NewJob,
     /// The routine's job, through the schedule and pipeline popups.
     EditJob(JobRef),
-    /// Edit job on a job whose routine is not listed: the routine picker
+    /// Edit schedule on a job whose routine is not listed: the routine picker
     /// first, then the same popups as [`RowOption::EditJob`].
     PickRoutine(JobRef),
     /// `named` when the routine has more than one job, so the item has to
@@ -4864,8 +4864,12 @@ impl RowOption {
             RowOption::Gate => "gate".to_string(),
             RowOption::Trial => "trial".to_string(),
             RowOption::SaveRoutine => "save as routine".to_string(),
-            RowOption::NewJob => "new job".to_string(),
-            RowOption::EditJob(_) | RowOption::PickRoutine(_) => "edit job".to_string(),
+            // Both open the same walk, the schedule popup then the pipeline
+            // popup, so the menu gives that path one name whether or not
+            // the routine has a job yet.
+            RowOption::NewJob | RowOption::EditJob(_) | RowOption::PickRoutine(_) => {
+                "edit schedule".to_string()
+            }
             RowOption::DeactivateJob { job, named: true } => {
                 format!("deactivate job {}", job.name)
             }
@@ -6313,8 +6317,8 @@ fn run_screen_from(
                 // `o`: the menu for whichever row the focused pane
                 // highlights — see `routine_options`. Read here rather than
                 // in `handle_routine_key`, which is never handed the
-                // pipelines and the routines directory `new job` is checked
-                // against.
+                // pipelines and the routines directory edit schedule is
+                // checked against.
                 Key::Char('o') => {
                     if let Some(menu) =
                         routine_options(repo, pipelines, &routines, &state.jobs, nav)
@@ -7035,9 +7039,9 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 /// jobs [`jobs_on`] finds for it in `jobs`, the stores as the pane last
 /// read them, and always end on delete routine:
 ///
-/// - No job: new job, only where [`super::jobs::NewJobWalk::for_routine`]
+/// - No job: edit schedule, only where [`super::jobs::NewJobWalk::for_routine`]
 ///   can point a job at the folder, the same check `n` made.
-/// - One job: edit job, then deactivate job for an enabled job or activate
+/// - One job: edit schedule, then deactivate job for an enabled job or activate
 ///   job for an inactive one.
 /// - Two or more: deactivate job or activate job with each job's name,
 ///   sorted by name as the details pane lists them. They clash, and
@@ -7048,8 +7052,8 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 ///   jobs the routine has cannot be told. Delete routine refuses for the
 ///   same reason, and says so.
 ///
-/// A job's row under the routines, an [`Orphan`], offers edit job alone,
-/// through the routine picker, titled with the row's name. No menu deletes
+/// A job's row under the routines, an [`Orphan`], offers edit schedule
+/// alone, through the routine picker, titled with the row's name. No menu deletes
 /// a job: deactivating keeps its schedule, and delete routine removes the
 /// jobs on the routine it deletes.
 ///
@@ -8661,8 +8665,8 @@ fn jobs_on<'a>(
 /// A job whose `routine` is not one of the routines the tab lists: missing,
 /// a task file, a folder inside a routine, or nothing a routine can be. It
 /// fires nowhere, and with no routine row to hang it on it gets a row of
-/// its own under the routines, where its menu's edit job can point it at a
-/// routine. Without that row it could be mended only by editing a store by
+/// its own under the routines, where its menu's edit schedule can point it at
+/// a routine. Without that row it could be mended only by editing a store by
 /// hand.
 struct Orphan<'a> {
     job: &'a crate::jobs::Job,
@@ -9231,8 +9235,8 @@ fn fit_keys(row: String, width: usize) -> String {
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
 /// notice opened from it, the options menu opened on it, delete routine's
-/// popup, the routine picker, new job's and edit job's popups and the
-/// notice they end on, or the tool-requirements gate or the issue question
+/// popup, the routine picker, edit schedule's popups and the notice they
+/// end on, or the tool-requirements gate or the issue question
 /// a routine submit stopped at. `None` for everything drawn over the
 /// pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
@@ -16698,10 +16702,10 @@ mod tests {
         assert_eq!(groups.len(), 1, "the group is still listed");
     }
 
-    /// On the routines tab, `o` over the list offers new job then delete
-    /// routine for a routine with no job, titled with the routine; over the details pane it offers open task,
-    /// titled with the task, and never open plan, even for a task with a
-    /// `plan:`.
+    /// On the routines tab, `o` over the list offers edit schedule then
+    /// delete routine for a routine with no job, titled with the routine;
+    /// over the details pane it offers open task, titled with the task, and
+    /// never open plan, even for a task with a `plan:`.
     #[test]
     fn the_routine_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("routine-options-lists");
@@ -16735,7 +16739,7 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ maintenance ")),
             "{last}"
         );
-        assert!(last.contains("│  > new job  "), "{last}");
+        assert!(last.contains("│  > edit schedule  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
         assert!(last.contains("[o] options   [tab] details"), "{last}");
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
@@ -21766,7 +21770,7 @@ mod tests {
             "`o` with the folders pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
         assert!(!drawn.contains("> open"), "{drawn}");
-        assert!(drawn.contains("> new job"), "{drawn}");
+        assert!(drawn.contains("> edit schedule"), "{drawn}");
     }
 
     /// Opening a terminal editor on a headless run finds no pane to open it
@@ -22296,7 +22300,7 @@ mod tests {
         assert!(job_names(&repo).is_empty());
     }
 
-    /// New job over the list opens the schedule popup, titled for
+    /// Edit schedule over the list opens the schedule popup, titled for
     /// the highlighted routine, with its keys on the line under the frame —
     /// and writes nothing yet.
     #[test]
@@ -22328,7 +22332,7 @@ mod tests {
         assert!(!saved.contains("Schedule:    none"), "{saved}");
     }
 
-    /// New job is offered only over the routine list: the details pane's menu
+    /// Edit schedule is offered only over the routine list: the details pane's menu
     /// does not list it, and `down` then `enter` there still picks open task,
     /// its one item, rather than a schedule popup. Headless, so open task
     /// surfaces its refusal instead of opening an editor pane in a real
@@ -22341,7 +22345,7 @@ mod tests {
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
-        assert!(!last.contains("new job"), "{last}");
+        assert!(!last.contains("edit schedule"), "{last}");
 
         let last = last_frame(&routines_screen(&repo, "\to\x1b[B\r")).to_string();
         assert!(!last.contains("when does"), "{last}");
@@ -22440,7 +22444,7 @@ mod tests {
         assert!(!repo.user_jobs_file().exists(), "nothing written");
     }
 
-    /// The routine's job as edit job's test writes it: in the project
+    /// The routine's job as edit schedule's test writes it: in the project
     /// store, on the `default` pipeline, which sorts after `bugfix`, so a
     /// pipeline popup that opened on the first pipeline would save the
     /// wrong one.
@@ -22459,9 +22463,9 @@ mod tests {
         .unwrap();
     }
 
-    /// A routine with one job offers edit job, deactivate job and delete
-    /// routine, and neither new job nor delete job; an inactive job offers
-    /// activate job in place of deactivate job.
+    /// A routine with one job offers edit schedule, deactivate job and
+    /// delete routine, and neither new job, edit job nor delete job; an
+    /// inactive job offers activate job in place of deactivate job.
     #[test]
     fn a_routine_with_one_job_offers_its_job_items_then_delete_routine() {
         use crate::jobs::Scope;
@@ -22472,7 +22476,7 @@ mod tests {
         let last = last_frame(&routines_screen(&repo, "jo")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ nightly ")), "{last}");
         let items = [
-            "│  > edit job  ",
+            "│  > edit schedule  ",
             "│    deactivate job  ",
             "│    delete routine  ",
         ];
@@ -22482,6 +22486,7 @@ mod tests {
             .collect();
         assert!(at.is_sorted(), "in the mockup's order: {last}");
         assert!(!last.contains("new job"), "{last}");
+        assert!(!last.contains("edit job"), "{last}");
         assert!(!last.contains("delete job"), "{last}");
         assert!(!last.contains("│    activate job"), "{last}");
 
@@ -22496,7 +22501,7 @@ mod tests {
     /// A routine two jobs run offers to switch either one by name —
     /// activate job for the inactive one, deactivate job for the active
     /// one — sorted as the details pane lists them, then delete routine,
-    /// and neither edit job nor delete job.
+    /// and neither edit schedule nor delete job.
     #[test]
     fn a_routine_with_two_jobs_offers_to_switch_either_by_name() {
         use crate::jobs::Scope;
@@ -22524,7 +22529,7 @@ mod tests {
         assert!(last.contains("│  > activate job nightly-a  "), "{last}");
         assert!(last.contains("│    deactivate job nightly-b  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
-        assert!(!last.contains("edit job"), "{last}");
+        assert!(!last.contains("edit schedule"), "{last}");
         assert!(!last.contains("delete job"), "{last}");
     }
 
@@ -22601,7 +22606,7 @@ mod tests {
         );
     }
 
-    /// Edit job opens the schedule popup on the job's own schedule and then
+    /// Edit schedule opens the schedule popup on the job's own schedule and then
     /// the pipeline popup on its own pipeline, and saves under the job's
     /// own name to its own store, keeping its routine.
     #[test]
@@ -22772,7 +22777,7 @@ mod tests {
     }
 
     /// A job gone from its store between `o` and the pick is not written
-    /// back: edit job and deactivate job both open a popup saying so, and the
+    /// back: edit schedule and deactivate job both open a popup saying so, and the
     /// store stays without it.
     #[test]
     fn a_job_item_whose_job_is_gone_changes_nothing_and_says_so() {
@@ -23224,7 +23229,8 @@ mod tests {
         assert!(!last.contains("[x] nightly-old"), "{last}");
     }
 
-    /// `o` on a job row offers edit job alone, titled with the row's name.
+    /// `o` on a job row offers edit schedule alone, titled with the row's
+    /// name.
     #[test]
     fn o_on_a_job_row_offers_edit_job_alone() {
         let (repo, _root_guard) = fixture("routines-orphan-menu");
@@ -23235,13 +23241,14 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ nightly-old ")),
             "{last}"
         );
-        assert!(last.contains("│  > edit job  "), "{last}");
+        assert!(last.contains("│  > edit schedule  "), "{last}");
+        assert!(!last.contains("edit job"), "{last}");
         assert!(!last.contains("delete job"), "{last}");
         assert!(!last.contains("deactivate job"), "{last}");
         assert!(!last.contains("delete routine"), "{last}");
     }
 
-    /// Edit job on a job row opens the routine picker, which lists the
+    /// Edit schedule on a job row opens the routine picker, which lists the
     /// routine folders and none of their tasks. `enter` moves on to the
     /// schedule and pipeline popups, and the save points the job at the
     /// picked folder, under its own name in its own store. `esc` on the

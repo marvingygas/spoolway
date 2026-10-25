@@ -2,8 +2,8 @@
 //! that has never seen the two store files, and the popups bare `spoolway`'s
 //! routines tab writes a job through. That tab is where a person writes a
 //! job; the only other writer is `spoolway pipeline rename`, which moves jobs
-//! onto a renamed pipeline. Its new job and edit job walk the cron expression
-//! and the pipeline, then save through [`crate::jobs::write`] — see
+//! onto a renamed pipeline. Its edit schedule walks the cron expression and
+//! the pipeline, then save through [`crate::jobs::write`] — see
 //! [`NewJobWalk`]. Deactivate and activate are [`set_enabled`]; no popup
 //! here deletes a job, which leaves only with the routine the routines tab's
 //! delete routine removes. No `jobs add`, no config key. A job only schedules:
@@ -355,8 +355,8 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the schedule and pipeline popups.
-/// `editing` is `Some` for edit job over an existing job and `None` for a new
-/// one; a new job takes its name from the routine's own leaf, an edited one
+/// `editing` is `Some` for edit schedule over an existing job and `None` for
+/// a new one; a new job takes its name from the routine's own leaf, an edited one
 /// keeps the name it had.
 #[derive(Debug, Clone)]
 pub(super) struct Draft {
@@ -413,7 +413,7 @@ impl Draft {
 }
 
 /// The schedule popup and then the pipeline popup, and the save at the end
-/// of them — what the routines tab's new job and edit job both go through.
+/// of them — what the routines tab's edit schedule goes through.
 /// The routine is settled before the walk opens: the highlighted one, the
 /// edited job's own, or the one picked for a job whose routine is gone.
 #[derive(Debug, Clone)]
@@ -449,9 +449,10 @@ impl NewJobWalk {
         NewJobWalk::Schedule(draft)
     }
 
-    /// The routines tab's new job: a new job over the routine folder at
-    /// `folder`, for the user store, named after the folder's leaf. `None`
-    /// for a folder outside `routines_dir`, which no job can point at.
+    /// The routines tab's edit schedule on a routine with no job: a new job
+    /// over the routine folder at `folder`, for the user store, named after
+    /// the folder's leaf. `None` for a folder outside `routines_dir`, which
+    /// no job can point at.
     pub(super) fn for_routine(
         pipelines: &Pipelines,
         folder: &Path,
@@ -462,17 +463,18 @@ impl NewJobWalk {
         Some(NewJobWalk::schedule(draft))
     }
 
-    /// The routines tab's edit job: the schedule popup over `job`'s own
-    /// schedule, then the pipeline popup on its own pipeline. The routine is
-    /// never asked for, so the job keeps it, and the save goes back under
-    /// the job's own name to the store its `scope` names.
+    /// The routines tab's edit schedule on a routine's job: the schedule
+    /// popup over `job`'s own schedule, then the pipeline popup on its own
+    /// pipeline. The routine is never asked for, so the job keeps it, and
+    /// the save goes back under the job's own name to the store its `scope`
+    /// names.
     pub(super) fn edit(job: &Job) -> NewJobWalk {
         NewJobWalk::schedule(Draft::from_job(job))
     }
 
-    /// Edit job on a job whose routine is not a listed one, once the routine
-    /// picker has picked `folder`: [`NewJobWalk::edit`], with the job moved
-    /// onto that folder when it saves. `None` for a folder outside
+    /// Edit schedule on a job whose routine is not a listed one, once the
+    /// routine picker has picked `folder`: [`NewJobWalk::edit`], with the
+    /// job moved onto that folder when it saves. `None` for a folder outside
     /// `routines_dir`, the same as [`NewJobWalk::for_routine`].
     pub(super) fn repoint(job: &Job, folder: &Path, routines_dir: &Path) -> Option<NewJobWalk> {
         let mut draft = Draft::from_job(job);
@@ -580,7 +582,7 @@ impl NewJobWalk {
 /// The schedule popup's keys, in the popup and on the line under the frame.
 const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
 
-/// The routines tab's popup once its new job or edit job has saved a job:
+/// The routines tab's popup once its edit schedule has saved a job:
 /// what it runs, when, on which pipeline, and where to change it.
 pub(super) fn saved_notice(draft: &Draft) -> Notice {
     let schedule = draft.schedule.trim();
@@ -614,7 +616,7 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
         Some(at) => at.format("%a %-d %b %H:%M").to_string(),
         None => "never".to_string(),
     };
-    // Edit job keeps an inactive job inactive, and its routine's menu then
+    // Edit schedule keeps an inactive job inactive, and its routine's menu then
     // offers activate job, not deactivate job, so the notice names that.
     let toggle = if draft.enabled {
         "deactivate"
@@ -1216,7 +1218,7 @@ mod tests {
         );
     }
 
-    /// An inactive job saved through edit job stays inactive, so "job
+    /// An inactive job saved through edit schedule stays inactive, so "job
     /// saved" points at activate job, the item its routine's menu offers.
     #[test]
     fn saved_notice_names_activate_for_an_inactive_job() {
