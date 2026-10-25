@@ -21745,7 +21745,7 @@ mod tests {
         assert!(!last.contains("[esc] back"), "{last}");
         assert!(
             !last.contains("[n] new job") && !last.contains("[x] delete"),
-            "new job and delete are in the menu, not on the line: {last}"
+            "edit schedule and delete are in the menu, not on the line: {last}"
         );
         assert!(!last.contains("r pending"), "{last}");
     }

@@ -356,8 +356,8 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 
 /// A job being written, carried through the schedule and pipeline popups.
 /// `editing` is `Some` for edit schedule over an existing job and `None` for
-/// a new one; a new job takes its name from the routine's own leaf, an edited one
-/// keeps the name it had.
+/// a new one; a new job takes its name from the routine's own leaf, an
+/// edited one keeps the name it had.
 #[derive(Debug, Clone)]
 pub(super) struct Draft {
     editing: Option<String>,

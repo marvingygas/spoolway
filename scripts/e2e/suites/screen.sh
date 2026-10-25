@@ -17,7 +17,7 @@
 # Delete off the queue tab's options menu removes a pending group and every
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
-# pane beside it says `Use /spoolway-tasks`. Delete off that row's options
+# pane beside it says `use /spoolway-tasks`. Delete off that row's options
 # menu removes its page after one popup.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
@@ -322,8 +322,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queued popup is drawn over the tab" "╭─ queued " "$LAST"
 has "naming the task it queued" "billing-export" "$LAST"
-has "saying no dispatcher will pick it up yet" "Start the dispatcher to begin working" "$LAST"
-lacks "never that one is running" "Dispatcher is running" "$LAST"
+has "saying no dispatcher will pick it up yet" "start the dispatcher to begin working" "$LAST"
+lacks "never that one is running" "dispatcher is running" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
 
@@ -463,7 +463,7 @@ works "and the dependent in another group" test -f "$PENDING/checkout-total.md"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete group cart/ { last = $0 } END { print last }' \
   "$DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "delete opens the delete popup" "─ delete group cart " "$LAST"
-has "counting every pending task it takes" "Delete 3 pending tasks:" "$LAST"
+has "counting every pending task it takes" "delete 3 pending tasks:" "$LAST"
 has "naming the dependent in another group" "checkout-total   (depends on cart-totals)" "$LAST"
 lacks "never a task nothing in the set depends on" "checkout-page" "$LAST"
 has "its one answer under the cursor" "> delete" "$LAST"
@@ -492,8 +492,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queueable group keeps its checkbox" "[ ] checkout" "$LAST"
 has "the plan row is drawn under it, by name, with no checkbox" "│ >     search " "$LAST"
-has "the tasks pane beside it says how to cut it" "│   Use /spoolway-tasks " "$LAST"
-lacks "with no task drawn for it" "Pipeline:" "$LAST"
+has "the tasks pane beside it says how to cut it" "│   use /spoolway-tasks " "$LAST"
+lacks "with no task drawn for it" "pipeline:" "$LAST"
 
 # The plan row's menu opens on open plan; delete, its second item, asks
 # once, and `enter` removes the page, so the row leaves the list.
