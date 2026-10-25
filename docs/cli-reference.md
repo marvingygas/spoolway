@@ -115,7 +115,7 @@ whatever that pass did, or earlier when the dispatcher starts a lane or a comman
 says so by writing its pid to a `first-pass` file in the project's home. The popup does not open again on
 a later pass. `enter` again, over a running child, stops it at once when no agent lane or
 command step is running and no task is on `queued`.
-When a step is running, it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
+When a step is running, it opens a popup asking how to stop it, in place of `starting dispatcher` if that is
 still up:
 
 ```
@@ -144,10 +144,10 @@ with `enter`. The key line offers `[u] update config` only while a dispatcher ho
 [Updating the config](dispatcher.md#updating-the-config). `q` or `ctrl-c` quits the whole screen
 and stops dispatching too.
 
-A child the tab started stays up on an empty queue and the board shows its greeting and `Nothing queued`; only
+A child the tab started stays up on an empty queue and the board shows its greeting and `nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
 a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`. Ending before
-its first pass, including under the `Starting dispatcher` popup, shows that reason there instead.
+its first pass, including under the `starting dispatcher` popup, shows that reason there instead.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 

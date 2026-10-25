@@ -236,7 +236,7 @@ impl Dispatcher {
         let text = text.trim();
         let text = text.strip_prefix("spoolway: ").unwrap_or(text);
         let reason = match text.is_empty() {
-            true => format!("It exited with {status} and said nothing."),
+            true => format!("it exited with {status} and said nothing."),
             false => text.to_string(),
         };
         Some(Some(Ended {
@@ -382,8 +382,8 @@ pub(crate) const STOP_ANSWERS: [&str; 2] = ["let running steps finish", "interru
 pub(crate) fn stop_panel(cursor: usize) -> Vec<String> {
     let body = [
         "",
-        "No new steps will be started.",
-        "Interrupting stops agents and commands. When resumed, agents pick",
+        "no new steps will be started.",
+        "interrupting stops agents and commands. when resumed, agents pick",
         "up where they left off and commands restart.",
     ];
     super::ask(
@@ -498,8 +498,8 @@ mod tests {
             [
                 format!("{TOP_LEFT}─ stop dispatching ──────────────────────────────────────────────────{TOP_RIGHT}").as_str(),
                 "│                                                                     │",
-                "│  No new steps will be started.                                      │",
-                "│  Interrupting stops agents and commands. When resumed, agents pick  │",
+                "│  no new steps will be started.                                      │",
+                "│  interrupting stops agents and commands. when resumed, agents pick  │",
                 "│  up where they left off and commands restart.                       │",
                 "│                                                                     │",
                 "│  > let running steps finish                                         │",
@@ -606,7 +606,7 @@ mod tests {
         assert!(
             panel
                 .iter()
-                .any(|line| line.contains("It exited with exit status: 4 and said nothing.")),
+                .any(|line| line.contains("it exited with exit status: 4 and said nothing.")),
             "{panel:?}"
         );
     }

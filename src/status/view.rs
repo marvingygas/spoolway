@@ -397,14 +397,14 @@ pub(super) fn pause_confirm_panel(
         .map(|d| human_secs(d.as_secs() as i64))
         .unwrap_or_else(|| NOTHING.to_string());
     let mut body = vec![
-        "Pausing aborts the step it is on:".to_string(),
+        "pausing aborts the step it is on:".to_string(),
         String::new(),
         format!("{}    {}    {time}", abort.step, abort.kind.word()),
     ];
     if matches!(abort.kind, AbortKind::Command) {
         body.push(String::new());
-        body.push("Pausing terminates the command's process.".to_string());
-        body.push("Resuming restarts the command.".to_string());
+        body.push("pausing terminates the command's process.".to_string());
+        body.push("resuming restarts the command.".to_string());
     }
     crate::screen::ask(
         &format!("pause {name}"),
@@ -436,7 +436,7 @@ pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> Vec<String> {
 }
 
 /// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough
-/// to keep `The lane is torn down and `review-spec` is briefed from` on one
+/// to keep `the lane is torn down and `review-spec` is briefed from` on one
 /// row, and narrow enough that the panel stays inside an 80-column pane.
 const RESTART_WRAP: usize = 56;
 
@@ -470,7 +470,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
                 body.push(format!("session   {}", session.describe()));
             }
             format!(
-                "The lane is torn down and `{}` is briefed from scratch. Its conversation is not \
+                "the lane is torn down and `{}` is briefed from scratch. its conversation is not \
                  kept.",
                 confirm.step
             )
@@ -484,7 +484,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
                 human_secs(elapsed.as_secs() as i64)
             ));
             format!(
-                "The command's process is ended and `{}` runs again from the start. Its log is \
+                "the command's process is ended and `{}` runs again from the start. its log is \
                  kept as the previous log.",
                 confirm.step
             )
@@ -493,7 +493,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
         // on its own. Saying the restart ends one would name a process that
         // is not there.
         RestartEnds::Command { elapsed: None } => format!(
-            "`{}` runs again from the start. Its log is kept as the previous log.",
+            "`{}` runs again from the start. its log is kept as the previous log.",
             confirm.step
         ),
     };
@@ -728,7 +728,7 @@ pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> 
         SkipThen::Archive { ticket } => {
             let mut body = vec![format!("{id} is archived and its worktree removed.")];
             if let Some(ticket) = ticket {
-                body.push(format!("Ticket {ticket} stays as it is."));
+                body.push(format!("ticket {ticket} stays as it is."));
             }
             (body, "skip and archive".to_string())
         }
@@ -780,22 +780,22 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
         let body = match &head.routine_file {
             Some(routine_file) => vec![
                 String::new(),
-                "Nothing has run for it yet.".to_string(),
+                "nothing has run for it yet.".to_string(),
                 String::new(),
-                "This copy is deleted. The".to_string(),
+                "this copy is deleted. the".to_string(),
                 "routine stays in:".to_string(),
                 shorten_home(routine_file),
                 String::new(),
-                "The routines tab queues it again.".to_string(),
+                "the routines tab queues it again.".to_string(),
             ],
             None => vec![
                 String::new(),
-                "Nothing has run for it yet.".to_string(),
+                "nothing has run for it yet.".to_string(),
                 String::new(),
-                "The task goes back to:".to_string(),
+                "the task goes back to:".to_string(),
                 shorten_home(&dir.join(format!("{}.md", head.id))),
                 String::new(),
-                "The queue tab is what sends it again.".to_string(),
+                "the queue tab is what sends it again.".to_string(),
             ],
         };
         return crate::screen::ask(
@@ -828,7 +828,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
     let (deleted, drafted): (Vec<&ChainEntry>, Vec<&ChainEntry>) =
         chain.iter().partition(|entry| entry.routine_file.is_some());
 
-    let mut body = vec![String::new(), "Nothing has run for these yet.".to_string()];
+    let mut body = vec![String::new(), "nothing has run for these yet.".to_string()];
     if !drafted.is_empty() {
         body.push(String::new());
         body.push(match drafted.len() {
@@ -839,7 +839,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
         body.push(String::new());
         body.extend(drafted.iter().map(|entry| line(entry)));
         body.push(String::new());
-        body.push("The queue tab is what sends them again.".to_string());
+        body.push("the queue tab is what sends them again.".to_string());
     }
     if !deleted.is_empty() {
         body.push(String::new());
@@ -850,7 +850,7 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
         body.push(String::new());
         body.extend(deleted.iter().map(|entry| line(entry)));
         body.push(String::new());
-        body.push("The routines tab queues them again.".to_string());
+        body.push("the routines tab queues them again.".to_string());
     }
     crate::screen::ask(
         &format!("unqueue {}", head.name),
@@ -1140,7 +1140,7 @@ fn held_suffix(held: &BTreeMap<crate::dispatch::Cap, usize>, cap: &crate::dispat
 ///
 /// One function for both boards that draw it — [`footer`] under the busy
 /// board's slots lines, and [`greeting_screen`] under an idle dispatcher's
-/// `Nothing queued` — so the two cannot word or order the ledger apart.
+/// `nothing queued` — so the two cannot word or order the ledger apart.
 /// `name_w` is the column "jobs" is padded to, so the footer can line it up
 /// with its profile names; it never pads to less than "jobs" itself, so the
 /// empty board, which has no profile names, passes 0.
@@ -2248,7 +2248,7 @@ pub(super) fn first_name(user_name: &str) -> Option<String> {
 const GREETING_BLOCK_ROWS: usize = 5 + 1 + 2;
 
 /// The empty board under its header: the lockup on `frame`, a blank row,
-/// `greeting` in bold and `Nothing queued` dim, each centred across a pane
+/// `greeting` in bold and `nothing queued` dim, each centred across a pane
 /// `pane` columns wide. Then, when `ledger` has lines, a blank row and the
 /// ledger — [`jobs_ledger`]'s lines, which the caller passes only while a
 /// dispatcher holds the lock — centred as one block, so its own columns
@@ -2295,7 +2295,7 @@ pub(super) fn greeting_screen(
         }
         group.push('\n');
     }
-    for (paint, text) in [(BOLD, greeting), (DIM, "Nothing queued")] {
+    for (paint, text) in [(BOLD, greeting), (DIM, "nothing queued")] {
         // Clipped like the header, one column clear of either edge, so a long
         // first name ends in `…` rather than wrapping off the centre.
         let text = clip(text, pane.saturating_sub(2));
@@ -4204,7 +4204,7 @@ mod tests {
                 "                                      █                            ▄▄▄▀",
                 "",
                 "                                    Good afternoon, Marvin.",
-                "                                         Nothing queued",
+                "                                         nothing queued",
             ]
             .map(String::from),
         );
@@ -4212,7 +4212,7 @@ mod tests {
         assert_eq!(trimmed(&block), expected, "{block}");
         // Bold over dim, the lockup on frame 0.
         assert!(block.contains(&format!("{BOLD}Good afternoon, Marvin.{RESET}")));
-        assert!(block.contains(&format!("{DIM}Nothing queued{RESET}")));
+        assert!(block.contains(&format!("{DIM}nothing queued{RESET}")));
         assert!(block.contains(LOCKUP[0][1]), "{block}");
     }
 
@@ -4226,7 +4226,7 @@ mod tests {
             assert_eq!(rows.len(), region, "{block}");
             assert_eq!(rows[top].trim(), "█", "{block}");
             assert_eq!(rows[top + 6].trim(), "Good morning.", "{block}");
-            assert_eq!(rows[top + 7].trim(), "Nothing queued", "{block}");
+            assert_eq!(rows[top + 7].trim(), "nothing queued", "{block}");
         }
 
         // One row short of the block: the art goes and the two lines stay.
@@ -4238,7 +4238,7 @@ mod tests {
             assert_eq!(rows[(region - 2) / 2].trim(), "Good morning.", "{block}");
             assert_eq!(
                 rows[(region - 2) / 2 + 1].trim(),
-                "Nothing queued",
+                "nothing queued",
                 "{block}"
             );
         }
@@ -4289,7 +4289,7 @@ mod tests {
             "                         █                            ▄▄▄▀".to_string(),
             String::new(),
             "                        Good evening, Marvin.".to_string(),
-            "                            Nothing queued".to_string(),
+            "                            nothing queued".to_string(),
             String::new(),
             format!("{left}jobs   2 active"),
             format!("{indent}○ nightly-audit   {}   (in 5h 12m)", at(0)),
@@ -4343,7 +4343,7 @@ mod tests {
             }
             // The two lines stay, whatever else gives way.
             assert!(rows.contains(&"Good morning.".to_string()), "{block}");
-            assert!(rows.contains(&"Nothing queued".to_string()), "{block}");
+            assert!(rows.contains(&"nothing queued".to_string()), "{block}");
         }
         // Twelve rows hold the whole group; eight the lockup and the lines.
         assert_eq!(dropped_at, Some(11));
@@ -4360,7 +4360,7 @@ mod tests {
         assert_eq!(rows[0], "", "{block}");
         assert_eq!(rows[1].trim(), "█", "{block}");
         assert_eq!(rows[7].trim(), "Working late.", "{block}");
-        assert_eq!(rows[8].trim(), "Nothing queued", "{block}");
+        assert_eq!(rows[8].trim(), "nothing queued", "{block}");
         assert_eq!(rows[9], "", "{block}");
     }
 
@@ -4372,7 +4372,7 @@ mod tests {
         assert!(!block.contains(LOCKUP[0][1]), "{block}");
         let rows = trimmed(&block);
         assert_eq!(rows[1], " Good morning, Bar…", "{block}");
-        assert_eq!(rows[2], "   Nothing queued", "{block}");
+        assert_eq!(rows[2], "   nothing queued", "{block}");
         assert!(rows.iter().all(|row| row.chars().count() < 20), "{block}");
     }
 
@@ -4389,7 +4389,7 @@ mod tests {
             .iter()
             .map(|r| r.trim().to_string())
             .collect();
-        assert!(rows.contains(&"Nothing queued".to_string()), "{block}");
+        assert!(rows.contains(&"nothing queued".to_string()), "{block}");
         for line in &ledger {
             let line = strip_ansi(line).trim().to_string();
             assert!(!rows.contains(&line), "{line:?} drawn:\n{block}");
@@ -5358,8 +5358,8 @@ mod tests {
                 "  lane      prompt-cache-ttl-default · review-spec",
                 "  session   32b0d7bd — abandoned, already banked",
                 "",
-                "  The lane is torn down and `review-spec` is briefed from",
-                "  scratch. Its conversation is not kept.",
+                "  the lane is torn down and `review-spec` is briefed from",
+                "  scratch. its conversation is not kept.",
                 "",
                 "  > restart",
                 "",
@@ -5410,8 +5410,8 @@ mod tests {
                 .collect()
         };
         let closing = [
-            "  The command's process is ended and `build` runs again",
-            "  from the start. Its log is kept as the previous log.",
+            "  the command's process is ended and `build` runs again",
+            "  from the start. its log is kept as the previous log.",
         ];
         let running = body(&confirm);
         assert_eq!(
@@ -5445,7 +5445,7 @@ mod tests {
                 "",
                 "  step      build",
                 "",
-                "  `build` runs again from the start. Its log is kept as",
+                "  `build` runs again from the start. its log is kept as",
                 "  the previous log.",
                 "",
                 "  > restart",
@@ -5472,7 +5472,7 @@ mod tests {
             .expect("the refusal is printed");
         let closed = panel
             .iter()
-            .position(|line| line.contains("Its log is kept"))
+            .position(|line| line.contains("its log is kept"))
             .unwrap();
         assert!(
             closed < refusal,
@@ -5530,13 +5530,13 @@ mod tests {
             [
                 "unqueue nightly",
                 "",
-                "Nothing has run for it yet.",
+                "nothing has run for it yet.",
                 "",
-                "This copy is deleted. The",
+                "this copy is deleted. the",
                 "routine stays in:",
                 ".spoolway/routines/nightly/nightly.md",
                 "",
-                "The routines tab queues it again.",
+                "the routines tab queues it again.",
                 "",
                 "> unqueue it",
                 "",
@@ -5568,12 +5568,12 @@ mod tests {
                 [
                     format!("unqueue {name}").as_str(),
                     "",
-                    "Nothing has run for it yet.",
+                    "nothing has run for it yet.",
                     "",
-                    "The task goes back to:",
+                    "the task goes back to:",
                     format!("/pending/{id}.md").as_str(),
                     "",
-                    "The queue tab is what sends it again.",
+                    "the queue tab is what sends it again.",
                     "",
                     "> unqueue it",
                     "",
@@ -5607,7 +5607,7 @@ mod tests {
             [
                 "unqueue login",
                 "",
-                "Nothing has run for these yet.",
+                "nothing has run for these yet.",
                 "",
                 "2 tasks go back to:",
                 "/pending/",
@@ -5615,13 +5615,13 @@ mod tests {
                 "login",
                 logout.as_str(),
                 "",
-                "The queue tab is what sends them again.",
+                "the queue tab is what sends them again.",
                 "",
                 "1 routine copy is deleted:",
                 "",
                 nightly.as_str(),
                 "",
-                "The routines tab queues them again.",
+                "the routines tab queues them again.",
                 "",
                 "> unqueue them",
                 "",
@@ -5646,7 +5646,7 @@ mod tests {
         let text = panel_text(&panel);
         assert_eq!(text[0], "unqueue nightly");
         assert!(text.contains(&"2 routine copies are deleted:".to_string()));
-        assert!(text.contains(&"The routines tab queues them again.".to_string()));
+        assert!(text.contains(&"the routines tab queues them again.".to_string()));
         assert!(
             !text.iter().any(|line| line.contains("pending")),
             "{panel:#?}"
@@ -5703,7 +5703,7 @@ mod tests {
         assert!(
             panel
                 .iter()
-                .any(|line| line.contains("The routines tab queues them again.")),
+                .any(|line| line.contains("the routines tab queues them again.")),
             "{panel:#?}"
         );
     }

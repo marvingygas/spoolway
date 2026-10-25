@@ -185,7 +185,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     let (live_tasks, live_problems) = repo.tasks_and_problems()?;
     // A run the screen started is the exception: it waits on an empty queue
     // for whatever the queue tab sends next, and the board greets the person
-    // over `Nothing queued` meanwhile — the screen, not the queue, decides
+    // over `nothing queued` meanwhile — the screen, not the queue, decides
     // when it ends.
     if live_tasks.is_empty() && live_problems.is_empty() && !args.screen {
         if idle_may_end(repo) {
@@ -1762,7 +1762,7 @@ fn stamped_pass<T>(repo: &Repo, stamped: &mut bool, pass: impl FnOnce() -> Resul
 }
 
 /// Write this process's pid into `first-pass`, which the dispatch tab's
-/// `Starting dispatcher` popup closes on. A write that fails is logged and
+/// `starting dispatcher` popup closes on. A write that fails is logged and
 /// costs only the popup staying up until a claim, not the run.
 fn stamp_first_pass(repo: &Repo) {
     let path = repo.first_pass_file();
@@ -1770,7 +1770,7 @@ fn stamp_first_pass(repo: &Repo) {
         crate::problem_log::append(
             repo,
             &format!(
-                "could not write {}: {err:#}. The dispatch tab's `Starting dispatcher` popup \
+                "could not write {}: {err:#}. The dispatch tab's `starting dispatcher` popup \
                  stays up until a lane is claimed. Make the project home writable.",
                 path.display()
             ),

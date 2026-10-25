@@ -517,7 +517,7 @@ pick_item pause
 
 draws "picking pause over a live lane opens a panel naming the task" "pause mid-turn"
 draws "the panel names the step and calls it an agent turn" "implement    agent"
-draws "and says pausing aborts it" "Pausing aborts the step it is on:"
+draws "and says pausing aborts it" "pausing aborts the step it is on:"
 draws "and lists pause now first, under the cursor" "> pause now"
 draws "with the scheduled pause as the second answer" "pause when implement finishes"
 draws "and the one key row every popup shares" "[enter] confirm   [esc] close"
@@ -638,14 +638,14 @@ else bad "a second lane is mid-turn"; fi
 
 press $'\r'
 draws "\`enter\` over a running dispatcher opens the stop popup" "╭─ stop dispatching"
-draws "saying no new steps will start" "No new steps will be started."
+draws "saying no new steps will start" "no new steps will be started."
 draws "offering to let running steps finish first" "> let running steps finish"
 draws "and to interrupt them" "interrupt them now"
 draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "no task file is written while the popup is open" busy implement
 
 press $'\x1b'
-stops_drawing "esc closes the stop popup" "No new steps will be started."
+stops_drawing "esc closes the stop popup" "no new steps will be started."
 MARK=$(wc -l < "$BOARD_LOG")
 draws_since_waited "and the dispatcher is still running" "dispatcher running · pid " "$MARK"
 if kill -0 "$BUSY_PID" 2>/dev/null; then ok "and leaves the lane running"
@@ -653,7 +653,7 @@ else bad "and leaves the lane running"; fi
 
 MARK=$(wc -l < "$BOARD_LOG")
 press $'\r'
-draws_since_waited "\`enter\` asks again" "No new steps will be started." "$MARK"
+draws_since_waited "\`enter\` asks again" "no new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
 # `i` first, then the popup's own `↓`: once the screen shows the cursor moved,
 # `i` has been read too, so the task file says what it did.
@@ -834,10 +834,10 @@ cursor_to nightly
 pick_item unqueue
 
 draws "unqueue on a routine copy is titled by the routine's name" "unqueue nightly"
-draws "and says the copy is deleted" "This copy is deleted. The"
+draws "and says the copy is deleted" "this copy is deleted. the"
 draws "naming the routine file that stays" ".spoolway/routines/nightly/nightly.md"
-draws "and where it is queued again" "The routines tab queues it again."
-never_draws "and does not promise a draft in pending" "The queue tab is what sends it again." "$MARK"
+draws "and where it is queued again" "the routines tab queues it again."
+never_draws "and does not promise a draft in pending" "the queue tab is what sends it again." "$MARK"
 stage_stays "nothing moves while the panel is open" nightly-1 queued
 
 press $'\r'
@@ -1061,8 +1061,8 @@ if cursor_to build-cmd && pick_item restart \
   && RESTART_FRAME=$(frame_showing "╭─ restart build-cmd ─" 10); then
   SAW_RESTART=build-cmd
   for want in "╭─ restart build-cmd ─" "step      build" "run       command · " \
-    "The command's process is ended and \`build\` runs again" \
-    "from the start. Its log is kept as the previous log." "> restart" \
+    "the command's process is ended and \`build\` runs again" \
+    "from the start. its log is kept as the previous log." "> restart" \
     "[enter] confirm   [esc] close"; do
     if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the command form says: $want"
     else bad "the command form says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi
@@ -1244,7 +1244,7 @@ for n in 0 1 2 3 4 5; do
 done
 MARK=$(wc -l < "$BOARD_LOG")
 press $'\r'
-draws_since_waited "\`enter\` opens the stop popup again" "No new steps will be started." "$MARK"
+draws_since_waited "\`enter\` opens the stop popup again" "no new steps will be started." "$MARK"
 MARK=$(wc -l < "$BOARD_LOG")
 press $'\x1b[B'
 press $'\r'

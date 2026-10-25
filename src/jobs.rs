@@ -1416,7 +1416,7 @@ pub fn staying_up(repo: &Repo) -> StayingUp {
 
 /// The two lines the plain run prints on an empty queue kept resident by a
 /// job: `nothing queued`, then which job fires next and when — or that none
-/// ever will. The board says `Nothing queued` under its own greeting instead,
+/// ever will. The board says `nothing queued` under its own greeting instead,
 /// and under that draws the busy board's job ledger, every enabled job and
 /// its next firing, while a dispatcher holds the lock — see
 /// `crate::status::view::greeting_screen`. Assumes at least one job is

@@ -484,7 +484,7 @@ const REFUSAL_WRAP: usize = 58;
 fn refused_panel(reasons: &[crate::reload::Reason]) -> Vec<String> {
     let mut body = vec![
         format!("{:<REFUSAL_WIDTH$}", ""),
-        "Nothing changed. The run is still on what it had.".to_string(),
+        "nothing changed. the run is still on what it had.".to_string(),
     ];
     for reason in reasons {
         body.push(String::new());
@@ -529,7 +529,7 @@ impl Came {
             // footer's `update` line goes once a reload loads, which is what
             // the advice leans on.
             Came::Unreadable(err) => update_notice(&format!(
-                "{err:#}, so the board cannot tell whether the reload loaded. If the \
+                "{err:#}, so the board cannot tell whether the reload loaded. if the \
                  footer still shows its update line, press u again."
             )),
             Came::Unanswered => update_notice(UNANSWERED),
@@ -563,8 +563,8 @@ fn came(repo: &Repo, asked: &Asked) -> Option<Came> {
 
 /// What the board says of a reload whose dispatcher let go of the lock
 /// before it answered.
-const UNANSWERED: &str = "The dispatcher stopped before answering, so nothing was \
-                          reloaded. A new run loads every file as it is now.";
+const UNANSWERED: &str = "the dispatcher stopped before answering, so nothing was \
+                          reloaded. a new run loads every file as it is now.";
 
 /// The popup for the dispatcher's `answer`.
 fn answered(answer: crate::reload::Answer) -> Popup {
@@ -589,7 +589,7 @@ fn update_notice(text: &str) -> Popup {
 /// line, since nothing answers it.
 fn starting_panel() -> Vec<String> {
     super::boxed(
-        "Starting dispatcher",
+        "starting dispatcher",
         &["checking herdr, git, queue…".to_string()],
     )
 }
@@ -783,7 +783,7 @@ impl DispatchTab {
             Ok(None) => return,
             Err(err) => {
                 self.popup = Some(update_notice(&format!(
-                    "{err:#}, so no reload was asked for. Press u again once the lock \
+                    "{err:#}, so no reload was asked for. press u again once the lock \
                      can be read."
                 )));
                 return;
@@ -795,7 +795,7 @@ impl DispatchTab {
                 Popup::Updating
             }
             Err(err) => update_notice(&format!(
-                "{err:#}, so no reload was asked for. Make the project home writable, then \
+                "{err:#}, so no reload was asked for. make the project home writable, then \
                  press u again."
             )),
         });
@@ -914,7 +914,7 @@ impl DispatchTab {
                 if let Err(err) = interrupted {
                     self.popup = Some(Popup::Ended(super::notice(
                         "stop dispatching",
-                        &format!("Not every running step could be interrupted: {err:#}"),
+                        &format!("not every running step could be interrupted: {err:#}"),
                         &super::confirm(),
                         super::NOTICE_WRAP,
                     )));
@@ -1399,7 +1399,7 @@ mod tests {
         assert!(last.contains("dispatcher stopped"), "{last}");
         assert!(!last.contains("─ dispatch"), "the box has no title: {last}");
         assert!(!last.contains("─ groups"), "{last}");
-        assert!(last.contains("Nothing queued"), "{last}");
+        assert!(last.contains("nothing queued"), "{last}");
         assert!(
             last.contains("\n  [enter] start dispatching   [q] quit\n"),
             "{last}"
@@ -2238,7 +2238,7 @@ mod tests {
             [
                 format!("{TOP_LEFT}─ reload refused {}{TOP_RIGHT}", "─".repeat(46)),
                 row(""),
-                row("Nothing changed. The run is still on what it had."),
+                row("nothing changed. the run is still on what it had."),
                 row(""),
                 row("fix-login: sitting on `review`, which pipeline `feature`"),
                 row("no longer defines"),
@@ -2302,7 +2302,7 @@ mod tests {
         let text = popup.panel().join("\n");
         assert!(text.contains("─ update config "), "{text}");
         assert!(
-            text.contains("The dispatcher stopped before answering"),
+            text.contains("the dispatcher stopped before answering"),
             "{text}"
         );
         assert!(text.contains("[enter] confirm"), "{text}");
@@ -2356,7 +2356,7 @@ mod tests {
         let text = popup.panel().join("\n");
         assert!(text.contains("SIGKILL"), "{text}");
         assert!(
-            text.contains("The dispatcher stopped before answering"),
+            text.contains("the dispatcher stopped before answering"),
             "{text}"
         );
         assert!(text.contains("[enter] confirm"), "{text}");
@@ -2437,7 +2437,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("─ update config "), "{text}");
         assert!(
-            text.contains("The dispatcher stopped before answering"),
+            text.contains("the dispatcher stopped before answering"),
             "{text}"
         );
         assert!(tab.asked.is_none());
@@ -2483,7 +2483,7 @@ mod tests {
         super::super::dispatcher::Dispatcher::stand_in(script)
     }
 
-    // A started child puts the keyless `Starting dispatcher` popup up at
+    // A started child puts the keyless `starting dispatcher` popup up at
     // once, drawn as the mockup draws it, and it reads no key.
     #[test]
     fn a_start_opens_the_keyless_starting_popup() {
@@ -2496,7 +2496,7 @@ mod tests {
         assert_eq!(
             popup.panel(),
             [
-                format!("{TOP_LEFT}─ Starting dispatcher ─────────{TOP_RIGHT}").as_str(),
+                format!("{TOP_LEFT}─ starting dispatcher ─────────{TOP_RIGHT}").as_str(),
                 "│  checking herdr, git, queue…  │",
                 format!("{BOTTOM_LEFT}───────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
