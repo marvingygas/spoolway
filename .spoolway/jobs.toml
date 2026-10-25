@@ -5,3 +5,8 @@
 schedule = "0 */2 * * *"
 pipeline = "dependabot"
 routine = "dependabot"
+
+[jobs.code-scanning-fix]
+schedule = "0 */2 * * *"
+pipeline = "security"
+routine = "security"
