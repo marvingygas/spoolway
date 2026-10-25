@@ -1024,8 +1024,11 @@ YML
 silent_about "a gated step's contract carries no withheld block" \
   "not available to you" \
   "$SPOOLWAY" prompt contract --pipeline gate-check --step check
-says "and still holds the pass for the person who opens the pane" \
-  "A pass is held here for a person, who opens this pane." \
+says "and still holds the pass for a person" \
+  "A pass is held here for a person. Your handoff is what" \
+  "$SPOOLWAY" prompt contract --pipeline gate-check --step check
+says "and tells the lane what the person needs in its handoff" \
+  "1. What" \
   "$SPOOLWAY" prompt contract --pipeline gate-check --step check
 rm -f .spoolway/pipelines/gate-check.yml
 
@@ -1067,7 +1070,17 @@ GATE_TASK="tab-shell"
   cat "$BODY"
 } > "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md"
 
-GATE_OUT=$("$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip" 2>&1)
+# A held report with no handoff is refused (exit 2) before anything is
+# recorded: the task stays where it was, file and stage both.
+GATE_BEFORE=$(cat "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md")
+exit_code "a held pass with no handoff is refused" 2 \
+  "$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip"
+if [ "$(stage_of "$GATE_TASK")" = blocked ] \
+  && [ "$(cat "$SPOOLWAY_PROJECT_HOME/queue/$GATE_TASK.md")" = "$GATE_BEFORE" ]
+then ok "and a refused held report leaves the task file untouched"
+else bad "and a refused held report leaves the task file untouched"; fi
+
+GATE_OUT=$("$SPOOLWAY" report "$GATE_TASK" --pass -m "fixed the strip" --handoff "the strip is fixed; check it renders" 2>&1)
 GATE_STATUS=$?
 if [ "$GATE_STATUS" -eq 0 ] && grep -qF "held here for a person, at \`look\`'s gate" <<<"$GATE_OUT"
 then
@@ -1077,6 +1090,8 @@ else
 (exit $GATE_STATUS)"
   sed 's/^/        /' <<<"$GATE_OUT"
 fi
+has "and its handoff is printed under the held line" \
+  "  the strip is fixed; check it renders" <(printf '%s\n' "$GATE_OUT")
 if [ "$(stage_of "$GATE_TASK")" = paused ]; then
   ok "and the task lands on paused rather than carried past the gate to e2e"
 else

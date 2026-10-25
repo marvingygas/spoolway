@@ -146,7 +146,7 @@ YML
 works "the pipelines check out" "$SPOOLWAY" pipeline check
 
 report_as() { # task step [--pass|--fail]
-  SPOOLWAY_TASK=$1 SPOOLWAY_STEP=$2 "$SPOOLWAY" report "${3:---pass}" -m "done with $2"
+  SPOOLWAY_TASK=$1 SPOOLWAY_STEP=$2 "$SPOOLWAY" report "${3:---pass}" -m "done with $2" --handoff "done with $2"
 }
 
 lane_listed() { "$SPOOLWAY" lane 2>&1 | grep -qF "$1"; }

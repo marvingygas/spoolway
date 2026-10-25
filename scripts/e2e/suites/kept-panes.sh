@@ -114,7 +114,7 @@ works "the two-step pipeline checks out" "$SPOOLWAY" pipeline check
 # The lane a task's agent would be, reporting for itself: a lane reports on the
 # step it was started for, from the task it belongs to.
 report_as() { # task step
-  SPOOLWAY_TASK=$1 SPOOLWAY_STEP=$2 "$SPOOLWAY" report --pass -m "done with $2"
+  SPOOLWAY_TASK=$1 SPOOLWAY_STEP=$2 "$SPOOLWAY" report --pass -m "done with $2" --handoff "done with $2"
 }
 
 lane_listed() { "$SPOOLWAY" lane 2>&1 | grep -qF "$1"; }
