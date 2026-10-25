@@ -631,11 +631,33 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// screen that switches over stops deciding its own spelling.
 ///
 /// Called by the queue screen's own `footer`, the job popups'
-/// `NewJobWalk::footer`, the board's own key line in `src/status/mod.rs`'s
-/// `render`, `spoolway eval`'s own `footer` in `src/eval.rs`, and
-/// [`shell`]'s own `message_frame`.
+/// `NewJobWalk::footer`, `spoolway eval`'s own `footer` in `src/eval.rs`,
+/// and [`shell`]'s own `message_frame`. The board's own key line in
+/// `src/status/mod.rs` goes through [`key_hint_lit`], which draws this same
+/// line with one pair taken out of the dim.
 pub(crate) fn key_hint(pairs: &[(&str, &str)]) -> String {
     hint(&keys(pairs))
+}
+
+/// [`key_hint`], with the pair whose key is `lit` drawn in normal text
+/// while every other pair stays dim — for a key that shows only when there
+/// is something to do, and would be easy to miss dimmed among the rest.
+///
+/// The pair closes the line's dim before itself and opens it again after,
+/// so the codes travel inside the pair: [`key_rows_to`] breaks only on the
+/// gutter between pairs, and a pair moved to a row of its own keeps them.
+/// No pair named `lit` draws the same line [`key_hint`] does.
+pub(crate) fn key_hint_lit(pairs: &[(&str, &str)], lit: &str) -> String {
+    let (dim, reset) = (crate::status::DIM, crate::status::RESET);
+    let row = pairs
+        .iter()
+        .map(|&pair| match pair.0 == lit {
+            true => format!("{reset}{}{dim}", keys(&[pair])),
+            false => keys(&[pair]),
+        })
+        .collect::<Vec<_>>()
+        .join(crate::status::GUTTER);
+    hint(&row)
 }
 
 /// A key row already built — [`keys`], with words of its own between pairs
@@ -683,11 +705,18 @@ pub(crate) fn key_rows_to(line: &str, width: usize) -> Vec<String> {
         None => (line, ""),
     };
     // The lead is everything up to the first visible character that is not
-    // a space: colour codes take no column, so they are skipped whole.
+    // a space: colour codes take no column, so they are skipped whole. A
+    // reset ends it too: it belongs to a pair drawn out of the line's own
+    // colour — see [`key_hint_lit`] — and a lead that carried it would
+    // start every row undimmed.
     let mut lead_len = body.len();
     let mut chars = body.char_indices();
     while let Some((at, c)) = chars.next() {
         match c {
+            '\x1b' if body[at..].starts_with(reset) => {
+                lead_len = at;
+                break;
+            }
             '\x1b' => {
                 chars.by_ref().find(|(_, c)| c.is_ascii_alphabetic());
             }
@@ -1079,6 +1108,54 @@ mod tests {
             [
                 "\x1b[2m [a] one   [b] two\x1b[0m",
                 "\x1b[2m [c] three\x1b[0m",
+            ]
+        );
+    }
+
+    // The lit pair alone leaves the dim: it closes the line's dim before
+    // itself and opens it again after, and every other pair stays inside.
+    #[test]
+    fn key_hint_lit_draws_its_one_pair_out_of_the_dim() {
+        assert_eq!(
+            key_hint_lit(&[("o", "open"), ("u", "update"), ("q", "quit")], "u"),
+            "\x1b[2m [o] open   \x1b[0m[u] update\x1b[2m   [q] quit\x1b[0m"
+        );
+        assert_eq!(
+            key_hint_lit(&[("o", "open"), ("q", "quit")], "u"),
+            key_hint(&[("o", "open"), ("q", "quit")])
+        );
+    }
+
+    // Broken at a narrow width, a line with a lit pair still starts every
+    // row dim and ends it on a reset, and the lit pair stays whole with its
+    // own codes, whether it lands mid-row, at a row's end or at its start.
+    #[test]
+    fn a_key_line_with_a_lit_pair_breaks_with_every_row_dim() {
+        let line = key_hint_lit(&[("a", "one"), ("u", "two"), ("c", "three")], "u");
+        let lit = "\x1b[0m[u] two\x1b[2m";
+        assert_eq!(
+            key_rows_to(&line, 20),
+            [
+                format!("\x1b[2m [a] one   {lit}\x1b[0m"),
+                "\x1b[2m [c] three\x1b[0m".to_string(),
+            ]
+        );
+        assert_eq!(
+            key_rows_to(&line, 10),
+            [
+                "\x1b[2m [a] one\x1b[0m".to_string(),
+                format!("\x1b[2m {lit}\x1b[0m"),
+                "\x1b[2m [c] three\x1b[0m".to_string(),
+            ]
+        );
+        // First on the line, the lit pair's reset must not become the lead
+        // every later row starts with.
+        let first = key_hint_lit(&[("u", "two"), ("c", "three")], "u");
+        assert_eq!(
+            key_rows_to(&first, 10),
+            [
+                format!("\x1b[2m {lit}\x1b[0m"),
+                "\x1b[2m [c] three\x1b[0m".to_string(),
             ]
         );
     }

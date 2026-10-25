@@ -238,3 +238,14 @@ fn headless_lane_running(
     mux.prompt(&name, "go").unwrap();
     (mux, name)
 }
+
+/// Records the dispatcher holding `repo`'s lock as having loaded the shipped
+/// pipelines, then adds a pipeline file after it, so the board's next
+/// reading lists that file in [`Snapshot::waiting`]: what a reload would
+/// load. The caller holds the lock; without it nothing is waiting at all.
+pub fn edit_a_pipeline_since_start(repo: &Repo) {
+    crate::pipeline_snapshot::write(repo, &Pipelines::builtin(), &repo.config.unattended).unwrap();
+    let dir = Pipelines::dir_in(&repo.root);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("t.yml"), "# edited\n").unwrap();
+}

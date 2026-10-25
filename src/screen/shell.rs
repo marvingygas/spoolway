@@ -773,7 +773,8 @@ impl DispatchTab {
     /// with another popup in `Updating`'s place, so a second press cannot
     /// send a second request, and nothing with no dispatcher up, where the
     /// key line does not offer it: a request then would sit unread until the
-    /// next run.
+    /// next run. The key loop asks this only while the frame on screen
+    /// offers the pair at all — see `crate::status::Board::offers_update`.
     fn update(&mut self, repo: &Repo) {
         if self.asked.is_some() {
             return;
@@ -1075,8 +1076,13 @@ fn dispatch_tab(
                 tab.enter(repo, pipelines, cwd);
                 continue;
             }
+            // Only while the frame on screen offers it: with nothing a
+            // reload would load the pair is not drawn, and a press then
+            // writes no request and opens no popup.
             if key == Key::Char('u') {
-                tab.update(repo);
+                if board.offers_update() {
+                    tab.update(repo);
+                }
                 continue;
             }
         }
@@ -2126,14 +2132,16 @@ mod tests {
             .outcome
     }
 
-    // `u` typed on the dispatch tab, with a dispatcher holding the lock,
-    // writes one reload request and waits under the keyless `update config`
-    // popup, drawn as the mockup draws it. A second `u` while it waits writes
-    // nothing. Fails before the change: `u` did nothing on the tab.
+    // `u` typed on the dispatch tab, with a dispatcher holding the lock and
+    // a pipeline edited since it started, writes one reload request and
+    // waits under the keyless `update config` popup, drawn as the mockup
+    // draws it. A second `u` while it waits writes nothing. Fails before the
+    // change: `u` did nothing on the tab.
     #[test]
     fn u_on_the_dispatch_tab_asks_for_one_reload_and_waits_for_it() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-update-asks");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::status::testutil::edit_a_pipeline_since_start(&repo);
         let pipelines = Pipelines::builtin();
         let mut board = crate::status::Board::for_test();
         let mut tab = DispatchTab::default();
@@ -2169,6 +2177,40 @@ mod tests {
         // No answer yet, and the dispatcher is still there: it keeps waiting.
         tab.reap(&repo);
         assert!(matches!(tab.popup, Some(Popup::Updating)));
+    }
+
+    // With a dispatcher holding the lock but nothing edited since it
+    // started, the key line draws no `u` pair, and a `u` typed on the tab
+    // writes no request and opens no popup. Fails before the change: a held
+    // lock alone was enough for `u` to ask for a reload.
+    #[test]
+    fn u_on_the_dispatch_tab_with_nothing_to_reload_does_nothing() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-update-nothing");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        let pipelines = Pipelines::builtin();
+        crate::pipeline_snapshot::write(&repo, &pipelines, &repo.config.unattended).unwrap();
+        let mut board = crate::status::Board::for_test();
+        let mut tab = DispatchTab::default();
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        let mut input = std::io::Cursor::new(b"u".to_vec());
+        let mut out = Vec::new();
+        dispatch_tab(
+            &repo,
+            &pipelines,
+            &repo.root,
+            &mut board,
+            &mut tab,
+            &mut writer,
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(tab.popup.is_none());
+        assert_eq!(requests(&repo), 0);
+        let drawn = crate::status::strip_ansi(&String::from_utf8_lossy(&out));
+        assert!(drawn.contains("[enter] start dispatching"), "{drawn}");
+        assert!(!drawn.contains("[u] update config"), "{drawn}");
     }
 
     // With no dispatcher holding the lock there is no run to reload: `u`

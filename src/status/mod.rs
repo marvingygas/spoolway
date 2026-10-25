@@ -694,6 +694,24 @@ impl Board {
         self.current = Some(Arc::clone(snapshot));
     }
 
+    /// Whether the frame on screen offers `[u] update config` — the same
+    /// [`update_hint`] [`paint`] drew that frame's key line with, asked of
+    /// [`Board::current`], the reading it was drawn from. The dispatch tab
+    /// reads `u` only while this holds, so the key never acts on a reading
+    /// newer or older than the one a person is looking at. `false` before
+    /// the first reading, when nothing has been drawn.
+    pub(crate) fn offers_update(&self) -> bool {
+        self.current.as_ref().is_some_and(|snapshot| {
+            // `dispatching` plays no part in the `u` pair: it is drawn for a
+            // dispatcher started in a terminal as much as for the tab's own.
+            let phase = Phase::Watching {
+                holder: snapshot.holder,
+                dispatching: false,
+            };
+            !update_hint(phase, &snapshot.waiting).is_empty()
+        })
+    }
+
     /// `frame`, with `popup` drawn over it wherever the board has no panel
     /// of its own open — see [`Board::hosted_frame`].
     fn with_popup(&self, frame: String, popup: Option<&[String]>) -> String {
@@ -3862,6 +3880,7 @@ fn paint_at(
             available.as_deref(),
             pane,
             phase,
+            &snapshot.waiting,
             name,
             jobs,
             spool_frame(snapshot.holder.is_some()),
@@ -3933,8 +3952,9 @@ fn paint_at(
     // so it shows exactly where the key would do something. A board with
     // no row drops both in `paint_empty`.
     //
-    // Built by `crate::screen::key_hint` — see that function's own doc
-    // comment for why this is the one place left to build it, rather than
+    // Built by `crate::screen::key_hint_lit`, `crate::screen::key_hint` with
+    // the `u` pair out of the dim — see `key_hint`'s own doc comment for why
+    // this is the one place left to build it, rather than
     // spelling it out by hand — and, now that the cursor reaches the first
     // row on its own, without naming `↑↓`: every screen this project draws
     // leaves the arrows and `q` off its own key line, since a person reads
@@ -3943,7 +3963,8 @@ fn paint_at(
     // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
     // it quits — see `crate::screen::shell::quit_hint` — and so does `enter`,
     // the one place it starts or stops dispatching. `[u] update config` sits
-    // between `[o] options` and `q` while a dispatcher holds the lock — see
+    // between `[o] options` and `q` while a dispatcher holds the lock and a
+    // reload has something to load, drawn out of the dim — see
     // [`update_hint`].
     let resumable = cursor
         .and_then(|id| snapshot.rows.iter().find(|row| row.id == id))
@@ -3956,11 +3977,11 @@ fn paint_at(
         &[enter_hint(phase)][..],
         resume,
         &[("o", "options")],
-        update_hint(phase),
+        update_hint(phase, &snapshot.waiting),
         crate::screen::shell::quit_hint(),
     ]
     .concat();
-    let (keys, height) = hosted_keys(crate::screen::key_hint(&keys), height);
+    let (keys, height) = hosted_keys(crate::screen::key_hint_lit(&keys, UPDATE_KEY), height);
 
     // The rows the table's body and RECENT share: everything under the
     // column header but the parse warnings, the footer, and the blank row
@@ -4036,16 +4057,24 @@ fn hosted_keys(keys: String, height: Option<usize>) -> (String, Option<usize>) {
     )
 }
 
-/// The key line's `u` pair, drawn while any dispatcher holds the lock: the
+/// The key that asks the running dispatcher to reload, which the key line
+/// draws out of the dim — see [`crate::screen::key_hint_lit`].
+const UPDATE_KEY: &str = "u";
+
+/// The key line's `u` pair, drawn while any dispatcher holds the lock — the
 /// tab's own child, or one started in a terminal, since the request `u`
-/// writes is read by whichever holds it. Empty with none, as there is no run
-/// to update — see `crate::screen::shell`, where the key is read.
-fn update_hint(phase: Phase) -> &'static [(&'static str, &'static str)] {
+/// writes is read by whichever holds it — and `waiting`, the reading's
+/// [`Snapshot::waiting`], names something a reload would load. Empty with no
+/// dispatcher, as there is no run to update, and empty with nothing waiting,
+/// as a reload would load nothing. `u` acts only while this is drawn — see
+/// [`Board::offers_update`], and `crate::screen::shell`, where the key is
+/// read.
+fn update_hint(phase: Phase, waiting: &[String]) -> &'static [(&'static str, &'static str)] {
     match phase {
         Phase::Watching {
             holder: Some(_), ..
-        } => &[("u", "update config")],
-        Phase::Watching { holder: None, .. } => &[],
+        } if !waiting.is_empty() => &[(UPDATE_KEY, "update config")],
+        Phase::Watching { .. } => &[],
     }
 }
 
@@ -4064,8 +4093,9 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 
 /// [`paint`]'s frame for a board with no rows: the header alone in the
 /// top-right corner, then [`view::greeting_screen`] centred down the rest of
-/// the pane, and a key line of `enter`, `u` while a dispatcher holds the
-/// lock and, inside the dispatch tab, `q`.
+/// the pane, and a key line of `enter`, `u` by the same rule the busy board
+/// keeps — see [`update_hint`], fed `waiting` — and, inside the dispatch
+/// tab, `q`.
 /// Under the greeting, `jobs` is drawn as the busy board's own job ledger —
 /// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
 /// the lock, and none is what a project with no enabled job has anyway.
@@ -4083,24 +4113,27 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// [`view::spool_frame`] of whether a dispatcher holds the lock, the test the
 /// busy board's masthead uses, so it turns under a dispatcher and holds
 /// frame 0 otherwise.
+#[allow(clippy::too_many_arguments)]
 fn paint_empty(
     header: &str,
     available: Option<&str>,
     pane: usize,
     phase: Phase,
+    waiting: &[String],
     name: Option<&str>,
     jobs: &[crate::jobs::ActiveJob],
     lockup_frame: usize,
 ) -> String {
     let hosted = crate::screen::shell::hosted().is_some();
     let (keys, height) = hosted_keys(
-        crate::screen::key_hint(
+        crate::screen::key_hint_lit(
             &[
                 &[enter_hint(phase)][..],
-                update_hint(phase),
+                update_hint(phase, waiting),
                 crate::screen::shell::quit_hint(),
             ]
             .concat(),
+            UPDATE_KEY,
         ),
         pane_height(),
     );
@@ -8062,15 +8095,18 @@ mod tests {
         );
     }
 
-    /// `[u] update config` is offered while a dispatcher holds the lock,
-    /// after `[o] options` and before `[q] quit`, on a board with rows and on
-    /// an empty one alike, and goes once nothing holds it. Fails before the
-    /// change: no key line named `u`.
+    /// `[u] update config` is offered while a dispatcher holds the lock and
+    /// a reload has something to load, after `[o] options` and before
+    /// `[q] quit`, on a board with rows and on an empty one alike. It goes
+    /// once nothing holds the lock, and is never drawn while nothing waits.
+    /// Fails before the change: a held lock alone drew the pair.
     #[test]
-    fn the_key_hint_offers_update_config_while_a_dispatcher_holds_the_lock() {
+    fn the_key_hint_offers_update_config_only_while_a_reload_has_something_to_load() {
         let (repo, _root_guard) = fixture("key-hint-update");
         let pipelines = Pipelines::builtin();
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::pipeline_snapshot::write(&repo, &pipelines, &repo.config.unattended).unwrap();
         let mut board = Board::for_test();
         // Hosted, the key line sits under the box, the frame's last row.
         let keys = |board: &mut Board, holder: Option<u32>| {
@@ -8095,19 +8131,72 @@ mod tests {
                 .to_string()
         };
 
+        // Nothing edited since the run started: no pair on either board.
         assert_eq!(
             keys(&mut board, Some(4242)),
-            "[enter] start dispatching   [u] update config   [q] quit"
+            "[enter] start dispatching   [q] quit"
         );
+        assert!(!board.offers_update());
         add_to(&repo, "login", &[], Some("implement"), Some("login"));
         board.cursor = Some("login".to_string());
         assert_eq!(
             keys(&mut board, Some(4242)),
+            "[enter] start dispatching   [o] options   [q] quit"
+        );
+
+        crate::status::testutil::edit_a_pipeline_since_start(&repo);
+        assert_eq!(
+            keys(&mut board, Some(4242)),
             "[enter] start dispatching   [o] options   [u] update config   [q] quit"
         );
+        assert!(board.offers_update());
         assert_eq!(
             keys(&mut board, None),
             "[enter] start dispatching   [o] options   [q] quit"
+        );
+        assert!(!board.offers_update());
+        let task = repo.task("login").unwrap();
+        std::fs::remove_file(&task.path).unwrap();
+        assert_eq!(
+            keys(&mut board, Some(4242)),
+            "[enter] start dispatching   [u] update config   [q] quit"
+        );
+        assert_eq!(
+            keys(&mut board, None),
+            "[enter] start dispatching   [q] quit"
+        );
+    }
+
+    /// The `[u] update config` pair is drawn out of the dim on the busy
+    /// board and the empty one, while every other pair on the key line
+    /// stays inside it. Fails before the change: the whole line was one dim
+    /// run, the pair with it.
+    #[test]
+    fn the_update_pair_alone_is_drawn_out_of_the_dim() {
+        let (repo, _root_guard) = fixture("key-hint-update-lit");
+        let pipelines = Pipelines::builtin();
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        crate::status::testutil::edit_a_pipeline_since_start(&repo);
+        let watching = Phase::Watching {
+            holder: Some(4242),
+            dispatching: false,
+        };
+        let lit = format!("{RESET}[u] update config{DIM}");
+        let mut board = Board::for_test();
+        let empty = board.frame(&repo, &pipelines, watching).unwrap();
+        assert!(
+            empty.contains(&format!(
+                "{DIM} [enter] start dispatching{GUTTER}{lit}{RESET}"
+            )),
+            "{empty:?}"
+        );
+        add_to(&repo, "login", &[], Some("implement"), Some("login"));
+        let busy = board.frame(&repo, &pipelines, watching).unwrap();
+        assert!(
+            busy.contains(&format!(
+                "{DIM} [enter] start dispatching{GUTTER}[o] options{GUTTER}{lit}{RESET}"
+            )),
+            "{busy:?}"
         );
     }
 
@@ -9067,7 +9156,7 @@ mod tests {
             holder: None,
             dispatching: false,
         };
-        let board = |frame| paint_empty("", None, 96, watching, None, &[], frame);
+        let board = |frame| paint_empty("", None, 96, watching, &[], None, &[], frame);
         let held = board(0);
         assert!(held.contains(view::LOCKUP[0][1]), "{held}");
         assert!(!held.contains(view::LOCKUP[1][1]), "{held}");
