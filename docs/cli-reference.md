@@ -2200,8 +2200,8 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 |---|---|---|
 | `--pass` | | The step succeeded. Route along `on_pass`. On `blocked`, when the step this pass stands in for is an agent step with `gate: on_pass` or `gate: always`, it lands on `paused` at that step's own gate instead. A command step is handed back to itself. In an unattended run the fourth such pass in a row parks the task on `paused` instead. See [Loops](pipelines.md#loops) |
 | `--stage <STEP>` | | Only with `--pass` on `blocked`: land on `<STEP>` instead of the default. `<STEP>` must be one this task has already run, and never one past a gate this pass has not answered for |
-| `--fail` | | The step failed. Route along `on_fail` |
-| `--block` | | Something outside the step is in the way. Escalate |
+| `--fail` | | The step is not finished, or a requirement is not met, so another round is needed. Route along `on_fail` |
+| `--block` | | The step cannot be finished: something unexpected is in the way, or the planned solution does not work out. Escalate |
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |
 | `-m`, `--message <TEXT>` | | One line for the status log |
 | `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
