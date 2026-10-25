@@ -83,9 +83,9 @@ brew install marvingygas/tap/spoolway
 
 The package is a small wrapper around a prebuilt binary. It runs on Linux (x64, arm64,
 musl) and macOS (Apple Silicon, Intel). `spoolway update` installs a newer release, through
-whichever of the two installed it. Run
-`spoolway sync` in each project to list the files the new release rewrites and apply them when
-you confirm. `spoolway whats-new` prints the release notes offline.
+whichever of the two installed it. Run `spoolway sync` in each project to list the files the new
+release rewrites and apply them when you confirm. `spoolway whats-new` prints the release notes
+offline.
 
 Or download one file that needs nothing else and never updates itself:
 
