@@ -4055,11 +4055,27 @@ fn paint_at(
     // line under the box rather than inside it. The blank row above the key
     // line stays inside, as the box's last row — or, with the notice up, as
     // the row above it, the notice taking the last row.
+    //
+    // `boxed` pads a short body with blank rows under it, which would leave
+    // the notice under a short table rather than on the box's last row. So
+    // with the notice up the body above the blank row is cut or padded here
+    // to the `height - 2` rows `boxed` gives, less the blank row and the
+    // notice, and `boxed` has nothing left to pad.
+    let hosted = crate::screen::shell::hosted().is_some();
+    if let (true, Some(_), Some(height)) = (hosted, &notice, height) {
+        let room = height.saturating_sub(4);
+        frame = frame
+            .lines()
+            .chain(std::iter::repeat(""))
+            .take(room)
+            .map(|line| format!("{line}\n"))
+            .collect();
+    }
     frame.push('\n');
     if let Some(notice) = &notice {
         frame.push_str(&format!(" {notice}\n"));
     }
-    if crate::screen::shell::hosted().is_some() {
+    if hosted {
         return boxed(&frame, &keys, pane, height);
     }
     frame.push_str(&format!("{keys}\n"));
@@ -8218,12 +8234,13 @@ mod tests {
 
     /// While a reload has something to load, both boards draw the
     /// `Config changed:` line under a blank row: inside the dispatch tab as
-    /// the box's last row, and on its own as the row above the key line.
-    /// With the line up the frame keeps the row count it had without it, so
-    /// the tab strip never scrolls off. With nothing waiting neither board
-    /// draws it, and the footer's old `update` line is gone. Fails before
-    /// the change: neither board drew the line, and the busy one named
-    /// `t.yml` among its slots lines instead.
+    /// the box's last row, however few rows the table above it takes, and
+    /// on its own as the row above the key line. With the line up the frame
+    /// keeps the row count it had without it, so the tab strip never
+    /// scrolls off. With nothing waiting neither board draws it, and the
+    /// footer's old `update` line is gone. Fails before the change: neither
+    /// board drew the line, and the busy one named `t.yml` among its slots
+    /// lines instead.
     #[test]
     fn both_boards_draw_the_config_changed_line_above_the_key_line() {
         let (repo, _root_guard) = fixture("board-config-notice");
@@ -8237,6 +8254,13 @@ mod tests {
             holder: Some(4242),
             waiting,
             ..full_board()
+        };
+        // One row, far short of the pane, so the box has rows to spare
+        // under the table.
+        let short = |waiting: Waiting| {
+            let mut snapshot = busy(waiting);
+            snapshot.rows.truncate(1);
+            snapshot
         };
         let empty = |waiting: Waiting| Snapshot {
             holder: Some(4242),
@@ -8257,18 +8281,26 @@ mod tests {
                     None,
                 ))
             };
-            let boards: [(&str, &dyn Fn(Waiting) -> Snapshot); 2] =
-                [("busy", &busy), ("empty", &empty)];
+            let boards: [(&str, &dyn Fn(Waiting) -> Snapshot); 3] =
+                [("busy", &busy), ("short", &short), ("empty", &empty)];
             for (board, snapshot) in boards {
                 let quiet = draw(&snapshot(Waiting::default()));
                 let changed = draw(&snapshot(waiting()));
                 assert!(!quiet.contains("Config changed"), "{board}:\n{quiet}");
                 assert!(!changed.contains("t.yml"), "{board}:\n{changed}");
-                assert_eq!(
-                    changed.lines().count(),
-                    quiet.lines().count(),
-                    "{board}, hosted {hosted}:\n{quiet}\n{changed}"
-                );
+                // Outside the tab a short busy board is not padded to the
+                // pane, so the line adds its row there; it still fits.
+                match (board, hosted) {
+                    ("short", false) => assert!(
+                        changed.lines().count() < 30,
+                        "{board}, hosted {hosted}:\n{changed}"
+                    ),
+                    _ => assert_eq!(
+                        changed.lines().count(),
+                        quiet.lines().count(),
+                        "{board}, hosted {hosted}:\n{quiet}\n{changed}"
+                    ),
+                }
                 // The box's borders taken off, so a row reads the same in
                 // and out of the tab.
                 let rows: Vec<&str> = changed
