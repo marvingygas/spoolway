@@ -28,7 +28,7 @@ if (!version || !sumsPath) {
   fail("usage: write-formula.mjs <version> <SHA256SUMS> [npm/targets.json]");
 }
 if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
-  fail(`the version "${version}" is not a plain release number like 0.15.0, so no formula was written. Pass the tag without its leading "v".`);
+  fail(`the version "${version}" is not a release number like 0.15.0 or 0.15.0-rc.1, so no formula was written. Pass the tag without its leading "v".`);
 }
 
 const sums = readSums(sumsPath);

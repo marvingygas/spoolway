@@ -397,7 +397,8 @@ jobs:
             published "the formula for spoolway ${VERSION#v} could not be committed to the tap." \
               "Read the git error above, fix what it names, then re-run this job."
           git push origin HEAD ||
-            published "pushing spoolway ${VERSION#v} to marvingygas/homebrew-tap failed." "$token_advice"
+            published "pushing spoolway ${VERSION#v} to marvingygas/homebrew-tap failed." \
+              "If the error above says the tap has newer commits, another release pushed first, so re-run this job and it will compare again. Otherwise check that HOMEBREW_TAP_TOKEN can write to marvingygas/homebrew-tap, then re-run this job."
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 

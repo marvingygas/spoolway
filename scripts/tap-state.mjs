@@ -12,7 +12,8 @@
 // tag" check would let a re-run of an older tag, or two tags finishing out of
 // order, replace a newer formula with an older one, and every new install
 // would then get the old version. The version is read from the formula's urls
-// (".../releases/download/v<version>/..."), the same place Homebrew reads it.
+// (".../releases/download/v<version>/..."), which carry the full version,
+// prereleases included.
 // Versions are ordered as semver orders them, so 0.15.0-rc.1 is older than
 // 0.15.0.
 
