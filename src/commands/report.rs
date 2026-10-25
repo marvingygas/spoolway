@@ -405,7 +405,7 @@ pub fn report(
         // no `stop_choices`.
         None if gated => println!(
             "{}",
-            held_account(&id, &current, outcome, gated_at.as_deref(), &handoffs)
+            held_pane_lines(&id, &current, outcome, gated_at.as_deref(), &handoffs)
         ),
         // `blocked` had nowhere else to send this — see `paused_from_blocked`
         // above — so the lane that reported it, and anyone reading the log
@@ -1911,7 +1911,7 @@ fn is_past_gate(pipeline: &Pipeline, origin: &str, gate_step: &str, candidate: &
 /// then each of `handoffs` on its own line, indented, in the order the lane
 /// gave them. `gated_at` is the step whose gate held an unblocker's pass,
 /// named because `current` is `blocked` there; `None` for every other hold.
-fn held_account(
+fn held_pane_lines(
     id: &str,
     current: &str,
     outcome: Outcome,
@@ -1921,12 +1921,12 @@ fn held_account(
     let at = gated_at
         .map(|step| format!(", at `{step}`'s gate"))
         .unwrap_or_default();
-    let account: String = handoffs
+    let lines: String = handoffs
         .iter()
         .map(|handoff| format!("\n  {handoff}"))
         .collect();
     format!(
-        "{id}: {current} --{outcome}--> {} - held here for a person{at}\n{account}",
+        "{id}: {current} --{outcome}--> {} - held here for a person{at}\n{lines}",
         crate::pipeline::PAUSED,
     )
 }
@@ -8348,15 +8348,15 @@ mod tests {
     /// handoff indented in the order given, and no key lines after them. An
     /// unblocker's hold names the gate it is held at.
     #[test]
-    fn a_held_account_ends_on_the_lanes_handoffs() {
+    fn a_held_pane_ends_on_the_lanes_handoffs() {
         let handoffs = vec!["what it did".to_string(), "how to check it".to_string()];
         assert_eq!(
-            held_account("ship", "deploy", Outcome::Fail, None, &handoffs),
+            held_pane_lines("ship", "deploy", Outcome::Fail, None, &handoffs),
             "ship: deploy --fail--> paused - held here for a person\n\n  what it did\n  \
              how to check it"
         );
         assert_eq!(
-            held_account(
+            held_pane_lines(
                 "tab",
                 "blocked",
                 Outcome::Pass,
