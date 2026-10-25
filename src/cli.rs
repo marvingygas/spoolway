@@ -574,9 +574,9 @@ impl EvalBy {
         One row per pipeline by default. `--by` groups the same lanes by group, task, \
         pipeline, step or version instead; the columns naming a row change with it, and \
         --by task alone adds CTX PEAK. A \
-        Total line closes the table with what adds up: distinct TASKS, BLOCKS, TURNS, and the \
+        `total` line closes the table with what adds up: distinct TASKS, BLOCKS, TURNS, and the \
         sums of IN, OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, not the \
-        calendar time the lanes took. With --per-task the table ends on an Average line \
+        calendar time the lanes took. With --per-task the table ends on an `average` line \
         instead: each sum over the table's distinct TASKS, with USD left blank and USD/TASK \
         carrying the average. Read TASKS before believing a figure: a row that has only run a couple of times can \
         swing a long way on luck alone, and the column is there to say so.",
@@ -607,11 +607,12 @@ impl EvalBy {
         Every figure is a floor: an agent does not always write every request it makes \n  \
         to its transcript, and what it leaves out is missing here.\n\n\
         \x1b[1mThe last line:\x1b[0m\n  \
-        Total carries distinct TASKS, BLOCKS, TURNS and the sums of IN, OUT, CACHE R, \n  \
-        CACHE W, their four USD columns, USD and TIME. Its TIME is lane time added up, \n  \
-        not the calendar time the lanes took. With --per-task the line is Average: \n  \
-        each sum over the table's distinct TASKS, with USD blank and USD/TASK carrying \n  \
-        the average. PASS, CTX AVG and CTX PEAK stay blank on either."
+        The total line carries distinct TASKS, BLOCKS, TURNS and the sums of IN, \n  \
+        OUT, CACHE R, CACHE W, their four USD columns, USD and TIME. Its TIME is \n  \
+        lane time added up, not the calendar time the lanes took. With --per-task \n  \
+        the line is average: each sum over the table's distinct TASKS, with USD \n  \
+        blank and USD/TASK carrying the average. PASS, CTX AVG and CTX PEAK stay \n  \
+        blank on either."
 )]
 pub struct EvalArgs {
     /// What one row stands for. The figure columns are the same under

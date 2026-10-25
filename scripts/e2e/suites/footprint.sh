@@ -345,7 +345,7 @@ eval_opened() { eval_frame > /dev/null; }
 eval_loaded() {
   local frame
   frame=$(eval_frame) || return 1
-  case "$frame" in *'Loading…'*) return 1 ;; esac
+  case "$frame" in *'loading…'*) return 1 ;; esac
 }
 settled=0
 if ! poll_until 60 eval_opened; then

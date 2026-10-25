@@ -309,7 +309,7 @@ works "and every one of them names the source group beside the trial" \
   ' _ "$TRIAL_ID" "$SPOOLWAY_PROJECT_HOME/usage.jsonl"
 
 # And that question, asked: `--by task` is one row per arm, closed by the
-# table's `Total` line, and `--trial` adds one delta line per arm against
+# table's `total` line, and `--trial` adds one delta line per arm against
 # the first. Which arm started first is the mock's scheduling to decide, so
 # the delta lines are counted rather than matched by name.
 COMPARE_OUT=$("$SPOOLWAY" eval --by task --trial "$TRIAL_ID" 2>&1)
@@ -317,8 +317,8 @@ for arm in $ARMS; do
   says "eval --by task --trial has a row for $arm" "$arm" \
     bash -c 'printf "%s" "$1"' _ "$COMPARE_OUT"
 done
-works "the arms' table closes on its Total line" \
-  bash -c 'grep -Eq "^Total +4 " <<<"$1"' _ "$COMPARE_OUT"
+works "the arms' table closes on its total line" \
+  bash -c 'grep -Eq "^total +4 " <<<"$1"' _ "$COMPARE_OUT"
 works "and compares every other arm against the first, one delta line each" \
   bash -c '[ "$(grep -Ec "^(alpha|beta)-[12] vs (alpha|beta)-[12]: pass .*, cost .*, time " <<<"$1")" -eq 3 ]' \
   _ "$COMPARE_OUT"
