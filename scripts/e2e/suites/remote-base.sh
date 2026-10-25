@@ -145,7 +145,7 @@ works "and no worktree was cut for it" test -z "$(worktree_of late)"
 # read `paused` a moment before the log has the sentence. Wait for it.
 poll_until 10 grep -qF 'task/gh-413-merged`, which doesn'"'"'t exist' "$E2E_DISPATCH_LOG"
 says "and the dispatch log says what to set" \
-  'it starts from `task/gh-413-merged`, which doesn'"'"'t exist. Set `starts_from:` in the task front matter and resume.' \
+  'it starts from `task/gh-413-merged`, which doesn'"'"'t exist. set `starts_from:` in the task front matter and resume.' \
   cat "$E2E_DISPATCH_LOG"
 
 # The person's fix: name a branch that exists, then resume.
@@ -185,7 +185,7 @@ DOC
 task_doc "$LIVE/after.md" after "$BODY" "group: after" "depends_on: [shipped]" \
   "base: plan/live"
 refuses "queue add refuses a dependent whose start branch was deleted" \
-  "after starts from task/gh-414-shipped, which doesn't exist. Set starts_from: in the task front matter and requeue." \
+  "after starts from task/gh-414-shipped, which doesn't exist. set starts_from: in the task front matter and requeue." \
   "$SPOOLWAY" queue add --from "$LIVE/after.md"
 works "and queues nothing" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/after.md"
 

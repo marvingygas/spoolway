@@ -55,7 +55,7 @@ pub const TASK_ENV: &str = "SPOOLWAY_TASK";
 pub fn refuse_from_lane(what: &str, in_lane: bool) -> Result<()> {
     if in_lane {
         bail!(
-            "this is a lane's own environment, and {what} from outside it. Ask the person \
+            "this is a lane's own environment, and {what} from outside it. ask the person \
              watching the board."
         );
     }

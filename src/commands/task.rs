@@ -755,7 +755,7 @@ mod tests {
             .expect_err("a start branch that is not there is reported");
         assert!(
             format!("{err:#}").contains(
-                "t starts from no/such, which doesn't exist. Set starts_from: in the task \
+                "t starts from no/such, which doesn't exist. set starts_from: in the task \
                  front matter and requeue."
             ),
             "{err:#}"

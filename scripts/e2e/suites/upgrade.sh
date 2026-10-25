@@ -399,7 +399,7 @@ has "the 0.6.0 dry run reports the headless: rename it would make" \
 has "and the real run names the deprecated spoolway stack" \
   "\`spoolway stack\` is deprecated" "$WORK/0.6.0/real.out"
 has "naming the step that still runs it, pipeline first" \
-  "Still run by: bugfix · handover, default · handover." "$WORK/0.6.0/real.out"
+  "still run by: bugfix · handover, default · handover." "$WORK/0.6.0/real.out"
 lacks "sync dropped the retired herdr_mode key, and its header row with it" \
   "herdr_mode" .spoolway/config.toml
 lacks "sync dropped the retired backend line the 0.6.0 fixture carried" \

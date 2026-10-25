@@ -80,7 +80,7 @@ impl RoutineFolder {
         Some(format!(
             "{} holds {them} that will not parse, so queueing it would leave {it} out:\n\n\
              {}\n\n\
-             Run the command under each for its reason, fix or remove {it}, and queue the \
+             run the command under each for its reason, fix or remove {it}, and queue the \
              folder again.",
             self.path.display(),
             files.join("\n"),
@@ -161,8 +161,8 @@ impl IdClash {
             n => (n.to_string(), "all but one of them"),
         };
         let advice = match &self.suggestion {
-            Some(id) => format!("Give {give} another id:, such as {id}."),
-            None => format!("Give {give} an `id:` of its own."),
+            Some(id) => format!("give {give} another id:, such as {id}."),
+            None => format!("give {give} an `id:` of its own."),
         };
         format!(
             "task id `{id}` is in {count} routines — {rest} and {last}. {advice}",
@@ -452,7 +452,7 @@ mod tests {
         let bad = by_id("fmt").refusal(&root);
         assert!(by_id("fmt").suggestion.is_none(), "`Web_UI-fmt` is no id");
         assert!(
-            bad.ends_with("Give one of them an `id:` of its own."),
+            bad.ends_with("give one of them an `id:` of its own."),
             "{bad}"
         );
         assert!(by_id("spell").suggestion.is_none(), "`api-spell` is taken");

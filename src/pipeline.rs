@@ -1469,7 +1469,7 @@ impl Pipeline {
                 {
                     bail!(
                         "step `{}` declares `gate: on_fail` but {}, so its lane is never offered \
-                         a fail and the gate can never hold one. Add `on_fail: <step>`, or use \
+                         a fail and the gate can never hold one. add `on_fail: <step>`, or use \
                          `gate: on_pass`.",
                         step.id,
                         match step.on_fail {
@@ -1600,7 +1600,7 @@ impl Pipeline {
                     if step.timeout == Some(Duration::ZERO) {
                         bail!(
                             "step `{}` sets `timeout: 0s`, which would kill the command as soon \
-                             as it started. There is no way to say `no limit` here — write the \
+                             as it started. there is no way to say `no limit` here — write the \
                              longest this command may reasonably take",
                             step.id
                         );
@@ -1962,7 +1962,7 @@ impl Pipeline {
             if let Some(cycle) = self.find_unbounded_cycle(&step.id, &mut state, &mut path) {
                 bail!(
                     "steps {} form a loop nothing bounds — no step along it carries a `loop:`, \
-                     so a task could go round it forever. Give one of them a `loop: <n>`: the \
+                     so a task could go round it forever. give one of them a `loop: <n>`: the \
                      arrival past it parks on `blocked`.",
                     cycle
                         .iter()
@@ -2317,7 +2317,7 @@ impl Clash {
         format!(
             "private pipeline `{name}` clashes with the tracked one — both {} and {} name \
              `{name}`; run `spoolway pipeline rename {name} <new-name>` to rename the private \
-             file. Tasks on `{name}` are held until then, and every other task runs",
+             file. tasks on `{name}` are held until then, and every other task runs",
             self.tracked.display(),
             self.private.display(),
         )
@@ -2519,7 +2519,7 @@ impl Pipelines {
                 if old.exists() {
                     bail!(
                         "{} is the old single-file shape, which this spoolway no longer \
-                         reads. Split it by hand: one `.spoolway/pipelines/<name>.yml` per \
+                         reads. split it by hand: one `.spoolway/pipelines/<name>.yml` per \
                          `pipelines:` entry (the file name is the pipeline name, so drop the \
                          map key and the old `default:` — every task now names its own \
                          pipeline instead), then delete the old file. `spoolway pipeline \
@@ -4046,7 +4046,7 @@ mod tests {
         assert!(
             none.contains(
                 "step `approve` declares `gate: on_fail` but no `on_fail:`, so its lane is \
-                 never offered a fail and the gate can never hold one. Add `on_fail: <step>`, \
+                 never offered a fail and the gate can never hold one. add `on_fail: <step>`, \
                  or use `gate: on_pass`."
             ),
             "{none}"

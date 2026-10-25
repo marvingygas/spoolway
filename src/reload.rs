@@ -201,7 +201,7 @@ fn settle(repo: &Repo, ids: &[String], outcome: &Outcome) -> Vec<String> {
                 let _ = std::fs::remove_file(requests_dir(repo).join(id));
             }
             Err(err) => problems.push(format!(
-                "the answer to reload request {id} could not be written: {err:#}. The request \
+                "the answer to reload request {id} could not be written: {err:#}. the request \
                  stays, and the next pass answers it again"
             )),
         }
@@ -303,22 +303,22 @@ fn apply(
         Err(err) => {
             return Outcome::Refused(vec![Reason {
                 what: format!("the run's mode could not be changed: {err:#}"),
-                fix: "Make the project home writable, then reload again.".to_string(),
+                fix: "make the project home writable, then reload again.".to_string(),
             }]);
         }
     };
     if let Err(err) = crate::pipeline_snapshot::write(live, &loaded, &config.unattended) {
         let mut reasons = vec![Reason {
             what: format!("the new pipelines could not be recorded: {err:#}"),
-            fix: "Make the project home writable, then reload again.".to_string(),
+            fix: "make the project home writable, then reload again.".to_string(),
         }];
-        let fix = "Make the project home writable, then reload again.".to_string();
+        let fix = "make the project home writable, then reload again.".to_string();
         match switch.map(crate::lock::ModeSwitch::undo) {
             Some(Err(crate::lock::UndoError::Text(undo))) => {
                 let mode = if enabled { "unattended" } else { "attended" };
                 reasons.push(Reason {
                     what: format!(
-                        "the lock could not be put back: {undo:#}. The run is now {mode}, and \
+                        "the lock could not be put back: {undo:#}. the run is now {mode}, and \
                          its snapshot no longer matches the lock"
                     ),
                     fix,
@@ -326,7 +326,7 @@ fn apply(
             }
             Some(Err(crate::lock::UndoError::Time(undo))) => reasons.push(Reason {
                 what: format!(
-                    "the lock's modified time could not be put back: {undo:#}. The run is \
+                    "the lock's modified time could not be put back: {undo:#}. the run is \
                      still in its old mode and the snapshot still matches, but the spend \
                      ceilings now count from this reload"
                 ),
@@ -354,7 +354,7 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
     let config = crate::config::Config::load_present(&live.root).map_err(|err| {
         vec![Reason {
             what: format!("config.toml does not load: {err:#}"),
-            fix: "Fix config.toml, then reload again.".to_string(),
+            fix: "fix config.toml, then reload again.".to_string(),
         }]
     })?;
     // The state a dispatch start refuses, refused here too: a reload that
@@ -365,7 +365,7 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
             what: "unattended.enabled is on and unattended.blocked_model is blank — an \
                    unattended run has nobody to clear a block, so `blocked` has to be staffed"
                 .to_string(),
-            fix: "Set unattended.blocked_model, or turn unattended.enabled off, then reload \
+            fix: "set unattended.blocked_model, or turn unattended.enabled off, then reload \
                   again."
                 .to_string(),
         }]);
@@ -373,13 +373,13 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
     let loaded = Pipelines::load(&live.root, &config).map_err(|err| {
         vec![Reason {
             what: format!("the pipelines do not load: {err:#}"),
-            fix: "Fix the file it names, then reload again.".to_string(),
+            fix: "fix the file it names, then reload again.".to_string(),
         }]
     })?;
     let (tasks, unreadable) = live.tasks_and_problems().map_err(|err| {
         vec![Reason {
             what: format!("the queue cannot be read: {err:#}"),
-            fix: "Make the queue readable, then reload again.".to_string(),
+            fix: "make the queue readable, then reload again.".to_string(),
         }]
     })?;
     // A task file that does not parse has no step to read, so the check below
@@ -391,7 +391,7 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
                 "{}, so a reload cannot tell whether the edit strands it",
                 file.skipped_line()
             ),
-            fix: "Fix or remove that queue file, then reload again.".to_string(),
+            fix: "fix or remove that queue file, then reload again.".to_string(),
         })
         .collect();
     refusals.extend(stranded(&loaded, &tasks));
@@ -424,7 +424,7 @@ fn stranded(loaded: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
             reasons.push(Reason {
                 what: format!("{id}: names pipeline `{name}`, which is no longer defined"),
                 fix: format!(
-                    "Put `{name}.yml` back, or wait until {id} is done, then reload again."
+                    "put `{name}.yml` back, or wait until {id} is done, then reload again."
                 ),
             });
             continue;
@@ -437,7 +437,7 @@ fn stranded(loaded: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
             reasons.push(Reason {
                 what: format!("{id}: {held}, which pipeline `{name}` no longer defines"),
                 fix: format!(
-                    "Put `{step}` back in {name}.yml, or wait until {id} has left it, then \
+                    "put `{step}` back in {name}.yml, or wait until {id} has left it, then \
                      reload again."
                 ),
             });
@@ -489,7 +489,7 @@ mod tests {
             [Reason {
                 what: "fix-login: sitting on `review`, which pipeline `feature` no longer defines"
                     .to_string(),
-                fix: "Put `review` back in feature.yml, or wait until fix-login has left it, \
+                fix: "put `review` back in feature.yml, or wait until fix-login has left it, \
                       then reload again."
                     .to_string(),
             }]
@@ -513,7 +513,7 @@ mod tests {
         );
         assert_eq!(
             reasons[0].fix,
-            "Put `retired.yml` back, or wait until old is done, then reload again."
+            "put `retired.yml` back, or wait until old is done, then reload again."
         );
     }
 
@@ -832,11 +832,11 @@ mod tests {
             outcome: Outcome::Refused(vec![
                 Reason {
                     what: "a: gone".into(),
-                    fix: "Put it back.".into(),
+                    fix: "put it back.".into(),
                 },
                 Reason {
                     what: "b: gone".into(),
-                    fix: "Put it back.".into(),
+                    fix: "put it back.".into(),
                 },
             ]),
         };

@@ -310,8 +310,8 @@ impl<'a> Dispatcher<'a> {
                     &off.reason,
                 )?;
                 report.problems.push(format!(
-                    "{id}: {found} — held on `{blocked}`.\n    Nothing was committed or \
-                     removed. Put the work back on `{branch}` in {worktree}, then: \
+                    "{id}: {found} — held on `{blocked}`.\n    nothing was committed or \
+                     removed. put the work back on `{branch}` in {worktree}, then: \
                      spoolway resume {id}",
                     id = task.id(),
                     blocked = crate::pipeline::BLOCKED,
@@ -782,7 +782,7 @@ impl<'a> Dispatcher<'a> {
                     .map(|e| format!(": {e:#}"))
                     .unwrap_or_default();
                 report.problems.push(format!(
-                    "{}: its worktree {} could not be removed{why}. To do it by hand, run \
+                    "{}: its worktree {} could not be removed{why}. to do it by hand, run \
                      `{}`",
                     task.id(),
                     checkout.display(),

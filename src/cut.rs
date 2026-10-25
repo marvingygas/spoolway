@@ -218,7 +218,7 @@ fn poll_within(
             }
             bail!(
                 "{task_id}: `git worktree add` exited 0 but {} is not a finished checkout of \
-                 `{branch}`. Remove it with `git worktree remove --force --force {}`, then \
+                 `{branch}`. remove it with `git worktree remove --force --force {}`, then \
                  resume the task",
                 path.display(),
                 path.display()
@@ -253,7 +253,7 @@ fn poll_within(
                 runs.forget(&key)?;
                 bail!(
                     "{task_id}: the cut of its worktree was killed {kills} times in a row \
-                     without finishing. See {} for what it printed, find what keeps ending it, \
+                     without finishing. see {} for what it printed, find what keeps ending it, \
                      then resume the task",
                     runs.log_path(&key).display()
                 );

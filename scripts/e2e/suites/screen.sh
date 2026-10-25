@@ -272,10 +272,10 @@ SECOND="$LIVE/second.txt"
 works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
-has "and says the one line" "Dispatcher already running" "$SECOND.plain"
+has "and says the one line" "dispatcher already running" "$SECOND.plain"
 lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
-  "Dispatcher already running" "$SPOOLWAY" dispatch
+  "dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
 
 wait "$HELD_PID"
@@ -286,7 +286,7 @@ AFTER="$LIVE/after.txt"
 works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
-lacks "not refused" "Dispatcher already running" "$AFTER.plain"
+lacks "not refused" "dispatcher already running" "$AFTER.plain"
 has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:

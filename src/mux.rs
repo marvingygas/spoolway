@@ -2951,7 +2951,7 @@ pub(crate) fn undo_stopped_cut(
             );
             bail!(
                 "{stopped} The worktree it left half set up at {path_arg} could not be \
-                 removed ({removal:#}). Run `{}`, then {next}.",
+                 removed ({removal:#}). run `{}`, then {next}.",
                 remove_by_hand_command(repo, path)
             );
         }

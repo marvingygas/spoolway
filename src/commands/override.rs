@@ -359,7 +359,7 @@ const OVERRIDE_CONTRACT_LINES: &[&str] = &[
     "touches the checkout, so `git status` never moves.",
     "",
     "WHEN IT TAKES EFFECT",
-    "  config.toml            read again at every dispatcher pass; no restart. Except",
+    "  config.toml            read again at every dispatcher pass; no restart. except",
     "                         unattended.enabled and unattended.blocked_*, which a running",
     "                         dispatcher fixes at start: restart it.",
     "  prompts/<name>         read when a lane starts.",
@@ -1161,7 +1161,7 @@ mod tests {
             assert_eq!(
                 format!("{err:#}"),
                 "the dispatcher reads the project's tracked files, not this worktree's.\n  \
-                 A lane does not change the project's setup. Write the\n  \
+                 a lane does not change the project's setup. write the\n  \
                  setting you wanted into your report, and a person\n  \
                  will make the change."
             );
@@ -1240,7 +1240,7 @@ mod tests {
             for (command, err) in &refusals {
                 let message = format!("{err:#}");
                 assert!(
-                    message.contains("A lane does not change the project's setup"),
+                    message.contains("a lane does not change the project's setup"),
                     "{command} was not refused as a lane: {message}"
                 );
             }

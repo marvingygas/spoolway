@@ -550,7 +550,7 @@ fn a_reload_is_refused_when_a_task_waits_on_a_step_the_edit_deleted() {
     );
     assert!(
         answer.contains("tb: sitting on `work`, which pipeline `solo` no longer defines")
-            && answer.contains("Put `work` back in solo.yml, or wait until tb has left it"),
+            && answer.contains("put `work` back in solo.yml, or wait until tb has left it"),
         "the refusal does not name the task and the fix:\n{answer}"
     );
     assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
@@ -634,9 +634,9 @@ fn the_reload_command_prints_the_whole_refusal_and_exits_non_zero() {
         String::from_utf8_lossy(&output.stderr).trim(),
         "reload refused — nothing changed, the run is still on what it had:\n  \
          ta: sitting on `work`, which pipeline `solo` no longer defines\n  \
-         Put `work` back in solo.yml, or wait until ta has left it, then reload again.\n  \
+         put `work` back in solo.yml, or wait until ta has left it, then reload again.\n  \
          tb: sitting on `work`, which pipeline `solo` no longer defines\n  \
-         Put `work` back in solo.yml, or wait until tb has left it, then reload again."
+         put `work` back in solo.yml, or wait until tb has left it, then reload again."
     );
     assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");
 }
@@ -682,7 +682,7 @@ fn the_reload_command_reaches_the_dispatcher_over_a_config_that_does_not_parse()
     assert!(
         stderr.starts_with("reload refused — nothing changed")
             && stderr.contains("config.toml does not load")
-            && stderr.contains("Fix config.toml, then reload again."),
+            && stderr.contains("fix config.toml, then reload again."),
         "the dispatcher's own refusal did not reach the terminal:\n{stderr}"
     );
     assert_eq!(project.snapshot(), before, "a refusal rewrote the snapshot");

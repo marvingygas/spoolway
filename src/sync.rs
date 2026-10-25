@@ -3983,8 +3983,8 @@ mod tests {
             stack_note_lines(&sentences),
             [
                 "note    `spoolway stack` is deprecated and may be removed in a future release.",
-                "        Still run by: bugfix · handover, default · handover.",
-                "        Run `spoolway init` to add the `create-pr` prompt, then replace each step",
+                "        still run by: bugfix · handover, default · handover.",
+                "        run `spoolway init` to add the `create-pr` prompt, then replace each step",
                 "        with an agent step on it — see docs/migrations.md",
             ]
         );

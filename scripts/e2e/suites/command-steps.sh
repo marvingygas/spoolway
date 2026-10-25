@@ -222,7 +222,7 @@ else bad "and names the task"; sed 's/^/        /' <<<"$OUT"; fi
 if grep -qF "Set \`pipeline:\` to one of:" <<<"$OUT" && grep -qF "default" <<<"$OUT"; then
   ok "and lists the pipelines it could choose"
 else bad "and lists the pipelines it could choose"; sed 's/^/        /' <<<"$OUT"; fi
-if grep -qF "Nothing was dispatched." <<<"$OUT"; then
+if grep -qF "nothing was dispatched." <<<"$OUT"; then
   ok "and says nothing was dispatched"
 else bad "and says nothing was dispatched"; sed 's/^/        /' <<<"$OUT"; fi
 if [ "$(stage_of routeless)" = queued ]; then
@@ -894,7 +894,7 @@ OUT=$(HERDR_STUB_NO_PANE=1 "$SPOOLWAY" dispatch 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then ok "dispatch refuses outside a herdr pane, herdr backend included"
 else bad "dispatch refuses outside a herdr pane, herdr backend included"; fi
-if grep -qF "Open herdr and start spoolway there:" <<<"$OUT"; then
+if grep -qF "open herdr and start spoolway there:" <<<"$OUT"; then
   ok "and names why"
 else bad "and names why"; sed 's/^/        /' <<<"$OUT"; fi
 if grep -qx "  herdr" <<<"$OUT" && grep -qx "  spoolway" <<<"$OUT"; then
@@ -923,7 +923,7 @@ fi
 OUT=$(HERDR_STUB_NO_PANE=1 "$SPOOLWAY" dispatch 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ] \
-   && grep -qF "Open herdr and start spoolway there:" <<<"$OUT"; then
+   && grep -qF "open herdr and start spoolway there:" <<<"$OUT"; then
   ok "and an ordinary dispatch is refused the same way, not exempted"
 else bad "and an ordinary dispatch is refused the same way, not exempted"; sed 's/^/        /' <<<"$OUT"; fi
 

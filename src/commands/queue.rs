@@ -762,7 +762,7 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
         if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
             bail!(
                 "`{}` depends on `{id}` and has not started either — unqueuing `{id}` alone \
-                 would leave it waiting on a dependency the queue no longer shows. Unqueue \
+                 would leave it waiting on a dependency the queue no longer shows. unqueue \
                  `{}` first, or pass `--all` to carry both back together.",
                 sibling.id(),
                 sibling.id(),
@@ -781,12 +781,12 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
         );
         if let Some(path) = &checkout {
             message += &format!(
-                "\n  It has a checkout at {}, and unqueuing it\n  would leave that standing.\n",
+                "\n  it has a checkout at {}, and unqueuing it\n  would leave that standing.\n",
                 path.display()
             );
         }
         message += &format!(
-            "\n  To stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n"
+            "\n  to stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n"
         );
         // `--force` is refused while a queued task depends on this one, so
         // offering it here would send the person into a second refusal.
@@ -794,18 +794,18 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
             Some(sibling) => {
                 message += &format!(
                     "\n  `{}` depends on `{id}` and has not started, which stops `--force` too.\n  \
-                     Unqueue `{}` first.\n",
+                     unqueue `{}` first.\n",
                     sibling.id(),
                     sibling.id()
                 );
             }
             None => {
                 message += &format!(
-                    "\n  To tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n"
+                    "\n  to tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n"
                 );
             }
         }
-        message += "\nNothing was changed.";
+        message += "\nnothing was changed.";
         bail!(message);
     }
 
@@ -815,7 +815,7 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
     if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
         bail!(
             "`{}` depends on `{id}` and has not started — unqueuing `{id}` would leave it \
-             waiting on a task that no longer exists. Unqueue `{}` first.",
+             waiting on a task that no longer exists. unqueue `{}` first.",
             sibling.id(),
             sibling.id(),
         );
@@ -857,7 +857,7 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
         Unqueued::Untouched => {
             bail!(
                 "did not unqueue `{id}`: it is no longer a queued task that has not started — \
-                 `spoolway queue list` shows where it is now. Nothing was changed."
+                 `spoolway queue list` shows where it is now. nothing was changed."
             );
         }
     }
@@ -896,7 +896,7 @@ fn queue_unqueue_forced(
     if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())? {
         bail!(
             "a dispatcher is already running for this repo (pid {pid}) — it re-reads the \
-             queue every pass and could be mid-turn on `{id}` right now. Stop it first, then \
+             queue every pass and could be mid-turn on `{id}` right now. stop it first, then \
              run this again."
         );
     }
@@ -925,7 +925,7 @@ fn queue_unqueue_forced(
     if routine_file.is_none() && pending_dest.exists() {
         bail!(
             "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
-             then run this again. Nothing was torn down.",
+             then run this again. nothing was torn down.",
             pending_dest.display()
         );
     }
@@ -946,8 +946,8 @@ fn queue_unqueue_forced(
     {
         bail!(
             "did not unqueue `{id}`: {} ({}) — committing and removing it would lose the \
-             work. Put it back on the task's branch, or finish or abort the operation, \
-             then run this again. Nothing was interrupted, committed or torn down.",
+             work. put it back on the task's branch, or finish or abort the operation, \
+             then run this again. nothing was interrupted, committed or torn down.",
             off.found,
             worktree.display()
         );
@@ -998,7 +998,7 @@ fn queue_unqueue_forced(
         if outcome.is_unrecorded() {
             bail!(
                 "`{id}`'s worktree at {} has work `auto_commit` could not record ({note}) — \
-                 nothing was torn down or unqueued. Commit or discard it by hand, then run \
+                 nothing was torn down or unqueued. commit or discard it by hand, then run \
                  this again.",
                 worktree.display()
             );
@@ -1054,7 +1054,7 @@ fn queue_unqueue_forced(
         if !torn_down {
             bail!(
                 "`{id}`'s checkout could not be removed (see above) — the copy of the routine \
-                 in {} is still queued. Remove the worktree by hand, then run this again.",
+                 in {} is still queued. remove the worktree by hand, then run this again.",
                 routine_file.display()
             );
         }
@@ -1300,13 +1300,13 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         match super::task::misspelt_key(key) {
             Some((known, true)) => bail!(
                 "{name} sets `{key}:`, which spoolway does not read — it means `{known}:`. \
-                 Rename it to `{known}:`."
+                 rename it to `{known}:`."
             ),
             // Renaming would only walk into the refusal or the silent drop
             // of the key itself, so the advice is to take it out.
             Some((known, false)) => bail!(
                 "{name} sets `{key}:`, which is `{known}:` spelt another way — a key \
-                 spoolway sets itself or throws away. Remove it from the task."
+                 spoolway sets itself or throws away. remove it from the task."
             ),
             None => {}
         }
@@ -1320,7 +1320,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // ever refuse it again once it did.
     if mapping.contains_key("parallel") {
         bail!(
-            "{name} sets `parallel:`, which is gone — a group is one chain. Give it a \
+            "{name} sets `parallel:`, which is gone — a group is one chain. give it a \
              `depends_on`, or move it to a group of its own."
         );
     }
@@ -1392,7 +1392,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         let shown = serde_norway::to_string(value).unwrap_or_default();
         bail!(
             "{name} sets `complexity: {}`, which is not a whole number from {} to {}. \
-             Set it to a whole number in that range, 100 being extremely complex, or \
+             set it to a whole number in that range, 100 being extremely complex, or \
              remove the key.",
             shown.trim(),
             crate::task::COMPLEXITY_RANGE.start(),
@@ -1415,7 +1415,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
             bail!(
                 "{name}: label `{label}` may not hold whitespace or a comma — a hook reads \
                  every label comma-joined in SPOOLWAY_LABELS, and Jira's own labels cannot \
-                 hold a space at all. Join the words with a hyphen instead, for example \
+                 hold a space at all. join the words with a hyphen instead, for example \
                  `needs-triage`."
             );
         }
@@ -1456,8 +1456,8 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
                 .filter(|flag| !flag.trim().is_empty())
                 .with_context(|| {
                     format!(
-                        "`{name}` sets no `base:` and no --base was given.\n\n  Set `base:` in \
-                     the task, or pass --base <branch>.\n\nNothing was queued."
+                        "`{name}` sets no `base:` and no --base was given.\n\n  set `base:` in \
+                     the task, or pass --base <branch>.\n\nnothing was queued."
                     )
                 })?
                 .to_string(),
@@ -1673,7 +1673,7 @@ fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<(
         .map_or("the top of the task", str::trim);
     bail!(
         "{name}: the section `{heading}` still holds the skeleton's `[[…]]` \
-         placeholder text. Replace it with the task's own words, or delete the \
+         placeholder text. replace it with the task's own words, or delete the \
          section if the task has nothing to say there, then add it again."
     );
 }
@@ -1788,7 +1788,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
             match above {
                 None => bail!(
                     "task `{}` has `gate_at: {gate_at}`, but it will never run `{gate_at}`: {}, \
-                     so the gate would never fire. Name a step it does run \
+                     so the gate would never fire. name a step it does run \
                      ({runs}), or drop `gate_at:`.",
                     task.front.id,
                     why.refusal(),
@@ -1796,7 +1796,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
                 Some(above) => bail!(
                     "task `{}`, already queued, has `gate_at: {gate_at}`, and adding `{}` above \
                      it would mean it never runs `{gate_at}`: {}, so the gate would never fire. \
-                     Change `gate_at:` on `{}` to a step it does run ({runs}), or leave `{}` out.",
+                     change `gate_at:` on `{}` to a step it does run ({runs}), or leave `{}` out.",
                     task.front.id,
                     above.front.id,
                     why.refusal(),
@@ -1904,7 +1904,7 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
             bail!(
                 "group `{group}` sets no `group_description:` on any of its tasks, and \
                  `issue_tracking.hook` names `{}` — the group's issue would have nothing to \
-                 say. Set it on one task of the group.",
+                 say. set it on one task of the group.",
                 repo.config.issue_tracking.hook
             );
         }
@@ -1978,7 +1978,7 @@ fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
     routine_names(repo).contains(id).then(|| {
         format!(
             "task id `{id}` is the name of routine `{id}`, whose copies' lanes are named \
-             `{id}{}<step>`. Give this task another id; nothing was queued.",
+             `{id}{}<step>`. give this task another id; nothing was queued.",
             crate::mux::LANE_NAME_SEPARATOR
         )
     })
@@ -2024,8 +2024,8 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
     };
     Some(format!(
         "task id `{id}` cannot be queued: {} from an earlier task with that id is still \
-         there, {why}. To drop it, run {}. To keep the work, rename the branch with `git \
-         branch -m {branch} <name>` and set `starts_from: <name>` in the task. Nothing was \
+         there, {why}. to drop it, run {}. to keep the work, rename the branch with `git \
+         branch -m {branch} <name>` and set `starts_from: <name>` in the task. nothing was \
          queued.",
         what.join(" and "),
         remove.join(", then "),
@@ -2323,7 +2323,7 @@ fn carry_group_descriptions(tasks: &mut [Task], not_queued: &[NotQueued]) {
 /// the queue tab's queued summary and `queue add`'s refusal say the same.
 fn missing_start_sentence(id: &str, branch: &str) -> String {
     format!(
-        "{id} starts from {branch}, which doesn't exist. Set starts_from: in the task front \
+        "{id} starts from {branch}, which doesn't exist. set starts_from: in the task front \
          matter and requeue."
     )
 }
@@ -2347,7 +2347,7 @@ fn missing_start_sentences(not_queued: &[NotQueued]) -> Vec<String> {
 pub(crate) fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
     let sentences = missing_start_sentences(&not_queued(repo, tasks));
     if !sentences.is_empty() {
-        bail!("{}\n\nNothing was queued.", sentences.join("\n"));
+        bail!("{}\n\nnothing was queued.", sentences.join("\n"));
     }
     Ok(())
 }
@@ -2513,7 +2513,7 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
                 .collect();
             format!(
                 "could not lock group {} to queue into it — another `queue add` into the \
-                 same group is holding it. Run this again in a moment.",
+                 same group is holding it. run this again in a moment.",
                 busy.join(" or ")
             )
         })?);
@@ -2526,7 +2526,7 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
             crate::lock::TaskLock::acquire(&repo.task_lock_file(id)).with_context(|| {
                 format!(
                     "could not lock task `{id}` to queue it — another `queue add` or \
-                     dispatch pass is holding it. Run this again in a moment."
+                     dispatch pass is holding it. run this again in a moment."
                 )
             })?,
         );
@@ -4209,7 +4209,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                 bail!(
                     "`{id}` is based on `{mine}` but depends on `{dep}`, which is based on \
                          `{theirs}` — work only merges into its own base, so that wait would never \
-                         put it in reach. Queue both from the same worktree."
+                         put it in reach. queue both from the same worktree."
                 );
             }
         }
@@ -4226,7 +4226,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                 bail!(
                     "`{id}` depends on `{}`, in another group, but also depends on a task in \
                      its own group `{}` — only a group's first task may stack onto another \
-                     group. Move the cross-group `depends_on` onto the first task, or drop it.",
+                     group. move the cross-group `depends_on` onto the first task, or drop it.",
                     cross[0].0,
                     mine.as_deref().unwrap_or("")
                 );
@@ -4337,7 +4337,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                     bail!(
                         "`{id}` depends on `{parents}`, in its own group{group}, but none of \
                          them reaches all the others — a group is one chain, and a task \
-                         joining two of it is not one. Its worktree would be cut from \
+                         joining two of it is not one. its worktree would be cut from \
                          `{first}`, and `{missing}` would not be in it. A depends_on must \
                          start with the id that contains the rest, or drop one.",
                         group = mine
@@ -4382,7 +4382,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
         if roots.len() > 1 {
             bail!(
                 "group `{group}` has {} tasks with no dependency in it: {} — a group is one \
-                 chain. Give one a `depends_on`, or move it to a group of its own.",
+                 chain. give one a `depends_on`, or move it to a group of its own.",
                 count_word(roots.len()),
                 roots.join(" and ")
             );
@@ -4411,7 +4411,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
             if dependents.len() > 1 {
                 bail!(
                     "group `{group}` has {} tasks depending on `{dep}`: {} — a group is one \
-                     chain. Give one a `depends_on` on the other, or move it to a group of \
+                     chain. give one a `depends_on` on the other, or move it to a group of \
                      its own.",
                     count_word(dependents.len()),
                     dependents.join(" and ")
@@ -5006,8 +5006,8 @@ fn untrack_named_groups(tasks: &mut [Task], named: &[String]) -> Result<()> {
     if named.iter().any(String::is_empty) {
         bail!(
             "--no-tracking was given an empty group name.\n\
-             Name a group, or drop the value to cover every group in the batch. \
-             Nothing was queued."
+             name a group, or drop the value to cover every group in the batch. \
+             nothing was queued."
         );
     }
     let groups: BTreeSet<&str> = tasks.iter().map(checklist_group).collect();
@@ -5018,9 +5018,9 @@ fn untrack_named_groups(tasks: &mut [Task], named: &[String]) -> Result<()> {
         let groups = groups.iter().copied().collect::<Vec<_>>().join(", ");
         bail!(
             "--no-tracking names `{unknown}`, but no task in this batch belongs to that group.\n\
-             The batch's groups are {groups}.\n\
-             Fix the group name, or drop the flag to open every group's tickets. \
-             Nothing was queued."
+             the batch's groups are {groups}.\n\
+             fix the group name, or drop the flag to open every group's tickets. \
+             nothing was queued."
         );
     }
     let everything = named
@@ -5396,8 +5396,8 @@ fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
     }
     lines.push(String::new());
     lines.extend(crate::screen::wrap(
-        "A routine runs one copy at a time. Let it finish, resume or restart it from the \
-         board if it has stopped, or unqueue it if it has not started. Then queue the routine \
+        "a routine runs one copy at a time. let it finish, resume or restart it from the \
+         board if it has stopped, or unqueue it if it has not started. then queue the routine \
          again.",
         STILL_QUEUED_WRAP,
     ));
@@ -11527,7 +11527,7 @@ fn unreadable_refusal(
         "the queue holds {them} that will not parse, so whether the routine being queued \
          still has a live copy cannot be told:\n\n\
          {}\n\n\
-         A routine runs one copy at a time. Fix {it}; the routine can then be queued.",
+         a routine runs one copy at a time. fix {it}; the routine can then be queued.",
         files.join("\n")
     )
 }
@@ -11582,7 +11582,7 @@ impl std::fmt::Display for RoutineBusy {
         write!(
             f,
             "could not lock routine `{}` to queue it — another submission of it is being \
-             queued. Run this again in a moment.",
+             queued. run this again in a moment.",
             self.0
         )
     }
@@ -11660,8 +11660,8 @@ fn validate_routine_batch(
         let text = format!("{err:#}");
         match text.split_once("sets no `base:` and no --base was given") {
             Some((name, _)) => anyhow::Error::msg(format!(
-                "{name}sets no `base:`, and the job has no `base` key.\n\n  Set `base:` in the \
-                 task, or `base = \"<branch>\"` on the job.\n\nNothing was queued."
+                "{name}sets no `base:`, and the job has no `base` key.\n\n  set `base:` in the \
+                 task, or `base = \"<branch>\"` on the job.\n\nnothing was queued."
             )),
             None => err,
         }
@@ -12794,7 +12794,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "group `cart` has two tasks with no dependency in it: cart-totals and cart-empty \
-             — a group is one chain. Give one a `depends_on`, or move it to a group of its \
+             — a group is one chain. give one a `depends_on`, or move it to a group of its \
              own."
         );
     }
@@ -13811,7 +13811,7 @@ mod tests {
         let err = queue_unqueue(&repo, &pipelines, &unqueue_args("parent")).unwrap_err();
         let said = format!("{err:#}");
         assert!(!said.contains("--force\n"), "{said}");
-        assert!(said.contains("Unqueue `child` first"), "{said}");
+        assert!(said.contains("unqueue `child` first"), "{said}");
     }
 
     /// A forced unqueue sweeps the worktree's leftovers into a commit before it
@@ -13845,7 +13845,7 @@ mod tests {
 
         let said = format!("{err:#}");
         assert!(said.contains("detached HEAD, not `task/solo`"), "{said}");
-        assert!(said.contains("Nothing was interrupted, committed or torn down"));
+        assert!(said.contains("nothing was interrupted, committed or torn down"));
         assert!(worktree.join("left.txt").exists());
         assert_eq!(
             git(&["rev-parse", "HEAD"]),
@@ -14977,8 +14977,8 @@ mod tests {
             let err = parse_submission("a.md", &raw, Some("main")).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains(&format!("`{known}:`")), "{message}");
-            assert!(message.contains("Remove it"), "{message}");
-            assert!(!message.contains("Rename"), "{message}");
+            assert!(message.contains("remove it"), "{message}");
+            assert!(!message.contains("rename"), "{message}");
         }
         let raw = task_text("a", "group: demo\nTracking: off\n", BODY);
         assert!(parse_submission("a.md", &raw, Some("main")).is_err());
@@ -17720,7 +17720,7 @@ mod tests {
         let said = format!("{err:#}");
         assert!(
             said.contains(
-                "index-file starts from task/reader, which doesn't exist. Set starts_from: in \
+                "index-file starts from task/reader, which doesn't exist. set starts_from: in \
                  the task front matter and requeue."
             ),
             "{said}"
@@ -20812,7 +20812,7 @@ mod tests {
         assert!(
             format!("{err:#}").contains(
                 "task id `nite` is the name of routine `nite`, whose copies' lanes are \
-                 named `nite · <step>`. Give this task another id; nothing was queued."
+                 named `nite · <step>`. give this task another id; nothing was queued."
             ),
             "{err:#}"
         );
@@ -21174,7 +21174,7 @@ mod tests {
                 "  retention-and-logs      (depends on archive-index-readers)",
                 "",
                 "archive-index-file starts from task/queue-tab-reader-thread, which",
-                "doesn't exist. Set starts_from: in the task front matter and",
+                "doesn't exist. set starts_from: in the task front matter and",
                 "requeue.",
                 "",
                 "dispatcher is running",
@@ -23907,9 +23907,9 @@ mod tests {
                 "",
                 "release-spoolway is still in the queue, at step ship.",
                 "",
-                "A routine runs one copy at a time. Let it finish, resume or",
+                "a routine runs one copy at a time. let it finish, resume or",
                 "restart it from the board if it has stopped, or unqueue it",
-                "if it has not started. Then queue the routine again.",
+                "if it has not started. then queue the routine again.",
                 "",
                 "[enter] close",
             ],
@@ -24067,7 +24067,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.ends_with("Fix them; the routine can then be queued."),
+            err.ends_with("fix them; the routine can then be queued."),
             "{err}"
         );
         assert_eq!(queue_files(&repo), ["audit-deps-1.md", "audit-deps.md"]);
@@ -24593,7 +24593,7 @@ mod tests {
 
             assert!(err.contains("names `chekout`"), "{err}");
             assert!(err.contains("cart, checkout, search"), "{err}");
-            assert!(err.contains("Nothing was queued."), "{err}");
+            assert!(err.contains("nothing was queued."), "{err}");
             assert!(!calls.exists(), "the hook ran before the refusal");
             assert!(repo.task("cart-01").is_err(), "something was queued");
         }
@@ -24662,7 +24662,7 @@ mod tests {
                 .to_string();
 
             assert!(err.contains("empty group name"), "{err}");
-            assert!(err.contains("Nothing was queued."), "{err}");
+            assert!(err.contains("nothing was queued."), "{err}");
             assert!(!calls.exists(), "the hook ran before the refusal");
             assert!(repo.task("cart-01").is_err(), "something was queued");
         }
@@ -27932,7 +27932,7 @@ body\n";
         let err = queue_unqueue(&repo, &pipelines, &unqueue_forced_args("solo")).unwrap_err();
         let said = format!("{err:#}");
         assert!(
-            said.contains("did not unqueue") && said.contains("Nothing was torn down"),
+            said.contains("did not unqueue") && said.contains("nothing was torn down"),
             "{said}"
         );
         assert!(

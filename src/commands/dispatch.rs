@@ -31,7 +31,7 @@ pub const EXIT_ALREADY_RUNNING: i32 = 4;
 /// `pub(crate)` so bare `spoolway`'s own refusal, in
 /// [`crate::screen::shell::run`], prints this exact constant rather than a
 /// second copy of the words that could drift from it.
-pub(crate) const ALREADY_RUNNING: &str = "Dispatcher already running";
+pub(crate) const ALREADY_RUNNING: &str = "dispatcher already running";
 
 /// Whether this project already has a `spoolway` in it — its screen, or a
 /// dispatcher, whichever is up.
@@ -141,7 +141,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         };
         bail!(
             "{cause} and unattended.blocked_model is blank — an unattended run has nobody to \
-             clear a block, so `blocked` has to be staffed. Set unattended.blocked_model, or \
+             clear a block, so `blocked` has to be staffed. set unattended.blocked_model, or \
              {fix}."
         );
     }
@@ -529,7 +529,7 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
                         repo,
                         &stop_line("stopped on an empty queue", "every task is done"),
                     );
-                    println!("  queue is empty — every task is done. Stopping.");
+                    println!("  queue is empty — every task is done. stopping.");
                     return Ok(0);
                 }
                 // A job keeps the run resident. Say so once per spell of
@@ -704,7 +704,7 @@ fn reload_config(
                         let problem = format!(
                             "the last good config could not be recorded: {message}. A lane's \
                              `spoolway report` or a `spoolway stack` step that meets a broken \
-                             config.toml will stop instead of running on it. Make the project \
+                             config.toml will stop instead of running on it. make the project \
                              home writable; the next pass tries again"
                         );
                         crate::problem_log::append(live, &problem);
@@ -736,7 +736,7 @@ fn reload_config(
 /// that leaves the queue.
 fn screen_stop_reason(ceiling: &crate::dispatch::Ceiling) -> String {
     format!(
-        "{}\nEvery task is where its last lane left it.",
+        "{}\nevery task is where its last lane left it.",
         ceiling.reached
     )
 }
@@ -1485,7 +1485,7 @@ pub(crate) fn check_git_identity(
         // own words are the ones to act on.
         return Err(anyhow::Error::new(Refusal {
             reason: format!("git cannot build a commit identity, and {reason}"),
-            fix: "the first commit would fail. Run `git var GIT_COMMITTER_IDENT` in the \
+            fix: "the first commit would fail. run `git var GIT_COMMITTER_IDENT` in the \
                   checkout to see what git objects to, and fix that"
                 .to_string(),
         }));
@@ -1509,7 +1509,7 @@ pub(crate) fn check_git_identity(
         .join("\n");
     Err(anyhow::Error::new(Refusal {
         reason: format!("git {} {verb} not set, and {reason}", missing.join(" and ")),
-        fix: format!("the first commit would fail. Set {pronoun} with:\n\n{commands}"),
+        fix: format!("the first commit would fail. set {pronoun} with:\n\n{commands}"),
     }))
 }
 
@@ -1527,7 +1527,7 @@ pub(crate) fn check_index_lock(repo: &Repo) -> Result<Option<String>> {
         return Err(anyhow::Error::new(Refusal {
             reason: format!("{} exists", lock.display()),
             fix: format!(
-                "every git write here fails until it is gone. If nothing is actually \
+                "every git write here fails until it is gone. if nothing is actually \
                  mid-commit, remove it:\n\n  rm {}",
                 lock.display()
             ),
@@ -1567,7 +1567,7 @@ pub(crate) fn check_backend_checkout(
                     "{} has no main checkout herdr can resolve a workspace onto",
                     repo.root.display()
                 ),
-                fix: "a bare repository, say. Run spoolway from a clone that has a \
+                fix: "a bare repository, say. run spoolway from a clone that has a \
                       working tree."
                     .to_string(),
             }));
@@ -1623,7 +1623,7 @@ fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
         return Ok(());
     }
     if !mux.in_own_pane() {
-        bail!("Open herdr and start spoolway there:\n\n  herdr\n  spoolway");
+        bail!("open herdr and start spoolway there:\n\n  herdr\n  spoolway");
     }
     Ok(())
 }
@@ -1645,8 +1645,8 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     for task in tasks {
         match task.front.pipeline.as_deref().map(str::trim) {
             None | Some("") => bail!(
-                "refusing to start: task `{}` has no `pipeline:`\n  Set `pipeline:` to one of: \
-                 {choices}.\n\nNothing was dispatched.",
+                "refusing to start: task `{}` has no `pipeline:`\n  set `pipeline:` to one of: \
+                 {choices}.\n\nnothing was dispatched.",
                 task.id()
             ),
             // A name clash holds only the tasks on it, once the run is going;
@@ -1654,7 +1654,7 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
             Some(name) if pipelines.clashes.contains_key(name) => {}
             Some(name) if pipelines.get(name).is_err() => bail!(
                 "refusing to start: task `{}` names a pipeline that does not exist: `{name}`\n  \
-                 Set `pipeline:` to one of: {choices}.\n\nNothing was dispatched.",
+                 set `pipeline:` to one of: {choices}.\n\nnothing was dispatched.",
                 task.id()
             ),
             Some(_) => {}
@@ -1668,7 +1668,7 @@ fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
 ///
 /// A dependent whose `base:` disagrees with its dependency's does not stop the
 /// start: it concerns that one task, so the first pass holds it with the
-/// "A chain has one base" line and every other task goes on. The same goes
+/// "a chain has one base" line and every other task goes on. The same goes
 /// for a base `origin` could not be asked about.
 ///
 /// Beside [`check_task_routes`] for the same reason: found and fixed by a
@@ -1691,7 +1691,7 @@ fn check_task_bases(repo: &Repo, tasks: &[Task]) -> Result<()> {
             &mut remote_cache,
             crate::dispatch::WhenOriginUnasked::Allow,
         ) {
-            bail!("refusing to start: {reason}\n  {fix}\n\nNothing was dispatched.");
+            bail!("refusing to start: {reason}\n  {fix}\n\nnothing was dispatched.");
         }
     }
     Ok(())
@@ -1770,8 +1770,8 @@ fn stamp_first_pass(repo: &Repo) {
         crate::problem_log::append(
             repo,
             &format!(
-                "could not write {}: {err:#}. The dispatch tab's `starting dispatcher` popup \
-                 stays up until a lane is claimed. Make the project home writable.",
+                "could not write {}: {err:#}. the dispatch tab's `starting dispatcher` popup \
+                 stays up until a lane is claimed. make the project home writable.",
                 path.display()
             ),
         );
@@ -1927,7 +1927,7 @@ mod tests {
         assert_eq!(
             screen_stop_reason(&ceiling),
             "unattended.max_cost_usd reached: $5.02 of $5.00\n\
-             Every task is where its last lane left it."
+             every task is where its last lane left it."
         );
     }
 
@@ -2104,10 +2104,10 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Set `pipeline:` to one of: bugfix, default."),
+            message.contains("set `pipeline:` to one of: bugfix, default."),
             "{message}"
         );
-        assert!(message.contains("Nothing was dispatched."), "{message}");
+        assert!(message.contains("nothing was dispatched."), "{message}");
     }
 
     /// A task naming a pipeline this project does not define refuses the
@@ -2131,7 +2131,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Set `pipeline:` to one of: bugfix, default."),
+            message.contains("set `pipeline:` to one of: bugfix, default."),
             "{message}"
         );
     }
@@ -2203,7 +2203,7 @@ mod tests {
             &mut remote_cache,
         )
         .expect("the running pass still holds the mismatched task");
-        assert!(held.1.contains("A chain has one base."), "{}", held.1);
+        assert!(held.1.contains("a chain has one base."), "{}", held.1);
     }
 
     /// A cut task with no dependency whose `starts_from:` differs from its
@@ -2246,7 +2246,7 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Set `base:` in cart-totals to a branch that exists."),
+            message.contains("set `base:` in cart-totals to a branch that exists."),
             "{message}"
         );
     }
@@ -2825,7 +2825,7 @@ mod tests {
         let err = format!("{:#}", check_dispatcher_visible(&mux).unwrap_err());
         assert_eq!(
             err,
-            "Open herdr and start spoolway there:\n\n  herdr\n  spoolway"
+            "open herdr and start spoolway there:\n\n  herdr\n  spoolway"
         );
     }
 

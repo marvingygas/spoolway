@@ -1936,7 +1936,7 @@ pub fn skip_duplicate_ids(mut tasks: Vec<Task>, problems: &mut Vec<LoadProblem>)
             Some(first) if first.id() == task.id() => problems.push(LoadProblem {
                 error: format!(
                     "holds the id `{id}`, which {first} already holds, so it was skipped. \
-                     Two files with one id would run the same task twice; rename this \
+                     two files with one id would run the same task twice; rename this \
                      file's `id:` or delete the file",
                     id = task.id(),
                     first = first.path.display(),
@@ -1972,7 +1972,7 @@ pub fn skip_archived_ids(
             problems.push(LoadProblem {
                 error: format!(
                     "holds the id `{}`, which {} already finished, so it was skipped. \
-                     Running it would archive over that record; rename this file's `id:` \
+                     running it would archive over that record; rename this file's `id:` \
                      or delete the file",
                     task.id(),
                     archived.display(),

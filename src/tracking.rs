@@ -244,7 +244,7 @@ pub(crate) fn not_bare_filename_problem(hook: &str) -> Option<String> {
     (!hook.is_empty() && !is_bare_filename(hook)).then(|| {
         format!(
             "names `{hook}`, which is not a bare filename — a hook only ever runs a script \
-             inside .spoolway/hooks/, so this can never run. Use a bare name, or clear hook to \
+             inside .spoolway/hooks/, so this can never run. use a bare name, or clear hook to \
              switch issue tracking off."
         )
     })

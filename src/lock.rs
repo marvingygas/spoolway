@@ -43,7 +43,7 @@ impl std::fmt::Display for HeldBy {
         write!(
             f,
             "a dispatcher is already running for this repo (pid {}). \
-             It re-reads the queue every pass, so anything just queued starts on its own — \
+             it re-reads the queue every pass, so anything just queued starts on its own — \
              stop that one first if you really do want a different run.",
             self.pid
         )
@@ -110,7 +110,7 @@ pub fn lost_line(path: &Path) -> String {
     );
     format!(
         "{file} no longer names this dispatcher (pid {}); another one holds it. \
-         Stopping, so two dispatchers never work one queue.",
+         stopping, so two dispatchers never work one queue.",
         std::process::id()
     )
 }
@@ -757,7 +757,7 @@ impl EditLock {
                         if std::time::Instant::now() >= deadline {
                             bail!(
                                 "another `spoolway` command (pid {pid}) has held the edit lock at \
-                                 {} for {:?}, so nothing was written. Run this command again \
+                                 {} for {:?}, so nothing was written. run this command again \
                                  once that one has finished.",
                                 path.display(),
                                 Self::WAIT
@@ -839,7 +839,7 @@ impl LaneAliasLock {
                         if std::time::Instant::now() >= deadline {
                             bail!(
                                 "another `spoolway` process (pid {pid}) has held the lane alias \
-                                 lock at {} for {:?}, so no lane record was written. Run this \
+                                 lock at {} for {:?}, so no lane record was written. run this \
                                  again once that one has finished.",
                                 path.display(),
                                 Self::WAIT
@@ -1152,7 +1152,7 @@ mod tests {
             line,
             format!(
                 "dispatch.pid no longer names this dispatcher (pid {}); another one holds it. \
-                 Stopping, so two dispatchers never work one queue.",
+                 stopping, so two dispatchers never work one queue.",
                 std::process::id()
             )
         );

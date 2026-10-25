@@ -2273,7 +2273,7 @@ mod tests {
         assert!(text.contains("─ reload refused "), "{text}");
         assert!(text.contains("config.toml does not load"), "{text}");
         assert!(
-            text.contains("Fix config.toml, then press u again."),
+            text.contains("fix config.toml, then press u again."),
             "{text}"
         );
         assert!(text.contains("[enter] confirm"), "{text}");

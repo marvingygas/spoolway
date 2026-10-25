@@ -4655,7 +4655,7 @@ mod tests {
 
         let err = pipeline_rename(&lane, "mine", "mine-2", false).unwrap_err();
         assert!(
-            format!("{err:#}").contains("A lane does not change the project's setup"),
+            format!("{err:#}").contains("a lane does not change the project's setup"),
             "{err:#}"
         );
         assert!(
@@ -4704,7 +4704,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "the dispatcher reads the project's pipelines, not this worktree's.\n  \
-             A lane does not change the project's setup. Write the\n  \
+             a lane does not change the project's setup. write the\n  \
              setting you wanted into your report, and a person\n  \
              will make the change."
         );

@@ -112,7 +112,7 @@ pub fn report(
                  `{current}` now — so this report is about a step the task has already \
                  left, and applying it would advance the task past `{current}` without \
                  anything having run it.\n\n\
-                 A lane reports once, at the end of its turn. If you have already \
+                 a lane reports once, at the end of its turn. if you have already \
                  reported, your turn is over and there is nothing more to do."
         );
     }
@@ -180,7 +180,7 @@ pub fn report(
     // advise when it judges a task cannot go on.
     if args.stage.as_deref() == Some(crate::pipeline::DONE) {
         bail!(
-            "only a person can close a task as `{done}`. Pass, block, or name a step to run \
+            "only a person can close a task as `{done}`. pass, block, or name a step to run \
              instead; a person can close it from the board's resume popup or with \
              `spoolway resume {id} --stage {done}`.",
             done = crate::pipeline::DONE,
@@ -270,8 +270,8 @@ pub fn report(
     if gated && handoffs.is_empty() {
         return Err(UsageRefusal(format!(
             "this {outcome} is held at `{}`'s gate for a person, and carries no\n\
-             handoff for them. Report again with at least one --handoff: what this step\n\
-             did, in plain words, then how to verify it. Nothing was recorded.",
+             handoff for them. report again with at least one --handoff: what this step\n\
+             did, in plain words, then how to verify it. nothing was recorded.",
             gated_at.as_deref().unwrap_or(&current),
         ))
         .into());
@@ -574,7 +574,7 @@ pub fn route(
         if let Some(missing) = stranded_step(task, pipeline) {
             bail!(
                 "task `{}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
-                 pass has no step to carry it to. Report `--block` instead, and a person sends it \
+                 pass has no step to carry it to. report `--block` instead, and a person sends it \
                  on with `spoolway resume {0} --stage <step>`.",
                 task.id(),
                 pipeline.name
@@ -652,12 +652,12 @@ pub fn route(
                     // reads as a message cut off.
                     let options = match allowed.is_empty() {
                         true => format!(
-                            "This task has not run `{gate_step}` or any step before it, so \
+                            "this task has not run `{gate_step}` or any step before it, so \
                              there is none to name — report a plain `--pass` without \
                              `--stage` instead"
                         ),
                         false => format!(
-                            "Name `{gate_step}` or a step before it: {}",
+                            "name `{gate_step}` or a step before it: {}",
                             allowed
                                 .iter()
                                 .map(|s| format!("`{s}`"))
@@ -1654,7 +1654,7 @@ pub fn stranded_step(task: &Task, pipeline: &Pipeline) -> Option<String> {
 fn missing_step_refusal(task: &Task, pipeline: &Pipeline, missing: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "task `{id}` stopped at `{missing}`, which pipeline `{pipeline}` no longer defines, so a \
-         plain resume has no step to send it back to. Name one with `spoolway resume {id} \
+         plain resume has no step to send it back to. name one with `spoolway resume {id} \
          --stage <step>`.",
         id = task.front.id,
         pipeline = pipeline.name
@@ -2515,7 +2515,7 @@ fn resume_checked(
                 crate::dispatch::walk_past(pipeline.require_step(stage)?, &task, dependents)
             {
                 bail!(
-                    "`{stage}` does not run for `{}`: {}. Nothing was resumed.",
+                    "`{stage}` does not run for `{}`: {}. nothing was resumed.",
                     task.front.id,
                     why.refusal()
                 );
@@ -2649,12 +2649,12 @@ pub(crate) fn skip_hook_quietly(
         // that command refuses too, so the refusal says why instead.
         let instead = match stage.as_str() {
             crate::pipeline::BLOCKED | crate::pipeline::PAUSED => {
-                format!("To carry it on from the step it stopped on:\n  spoolway resume {id}")
+                format!("to carry it on from the step it stopped on:\n  spoolway resume {id}")
             }
             crate::pipeline::QUEUED => {
-                "It starts on its own when the dispatcher reaches it.".to_string()
+                "it starts on its own when the dispatcher reaches it.".to_string()
             }
-            _ => "It is not stopped, so there is nothing to carry on.".to_string(),
+            _ => "it is not stopped, so there is nothing to carry on.".to_string(),
         };
         return Err(UsageRefusal(format!(
             "{id} is on `{stage}`, not `hook_failed`, so there is no hook to skip.\n{instead}"
@@ -2664,7 +2664,7 @@ pub(crate) fn skip_hook_quietly(
     let Some(event) = task.front.hook_paused.clone() else {
         bail!(
             "task `{id}` is on `hook_failed` but does not record which hook failed, so there \
-             is none to skip. Run `spoolway resume {id}` to start it again from its step."
+             is none to skip. run `spoolway resume {id}` to start it again from its step."
         );
     };
     let then = skip_then(repo, pipelines, &task, &event)?;
@@ -2688,7 +2688,7 @@ pub(crate) fn skip_hook_quietly(
     )]);
     let stale = || {
         anyhow::anyhow!(
-            "task `{id}` changed while its hook was being skipped, so it was not moved. Check \
+            "task `{id}` changed while its hook was being skipped, so it was not moved. check \
              `spoolway queue show {id}` and run it again if it still applies."
         )
     };
@@ -2763,7 +2763,7 @@ fn close_as_done(
     {
         bail!(
             "task `{id}` is on `{stage}`, and only a task on `blocked`, `paused` or \
-             `hook_failed` can be closed as `done`. To stop it first, run `spoolway queue \
+             `hook_failed` can be closed as `done`. to stop it first, run `spoolway queue \
              pause {id}`."
         );
     }
@@ -2797,7 +2797,7 @@ fn close_as_done(
             mux.list_lanes().with_context(|| {
                 format!(
                     "task `{id}` is not closed: its lanes could not be listed, so a lane \
-                     still working on it could not be stopped. Check that the `{}` backend \
+                     still working on it could not be stopped. check that the `{}` backend \
                      answers, then run it again",
                     mux.name()
                 )
@@ -2833,7 +2833,7 @@ fn close_as_done(
     if !crate::dispatch::persist_task(repo, &mut task, &mut seen)? {
         bail!(
             "task `{id}` changed while it was being closed — a report landed first, so it was \
-             not closed and no lane was touched. Check `spoolway queue show {id}` and run it \
+             not closed and no lane was touched. check `spoolway queue show {id}` and run it \
              again if it still applies."
         );
     }
@@ -2945,7 +2945,7 @@ fn refuse_if_archived(repo: &Repo, task: &Task) -> Result<()> {
     if task.path.starts_with(repo.archive_dir()) {
         bail!(
             "task `{id}` is archived — it finished and left the queue, so there is nothing to \
-             resume. To run the work again, queue a new task with `spoolway queue add`.",
+             resume. to run the work again, queue a new task with `spoolway queue add`.",
             id = task.front.id
         );
     }
@@ -2963,7 +2963,7 @@ fn refuse_if_claimed(repo: &Repo, task: &Task) -> Result<()> {
     if let Some(step) = crate::claim::live(repo).get(task.id()) {
         bail!(
             "task `{id}` is not closed: the dispatcher is starting its `{step}` lane right \
-             now, and a lane still starting cannot be stopped yet. Run \
+             now, and a lane still starting cannot be stopped yet. run \
              `spoolway resume {id} --stage done` again in a moment; the close then stops \
              that lane.",
             id = task.front.id
@@ -3004,7 +3004,7 @@ fn refuse_if_unblocker_live(repo: &Repo, pipelines: &Pipelines, task: &Task) -> 
             .unwrap_or_else(|_| "<step>".to_string());
         bail!(
             "task `{id}` is blocked and has a live unblocker lane — resuming it now would \
-             start a second lane in the same worktree and lose the unblocker's verdict. To \
+             start a second lane in the same worktree and lose the unblocker's verdict. to \
              take it from the unblocker, run `spoolway queue pause {id}`, then \
              `spoolway resume {id} --stage {step}`. A resume without `--stage` would put \
              it back on `blocked`.",
@@ -3037,7 +3037,7 @@ fn refuse_if_not_stopped(task: &Task, pipelines: &Pipelines) -> Result<()> {
     }
     if running {
         bail!(
-            "task `{id}` is {stage}, not stopped — there is nothing to resume. To stop it \
+            "task `{id}` is {stage}, not stopped — there is nothing to resume. to stop it \
              where it is, run `spoolway queue pause {id}`.",
             id = task.front.id
         );
@@ -3311,7 +3311,7 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
     if stage == crate::pipeline::QUEUED {
         bail!(
             "task `{id}` is {stage}, so no step has started — it starts on its own when the \
-             dispatcher reaches it. To hold it back, run `spoolway queue pause {id}`."
+             dispatcher reaches it. to hold it back, run `spoolway queue pause {id}`."
         );
     }
     if task.front.hook_paused.is_some() {
@@ -3329,7 +3329,7 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
     let lost = |missing: &str| {
         anyhow::anyhow!(
             "task `{id}` stopped at `{missing}`, which pipeline `{}` no longer defines, so a \
-             restart has no step to start over. Send it to a step that exists:\n  spoolway \
+             restart has no step to start over. send it to a step that exists:\n  spoolway \
              resume {id} --stage <step>",
             pipeline.name
         )
@@ -3468,7 +3468,7 @@ pub(crate) fn restart_with(
         && wanted != step
     {
         bail!(
-            "{id} is on `{step}` now, not `{wanted}`; nothing was restarted. Run \
+            "{id} is on `{step}` now, not `{wanted}`; nothing was restarted. run \
              `spoolway restart {id} --step {step}` to restart `{step}`, or look at it first \
              with `spoolway queue route {id}`.",
             id = args.task
@@ -3548,7 +3548,7 @@ pub(crate) fn restart_with(
     let refused = || {
         anyhow::anyhow!(
             "task `{}` changed while the restart was being written — a report landed first, so \
-             the restart was not written and no lane was touched. Check `spoolway queue show {}` \
+             the restart was not written and no lane was touched. check `spoolway queue show {}` \
              and run it again if it still applies.",
             args.task,
             args.task
@@ -3572,7 +3572,7 @@ pub(crate) fn restart_with(
         if stopped_run.is_some() {
             bail!(
                 "the command `{step}` of task `{}` was stopped, but the task changed before the \
-                 restart could be written, so it was not. Check `spoolway queue show {}` and \
+                 restart could be written, so it was not. check `spoolway queue show {}` and \
                  run `spoolway restart {}` again if it still applies.",
                 args.task,
                 args.task,
@@ -3762,7 +3762,7 @@ fn resolve_task_id(explicit: Option<&str>) -> Result<String> {
     let id = match (explicit, from_env.as_deref()) {
         (Some(explicit), Some(env)) if explicit != env => bail!(
             "this lane was started for `{env}`, but `--task {explicit}` names another task — \
-             a lane may only report on its own task. Ask the person watching the board."
+             a lane may only report on its own task. ask the person watching the board."
         ),
         (Some(explicit), _) => explicit.to_string(),
         (None, Some(env)) => env.to_string(),
@@ -4657,7 +4657,7 @@ mod tests {
         assert_eq!(
             refusal.0,
             "demo is on `blocked`, not `hook_failed`, so there is no hook to skip.\n\
-             To carry it on from the step it stopped on:\n  spoolway resume demo"
+             to carry it on from the step it stopped on:\n  spoolway resume demo"
         );
         assert_eq!(queued(&repo, "demo").stage(), crate::pipeline::BLOCKED);
     }
@@ -4677,7 +4677,7 @@ mod tests {
         assert_eq!(
             refusal.0,
             "demo is on `queued`, not `hook_failed`, so there is no hook to skip.\n\
-             It starts on its own when the dispatcher reaches it."
+             it starts on its own when the dispatcher reaches it."
         );
 
         let mut task = queued(&repo, "demo");
@@ -4689,7 +4689,7 @@ mod tests {
         assert_eq!(
             refusal.0,
             "demo is on `done`, not `hook_failed`, so there is no hook to skip.\n\
-             It is not stopped, so there is nothing to carry on."
+             it is not stopped, so there is nothing to carry on."
         );
     }
 
@@ -6069,7 +6069,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            "only a person can close a task as `done`. Pass, block, or name a step to run \
+            "only a person can close a task as `done`. pass, block, or name a step to run \
              instead; a person can close it from the board's resume popup or with \
              `spoolway resume b-noop --stage done`."
         );
@@ -6571,7 +6571,7 @@ mod tests {
         );
         assert!(err.contains("stopped at `look`, which is gated"), "{err}");
         assert!(
-            err.ends_with("Name `look` or a step before it: `implement`, `review`, `look`"),
+            err.ends_with("name `look` or a step before it: `implement`, `review`, `look`"),
             "{err}"
         );
     }
@@ -6584,7 +6584,7 @@ mod tests {
         assert!(err.contains("stopped at `look`, which is gated"), "{err}");
         assert!(
             err.ends_with(
-                "This task has not run `look` or any step before it, so there is none to name — report a plain `--pass` without `--stage` instead"
+                "this task has not run `look` or any step before it, so there is none to name — report a plain `--pass` without `--stage` instead"
             ),
             "{err}"
         );
@@ -6680,7 +6680,7 @@ mod tests {
         assert_eq!(
             err,
             "task `tab-shell` stopped at `look`, which is gated - a pass from `blocked` may \
-             not name a step past it. Name `look` or a step before it: `implement`, `review`, \
+             not name a step past it. name `look` or a step before it: `implement`, `review`, \
              `look`"
         );
     }
@@ -6705,7 +6705,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.ends_with("Name `look` or a step before it: `implement`, `review`, `look`"),
+            err.ends_with("name `look` or a step before it: `implement`, `review`, `look`"),
             "{err}"
         );
     }
@@ -6926,7 +6926,7 @@ mod tests {
             );
             assert!(err.contains("`review` after it is gated"), "{err}");
             assert!(
-                err.contains("Name `review` or a step before it: `implement`, `review`"),
+                err.contains("name `review` or a step before it: `implement`, `review`"),
                 "{err}"
             );
             assert_eq!(stage, crate::pipeline::BLOCKED);
@@ -6961,7 +6961,7 @@ mod tests {
         );
         let err = format!("{:#}", result.expect_err("`ship` is past `review`'s gate"));
         assert!(
-            err.contains("Name `review` or a step before it: `implement`, `prepare`"),
+            err.contains("name `review` or a step before it: `implement`, `prepare`"),
             "{err}"
         );
     }
@@ -8271,8 +8271,8 @@ mod tests {
             assert_eq!(
                 refusal.to_string(),
                 "this pass is held at `deploy`'s gate for a person, and carries no\n\
-                 handoff for them. Report again with at least one --handoff: what this step\n\
-                 did, in plain words, then how to verify it. Nothing was recorded."
+                 handoff for them. report again with at least one --handoff: what this step\n\
+                 did, in plain words, then how to verify it. nothing was recorded."
             );
             assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
             assert_eq!(queued(&repo, "ship").stage(), "deploy");
@@ -8402,7 +8402,7 @@ mod tests {
         .expect_err("a lane must not be able to answer its own gate");
         let said = format!("{err:#}");
         assert!(said.contains("lane's own environment"), "{said}");
-        assert!(said.contains("Ask the person watching the board"), "{said}");
+        assert!(said.contains("ask the person watching the board"), "{said}");
 
         // Refused before anything moved.
         let task = queued(&repo, "ship");
@@ -10307,7 +10307,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "task `stuck` is not closed: the dispatcher is starting its `blocked` lane right \
-             now, and a lane still starting cannot be stopped yet. Run \
+             now, and a lane still starting cannot be stopped yet. run \
              `spoolway resume stuck --stage done` again in a moment; the close then stops \
              that lane."
         );
@@ -10342,7 +10342,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "task `stuck` is not closed: its lanes could not be listed, so a lane still \
-             working on it could not be stopped. Check that the `restart-fake` backend \
+             working on it could not be stopped. check that the `restart-fake` backend \
              answers, then run it again: the backend did not answer"
         );
         assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
@@ -10409,7 +10409,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "task `busy` is on `implement`, and only a task on `blocked`, `paused` or \
-             `hook_failed` can be closed as `done`. To stop it first, run `spoolway queue \
+             `hook_failed` can be closed as `done`. to stop it first, run `spoolway queue \
              pause busy`."
         );
         assert_eq!(queued(&repo, "busy").stage(), "implement");
@@ -11835,7 +11835,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            "`mid` does not run for `demo`: it is not last in its chain. Nothing was resumed."
+            "`mid` does not run for `demo`: it is not last in its chain. nothing was resumed."
         );
         assert_eq!(queued(&repo, "demo").stage(), crate::pipeline::BLOCKED);
 
@@ -11856,7 +11856,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            "`after` does not run for `demo`: its own skip: names it. Nothing was resumed."
+            "`after` does not run for `demo`: its own skip: names it. nothing was resumed."
         );
         assert_eq!(
             crate::dispatch::Hidden::NotRoot.refusal(),
