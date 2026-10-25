@@ -162,9 +162,9 @@ fi
 #    missing. The brew copy is `$(brew --prefix)/bin/spoolway`, and brew's bin
 #    can sit ahead of the npm copy on PATH, so everything this check added is
 #    undone afterwards: the formula, the tap, and the trust entry that
-#    Homebrew 6 writes to its trust.json when it installs from a tap. A copy
-#    that was there before is upgraded and left installed, since removing it
-#    would take something away from the maintainer.
+#    Homebrew 5.1.15 and later write to its trust.json when it installs from
+#    a tap. A copy that was there before is upgraded and left installed, since
+#    removing it would take something away from the maintainer.
 #    The tap holds only the newest formula, so this check passes only for the
 #    latest release. Run by hand for an older version it dies at the version
 #    comparison, naming the version the tap holds, rather than skipping:
@@ -173,12 +173,18 @@ brew_formula=marvingygas/tap/spoolway
 brew_tap=marvingygas/tap
 brew_summary="brew is not on this machine, so the brew install check was skipped"
 # Whether the formula is trusted, from `brew trust --json=v1`. Homebrew before
-# 6 has no such command, and then nothing was ever trusted. An entry counts
-# if its text names the formula or the tap, whichever shape the entry has.
+# 5.1.15 has no such command, and then nothing was ever trusted. When the
+# command exists, a failed read dies instead of reading as "not trusted": the
+# cleanup would then untrust an entry the maintainer made themselves. An entry
+# counts if its text names the formula or the tap, whichever shape it has.
 brew_trusted() {
-  brew trust --json=v1 2>/dev/null \
-    | jq -e --arg f "$brew_formula" --arg t "$brew_tap" \
-        '[.formulae[]?, .taps[]? | tostring] | any(contains($f) or contains($t))' >/dev/null 2>&1
+  local listing verdict
+  brew trust --help >/dev/null 2>&1 || return 1
+  listing="$(brew trust --json=v1)" || die "brew trust failed, so it is not known whether $brew_formula is trusted"
+  verdict="$(jq -r --arg f "$brew_formula" --arg t "$brew_tap" \
+    '[.formulae[]?, .taps[]? | tostring] | any(contains($f) or contains($t))' <<<"$listing")" \
+    || die "brew trust printed something that is not JSON, so it is not known whether $brew_formula is trusted"
+  [ "$verdict" = true ]
 }
 # Read whole before grep sees them: `grep -q` quits at the first match, and a
 # listing killed by SIGPIPE under pipefail would read as "not there", which
@@ -212,7 +218,8 @@ if command -v brew >/dev/null 2>&1; then
     # `brew untap` leaves the trust entry that `brew install` wrote, and
     # untrusting an entry that is not there is harmless.
     if [ "$brew_trusted_was" = 0 ] && brew trust --help >/dev/null 2>&1; then
-      brew untrust --formula "$brew_formula" >/dev/null 2>&1 || true
+      brew untrust --formula "$brew_formula" >/dev/null 2>&1 \
+        || say "release-verify: could not remove the trust entry for $brew_formula — run: brew untrust --formula $brew_formula"
     fi
   }
   # One trap per shell: this replaces the npm check's, so it removes that

@@ -36,10 +36,10 @@ already happened.
   checks that all six are attached.
 - A formula, `Formula/spoolway.rb`, pushed to the `marvingygas/homebrew-tap` repository by the
   workflow's `homebrew` job. It points at the release's files and their checksums.
-  `scripts/release-verify.sh` installs it with `brew` when `brew` is on the machine. It then removes the formula, the tap
-  and the trust entry Homebrew 6 writes for it, unless each was there before. A copy installed
-  before is upgraded and left in place. The tap holds only the newest formula, so the check passes
-  only for the latest release.
+  `scripts/release-verify.sh` installs it with `brew` when `brew` is on the machine. It then
+  removes the formula, the tap and the trust entry Homebrew 5.1.15 and later write for it, unless
+  each was there before. A copy installed before is upgraded and left in place. The tap holds only
+  the newest formula, so the check passes only for the latest release.
 - The changelog section, as the release body and inside every binary (`spoolway whats-new`).
 
 | Release file | Built from |
