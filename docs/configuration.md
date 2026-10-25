@@ -628,7 +628,7 @@ no `ticket:` needs none. A group named by `queue add --no-tracking` needs none e
 failed login does not waive it. The gate shows the failed login once the description is there.
 
 On the queue screen, `enter` asks before any of this runs, with a checklist headed
-`Deactivate issue tracking for selected groups:`. It lists every group in the batch that has a
+`deactivate issue tracking for selected groups:`. It lists every group in the batch that has a
 task with no `ticket:`, with how many of its tasks the batch queues. Nothing starts ticked.
 
 | Key | What it does |

@@ -168,9 +168,9 @@ that still has a task to queue or has every task archived. A group with every ta
 queued never appears. Below the groups that can be queued, the pane also lists one row per plan
 page that no task names yet. See [Queueing a plan](planning.md#queueing-a-plan). The left pane
 is titled `groups`. The right pane is titled `tasks` and lists the highlighted group's tasks.
-Beside a plan row it says `Use /spoolway-tasks`. Each task shows its `Pipeline:`, `Depends on:`,
-`Starts from:` and `Lands in:`. `Starts from:` is the task's own `starts_from:`, else its first
-dependency's id, else the same branch as `Lands in:`. `Lands in:` is the task's `base:`, else the
+Beside a plan row it says `use /spoolway-tasks`. Each task shows its `pipeline:`, `depends on:`,
+`starts from:` and `lands in:`. `starts from:` is the task's own `starts_from:`, else its first
+dependency's id, else the same branch as `lands in:`. `lands in:` is the task's `base:`, else the
 board's branch.
 
 <img src="screenshots/queue.png" alt="the queue screen">
@@ -235,8 +235,8 @@ is missing:
 cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
 ```
 
-Below the list, a line says whether a dispatcher will pick the work up: `Dispatcher is running`
-or `Start the dispatcher to begin working`. `enter` closes the popup back to the screen.
+Below the list, a line says whether a dispatcher will pick the work up: `dispatcher is running`
+or `start the dispatcher to begin working`. `enter` closes the popup back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements and runs its `# spoolway-login:` command. A requirement this machine does not meet,
@@ -253,7 +253,7 @@ this run:
 ```
 ╭─ issue tracking ─────────────────────────────────────────────────╮
 │                                                                  │
-│  Deactivate issue tracking for selected groups:                  │
+│  deactivate issue tracking for selected groups:                  │
 │                                                                  │
 │  > [ ] cart       3 tasks                                        │
 │    [ ] checkout   2 tasks                                        │
@@ -274,10 +274,10 @@ group's tasks the batch queues. Nothing starts ticked.
 | `esc` | Returns to the queue screen with nothing queued. |
 
 When no group has a task without a `ticket:`, no popup opens. While the hook runs, an `issue
-tracking` popup shows one line, `Progress: ` followed by a 44-cell bar. A `█` marks a finished
+tracking` popup shows one line, `progress: ` followed by a 44-cell bar. A `█` marks a finished
 call and a `░` a cell still to fill. The bar starts empty and fills by one call's share each time
 a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
-not in it. The `queued` popup then opens on `Hook executed successfully`, followed by
+not in it. The `queued` popup then opens on `hook executed successfully`, followed by
 `queued <n> tasks`, every queued id and the dispatcher line. When every group was ticked, the hook is never called and the popup has no success line.
 Queueing a routine from the routines tab asks the same question and shows the same popups. A
 trial never asks and opens no ticket. See
@@ -846,11 +846,11 @@ is configured or the hook has no `fetch` branch, and fails when the hook runs pa
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
 Bare `spoolway`'s routines tab is the only place that writes a cron job. A routine's options
-menu offers `new job`, or `edit job` and `deactivate job` or `activate job` for its one job; a
+menu offers `edit schedule`, and `deactivate job` or `activate job` for its one job; a
 routine with two or more jobs offers `deactivate job <name>` or `activate job <name>` for each.
 `activate job` is refused, writing nothing, while another job on the routine is active. No menu
 deletes a job; `delete routine` deletes the jobs on the routine it removes. A job whose routine
-is not a listed one gets a row of its own under the routines, whose menu offers `edit job`
+is not a listed one gets a row of its own under the routines, whose menu offers `edit schedule`
 alone.
 
 See [Jobs](jobs.md).
