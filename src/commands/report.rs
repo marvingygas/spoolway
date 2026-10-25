@@ -250,6 +250,28 @@ pub fn report(
     let lap_limited = routed.lap_limited;
     let gated_at = routed.gated_at;
 
+    // A held report is read by a person who opens this pane cold, so it must
+    // carry an account for them: the contract asks for one (see
+    // `compose::report_contract`), and a lane that skips it is refused here.
+    // Refused now, after `route` has only touched `task` in memory and before
+    // the worktree is committed or the task saved, so nothing of a refused
+    // report is recorded: no commit, no Status Log line, no moved stage.
+    // `gated_at` names the step whose gate holds an unblocker's pass.
+    let handoffs: Vec<String> = args
+        .handoff
+        .iter()
+        .map(|handoff| handoff.trim().replace('\n', " "))
+        .filter(|handoff| !handoff.is_empty())
+        .collect();
+    if gated && handoffs.is_empty() {
+        bail!(
+            "this {outcome} is held at `{}`'s gate for a person, and carries no handoff for \
+             them. Report again with at least one --handoff: what this step did, in plain \
+             words, then how to verify it. Nothing was recorded.",
+            gated_at.as_deref().unwrap_or(&current),
+        );
+    }
+
     // Committing is deterministic, so it is not left to a model. Every lane
     // goes through this command — that is the pipeline's central contract,
     // not a convention — which makes it the one place that covers a change
@@ -366,25 +388,28 @@ pub fn report(
         // true of a caught fail or block exactly as it is of a caught pass,
         // since `gate_at` holds this step's whole outcome, not only a pass.
         //
-        // `stop_choices` prints `spoolway resume <id>` here now — that is
-        // still refused when it is the lane's own turn that types it
-        // (`refuse_from_lane`, unmoved by any of this), but this pane
-        // belongs to whoever reads it next, and every choice a stop offers
-        // is printed key first, then the command, the same as the board's
-        // own row for this task will read the moment it redraws.
         // `current` alone does not say which step's gate this is when the
         // hold came from an unblocker's pass — `current` is `blocked` there,
         // not the step the person actually has to answer for — so
         // `gated_at` names it.
+        //
+        // The lane's own handoffs follow, indented, and nothing after them:
+        // they are the account the person opening this pane reads, so they
+        // come last, where the pane leaves off. The board already offers
+        // resuming, opening and parking on this task's row, so a hold prints
+        // no `stop_choices`.
         None if gated => {
             let at = gated_at
                 .as_deref()
                 .map(|step| format!(", at `{step}`'s gate"))
                 .unwrap_or_default();
+            let account: String = handoffs
+                .iter()
+                .map(|handoff| format!("\n  {handoff}"))
+                .collect();
             println!(
-                "{id}: {current} --{outcome}--> {} - held here for a person{at}{}",
+                "{id}: {current} --{outcome}--> {} - held here for a person{at}\n{account}",
                 crate::pipeline::PAUSED,
-                stop_choices(&id, &crate::mux::lane_name(&current, &task))
             )
         }
         // `blocked` had nowhere else to send this — see `paused_from_blocked`
@@ -977,9 +1002,10 @@ pub fn route(
     // `-m` message — the Mockup draws this note on the arrival, not the
     // lane's own account of its pass, which `report` writes back in as a
     // second line credited to `current` once `set_stage` has banked this
-    // one. A lane leaving something for the person who answers the gate to
-    // read still has `--handoff` for it too, credited to `current` in
-    // `## Handoff` above, same as any other step.
+    // one. What the lane leaves the person who answers the gate is its
+    // `--handoff`, which `report` requires of a held report and prints under
+    // the held line, credited to `current` in `## Handoff` the same as any
+    // other step's, where a step after the gate still reads it.
     let mut pause_note = None;
     if let Some(kind) = hold {
         task.front.paused_at = Some(current.to_string());
@@ -1890,7 +1916,9 @@ fn is_past_gate(pipeline: &Pipeline, origin: &str, gate_step: &str, candidate: &
 /// the same thing, matching the board's own key line — `resume`, open the
 /// pane, or park it in place. Printed once, straight into the pane a report
 /// just landed on `paused`, the only place this particular moment is ever
-/// seen: nothing rereads a task's own status log for it.
+/// seen: nothing rereads a task's own status log for it. A gate's hold is
+/// the exception, which ends on the lane's handoffs instead — see the held
+/// branch of [`report`].
 ///
 /// `lane` is the lane of the step this report just settled — the one
 /// `spoolway lane --attach` opens, since the same lane's pane is what stays
@@ -4710,7 +4738,8 @@ mod tests {
                 block: outcome == Outcome::Block,
                 pause: outcome == Outcome::Pause,
                 message: Some("test".into()),
-                handoff: vec![],
+                // A report a gate holds is refused without one.
+                handoff: vec!["test".into()],
             },
             started_for,
         )
@@ -6265,7 +6294,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: None,
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             None,
         )
@@ -8532,7 +8561,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("deployed".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )
@@ -8697,7 +8726,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("Rendering matches the mockup exactly.".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )
@@ -8749,7 +8778,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("deployed".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )
@@ -8834,7 +8863,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("built".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("build"),
         )
@@ -8942,7 +8971,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("the migration failed".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )
@@ -9006,7 +9035,7 @@ mod tests {
                 block: true,
                 pause: false,
                 message: Some("needs a credential no lane can mint".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("build"),
         )
@@ -9071,7 +9100,7 @@ mod tests {
                 block: true,
                 pause: false,
                 message: Some("the forge is down".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )
@@ -9108,7 +9137,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("deployed".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )
@@ -9227,7 +9256,7 @@ mod tests {
                 block: false,
                 pause: false,
                 message: Some("deployed".into()),
-                handoff: vec![],
+                handoff: vec!["what it did".into()],
             },
             Some("deploy"),
         )

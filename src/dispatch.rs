@@ -18943,7 +18943,7 @@ mod tests {
             crate::compose::opening_prompt(&task, pipeline, step),
         );
         assert!(
-            sent.contains("A pass is held here for a person, who opens this pane."),
+            sent.contains("A pass is held here for a person. Your handoff is what they read,"),
             "got: {sent}"
         );
         for word in [
@@ -18978,7 +18978,7 @@ mod tests {
                     block: false,
                     pause: false,
                     message: Some("released it".into()),
-                    handoff: vec![],
+                    handoff: vec!["released it".into()],
                 },
                 Some("release"),
             )
@@ -31085,7 +31085,8 @@ mod tests {
         let gated_contract = crate::compose::report_contract(&task, &pipeline, gated_step, false);
         let plain_contract = crate::compose::report_contract(&task, &pipeline, plain_step, false);
         assert!(
-            gated_contract.contains("A pass is held here for a person, who opens this pane."),
+            gated_contract
+                .contains("A pass is held here for a person. Your handoff is what they read,"),
             "got: {gated_contract}"
         );
         assert!(
@@ -31241,7 +31242,7 @@ mod tests {
             "{contract}"
         );
         assert!(
-            contract.contains("A pass is held here for a person, who opens this pane."),
+            contract.contains("A pass is held here for a person. Your handoff is what they read,"),
             "{contract}"
         );
     }

@@ -783,6 +783,24 @@ const HANDOFF: Form = (
     "  Anything worth passing on that one line cannot hold. One per thing.",
 );
 
+/// What follows the held line in [`report_contract`], ahead of
+/// [`HELD_HANDOFF`]'s numbered points.
+const HELD_HANDOFF_LEAD: &str =
+    "Your handoff is what they read, one --handoff per point, in this order:";
+
+/// What a held lane's `--handoff` lines say and in which order, under the
+/// held line in [`report_contract`]. A person running many tasks at once
+/// opens the held pane cold, so the first point tells them what the step was
+/// about and the second how to check it; the third is only for a task whose
+/// usual next step makes no sense.
+const HELD_HANDOFF: &str = "  1. What this step did, in plain words. Explain it as if they had
+     not seen this task. They run many at once, and this tells them
+     in one read what the step was about.
+  2. How to verify it: every path, URL or command, and what to
+     open, click or look at. Never leave them without one.
+  3. A step to skip or take instead, and why. Only when the usual
+     next step makes no sense for this task.";
+
 /// Render a list of [`Form`]s as `report_contract` prints them: the command
 /// line, a blank line, its explanation, a blank line, the next form. Takes
 /// any lifetime, not only `'static`: `blocked`'s own `--stage` form has an
@@ -842,13 +860,16 @@ fn render_forms(forms: &[(&str, &str)]) -> String {
 /// `spoolway prompt contract` passes the one `config.toml` sets, so no
 /// caller keeps a copy of the text.
 ///
-/// One line closes the whole contract when `step` would hold a pass here —
-/// see [`crate::commands::gate_hold`], read against a hypothetical pass,
-/// since no real outcome exists yet while a prompt is being composed. Which
-/// gate answers picks the sentence: a step's own `gate:` is asked only about
-/// that hypothetical pass, so it reads *a pass is held here*; a task's own
-/// `gate_at` catches whatever is reported, so it reads *this report is held
-/// here, whatever it is*.
+/// The held line and [`HELD_HANDOFF`]'s order close the whole contract when
+/// `step` would hold a report here — see [`crate::commands::gate_hold`],
+/// read against a hypothetical pass and a hypothetical fail, since no real
+/// outcome exists yet while a prompt is being composed. Which gate answers
+/// picks the sentence: a step's own `gate:` names the outcomes it holds, so
+/// it reads *a pass*, *a fail* or *a pass or a fail is held here*; a task's
+/// own `gate_at` catches whatever is reported, so it reads *this report is
+/// held here, whatever it is*. The order follows because
+/// `commands::report` refuses a held report that carries no `--handoff`, and
+/// those handoffs are what the person reads in this pane.
 pub(crate) fn report_contract(
     task: &Task,
     pipeline: &Pipeline,
@@ -923,33 +944,52 @@ pub(crate) fn report_contract(
     // `blocked` asks this of the step it stands in for, not of itself: a
     // plain `--pass` is taken at the unblocker's word for `origin`, so
     // `origin`'s own `gate:` is what would hold it, when it holds a pass —
-    // never `blocked`'s, which no pipeline may even declare. Only an agent origin is held: a
-    // command step has no work for the unblocker to stand in for, so `route`
-    // hands it straight back to run again, with no person asked. A task's own
-    // `gate_at` plays no part here: it catches this step's outcome before the
-    // task ever reaches `blocked` — see `commands::report::route`'s own doc.
-    let gate = match &origin {
-        Some(origin) => pipeline
-            .step(origin)
-            .filter(|step| step.gates_pass() && step.kind() == crate::pipeline::StepKind::Agent)
-            .map(|_| crate::commands::Gate::Step),
+    // never `blocked`'s, which no pipeline may even declare. Only an agent
+    // origin is held: a command step has no work for the unblocker to stand
+    // in for, so `route` hands it straight back to run again, with no person
+    // asked. A task's own `gate_at` plays no part here: it catches this
+    // step's outcome before the task ever reaches `blocked` — see
+    // `commands::report::route`'s own doc. A `gate_at: blocked` is the one
+    // exception, naming `blocked` itself: it holds whatever the unblocker
+    // reports, so it is asked first.
+    let whatever = "This report is held here for a person, whatever it is.";
+    let held = match &origin {
+        Some(origin) => (task.front.gate_at.as_deref() == Some(crate::pipeline::BLOCKED))
+            .then_some(whatever)
+            .or_else(|| {
+                pipeline
+                    .step(origin)
+                    .filter(|step| {
+                        step.gates_pass() && step.kind() == crate::pipeline::StepKind::Agent
+                    })
+                    .map(|_| "A pass is held here for a person.")
+            }),
         None => {
-            let hypothetical_destination = step
-                .destination(Outcome::Pass)
-                .unwrap_or(crate::pipeline::BLOCKED)
-                .to_string();
-            crate::commands::gate_hold(task, step, Outcome::Pass, &hypothetical_destination)
+            let hold = |outcome| {
+                let hypothetical_destination = step
+                    .destination(outcome)
+                    .unwrap_or(crate::pipeline::BLOCKED)
+                    .to_string();
+                crate::commands::gate_hold(task, step, outcome, &hypothetical_destination)
+            };
+            match (hold(Outcome::Pass), hold(Outcome::Fail)) {
+                (Some(crate::commands::Gate::Schedule), _) => Some(whatever),
+                (Some(_), Some(_)) => Some("A pass or a fail is held here for a person."),
+                (Some(_), None) => Some("A pass is held here for a person."),
+                (None, Some(_)) => Some("A fail is held here for a person."),
+                (None, None) => None,
+            }
         }
     };
-    if let Some(gate) = gate {
-        let line = match gate {
-            crate::commands::Gate::Step => "A pass is held here for a person, who opens this pane.",
-            crate::commands::Gate::Schedule => {
-                "This report is held here for a person, whatever it is."
-            }
-        };
+    if let Some(held) = held {
+        // Wrapped as one paragraph, since the held sentence differs in
+        // length by gate; 68 columns keeps a pass's first line ending on
+        // "what they read," as the rest of the contract's prose is broken.
+        let lead = wrap(&format!("{held} {HELD_HANDOFF_LEAD}"), 68).join("\n");
         contract.push_str("\n\n");
-        contract.push_str(line);
+        contract.push_str(&lead);
+        contract.push_str("\n\n");
+        contract.push_str(HELD_HANDOFF);
     }
     contract
 }
