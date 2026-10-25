@@ -8244,9 +8244,8 @@ mod tests {
             ..Snapshot::empty()
         };
         for hosted in [false, true] {
-            let _hosting = hosted.then(|| {
-                crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch)
-            });
+            let _hosting = hosted
+                .then(|| crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch));
             let draw = |snapshot: &Snapshot| {
                 strip(&paint(
                     &repo,

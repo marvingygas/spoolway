@@ -219,6 +219,8 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" "$SPOOLWAY_PROJECT_HOME/queue/
 # a real child serving a real request, which no unit test runs. The key line
 # offers `u` only once the lock is held and a pipeline file has changed since
 # the run started: with nothing to load, a held lock alone draws no pair.
+# The board names the kind of change on a `Config changed:` line above the
+# key line while the edit waits, and drops it once the reload has loaded it.
 # `updating config…` stays up until the answer lands; `successfully loaded`
 # then shows and closes itself, with no key pressed. Looked for in the whole
 # log since `u`, not in the last frame: it is up for a second, and a poll can
@@ -236,10 +238,16 @@ sleep 2
 if now_lacks "[u] update config"
 then ok "the key line leaves u off while nothing changed"
 else bad "the key line leaves u off while nothing changed"; fi
+if now_lacks "Config changed"
+then ok "the board draws no Config changed line while nothing changed"
+else bad "the board draws no Config changed line while nothing changed"; fi
 printf '# edited while the dispatcher runs\n' >> .spoolway/pipelines/default.yml
 if poll_until 10 now_says "[u] update config"
 then ok "the key line offers u once a pipeline file changed"
 else bad "the key line offers u once a pipeline file changed"; fi
+if now_says "Config changed: pipelines updated"
+then ok "the board names the change on its Config changed line"
+else bad "the board names the change on its Config changed line"; fi
 UPDATE_MARK=$(wc -l < "$UPDATE")
 screen_press u
 if poll_until 15 screen_drew_since "$UPDATE_MARK" "successfully loaded"
@@ -254,6 +262,9 @@ has "leaving the dispatcher running" "dispatcher running · pid " "$LAST"
 if poll_until 10 now_lacks "[u] update config"
 then ok "and u goes once the edit is loaded"
 else bad "and u goes once the edit is loaded"; fi
+if now_lacks "Config changed"
+then ok "and so does the Config changed line"
+else bad "and so does the Config changed line"; fi
 screen_stop
 cp "$LIVE/default.yml.update" .spoolway/pipelines/default.yml
 

@@ -526,11 +526,11 @@ impl Came {
             Came::Answer(answer) => answered(answer),
             // Only the dispatcher writes an answer, so it did take the
             // request: whether the reload loaded is what cannot be told. The
-            // footer's `update` line goes once a reload loads, which is what
-            // the advice leans on.
+            // board's `Config changed:` line goes once a reload loads, which
+            // is what the advice leans on.
             Came::Unreadable(err) => update_notice(&format!(
                 "{err:#}, so the board cannot tell whether the reload loaded. If the \
-                 footer still shows its update line, press u again."
+                 board still shows its Config changed line, press u again."
             )),
             Came::Unanswered => update_notice(UNANSWERED),
         }
@@ -2486,8 +2486,9 @@ mod tests {
     }
 
     // An answer that is there but cannot be read says the board cannot tell
-    // whether the reload loaded, and what to do next. Fails before the
-    // change: the notice was the bare read error.
+    // whether the reload loaded, and what to do next: look for the board's
+    // `Config changed` line. Fails before the change: the advice pointed at
+    // the footer's update line, which the board no longer draws.
     #[test]
     fn an_answer_that_cannot_be_read_says_what_to_do() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-update-unreadable");
@@ -2510,7 +2511,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(text.contains("cannot tell whether the reload"), "{text}");
-        assert!(text.contains("press u again"), "{text}");
+        assert!(
+            text.contains("If the board still shows its Config changed line, press u again."),
+            "{text}"
+        );
+        assert!(!text.contains("update line"), "{text}");
         assert!(tab.asked.is_none());
     }
 
