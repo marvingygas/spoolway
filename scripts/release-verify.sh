@@ -160,42 +160,64 @@ fi
 #    tap, run wherever brew is present (it supports Linux, so the maintainer's
 #    WSL qualifies). Skipped with a note, like the npm check, when brew is
 #    missing. The brew copy is `$(brew --prefix)/bin/spoolway`, and brew's bin
-#    can sit ahead of the npm copy on PATH, so a copy this check installed is
-#    removed again, and so is a tap it added. A copy that was there before is
-#    upgraded and left installed, since removing it would take something away
-#    from the maintainer.
+#    can sit ahead of the npm copy on PATH, so everything this check added is
+#    undone afterwards: the formula, the tap, and the trust entry that
+#    Homebrew 6 writes to its trust.json when it installs from a tap. A copy
+#    that was there before is upgraded and left installed, since removing it
+#    would take something away from the maintainer.
+#    The tap holds only the newest formula, so this check passes only for the
+#    latest release. Run by hand for an older version it dies at the version
+#    comparison, naming the version the tap holds, rather than skipping:
+#    a skipped check would read as a pass.
 brew_formula=marvingygas/tap/spoolway
 brew_tap=marvingygas/tap
 brew_summary="brew is not on this machine, so the brew install check was skipped"
+# Whether the formula is trusted, from `brew trust --json=v1`. Homebrew before
+# 6 has no such command, and then nothing was ever trusted. An entry counts
+# if its text names the formula or the tap, whichever shape the entry has.
+brew_trusted() {
+  brew trust --json=v1 2>/dev/null \
+    | jq -e --arg f "$brew_formula" --arg t "$brew_tap" \
+        '[.formulae[]?, .taps[]? | tostring] | any(contains($f) or contains($t))' >/dev/null 2>&1
+}
+# Read whole before grep sees them: `grep -q` quits at the first match, and a
+# listing killed by SIGPIPE under pipefail would read as "not there", which
+# would make the cleanup uninstall a copy the maintainer already had.
+brew_formula_present() { local l; l="$(brew list --full-name --formula)" && grep -qxF "$brew_formula" <<<"$l"; }
+brew_tap_present() { local l; l="$(brew tap)" && grep -qxF "$brew_tap" <<<"$l"; }
 if command -v brew >/dev/null 2>&1; then
   brew_formula_was=0
   brew_tap_was=0
-  brew_touched=0
-  # Read whole before grep sees them: `grep -q` quits at the first match, and
-  # a listing killed by SIGPIPE under pipefail would read as "was not there",
-  # which would make the cleanup uninstall a copy the maintainer already had.
-  brew_installed="$(brew list --full-name --formula)" || die "brew list failed, so it is not known whether $brew_formula is installed"
-  brew_taps="$(brew tap)" || die "brew tap failed, so it is not known whether $brew_tap is added"
-  grep -qxF "$brew_formula" <<<"$brew_installed" && brew_formula_was=1
-  grep -qxF "$brew_tap" <<<"$brew_taps" && brew_tap_was=1
+  brew_trusted_was=0
+  brew list --full-name --formula >/dev/null || die "brew list failed, so it is not known whether $brew_formula is installed"
+  brew tap >/dev/null || die "brew tap failed, so it is not known whether $brew_tap is added"
+  ! brew_formula_present || brew_formula_was=1
+  ! brew_tap_present || brew_tap_was=1
+  ! brew_trusted || brew_trusted_was=1
   # Runs on every exit, including a `die` halfway through the install, which
-  # is when a half-installed copy is most likely to be left behind. A failure
-  # here is reported and does not replace the exit status that got us here.
+  # is when a half-installed copy is most likely to be left behind. Each item
+  # is removed only when it was absent before and is present now, so a run
+  # that failed before installing anything has nothing to undo and prints
+  # nothing. A failure here is reported and does not replace the exit status
+  # that got us here.
   cleanup_brew() {
-    [ "$brew_touched" = 1 ] || return 0
-    if [ "$brew_formula_was" = 0 ]; then
+    if [ "$brew_formula_was" = 0 ] && brew_formula_present; then
       brew uninstall --formula "$brew_formula" >/dev/null 2>&1 \
         || say "release-verify: could not remove $brew_formula — run: brew uninstall $brew_formula"
     fi
-    if [ "$brew_tap_was" = 0 ]; then
+    if [ "$brew_tap_was" = 0 ] && brew_tap_present; then
       brew untap "$brew_tap" >/dev/null 2>&1 \
         || say "release-verify: could not remove the tap $brew_tap — run: brew untap $brew_tap"
+    fi
+    # `brew untap` leaves the trust entry that `brew install` wrote, and
+    # untrusting an entry that is not there is harmless.
+    if [ "$brew_trusted_was" = 0 ] && brew trust --help >/dev/null 2>&1; then
+      brew untrust --formula "$brew_formula" >/dev/null 2>&1 || true
     fi
   }
   # One trap per shell: this replaces the npm check's, so it removes that
   # check's scratch directory as well when there is one.
   trap 'cleanup_brew; [ -z "${install_dir:-}" ] || rm -rf "$install_dir"' EXIT
-  brew_touched=1
   for attempt in 1 2 3; do
     # `brew update` first, so a tap cloned on an earlier release hands over
     # the formula for this one. Upgrading a copy that is already current only
@@ -213,7 +235,9 @@ if command -v brew >/dev/null 2>&1; then
     || die "the brew-installed $brew_bin would not run"
   case "$got" in
     *"$version"*) ;;
-    *) die "brew-installed spoolway reports '$got', not $version — run: brew update && brew upgrade $brew_formula" ;;
+    *)
+      tap_version="$(brew info --json=v2 "$brew_formula" | jq -r '.formulae[0].versions.stable // "unknown"')" || tap_version=unknown
+      die "brew-installed spoolway reports '$got', not $version. The tap holds $tap_version. If that is not $version, the release workflow's homebrew job did not push this release, so re-run it. The tap only ever holds the newest release, so $version is also not checkable here once a later one is out." ;;
   esac
   if [ "$brew_formula_was" = 1 ]; then
     say "release-verify: brew upgraded $brew_formula to $version and it reports $version, then left it installed"
