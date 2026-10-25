@@ -73,38 +73,12 @@ A gate can pause a task for a person after a step reports.
 
 spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
 
-### npm
-
-```
-npm install -g spoolway
-```
-
-The package is a small wrapper around a prebuilt binary.
-
-### Standalone
-
-One file that needs nothing else:
-
-```
-curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh | sh
-```
-
-It installs to `~/.local/bin`. See
-[Standalone download](docs/installation.md#standalone-download) for the file per platform.
-
-### From source
-
-In a clone of this repository:
-
-```
-cargo install --path .
-```
-
-### herdr plugin
-
-```
-herdr plugin install marvingygas/spoolway
-```
+| Method | Command | Notes |
+|---|---|---|
+| herdr plugin | `herdr plugin install marvingygas/spoolway` | See [The herdr plugin](docs/herdr-plugin.md). |
+| npm | `npm install -g spoolway` | |
+| Standalone | `curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh \| sh` | Installs to `~/.local/bin`. Updated manually. See [Standalone download](docs/installation.md#standalone-download) for the file per platform. |
+| Source | `cargo install --path .` | In a clone of this repository. |
 
 ### Updating
 
