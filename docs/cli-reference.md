@@ -95,7 +95,8 @@ and sentences, and the details panes. These capitals are allowed:
 - Month and weekday names and their short forms, such as `August`, `Aug`, `Monday`, `Mon` and
   `Mo`.
 - Proper nouns, such as `Windows`, `Unix` and `Jira`.
-- The greeting: `Good morning`, `Good afternoon`, `Good evening` and `Working late`.
+- The greeting: `Good morning`, `Good afternoon`, `Good evening` and `Working late`, and the
+  name that follows it.
 - Values read from tasks, routines, jobs and pipelines, shown as the author wrote them.
 
 The test `tui_text_is_lowercase` renders every tab, the details panes and the popups, and
