@@ -54,7 +54,7 @@ as JSON.
 | `gate_at` | you | An agent step id, or `blocked`. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | `spoolway-tasks`, or you | The branch the group lands in. `spoolway-tasks` writes it from `spoolway task contract`'s own `base`, the branch your checkout has out. Otherwise required, here or with `spoolway queue add --base`. Must exist locally or on `origin`. |
 | `source` | you | The URL of the tracker item the task came from: an issue, a pull request or a Jira item. Never parsed. |
-| `plan` | you | The plan page's absolute path, whenever a page exists, with or without an issue. The `o` menu's `open plan` opens it in your default browser. Never parsed. |
+| `plan` | you | The plan page's absolute path, whenever a page exists, with or without an issue. The `o` menu's `open plan` opens it in your default browser, on a board row and on a queue screen group. Never parsed. |
 | `group_description` | you | The group's own words for its tracker issue. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
 | `labels` | you | Plain words for a hook to put on this task's own tracker issue and its group's. A label may hold no whitespace and no comma. |
 | `complexity` | the planner, or you | Experimental. The planner's estimate of how complex the task is, a whole number from 1 to 100, where 100 is extremely complex. Every ledger line the task banks carries it, and `spoolway eval --by task` shows it. Optional. See [A complexity outside 1 to 100](#a-complexity-outside-1-to-100). |
