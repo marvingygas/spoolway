@@ -2758,6 +2758,20 @@ impl Pipelines {
         pipelines
     }
 
+    /// [`Pipelines::builtin`] with every description swapped for a lowercase
+    /// stand-in. A description is text a pipeline's author wrote, which a
+    /// screen shows as a row value; the shipped ones start with a capital.
+    /// A test that checks the words a screen brings itself for capitals
+    /// draws its pickers over these, so the shipped prose stays out of it.
+    #[cfg(test)]
+    pub fn builtin_with_plain_descriptions() -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline.description = Some("what this pipeline is for".to_string());
+        }
+        pipelines
+    }
+
     /// The two shipped pipelines, assembled against `config`. `spoolway
     /// pipeline check` no longer opens these — it derives every finding from
     /// a project's own loaded set — so this is release-time proof only:

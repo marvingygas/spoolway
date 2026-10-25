@@ -925,10 +925,8 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
 /// project; see `crate::screen`'s own tests.
 #[cfg(test)]
 pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
-    vec![(
-        "jobs pipeline picker",
-        pipeline_panel(&Pipelines::builtin(), "", 0),
-    )]
+    let pipelines = Pipelines::builtin_with_plain_descriptions();
+    vec![("jobs pipeline picker", pipeline_panel(&pipelines, "", 0))]
 }
 
 #[cfg(test)]

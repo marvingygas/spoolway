@@ -88,6 +88,21 @@ above the strip and one below it.
 Inside the eval tab's filter panel and any popup drawn over a tab, `←` and `→` keep their own
 meaning instead.
 
+All text the screen draws is lowercase. That covers tab-body labels, key lines, popup titles
+and sentences, and the details panes. These capitals are allowed:
+
+- Words written in capitals, such as `DISPATCH`, `PIPELINE`, `PR` and `YAML`.
+- Month and weekday names and their short forms, such as `August`, `Aug`, `Monday`, `Mon` and
+  `Mo`.
+- Proper nouns, such as `Windows`, `Unix` and `Jira`.
+- The greeting: `Good morning`, `Good afternoon`, `Good evening` and `Working late`.
+- Values read from tasks, routines, jobs and pipelines, shown as the author wrote them.
+
+The test `tui_text_is_lowercase` renders every tab, the details panes and the popups, and
+fails on any other word that starts with a capital. Its failure names the screen, the line
+and the word, and says what to write instead. Fix the word at its source. Add it to the
+test's allowed list only when it falls under one of the cases above.
+
 Every tab keeps column 0 and the last column empty, and leaves two blank rows under its key
 line. The tab strip stays centred, and every popup stays centred on its tab. A key line wider
 than the tab breaks between two keys, and each broken row starts one column in. Every row it
@@ -813,7 +828,7 @@ A refusal changes nothing, and the run stays on what it had:
 ```
 reload refused — nothing changed, the run is still on what it had:
   fix-login: sitting on `review`, which pipeline `feature` no longer defines
-  Put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
+  put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
 ```
 
 With no dispatcher running it prints this, so it works even when a pipeline file or `config.toml` is broken:

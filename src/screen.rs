@@ -1005,6 +1005,422 @@ mod tests {
     use super::*;
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
+    /// Words that keep a capital in TUI text, each under the one category
+    /// the rule allows. All-caps words need no entry: [`capital_violation`]
+    /// lets them through whole.
+    const ALLOWED_CAPITALS: &[(&str, &str)] = &[
+        // Month names and their short forms.
+        ("January", "month"),
+        ("February", "month"),
+        ("March", "month"),
+        ("April", "month"),
+        ("May", "month"),
+        ("June", "month"),
+        ("July", "month"),
+        ("August", "month"),
+        ("September", "month"),
+        ("October", "month"),
+        ("November", "month"),
+        ("December", "month"),
+        ("Jan", "month"),
+        ("Feb", "month"),
+        ("Mar", "month"),
+        ("Apr", "month"),
+        ("Jun", "month"),
+        ("Jul", "month"),
+        ("Aug", "month"),
+        ("Sep", "month"),
+        ("Oct", "month"),
+        ("Nov", "month"),
+        ("Dec", "month"),
+        // Weekday names and their short forms.
+        ("Monday", "weekday"),
+        ("Tuesday", "weekday"),
+        ("Wednesday", "weekday"),
+        ("Thursday", "weekday"),
+        ("Friday", "weekday"),
+        ("Saturday", "weekday"),
+        ("Sunday", "weekday"),
+        ("Mon", "weekday"),
+        ("Tue", "weekday"),
+        ("Wed", "weekday"),
+        ("Thu", "weekday"),
+        ("Fri", "weekday"),
+        ("Sat", "weekday"),
+        ("Sun", "weekday"),
+        ("Mo", "weekday"),
+        ("Tu", "weekday"),
+        ("We", "weekday"),
+        ("Th", "weekday"),
+        ("Fr", "weekday"),
+        ("Sa", "weekday"),
+        ("Su", "weekday"),
+        // Proper nouns.
+        ("Windows", "proper noun"),
+        ("Unix", "proper noun"),
+        ("Jira", "proper noun"),
+    ];
+
+    /// The greeting, whole: its first word is no capital to allow anywhere
+    /// else, so it is taken out of a line before the line is read.
+    const ALLOWED_PHRASES: &[(&str, &str)] = &[
+        ("Good morning", "greeting"),
+        ("Good afternoon", "greeting"),
+        ("Good evening", "greeting"),
+        ("Working late", "greeting"),
+    ];
+
+    /// The first word of `line` that starts with a capital outside the
+    /// allowed cases: its start column and the word, or `None`.
+    ///
+    /// A word is a run of letters and digits, so `Press` in `(Press o)` is
+    /// found, and a word with no lowercase letter, such as `ULID`, is read
+    /// whole and let through.
+    fn capital_violation(line: &str) -> Option<(usize, String)> {
+        // Blanked rather than cut, so a column the report marks is still the
+        // column in the line.
+        let mut line = line.to_string();
+        for (phrase, _) in ALLOWED_PHRASES {
+            line = line.replace(phrase, &" ".repeat(phrase.len()));
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        let mut after_shouting = false;
+        while i < chars.len() {
+            if !chars[i].is_alphanumeric() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < chars.len() && chars[i].is_alphanumeric() {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let first = word.chars().next().unwrap();
+            // Every run of letters is a word wherever it sits, so `Cargo` in
+            // `src/Cargo.toml` counts as much as one after a space.
+            if !first.is_uppercase() {
+                after_shouting = false;
+                continue;
+            }
+            let letters = word.chars().filter(|c| c.is_alphabetic()).count();
+            let shouting = !word.chars().any(char::is_lowercase)
+                // A lone capital is a word of an all-caps heading only when
+                // the word before it is one too, as the `R` in `CACHE R`.
+                // Anywhere else it starts a sentence, such as `A job`.
+                && (letters > 1 || after_shouting);
+            after_shouting = shouting;
+            if shouting || ALLOWED_CAPITALS.iter().any(|(allowed, _)| *allowed == word) {
+                continue;
+            }
+            return Some((start, word));
+        }
+        None
+    }
+
+    /// Every capital in `screens` that the rule does not allow, as the
+    /// message a failing test prints: the screen, the line, the word marked
+    /// and the fix.
+    fn capital_report(screens: &[(String, Vec<String>)]) -> String {
+        let mut report = String::new();
+        for (screen, lines) in screens {
+            for line in lines {
+                let Some((at, word)) = capital_violation(line) else {
+                    continue;
+                };
+                let mut fixed = word.chars();
+                let lower: String = fixed
+                    .next()
+                    .into_iter()
+                    .flat_map(char::to_lowercase)
+                    .chain(fixed)
+                    .collect();
+                report += &format!(
+                    "a TUI word starts with a capital:\n  {screen}\n  \"{line}\"\n  {}{}\n\
+                     TUI text is lowercase: write \"{lower}\".\n\
+                     All-caps words, dates, proper nouns, the greeting and row values \
+                     are allowed.\n\
+                     If this word must keep its capital, add it to the allowed list \
+                     beside this test.\n\n",
+                    " ".repeat(at + 1),
+                    "^".repeat(word.chars().count()),
+                );
+            }
+        }
+        report
+    }
+
+    /// A project with something on every tab: a task queued, tasks pending
+    /// in two groups, routines in two folders, a job on one of them and a
+    /// job whose routine is gone. Every name is lowercase, so only the
+    /// words the screens bring themselves can start with a capital.
+    fn full_project(name: &str) -> (crate::Repo, crate::scratch::ScratchRoot) {
+        let (repo, guard) = crate::status::testutil::fixture(name);
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        crate::status::testutil::add(&repo, "route", &["wire"], None);
+        for (id, group, stage) in [
+            ("stuck", "one", "blocked"),
+            ("held", "two", "paused"),
+            ("review", "three", "review-code"),
+        ] {
+            crate::status::testutil::add_to(&repo, id, &[], Some(stage), Some(group));
+        }
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        for (id, group) in [("cart", "shop"), ("pay", "shop"), ("logo", "site")] {
+            std::fs::write(
+                repo.pending_dir().join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntitle: {id}, done\ngroup: {group}\npipeline: default\n\
+                     ---\n## Goal\n\ndo it.\n"
+                ),
+            )
+            .unwrap();
+        }
+        for (folder, id) in [("nightly", "audit"), ("weekly", "deps")] {
+            let dir = repo.routines_dir().join(folder);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.md")),
+                format!("---\nid: {id}\ntitle: {id}, done\ngroup: demo\n---\n## Goal\n\ndo it.\n"),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(repo.home()).unwrap();
+        std::fs::write(
+            repo.user_jobs_file(),
+            "[jobs.maintenance]\nschedule = \"0 3 * * 1-5\"\npipeline = \"bugfix\"\n\
+             routine = \"nightly\"\n\n[jobs.orphan]\nschedule = \"0 4 * * *\"\n\
+             pipeline = \"bugfix\"\nroutine = \"gone\"\n",
+        )
+        .unwrap();
+        (repo, guard)
+    }
+
+    /// A capital the rule does not allow is reported the way the guard's
+    /// failure reads: the screen, the line, the word marked under it, and
+    /// the lowercase word to write.
+    #[test]
+    fn a_capitalised_word_is_reported_with_its_screen_line_and_fix() {
+        let screens = [(
+            "routines tab, details of a job whose routine is gone".to_string(),
+            vec![
+                "  no routine to open.".to_string(),
+                "  Press o to point this job at a routine.".to_string(),
+            ],
+        )];
+        assert_eq!(
+            capital_report(&screens),
+            "a TUI word starts with a capital:\n\
+             \x20 routines tab, details of a job whose routine is gone\n\
+             \x20 \"  Press o to point this job at a routine.\"\n\
+             \x20    ^^^^^\n\
+             TUI text is lowercase: write \"press\".\n\
+             All-caps words, dates, proper nouns, the greeting and row values \
+             are allowed.\n\
+             If this word must keep its capital, add it to the allowed list \
+             beside this test.\n\n"
+        );
+    }
+
+    /// Each case the rule allows passes, and the capitals next to them do
+    /// not: a sentence that starts `A`, a lone `R` after a lowercase word,
+    /// and a greeting's first word cut off from the rest of it.
+    #[test]
+    fn only_the_allowed_capitals_pass() {
+        for line in [
+            "│ PIPELINE  TASKS  CACHE R  OUT USD │",
+            "next: Mon 26 Oct 03:00, Monday to Friday",
+            "next  Tue 27 Oct  03:00  (Aug, Dec)",
+            "Good morning.",
+            "Working late.",
+            "needs Windows or Unix, and a Jira key",
+            "[enter] confirm   [esc] close   [↑↓] move",
+        ] {
+            assert_eq!(capital_violation(line), None, "{line}");
+        }
+        for (line, word) in [
+            ("A job is due", "A"),
+            ("pick one R", "R"),
+            ("Good night.", "Good"),
+            ("press Enter", "Enter"),
+            ("(Delete the routine)", "Delete"),
+            ("edit src/Cargo.toml", "Cargo"),
+            ("queued — Waiting", "Waiting"),
+        ] {
+            let found = capital_violation(line).map(|(_, word)| word);
+            assert_eq!(found.as_deref(), Some(word), "{line}");
+        }
+    }
+
+    /// No word of TUI text starts with a capital outside the allowed cases.
+    ///
+    /// Renders every tab with something on it, the details panes and the
+    /// popups the keys below open, then reads each line: the dispatch,
+    /// queue and routines tabs through the shell on a scripted terminal,
+    /// the eval tab through its own synchronous loader, the popups no key
+    /// reaches from where they are built, and every list of asking popups.
+    /// Every name in the fixtures is lowercase, so a capital found is a word
+    /// a screen brought itself.
+    ///
+    /// No walk presses `enter` on the dispatch tab outside a popup, which
+    /// starts a dispatcher from the test binary, or picks a board row's
+    /// open action, which starts `$EDITOR`.
+    #[test]
+    fn tui_text_is_lowercase() {
+        let _t = test_terminal((100, 30));
+        let mut screens: Vec<(String, Vec<String>)> = Vec::new();
+        let right = "\x1b[C";
+        let walks = [
+            ("dispatch tab", "\x1b[D"),
+            ("queue tab", ""),
+            ("queue tab, options", "o"),
+            ("queue tab, tasks pane", "\t"),
+            ("queue tab, find", "f"),
+            ("queue tab, done tasks", "h"),
+            ("queue tab, queue the group", "\r"),
+            ("queue tab, select", " "),
+            ("queue tab, queue the selection", " \r"),
+            ("queue tab, queue the second group", "\x1b[B\r"),
+            ("queue tab, trial, next", "o\r\r"),
+            ("queue tab, trial, next, next", "o\r\r\r"),
+            ("queue tab, save as routine, name", "o\x1b[B\r\r"),
+            ("queue tab, delete, confirm", "o\x1b[B\x1b[B\r\r"),
+            ("queue tab, delete, close", "o\x1b[B\x1b[B\r\x1b"),
+            ("queue tab, find a task", "fwire"),
+            ("queue tab, find nothing", "fzzz"),
+            ("queue tab, done tasks pane", "h\t"),
+            ("routines tab", right),
+            ("routines tab, options", &format!("{right}o")),
+            ("routines tab, details", &format!("{right}\t")),
+            ("routines tab, second routine", &format!("{right}\x1b[B")),
+            ("routines tab, enter", &format!("{right}\r")),
+            ("queue tab, trial", "o\r"),
+            ("queue tab, save as routine", "o\x1b[B\r"),
+            ("queue tab, delete", "o\x1b[B\x1b[B\r"),
+            ("queue tab, pick pipelines", "\r\r"),
+            ("routines tab, edit schedule", &format!("{right}o\r")),
+            ("routines tab, deactivate job", &format!("{right}o\x1b[B\r")),
+            (
+                "routines tab, delete routine",
+                &format!("{right}o\x1b[B\x1b[B\r"),
+            ),
+            (
+                "routines tab, routine without a job",
+                &format!("{right}\x1b[B"),
+            ),
+            (
+                "routines tab, routine without a job, options",
+                &format!("{right}\x1b[Bo"),
+            ),
+            (
+                "routines tab, job without a routine",
+                &format!("{right}\x1b[B\x1b[B"),
+            ),
+            (
+                "routines tab, job without a routine, details",
+                &format!("{right}\x1b[B\x1b[B\t"),
+            ),
+            (
+                "routines tab, job without a routine, options",
+                &format!("{right}\x1b[B\x1b[Bo"),
+            ),
+            (
+                "routines tab, job without a routine, options, enter",
+                &format!("{right}\x1b[B\x1b[Bo\r"),
+            ),
+            ("dispatch tab, options key", "\x1b[Do"),
+            (
+                "routines tab, edit schedule, accept",
+                &format!("{right}o\r\r"),
+            ),
+            (
+                "routines tab, edit schedule, pipeline",
+                &format!("{right}o\r\r\r"),
+            ),
+            (
+                "routines tab, edit schedule, saved",
+                &format!("{right}o\r\r\r\r"),
+            ),
+            (
+                "routines tab, edit schedule, nonsense",
+                &format!("{right}o\r1\r"),
+            ),
+            (
+                "routines tab, deactivate, confirm",
+                &format!("{right}o\x1b[B\r\r"),
+            ),
+            (
+                "routines tab, delete routine, confirm",
+                &format!("{right}o\x1b[B\x1b[B\r\r"),
+            ),
+            ("routines tab, queue the routine", &format!("{right} \r")),
+            (
+                "routines tab, queue the routine, next",
+                &format!("{right} \r\r"),
+            ),
+            (
+                "routines tab, weekly options, enter",
+                &format!("{right}\x1b[Bo\r"),
+            ),
+            (
+                "routines tab, weekly options, enter, accept",
+                &format!("{right}\x1b[Bo\r\r"),
+            ),
+            (
+                "routines tab, weekly options, enter, pipeline",
+                &format!("{right}\x1b[Bo\r\r\r"),
+            ),
+            ("dispatch tab, update", "\x1b[Du"),
+            ("dispatch tab, rows", "\x1b[D\x1b[B"),
+            ("dispatch tab, rows, more", "\x1b[D\x1b[B\x1b[B\x1b[B"),
+            ("dispatch tab, options on a row", "\x1b[D\x1b[Bo"),
+            (
+                "dispatch tab, options on a blocked row",
+                "\x1b[D\x1b[B\x1b[B\x1b[Bo",
+            ),
+            (
+                "dispatch tab, options on a paused row",
+                "\x1b[D\x1b[B\x1b[B\x1b[B\x1b[Bo",
+            ),
+            ("dispatch tab, resume a row", "\x1b[D\x1b[B\x1b[B\x1b[Br"),
+            ("dispatch tab, skip a hook", "\x1b[D\x1b[B\x1b[B\x1b[Bk"),
+            ("eval tab", &format!("{right}{right}")),
+        ];
+        for (i, (name, keys)) in walks.into_iter().enumerate() {
+            let (repo, _guard) = full_project(&format!("capitals-{i}"));
+            for (n, frame) in crate::screen::shell::drive_frames(&repo, keys)
+                .iter()
+                .enumerate()
+            {
+                screens.push((
+                    format!("{name} (keys {keys:?}), frame {n}"),
+                    frame.lines().map(str::to_string).collect(),
+                ));
+            }
+        }
+        for (name, panel) in [
+            crate::status::asking_panels(),
+            vec![
+                ("stop dispatching", dispatcher::stop_panel(0)),
+                (
+                    "stop dispatching, tasks queued",
+                    dispatcher::stop_queued_panel(1, 0),
+                ),
+            ],
+            crate::commands::dispatch_asking_panels(),
+            crate::commands::queue_asking_panels(),
+            crate::commands::jobs_asking_panels(),
+        ]
+        .concat()
+        {
+            screens.push((format!("popup: {name}"), panel));
+        }
+        screens.extend(crate::eval::tui_screens());
+        screens.extend(crate::screen::shell::tui_screens());
+        let report = capital_report(&screens);
+        assert!(report.is_empty(), "{report}");
+    }
+
     /// Every popup in the project that asks a person something closes on
     /// `[enter] confirm   [esc] close` and nothing else: no letter answers,
     /// no key row of its own. Each module hands over its own asking popups,

@@ -324,7 +324,7 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   | `create and queue`, then `enter` | `enter` |
   | `queue only`, then `enter` | `a`, then `enter` |
   | The `opening issues` popup, one row per ticket | `running the hook: <n> of <total> tasks` |
-  | The `issues created` popup | The `queued` popup, opening on `Hook executed successfully` |
+  | The `issues created` popup | The `queued` popup, opening on `hook executed successfully` |
 
   `spoolway queue add --no-tracking <group>` gives the same answer from a shell. See
   [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).

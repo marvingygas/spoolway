@@ -581,7 +581,7 @@ with `press u again.`
 │  fix-login: sitting on `review`, which pipeline `feature`     │
 │  no longer defines                                            │
 │                                                               │
-│  Put `review` back in feature.yml, or wait until fix-login    │
+│  put `review` back in feature.yml, or wait until fix-login    │
 │  has left it, then press u again.                             │
 │                                                               │
 │  [enter] confirm                                              │

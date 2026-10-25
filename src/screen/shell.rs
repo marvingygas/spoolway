@@ -348,6 +348,81 @@ fn host(
     }
 }
 
+/// `line` with every escape code taken out — the colour a tab's own
+/// frame paints under the strip, the strip's own bold, and the frame
+/// writer's own codes around it. A CSI code (`ESC [ ... letter`) ends on
+/// any letter, not only `m`: the frame writer's `H`, `J` and `K` would
+/// otherwise run the skip on into real text. `ESC7`/`ESC8` (DECSC/DECRC,
+/// the frame writer's save and restore around each clear — see
+/// [`super::frame_writer::CLEAR_TO_END`]) are not CSI at all: `7` and
+/// `8` are not letters, so hunting for one the way a CSI code is skipped
+/// would eat every character up to the next stray letter in the frame's
+/// own text instead of stopping after the one byte the code actually
+/// spends.
+#[cfg(test)]
+pub(crate) fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    chars.by_ref().find(char::is_ascii_alphabetic);
+                }
+                _ => continue,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The popups the dispatch tab opens that no key reaches on a scripted
+/// terminal: the config reload's waiting and loaded ones, the refused one
+/// with a reason in it, and the starting one, for the test that checks TUI
+/// text for capitals — see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn tui_screens() -> Vec<(String, Vec<String>)> {
+    let reason = crate::reload::Reason {
+        what: "wire is at a step the pipeline no longer defines".to_string(),
+        fix: "put the step back, then press u again.".to_string(),
+    };
+    vec![
+        ("updating popup".to_string(), Popup::Updating.panel()),
+        (
+            "loaded popup".to_string(),
+            Popup::Loaded(Instant::now()).panel(),
+        ),
+        ("refused popup".to_string(), refused_panel(&[reason])),
+        ("starting popup".to_string(), starting_panel()),
+    ]
+}
+
+/// The frames `host` draws over `input` typed at it, each with its colour
+/// codes taken out, for a test that reads what a person would see on every
+/// tab, over pipelines whose descriptions are plain stand-ins. The same
+/// scripted-terminal drive the shell's own tests use.
+#[cfg(test)]
+pub(crate) fn drive_frames(repo: &Repo, input: &str) -> Vec<String> {
+    let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
+    let mut out = Vec::new();
+    host(
+        repo,
+        &Pipelines::builtin_with_plain_descriptions(),
+        &repo.root,
+        &mut input,
+        &mut out,
+    )
+    .unwrap();
+    let drawn = String::from_utf8(out).unwrap();
+    drawn
+        .split("\x1b[?2026h\x1b[H")
+        .skip(1)
+        .map(plain)
+        .collect()
+}
+
 /// What the dispatch tab keeps between visits beyond the board itself: the
 /// dispatcher it started, if any, the popup it has open, and the reload `u`
 /// asked for that has not been settled yet.
@@ -1246,35 +1321,6 @@ mod tests {
     use super::*;
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
-    /// `line` with every escape code taken out — the colour a tab's own
-    /// frame paints under the strip, the strip's own bold, and the frame
-    /// writer's own codes around it. A CSI code (`ESC [ ... letter`) ends on
-    /// any letter, not only `m`: the frame writer's `H`, `J` and `K` would
-    /// otherwise run the skip on into real text. `ESC7`/`ESC8` (DECSC/DECRC,
-    /// the frame writer's save and restore around each clear — see
-    /// [`super::frame_writer::CLEAR_TO_END`]) are not CSI at all: `7` and
-    /// `8` are not letters, so hunting for one the way a CSI code is skipped
-    /// would eat every character up to the next stray letter in the frame's
-    /// own text instead of stopping after the one byte the code actually
-    /// spends.
-    fn plain(line: &str) -> String {
-        let mut out = String::new();
-        let mut chars = line.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                match chars.next() {
-                    Some('[') => {
-                        chars.by_ref().find(char::is_ascii_alphabetic);
-                    }
-                    _ => continue,
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
     /// A live `dispatch.pid` — a dispatcher started from the CLI — refuses
     /// bare `spoolway` exactly as a second screen would. Against
     /// [`crate::commands::already_running`] itself, the one check `run`
@@ -1363,22 +1409,7 @@ mod tests {
     /// ask: that starts a child from `current_exe`, which under `cargo test`
     /// is the test binary itself. The e2e suite `screen` covers the start.
     fn drive_host(repo: &Repo, input: &str) -> Vec<String> {
-        let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
-        let mut out = Vec::new();
-        host(
-            repo,
-            &Pipelines::builtin(),
-            &repo.root,
-            &mut input,
-            &mut out,
-        )
-        .unwrap();
-        let drawn = String::from_utf8(out).unwrap();
-        drawn
-            .split("\x1b[?2026h\x1b[H")
-            .skip(1)
-            .map(plain)
-            .collect()
+        drive_frames(repo, input)
     }
 
     // The e2e suite's own gesture, at unit level: the screen opens on the

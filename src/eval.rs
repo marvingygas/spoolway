@@ -8853,6 +8853,13 @@ mod tests {
     }
 }
 
+/// Every eval screen the test that checks TUI text for capitals walks — see
+/// `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn tui_screens() -> Vec<(String, Vec<String>)> {
+    screen_tests::tui_screens()
+}
+
 #[cfg(test)]
 mod screen_tests {
     use super::*;
@@ -9081,6 +9088,64 @@ mod screen_tests {
         // `f` opens the filters; `→` there cycles a row, and the input then
         // runs out inside the panel.
         assert_eq!(run("f\x1b[C\x1b[D").0, Leave::Quit);
+    }
+
+    /// Every eval screen the test that checks TUI text for capitals walks:
+    /// a ledger of runs over two pipelines, drawn through each table, sort
+    /// and popup, as `(what is open, its lines)`.
+    pub(super) fn tui_screens() -> Vec<(String, Vec<String>)> {
+        let (repo, _root_guard) = fixture_with_one_run("tui-screens");
+        for (task, step, pipeline, outcome) in [
+            ("b", "review", "default", Some("fail")),
+            ("c", "implement", "bugfix", Some("pass")),
+            ("d", "test", "bugfix", None),
+        ] {
+            bank(
+                &repo,
+                "2026-08-02T09:00:00+00:00",
+                task,
+                step,
+                pipeline,
+                "sonnet",
+                2.0,
+                outcome,
+            );
+        }
+        let down = DOWN;
+        let walks = [
+            ("totals by pipeline", ""),
+            ("sorted ascending", "a"),
+            ("sorted descending", "d"),
+            ("one row down", down),
+            ("per task", "t"),
+            ("per task, one row down", &format!("t{down}")),
+            ("directories", "\t"),
+            ("filters", "f"),
+            ("filters, one down", &format!("f{down}")),
+            ("filters, entered", "f\r"),
+            ("filters, entered twice", &format!("f{down}\r")),
+            ("filters, closed", "f\x1b"),
+            ("export", "e"),
+            ("export, entered", "e\r"),
+            ("refreshed", "r"),
+            ("opened row", "\r"),
+            ("opened row, per task", "t\r"),
+            ("opened row, closed", "\r\x1b"),
+        ];
+        let mut screens = Vec::new();
+        for (name, input) in walks {
+            let drawn = screen(&repo, input);
+            for (n, frame) in frames(&drawn).iter().enumerate() {
+                screens.push((
+                    format!("eval tab, {name}, frame {n}"),
+                    crate::screen::shell::plain(frame)
+                        .lines()
+                        .map(str::to_string)
+                        .collect(),
+                ));
+            }
+        }
+        screens
     }
 
     /// Every draw opens with the shared frame writer's own start code, so a
