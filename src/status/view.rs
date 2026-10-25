@@ -917,13 +917,6 @@ struct Spend {
 /// at all, only the same ledger under its greeting while a dispatcher holds
 /// the lock — see [`jobs_ledger`] and `paint_empty` in the parent module.
 ///
-/// `waiting` is every pipeline file edited since the running dispatcher
-/// started, then every config key whose new value it has not taken up — see
-/// [`crate::pipeline_snapshot`]. Named on an `update` line under the slots,
-/// since the run keeps routing on what it loaded and an edit waits for a
-/// reload, which `u` on this board asks for.
-/// Empty, and no line, otherwise.
-///
 /// `held` is how many slots `dispatch.priority = "reserve"` holds on each cap
 /// for a started group. A figure with a hold on its cap reads
 /// `<live>/<cap> · <n> held`, so a task waiting beside a free slot has its
@@ -942,7 +935,6 @@ pub(super) fn footer(
     agent_model: &BTreeMap<&str, Vec<&str>>,
     held: &BTreeMap<crate::dispatch::Cap, usize>,
     jobs: &[crate::jobs::ActiveJob],
-    waiting: &[String],
 ) -> Vec<String> {
     // Which profiles this project could actually start a lane on. Config
     // ships a profile per agent kind spoolway can drive, so a project that
@@ -1071,15 +1063,6 @@ pub(super) fn footer(
         })
         .collect();
 
-    // A person who edited a pipeline mid-run would otherwise watch the run
-    // ignore the edit with nothing saying why. Not `GUTTER` after the label:
-    // this line shares no column with the slots lines above it. The label is
-    // padded to the width `pipelines` had when it labelled this line, so the
-    // notice starts in the column a person already looks in.
-    if let Some(notice) = update_notice(waiting) {
-        lines.push(format!("{BOLD}update{RESET}     {notice}"));
-    }
-
     // The job ledger, below the whole slots block: every enabled job, ordered
     // by next firing, naming what would still bring the dispatcher back to
     // life once nothing above it is running. Absent wherever no job is
@@ -1092,16 +1075,27 @@ pub(super) fn footer(
     lines
 }
 
-/// The footer's `update` line about `waiting`, or `None` when nothing waits:
-/// what changed, and the key on this board that brings it in.
-fn update_notice(waiting: &[String]) -> Option<String> {
-    if waiting.is_empty() {
+/// The board's `Config changed:` line about `waiting`, or `None` when a
+/// reload would load nothing. A person who edited a pipeline mid-run would
+/// otherwise watch the run ignore the edit with nothing saying why.
+///
+/// It names kinds of change, never files or keys: `pipelines updated` for
+/// any pipeline file, `config.toml updated` for a key waiting on a reload,
+/// or both. Prompts are no kind of their own, since a running dispatcher
+/// reads each `PROMPT.md` fresh at every lane start. Each kind is read from
+/// the list it came from — see [`Waiting`] — never from a name's text.
+pub(super) fn config_notice(waiting: &Waiting) -> Option<String> {
+    let kinds: Vec<&str> = [
+        (!waiting.pipelines.is_empty()).then_some("pipelines updated"),
+        (!waiting.keys.is_empty()).then_some("config.toml updated"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if kinds.is_empty() {
         return None;
     }
-    Some(format!(
-        "{} changed since this run started — press u to update config",
-        waiting.join(", ")
-    ))
+    Some(format!("{BOLD}Config changed:{RESET} {}", kinds.join(", ")))
 }
 
 /// The name a footer line gives the pool behind `[models]` row `key`: the
@@ -4469,7 +4463,6 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -4485,51 +4478,40 @@ mod tests {
         assert!(!lines.iter().any(|l| l.starts_with("codex")), "{lines:#?}");
     }
 
-    /// A pipeline edited mid-run is named under the slots, on an `update`
-    /// line with the key that applies it, and a config key waiting beside it
-    /// is named after it — and no line at all while nothing is waiting.
+    /// The `Config changed:` notice names kinds, each read from the list it
+    /// came from: a pipeline file alone, a waiting key alone, and both. A
+    /// pipeline file called `config.toml.yml` is still a pipeline. Only the
+    /// label is bold, and nothing waiting draws no notice at all. Fails
+    /// before the change: the footer drew an `update` line naming each file
+    /// and key instead.
     #[test]
-    fn a_pipeline_edited_mid_run_is_named_with_the_key_that_updates_it() {
-        let (repo, _root_guard) = fixture("footer-changed-pipelines");
-        let pipelines = Pipelines::builtin();
-        let mut used: BTreeMap<&str, usize> = BTreeMap::new();
-        used.insert("claude", 1);
-        let draw = |changed: &[String]| -> Vec<String> {
-            footer(
-                &repo,
-                &pipelines,
-                &used,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                &[],
-                changed,
-            )
-            .iter()
-            .map(|l| strip(l))
-            .collect()
+    fn the_config_notice_names_the_kinds_of_change() {
+        let waiting = |pipelines: &[&str], keys: &[&str]| Waiting {
+            pipelines: pipelines.iter().map(|p| p.to_string()).collect(),
+            keys: keys.iter().map(|k| k.to_string()).collect(),
         };
+        let plain = |w: &Waiting| config_notice(w).map(|n| strip(&n));
 
-        assert!(
-            !draw(&[]).iter().any(|l| l.starts_with("update")),
-            "{:#?}",
-            draw(&[])
-        );
-
-        let lines = draw(&["t.yml".to_string()]);
+        assert_eq!(config_notice(&waiting(&[], &[])), None);
         assert_eq!(
-            lines.last().unwrap(),
-            "update     t.yml changed since this run started — press u to update config",
-            "{lines:#?}"
+            plain(&waiting(&["t.yml"], &[])).as_deref(),
+            Some("Config changed: pipelines updated")
         );
-        assert!(lines[0].starts_with("claude"), "{lines:#?}");
-
-        let lines = draw(&["t.yml".to_string(), "unattended.enabled".to_string()]);
         assert_eq!(
-            lines.last().unwrap(),
-            "update     t.yml, unattended.enabled changed since this run started — press u to \
-             update config",
-            "{lines:#?}"
+            plain(&waiting(&["config.toml.yml"], &[])).as_deref(),
+            Some("Config changed: pipelines updated")
+        );
+        assert_eq!(
+            plain(&waiting(&[], &["unattended.enabled"])).as_deref(),
+            Some("Config changed: config.toml updated")
+        );
+        assert_eq!(
+            plain(&waiting(&["t.yml"], &["unattended.enabled"])).as_deref(),
+            Some("Config changed: pipelines updated, config.toml updated")
+        );
+        assert_eq!(
+            config_notice(&waiting(&["t.yml"], &["unattended.enabled"])).unwrap(),
+            format!("{BOLD}Config changed:{RESET} pipelines updated, config.toml updated")
         );
     }
 
@@ -4561,7 +4543,6 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -4583,7 +4564,6 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
-            &[],
             &[],
         )
         .iter()
@@ -4610,7 +4590,6 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 &BTreeMap::new(),
-                &[],
                 &[],
             )
             .iter()
@@ -4678,7 +4657,6 @@ mod tests {
             &agent_model,
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -4717,7 +4695,6 @@ mod tests {
                 &BTreeMap::new(),
                 &BTreeMap::new(),
                 held,
-                &[],
                 &[],
             )
             .iter()
@@ -4764,7 +4741,6 @@ mod tests {
             &agent_model,
             &held,
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -4809,7 +4785,6 @@ mod tests {
             &BTreeMap::new(),
             &agent_model,
             &held,
-            &[],
             &[],
         )
         .iter()
@@ -4858,7 +4833,6 @@ mod tests {
             &model_used,
             &agent_model,
             &BTreeMap::new(),
-            &[],
             &[],
         )
         .iter()
@@ -4914,7 +4888,6 @@ mod tests {
             &model_used,
             &agent_model,
             &BTreeMap::new(),
-            &[],
             &[],
         )
         .iter()
@@ -4979,7 +4952,6 @@ mod tests {
             &agent_model,
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -5035,7 +5007,6 @@ mod tests {
             &agent_model,
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -5084,7 +5055,6 @@ mod tests {
             &agent_model,
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -5123,7 +5093,6 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -5152,7 +5121,6 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
-            &[],
         )
         .iter()
         .map(|l| strip(l))
@@ -5202,7 +5170,6 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &jobs,
-            &[],
         )
         .iter()
         .map(|l| strip(l))

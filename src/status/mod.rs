@@ -40,10 +40,10 @@ pub use view::{banner, plain_table};
 // the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
 use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
-    clamp_rows, first_name, footer, greeting, greeting_screen, group_totals, jobs_ledger,
-    pane_height, pane_width, pause_answers, pause_confirm_panel, restart_confirm_panel,
-    resume_picker_panel, skip_hook_confirm_panel, spool_frame, table_laid_out, table_window,
-    ticker, tint_available, unqueue_confirm_panel,
+    clamp_rows, config_notice, first_name, footer, greeting, greeting_screen, group_totals,
+    jobs_ledger, pane_height, pane_width, pause_answers, pause_confirm_panel,
+    restart_confirm_panel, resume_picker_panel, skip_hook_confirm_panel, spool_frame,
+    table_laid_out, table_window, ticker, tint_available, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -3225,13 +3225,10 @@ struct Snapshot {
     /// `· <n> held` — see [`held_slots`].
     held: BTreeMap<crate::dispatch::Cap, usize>,
     active_jobs: Vec<crate::jobs::ActiveJob>,
-    /// Every pipeline file edited since the running dispatcher loaded them,
-    /// then every config key whose edit waits for a reload — see
-    /// [`crate::pipeline_snapshot::changed_since_start`] and
-    /// [`crate::pipeline_snapshot::config_changed_since_start`]. Read here,
-    /// off the key thread, rather than in the footer, since it reads every
-    /// pipeline file and `config.toml`.
-    waiting: Vec<String>,
+    /// What a reload would load — see [`Waiting`]. Read here, off the key
+    /// thread, rather than while painting, since it reads every pipeline
+    /// file and `config.toml`.
+    waiting: Waiting,
     recent: VecDeque<RecentEvent>,
 }
 
@@ -3251,9 +3248,30 @@ impl Snapshot {
             agent_model: BTreeMap::new(),
             held: BTreeMap::new(),
             active_jobs: Vec::new(),
-            waiting: Vec::new(),
+            waiting: Waiting::default(),
             recent: VecDeque::new(),
         }
+    }
+}
+
+/// What a reload would bring into the running dispatcher, kept as the two
+/// lists it is read from rather than one joined list. The board's notice
+/// names the kinds of change, and a kind read back from a name would take a
+/// pipeline file called `config.toml.yml` for a config key.
+#[derive(Debug, Default)]
+struct Waiting {
+    /// Every pipeline file edited since the running dispatcher loaded them
+    /// — see [`crate::pipeline_snapshot::changed_since_start`].
+    pipelines: Vec<String>,
+    /// Every `config.toml` key whose edit waits for a reload — see
+    /// [`crate::pipeline_snapshot::config_changed_since_start`].
+    keys: Vec<String>,
+}
+
+impl Waiting {
+    /// Whether a reload would load nothing at all.
+    fn is_empty(&self) -> bool {
+        self.pipelines.is_empty() && self.keys.is_empty()
     }
 }
 
@@ -3458,8 +3476,10 @@ fn build(
     // — memoised, so a reading over an unchanged calendar does not re-scan
     // it for every enabled job.
     let active_jobs = crate::jobs::active_jobs_cached(repo, &mut memory.jobs_next);
-    let mut waiting = crate::pipeline_snapshot::changed_since_start(repo);
-    waiting.extend(crate::pipeline_snapshot::config_changed_since_start(repo));
+    let waiting = Waiting {
+        pipelines: crate::pipeline_snapshot::changed_since_start(repo),
+        keys: crate::pipeline_snapshot::config_changed_since_start(repo),
+    };
 
     // Taken before the clear below, which must not erase the very news this
     // reading is handing back — see `Memory::adopted`.
@@ -3941,10 +3961,13 @@ fn paint_at(
         &agent_model,
         &snapshot.held,
         &snapshot.active_jobs,
-        &snapshot.waiting,
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
+    // The `Config changed:` line, while a reload has something to load: the
+    // box's last row inside the dispatch tab, and the row above the key line
+    // anywhere else, under the blank row either way.
+    let notice = config_notice(&snapshot.waiting);
     // The key hint, last of all. Every row action but resume sits behind
     // `[o] options`, drawn whenever the board has a row: the menu itself
     // lists what that row can do. `[r] resume` is drawn only while the
@@ -3984,11 +4007,13 @@ fn paint_at(
     let (keys, height) = hosted_keys(crate::screen::key_hint_lit(&keys, UPDATE_KEY), height);
 
     // The rows the table's body and RECENT share: everything under the
-    // column header but the parse warnings, the footer, and the blank row
-    // and key line pushed below. One more is held back for the reason
-    // `clamp_rows` gives. Hosted, the count comes out the same: `boxed`
-    // gives the body two rows fewer than `height`, the key line goes under
-    // the box, and the blank row above it sits inside the box.
+    // column header but the parse warnings, the footer, and the blank row,
+    // the notice and the key line pushed below. One more is held back for
+    // the reason `clamp_rows` gives. Hosted, the count comes out the same:
+    // `boxed` gives the body two rows fewer than `height`, the key line goes
+    // under the box, and the blank row and the notice sit inside the box.
+    // The notice's row comes out of these, so a board with it up is no
+    // taller than one without, and the tab strip stays on screen.
     let header_rows = frame.lines().count() + 1;
     let body_rows = table.lines().count() - 1;
     let rows = height.map(|height| {
@@ -3998,6 +4023,7 @@ fn paint_at(
             .saturating_sub(problems.lines().count())
             .saturating_sub(tail.lines().count())
             .saturating_sub(2)
+            .saturating_sub(usize::from(notice.is_some()))
     });
     // Only RECENT gives up rows to the table, and only the table scrolls:
     // the lockup, the slots and the jobs keep theirs. Only a pane too short
@@ -4027,12 +4053,16 @@ fn paint_at(
     // Inside bare `spoolway`'s dispatch tab the board draws in an untitled box
     // the way the other three tabs draw theirs, with the key
     // line under the box rather than inside it. The blank row above the key
-    // line stays inside, as the box's last row.
+    // line stays inside, as the box's last row — or, with the notice up, as
+    // the row above it, the notice taking the last row.
+    frame.push('\n');
+    if let Some(notice) = &notice {
+        frame.push_str(&format!(" {notice}\n"));
+    }
     if crate::screen::shell::hosted().is_some() {
-        frame.push('\n');
         return boxed(&frame, &keys, pane, height);
     }
-    frame.push_str(&format!("\n{keys}\n"));
+    frame.push_str(&format!("{keys}\n"));
 
     clamp_rows(&frame, height)
 }
@@ -4069,7 +4099,7 @@ const UPDATE_KEY: &str = "u";
 /// as a reload would load nothing. `u` acts only while this is drawn — see
 /// [`Board::offers_update`], and `crate::screen::shell`, where the key is
 /// read.
-fn update_hint(phase: Phase, waiting: &[String]) -> &'static [(&'static str, &'static str)] {
+fn update_hint(phase: Phase, waiting: &Waiting) -> &'static [(&'static str, &'static str)] {
     match phase {
         Phase::Watching {
             holder: Some(_), ..
@@ -4100,9 +4130,15 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
 /// the lock, and none is what a project with no enabled job has anyway.
 ///
+/// While a reload has something to load, the busy board's `Config changed:`
+/// line is drawn by the same rule, under a blank row: the box's last row
+/// inside the dispatch tab, the row above the key line anywhere else — see
+/// [`config_notice`]. Its two rows come out of the greeting's, so the frame
+/// is no taller with it up.
+///
 /// Everything else the busy board draws is left off, so an idle board reads
-/// as idle at a glance: the rule, the slots lines, the `update`
-/// notice and the parse warning. Each comes back
+/// as idle at a glance: the rule, the slots lines and the parse warning.
+/// Each comes back
 /// once the board has a row again. A queue file that fails to parse makes no
 /// row, so a broken file on an otherwise empty queue is not named on the
 /// board at all. The keys that act on a row go too, since there is no row to
@@ -4119,7 +4155,7 @@ fn paint_empty(
     available: Option<&str>,
     pane: usize,
     phase: Phase,
-    waiting: &[String],
+    waiting: &Waiting,
     name: Option<&str>,
     jobs: &[crate::jobs::ActiveJob],
     lockup_frame: usize,
@@ -4146,10 +4182,18 @@ fn paint_empty(
     // The rows between the header and the key line. Hosted, `boxed` gives
     // the body `height - 2` rows, the header one of them. On its own the
     // frame also spends the top margin above, the key line, and the row
-    // `clamp_rows` holds back so the cursor never scrolls the pane.
+    // `clamp_rows` holds back so the cursor never scrolls the pane. The
+    // notice, when up, spends two more: its own and the blank row above it,
+    // pushed here rather than left to the greeting's bottom padding, which a
+    // short pane leaves at none.
+    let notice = config_notice(waiting);
+    let notice_rows = match notice {
+        Some(_) => 2,
+        None => 0,
+    };
     let region = height.map(|height| match hosted {
-        true => height.saturating_sub(3),
-        false => height.saturating_sub(4),
+        true => height.saturating_sub(3 + notice_rows),
+        false => height.saturating_sub(4 + notice_rows),
     });
     let hour = chrono::Timelike::hour(&chrono::Local::now());
     // No profile names to line "jobs" up with here, so the ledger takes
@@ -4162,6 +4206,9 @@ fn paint_empty(
         &ledger,
         lockup_frame,
     ));
+    if let Some(notice) = &notice {
+        frame.push_str(&format!("\n {notice}\n"));
+    }
     if hosted {
         return boxed(&frame, &keys, pane, height);
     }
@@ -7733,9 +7780,8 @@ mod tests {
     }
 
     /// An empty board with no dispatcher is the greeting and nothing else: no
-    /// rule, no slots lines, no jobs ledger even with a job enabled, no
-    /// `update` notice and no parse warning — and only `enter` on the key
-    /// line.
+    /// rule, no slots lines, no jobs ledger even with a job enabled and no
+    /// parse warning — and only `enter` on the key line.
     #[test]
     fn an_empty_board_draws_only_its_greeting() {
         let (repo, _root_guard) = fixture("board-empty-greeting");
@@ -7771,15 +7817,18 @@ mod tests {
         assert!(frame.contains("[enter] start dispatching"), "{frame}");
         assert!(!frame.contains("[o] options"), "{frame}");
 
-        // What only a reading can carry — a file that would not parse, an
-        // edited pipeline — stays off an empty board too.
+        // A file that would not parse stays off an empty board too, and an
+        // edited pipeline is named only by its kind, never by its file.
         let snapshot = Snapshot {
             load_problems: vec![crate::task::LoadProblem {
                 path: "broken.md".into(),
                 error: "no frontmatter".to_string(),
                 duplicate: false,
             }],
-            waiting: vec!["default".to_string()],
+            waiting: Waiting {
+                pipelines: vec!["default".to_string()],
+                keys: Vec::new(),
+            },
             ..Snapshot::empty()
         };
         let frame = strip(&paint(
@@ -8165,6 +8214,83 @@ mod tests {
             keys(&mut board, None),
             "[enter] start dispatching   [q] quit"
         );
+    }
+
+    /// While a reload has something to load, both boards draw the
+    /// `Config changed:` line under a blank row: inside the dispatch tab as
+    /// the box's last row, and on its own as the row above the key line.
+    /// With the line up the frame keeps the row count it had without it, so
+    /// the tab strip never scrolls off. With nothing waiting neither board
+    /// draws it, and the footer's old `update` line is gone. Fails before
+    /// the change: neither board drew the line, and the busy one named
+    /// `t.yml` among its slots lines instead.
+    #[test]
+    fn both_boards_draw_the_config_changed_line_above_the_key_line() {
+        let (repo, _root_guard) = fixture("board-config-notice");
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((100, 30));
+        let waiting = || Waiting {
+            pipelines: vec!["t.yml".to_string()],
+            keys: Vec::new(),
+        };
+        let busy = |waiting: Waiting| Snapshot {
+            holder: Some(4242),
+            waiting,
+            ..full_board()
+        };
+        let empty = |waiting: Waiting| Snapshot {
+            holder: Some(4242),
+            waiting,
+            ..Snapshot::empty()
+        };
+        for hosted in [false, true] {
+            let _hosting = hosted.then(|| {
+                crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch)
+            });
+            let draw = |snapshot: &Snapshot| {
+                strip(&paint(
+                    &repo,
+                    &pipelines,
+                    true,
+                    snapshot,
+                    None,
+                    &VecDeque::new(),
+                    None,
+                ))
+            };
+            let boards: [(&str, &dyn Fn(Waiting) -> Snapshot); 2] =
+                [("busy", &busy), ("empty", &empty)];
+            for (board, snapshot) in boards {
+                let quiet = draw(&snapshot(Waiting::default()));
+                let changed = draw(&snapshot(waiting()));
+                assert!(!quiet.contains("Config changed"), "{board}:\n{quiet}");
+                assert!(!changed.contains("t.yml"), "{board}:\n{changed}");
+                assert_eq!(
+                    changed.lines().count(),
+                    quiet.lines().count(),
+                    "{board}, hosted {hosted}:\n{quiet}\n{changed}"
+                );
+                // The box's borders taken off, so a row reads the same in
+                // and out of the tab.
+                let rows: Vec<&str> = changed
+                    .lines()
+                    .map(|row| row.trim_matches(|c| c == '│' || c == ' '))
+                    .collect();
+                let at = rows
+                    .iter()
+                    .position(|row| *row == "Config changed: pipelines updated")
+                    .unwrap_or_else(|| panic!("{board}, hosted {hosted}:\n{changed}"));
+                assert_eq!(rows[at - 1], "", "{board}, hosted {hosted}:\n{changed}");
+                let under = match hosted {
+                    true => "╰",
+                    false => "[enter] stop dispatching",
+                };
+                assert!(
+                    rows[at + 1].starts_with(under),
+                    "{board}, hosted {hosted}:\n{changed}"
+                );
+            }
+        }
     }
 
     /// The `[u] update config` pair is drawn out of the dim on the busy
@@ -9156,7 +9282,18 @@ mod tests {
             holder: None,
             dispatching: false,
         };
-        let board = |frame| paint_empty("", None, 96, watching, &[], None, &[], frame);
+        let board = |frame| {
+            paint_empty(
+                "",
+                None,
+                96,
+                watching,
+                &Waiting::default(),
+                None,
+                &[],
+                frame,
+            )
+        };
         let held = board(0);
         assert!(held.contains(view::LOCKUP[0][1]), "{held}");
         assert!(!held.contains(view::LOCKUP[1][1]), "{held}");
