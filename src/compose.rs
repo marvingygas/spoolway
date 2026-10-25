@@ -721,22 +721,25 @@ type Form = (&'static str, &'static str);
 
 const PASS: Form = (
     "    spoolway report --pass  -m \"<one line on what happened>\"",
-    "  This step's work is done and it came out right.",
+    "  Every requirement is met: the task's acceptance criteria and\n  \
+     what your role asks for. Nothing is left open.",
 );
 
 const FAIL: Form = (
-    "    spoolway report --fail  -m \"<what is not right, and where>\"",
-    "  This step's work is done, and what you found is not right. Your\n  \
-     message is what somebody works from to put it right, so say what\n  \
-     is wrong and where.",
+    "    spoolway report --fail  -m \"<what is wrong or unfinished>\"",
+    "  The step is not finished, or a requirement is not met, and\n  \
+     another round is needed. Say precisely what is wrong or what is\n  \
+     left to finish, and why, in your message and your handoff.",
 );
 
 const BLOCK: Form = (
     "    spoolway report --block -m \"<what is in the way>\"",
-    "  You cannot settle this within what this step is allowed to do. It\n  \
-     goes up to a person, or to a stronger agent. Say what you tried\n  \
-     and what stopped you. When a person has to act, name the\n  \
-     action and end with: then resume it on the board.",
+    "  The step cannot be finished: something unexpected is in the\n  \
+     way, or the planned solution does not work out. It needs\n  \
+     escalating: it goes up to a person, or to a stronger agent.\n  \
+     Say precisely what happened, what is in the way, and what you\n  \
+     tried. When a person has to act, name the action and end\n  \
+     with: then resume it on the board.",
 );
 
 /// `--block` in an unattended run. The unblocker reads a blocker first, and
@@ -744,9 +747,10 @@ const BLOCK: Form = (
 /// should have checked itself, so a stuck lane here writes facts only.
 const BLOCK_UNATTENDED: Form = (
     BLOCK.0,
-    "  You cannot settle this within what this step is allowed to do.\n  \
-     An unblocker lane picks it up next. Say what you tried and\n  \
-     what stopped you.",
+    "  The step cannot be finished: something unexpected is in the\n  \
+     way, or the planned solution does not work out. It needs\n  \
+     escalating. An unblocker lane picks it up next. Say precisely\n  \
+     what happened, what is in the way, and what you tried.",
 );
 
 const BLOCKED_PASS: Form = (
@@ -1177,15 +1181,20 @@ mod tests {
         report_contract(&task, &pipeline, pipeline.step(step).unwrap(), unattended)
     }
 
-    /// Attended runs keep the `--block` text they always had, word for word.
+    /// Attended runs end `--block` with the sentence that tells a lane how to
+    /// hand a person an action; unattended runs never carry it.
     #[test]
     fn an_attended_block_asks_for_a_person_when_one_has_to_act() {
         let text = contract("implement", false);
-        let expected = "  You cannot settle this within what this step is allowed to do. It\n  \
-             goes up to a person, or to a stronger agent. Say what you tried\n  \
-             and what stopped you. When a person has to act, name the\n  \
-             action and end with: then resume it on the board.";
+        let expected = "    spoolway report --block -m \"<what is in the way>\"\n\n  \
+             The step cannot be finished: something unexpected is in the\n  \
+             way, or the planned solution does not work out. It needs\n  \
+             escalating: it goes up to a person, or to a stronger agent.\n  \
+             Say precisely what happened, what is in the way, and what you\n  \
+             tried. When a person has to act, name the action and end\n  \
+             with: then resume it on the board.";
         assert!(text.contains(expected), "{text}");
+        assert!(!contract("implement", true).contains("When a person has to act"));
     }
 
     /// An unattended run's stuck lane writes facts only, for every step.
@@ -1193,12 +1202,47 @@ mod tests {
     fn an_unattended_block_names_the_unblocker_and_asks_for_no_person() {
         let text = contract("implement", true);
         let expected = "    spoolway report --block -m \"<what is in the way>\"\n\n  \
-             You cannot settle this within what this step is allowed to do.\n  \
-             An unblocker lane picks it up next. Say what you tried and\n  \
-             what stopped you.";
+             The step cannot be finished: something unexpected is in the\n  \
+             way, or the planned solution does not work out. It needs\n  \
+             escalating. An unblocker lane picks it up next. Say precisely\n  \
+             what happened, what is in the way, and what you tried.";
         assert!(text.contains(expected), "{text}");
         assert!(!text.contains("resume it on the board"), "{text}");
         assert!(!text.contains("a person"), "{text}");
+    }
+
+    /// `--pass` and `--fail` read the same in both modes, and say what each
+    /// claims: pass is every requirement met, fail is another round needed.
+    #[test]
+    fn pass_and_fail_say_what_each_report_claims_in_both_modes() {
+        let pass = "    spoolway report --pass  -m \"<one line on what happened>\"\n\n  \
+             Every requirement is met: the task's acceptance criteria and\n  \
+             what your role asks for. Nothing is left open.";
+        let fail = "    spoolway report --fail  -m \"<what is wrong or unfinished>\"\n\n  \
+             The step is not finished, or a requirement is not met, and\n  \
+             another round is needed. Say precisely what is wrong or what is\n  \
+             left to finish, and why, in your message and your handoff.";
+        for unattended in [false, true] {
+            let text = contract("implement", unattended);
+            assert!(text.contains(pass), "{text}");
+            assert!(!text.contains("--fail  -m"), "{text}");
+        }
+        let two_way = Pipeline::parse(
+            "demo",
+            "steps:\n  - id: implement\n    agent: pi\n    on_pass: done\n    on_fail: fix\n  \
+             - id: fix\n    agent: pi\n    on_pass: done\n",
+        )
+        .unwrap();
+        let task = Task::parse(
+            std::path::PathBuf::from("example.md"),
+            "---\nid: example\nstage: implement\n---\n",
+        )
+        .unwrap();
+        for unattended in [false, true] {
+            let step = two_way.step("implement").unwrap();
+            let text = report_contract(&task, &two_way, step, unattended);
+            assert!(text.contains(fail), "{text}");
+        }
     }
 
     /// `--pause` tells the unblocker to check a blocker written to a person,
