@@ -21447,7 +21447,7 @@ mod tests {
         )
         .expect("a stray task beside a queueable group must still be named");
         assert!(msg.contains("no-group.md"), "{msg}");
-        assert!(!msg.contains("Nothing to list"), "{msg}");
+        assert!(!msg.contains("nothing to list"), "{msg}");
         assert_eq!(opening_title(&groups), "tasks not listed");
     }
 

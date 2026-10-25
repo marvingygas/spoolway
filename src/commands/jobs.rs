@@ -795,7 +795,13 @@ fn pipeline_index(pipelines: &Pipelines, name: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The `Next:` value on the routines tab's details pane.
+/// How the routines tab's details pane writes a time on its `next:` and
+/// `last:` rows: `Mon 26 Oct 03:00`, with no comma, the same as the `job
+/// saved` notice writes its next firing, so one pane never shows the same
+/// moment two ways.
+const DETAIL_TIME: &str = "%a %-d %b %H:%M";
+
+/// The `next:` value on the routines tab's details pane.
 pub(super) fn detail_next(job: &Job) -> String {
     if !job.spec.enabled {
         return "inactive".to_string();
@@ -804,19 +810,16 @@ pub(super) fn detail_next(job: &Job) -> String {
         return "will not parse".to_string();
     }
     match jobs::next_fire(&job.spec.schedule) {
-        Some(when) => when.format("%a %-d %b, %H:%M").to_string(),
+        Some(when) => when.format(DETAIL_TIME).to_string(),
         None => "never".to_string(),
     }
 }
 
-/// The `Last:` value on the routines tab's details pane.
+/// The `last:` value on the routines tab's details pane.
 pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
     match jobs::last_fired(repo, name) {
         Some(epoch) => match chrono::DateTime::from_timestamp(epoch, 0) {
-            Some(when) => format!(
-                "{}  ok",
-                when.with_timezone(&Local).format("%a %-d %b, %H:%M")
-            ),
+            Some(when) => format!("{}  ok", when.with_timezone(&Local).format(DETAIL_TIME)),
             None => "never".to_string(),
         },
         None => "never".to_string(),
@@ -1233,6 +1236,33 @@ mod tests {
             text.ends_with("\nedit or activate it with o on its routine."),
             "{text}"
         );
+    }
+
+    /// The details pane's `next:` value is written `Mon 26 Oct 03:00`: day,
+    /// date, month and clock time, with no comma before the time.
+    #[test]
+    fn detail_next_writes_the_date_and_time_with_no_comma() {
+        let (repo, _root_guard) = fixture("jobs-detail-next");
+        jobs::write(
+            &repo,
+            Scope::User,
+            "nightly",
+            &JobSpec {
+                schedule: "0 3 * * *".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: "nightly".to_string(),
+                ..JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        let job = &jobs::load(&repo).unwrap()[0];
+
+        let next = detail_next(job);
+        let words: Vec<&str> = next.split(' ').collect();
+        assert!(!next.contains(','), "{next}");
+        assert_eq!(words.len(), 4, "{next}");
+        assert_eq!(words[3], "03:00", "{next}");
+        assert!(words[1].parse::<u32>().is_ok(), "{next}");
     }
 
     #[test]
