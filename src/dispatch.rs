@@ -31877,7 +31877,9 @@ mod tests {
     /// command. Raised again from 360 when that bullet, and `BLOCK`, grew
     /// their own "then resume it on the board" close, so a paused or blocked
     /// lane always says what happens after a person acts. Raised again from
-    /// 400 for `YOUR LANE`'s route and person-request bullets.
+    /// 400 for `YOUR LANE`'s route and person-request bullets. Raised again
+    /// from 480 when `PASS`, `FAIL` and `BLOCK` began saying what each
+    /// report means.
     #[test]
     fn the_composed_prompt_is_under_the_word_budget_for_the_plain_case() {
         let (repo, _root_guard) = fixture("prompt-word-budget");
@@ -31890,7 +31892,7 @@ mod tests {
         let prompt =
             crate::compose::system_prompt(&repo, &task, pipeline, step, role, false).unwrap();
         let words = prompt.replace(role, "").split_whitespace().count();
-        assert!(words < 480, "got {words} words:\n{prompt}");
+        assert!(words < 520, "got {words} words:\n{prompt}");
     }
 
     /// Every heading gap in the Mockup is exactly one blank line — never
