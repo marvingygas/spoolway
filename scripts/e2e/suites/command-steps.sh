@@ -219,7 +219,7 @@ else bad "dispatch refuses the whole start over a routeless task"; fi
 if grep -qF "refusing to start: task \`routeless\` has no \`pipeline:\`" <<<"$OUT"; then
   ok "and names the task"
 else bad "and names the task"; sed 's/^/        /' <<<"$OUT"; fi
-if grep -qF "Set \`pipeline:\` to one of:" <<<"$OUT" && grep -qF "default" <<<"$OUT"; then
+if grep -qF "set \`pipeline:\` to one of:" <<<"$OUT" && grep -qF "default" <<<"$OUT"; then
   ok "and lists the pipelines it could choose"
 else bad "and lists the pipelines it could choose"; sed 's/^/        /' <<<"$OUT"; fi
 if grep -qF "nothing was dispatched." <<<"$OUT"; then
