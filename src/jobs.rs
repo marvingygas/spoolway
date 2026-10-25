@@ -934,7 +934,7 @@ pub fn stop_stray_opens(repo: &Repo, problems: &mut Vec<String>) {
     for (task, ran) in crate::tracking::stop_overdue_strays(repo, &waited_on) {
         problems.push(format!(
             "the open hook for `{task}` was still running after {} and was stopped — \
-             nothing was queued for it. Run `spoolway queue add` again, or let the job \
+             nothing was queued for it. run `spoolway queue add` again, or let the job \
              that fired it run again, to open it.",
             crate::tracking::minutes(ran),
         ));

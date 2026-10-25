@@ -1745,13 +1745,13 @@ pub fn stale_gate_note(task: &Task, pipeline: &Pipeline, gate_at: &str) -> Strin
     if command_gate_at(task, pipeline) == Some(gate_at) {
         let reason = command_gate_at_reason(&task.front.id, gate_at, &pipeline.name);
         return format!(
-            "{kind} {reason} Its exit is not held.{PARK_NOTE_BREAK}Change `gate_at:` in the \
+            "{kind} {reason} its exit is not held.{PARK_NOTE_BREAK}change `gate_at:` in the \
              task to an agent step, or delete it."
         );
     }
     format!(
         "{kind} task `{}` has `gate_at: {gate_at}`, which pipeline `{pipeline}` does not \
-         define.{PARK_NOTE_BREAK}Change `gate_at:` in the task to a step `{pipeline}` has.",
+         define.{PARK_NOTE_BREAK}change `gate_at:` in the task to a step `{pipeline}` has.",
         task.front.id,
         pipeline = pipeline.name,
     )
@@ -3006,7 +3006,7 @@ fn refuse_if_unblocker_live(repo: &Repo, pipelines: &Pipelines, task: &Task) -> 
             "task `{id}` is blocked and has a live unblocker lane — resuming it now would \
              start a second lane in the same worktree and lose the unblocker's verdict. to \
              take it from the unblocker, run `spoolway queue pause {id}`, then \
-             `spoolway resume {id} --stage {step}`. A resume without `--stage` would put \
+             `spoolway resume {id} --stage {step}`. a resume without `--stage` would put \
              it back on `blocked`.",
             id = task.front.id
         );
@@ -3368,7 +3368,7 @@ pub(crate) fn restart_step(task: &Task, pipeline: &Pipeline) -> Result<String> {
     if step == crate::pipeline::DONE {
         bail!(
             "task `{id}` is {step}, which has finished — there is no step left to start \
-             over. A finished task cannot run again; queue a new task with `spoolway queue \
+             over. a finished task cannot run again; queue a new task with `spoolway queue \
              add`."
         );
     }

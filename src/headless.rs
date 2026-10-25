@@ -473,7 +473,7 @@ pub(crate) fn await_pid_file(mut read: impl FnMut() -> Option<u32>) -> Option<u3
 /// instead — the same shape [`crate::mux::Herdr::unavailable`] already
 /// answers with: what is missing, and what works in its place.
 const NOT_UNIX: &str = "headless lanes need `libc::setsid()` to detach a turn, and this \
-     platform has no such syscall. Dispatch through a multiplexer instead: leave \
+     platform has no such syscall. dispatch through a multiplexer instead: leave \
      `SPOOLWAY_TEST_BACKEND` unset or set to anything but `headless`.";
 
 /// Spawn `sh -c script` detached in `cwd`: `libc::setsid()`, called in the
@@ -881,7 +881,7 @@ impl Mux for Headless {
         if adapter.and_then(|a| a.headless.as_ref()).is_none() {
             bail!(
                 "`{}` cannot run headless: spoolway does not know how to hand it a prompt and \
-                 reopen its session. Run this project under a multiplexer \
+                 reopen its session. run this project under a multiplexer \
                  (leave `SPOOLWAY_TEST_BACKEND` unset), or use one of the kinds that \
                  can: {}",
                 spec.kind,

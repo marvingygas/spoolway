@@ -1726,7 +1726,7 @@ fn strip_refused_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
         if let [_] = unknown.as_slice() {
             notices.push(format!(
                 "note: `{shown}` in {} is not a table or setting this spoolway knows — kept in \
-                 the file and otherwise ignored. A newer spoolway may read it; if not, it is \
+                 the file and otherwise ignored. a newer spoolway may read it; if not, it is \
                  a typo.",
                 path.display(),
             ));
@@ -1735,7 +1735,7 @@ fn strip_refused_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
             stripped = crate::confdoc::remove(&stripped, &parts)?;
             notices.push(format!(
                 "note: `{shown}` in {} is not a setting this spoolway knows — loaded past it \
-                 and kept in the file. A newer spoolway may read it; if not, it is a typo.",
+                 and kept in the file. a newer spoolway may read it; if not, it is a typo.",
                 path.display(),
             ));
         }

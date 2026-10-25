@@ -2880,7 +2880,7 @@ mod tests {
             problems[0].contains("queued task `stale`")
                 && problems[0].contains("`gate_at: review-renamed`")
                 && problems[0].contains(
-                    "does not define.\n    Change `gate_at:` in the task to a step `default` has."
+                    "does not define.\n    change `gate_at:` in the task to a step `default` has."
                 ),
             "{problems:?}"
         );
@@ -2928,8 +2928,8 @@ mod tests {
             problems,
             [format!(
                 "queued task `stale` has `gate_at: {command}`, which runs a command in pipeline \
-                 `default` — only an agent step can be held for a person. Its exit is not \
-                 held.\n    Change `gate_at:` in the task to an agent step, or delete it."
+                 `default` — only an agent step can be held for a person. its exit is not \
+                 held.\n    change `gate_at:` in the task to an agent step, or delete it."
             )]
         );
     }

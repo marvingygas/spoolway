@@ -1693,7 +1693,7 @@ fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<(
 fn check_gate_at(task: &Task, pipeline: &crate::pipeline::Pipeline) -> Result<()> {
     if let Some(gate_at) = crate::commands::command_gate_at(task, pipeline) {
         bail!(
-            "{} Change `gate_at:` to an agent step, or delete it.",
+            "{} change `gate_at:` to an agent step, or delete it.",
             crate::commands::command_gate_at_reason(&task.front.id, gate_at, &pipeline.name)
         );
     }
@@ -4338,7 +4338,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                         "`{id}` depends on `{parents}`, in its own group{group}, but none of \
                          them reaches all the others — a group is one chain, and a task \
                          joining two of it is not one. its worktree would be cut from \
-                         `{first}`, and `{missing}` would not be in it. A depends_on must \
+                         `{first}`, and `{missing}` would not be in it. a depends_on must \
                          start with the id that contains the rest, or drop one.",
                         group = mine
                             .as_deref()
@@ -14486,7 +14486,7 @@ mod tests {
         assert_eq!(
             err,
             "task `demo` has `gate_at: handover`, which runs a command in pipeline `default` — \
-             only an agent step can be held for a person. Change `gate_at:` to an agent step, \
+             only an agent step can be held for a person. change `gate_at:` to an agent step, \
              or delete it."
         );
 

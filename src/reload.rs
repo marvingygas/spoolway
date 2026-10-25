@@ -340,7 +340,7 @@ fn apply(
     *pipelines = loaded;
     if let Err(err) = crate::pipeline_snapshot::record_config(live, &live.config) {
         problems.push(format!(
-            "the last good config could not be recorded under the run's new mode: {err:#}. A \
+            "the last good config could not be recorded under the run's new mode: {err:#}. a \
              lane that reports while config.toml is broken fails until it is; reload again once \
              the project home is writable"
         ));

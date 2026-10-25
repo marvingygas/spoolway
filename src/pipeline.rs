@@ -817,9 +817,9 @@ fn deserialize_retired_max_new_sessions<'de, D: serde::Deserializer<'de>>(
     Err(serde::de::Error::custom(
         "`max_new_sessions:` is now `loop:` — it bounds how many times this step may send a \
          task on to a given one, a lap of the loop, not how many fresh conversations that \
-         cost. A step with `session: true` may re-prompt a live session as often as it needs; \
+         cost. a step with `session: true` may re-prompt a live session as often as it needs; \
          what may bound a conversation's own size is `session_reuse_ctx` on the agent \
-         profile, entirely separate from this. Rename the key, and consider raising the \
+         profile, entirely separate from this. rename the key, and consider raising the \
          number: a whole conversation was stingier than a lap now is",
     ))
 }
@@ -833,7 +833,7 @@ fn deserialize_max_rounds<'de, D: serde::Deserializer<'de>>(
     let _ = serde_norway::Value::deserialize(d)?;
     Err(serde::de::Error::custom(
         "`max_rounds:` is now `loop:` — it bounds how many times this step may send a task \
-         on to a given one. Rename the key, and consider raising the number: what it \
+         on to a given one. rename the key, and consider raising the number: what it \
          counts has changed twice since",
     ))
 }
@@ -1207,7 +1207,7 @@ impl Pipeline {
 fn self_route_message(step_id: &str, key: &str) -> String {
     format!(
         "step `{step_id}`: `{key}` names `{step_id}` itself — a step may not route back to \
-         its own id. Send the failure to a step that leaves, or delete the step."
+         its own id. send the failure to a step that leaves, or delete the step."
     )
 }
 
@@ -1220,7 +1220,7 @@ fn loop_map_message(step_id: &str, by_route: &BTreeMap<String, u32>) -> String {
         .join("; ");
     format!(
         "step `{step_id}` declares `loop:` as a map — a limit now counts arrivals at the step \
-         that carries it. Delete it here and {give}."
+         that carries it. delete it here and {give}."
     )
 }
 
@@ -1249,7 +1249,7 @@ fn end_message(step_id: &str) -> String {
 pub(crate) fn command_gate_message(step_id: &str) -> String {
     format!(
         "step `{step_id}` runs a command but declares `gate:` — only an agent step can be held \
-         for a person. Delete `gate:`, or put it on the agent step after `{step_id}`."
+         for a person. delete `gate:`, or put it on the agent step after `{step_id}`."
     )
 }
 
@@ -4085,7 +4085,7 @@ mod tests {
             assert_eq!(
                 err,
                 "step `publish` runs a command but declares `gate:` — only an agent step can be \
-                 held for a person. Delete `gate:`, or put it on the agent step after `publish`.",
+                 held for a person. delete `gate:`, or put it on the agent step after `publish`.",
             );
         }
     }

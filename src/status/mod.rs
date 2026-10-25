@@ -14859,7 +14859,7 @@ mod tests {
         let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
         assert!(
             rows[0].next.contains("`gate_at: review-renamed`")
-                && rows[0].next.contains("Change `gate_at:` in the task"),
+                && rows[0].next.contains("change `gate_at:` in the task"),
             "{}",
             rows[0].next
         );
@@ -14883,7 +14883,7 @@ mod tests {
         assert!(rows[0].resumable);
         assert!(
             rows[0].next.contains("`gate_at: review-renamed`")
-                && rows[0].next.contains("Change `gate_at:` in the task"),
+                && rows[0].next.contains("change `gate_at:` in the task"),
             "{}",
             rows[0].next
         );

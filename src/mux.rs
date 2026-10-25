@@ -2950,7 +2950,7 @@ pub(crate) fn undo_stopped_cut(
                 &["worktree", "lock", "--reason", "initializing", &path_arg],
             );
             bail!(
-                "{stopped} The worktree it left half set up at {path_arg} could not be \
+                "{stopped} the worktree it left half set up at {path_arg} could not be \
                  removed ({removal:#}). run `{}`, then {next}.",
                 remove_by_hand_command(repo, path)
             );
@@ -3163,7 +3163,7 @@ pub(crate) fn cut_failure(cut: &str, base: &str, fetch_timed_out: bool) -> Strin
     match fetch_timed_out {
         true => format!(
             "{cut}; `git fetch origin {base}` did not finish within {}s and was \
-             stopped, so `{base}` may exist on origin but not here. Run \
+             stopped, so `{base}` may exist on origin but not here. run \
              `git fetch origin {base}` in the repository yourself, then resume \
              the task",
             CUT_FETCH_TIMEOUT.as_secs()

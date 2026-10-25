@@ -702,7 +702,7 @@ fn reload_config(
                     let message = format!("{err:#}");
                     if record_reported.as_deref() != Some(message.as_str()) {
                         let problem = format!(
-                            "the last good config could not be recorded: {message}. A lane's \
+                            "the last good config could not be recorded: {message}. a lane's \
                              `spoolway report` or a `spoolway stack` step that meets a broken \
                              config.toml will stop instead of running on it. make the project \
                              home writable; the next pass tries again"

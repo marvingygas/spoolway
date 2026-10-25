@@ -1239,7 +1239,7 @@ fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
             Finding::Check(
                 HOOK_FAILURE_LABEL.into(),
                 Err(anyhow::anyhow!(
-                    "`{event}` failed for {task} (exit {exit_code}), {remedy} Its log: {}",
+                    "`{event}` failed for {task} (exit {exit_code}), {remedy} its log: {}",
                     crate::repo::shorten_home(&log)
                 )),
             )
@@ -4824,7 +4824,7 @@ mod tests {
             vec![format!(
                 "`started` failed for compact-ctx-launch (exit 1), so the task stopped on \
                  `hook_failed`. fix what its log names, then run `spoolway resume \
-                 compact-ctx-launch`. Its log: {}",
+                 compact-ctx-launch`. its log: {}",
                 crate::repo::shorten_home(&log)
             )]
         );
