@@ -15816,8 +15816,8 @@ mod tests {
     }
 
     /// Over the groups pane, `open plan` is listed first exactly when one of
-    /// the group's tasks sets `plan:` to a value that is not empty, whichever
-    /// task that is, and the file it names is not looked for. Over the tasks
+    /// the group's tasks sets `plan:` to a value that is not empty, the first
+    /// task or a later one, and the file it names is not looked for. Over the tasks
     /// pane a task's menu never lists it, `plan:` or not.
     #[test]
     fn the_group_menu_lists_open_plan_only_with_a_plan_key() {
@@ -15850,7 +15850,8 @@ mod tests {
             );
         }
 
-        // One task of two naming a plan is enough, whichever one it is.
+        // One task of two naming a plan is enough, even when it is not the
+        // first one the group lists.
         write_pending(&repo, "first", &task_text("first", "group: mixed\n", BODY));
         write_pending(
             &repo,
