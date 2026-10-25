@@ -409,7 +409,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` One whose `gate_at:` names a command step reads ``<queued or live> task `<id>` has `gate_at: <step>`, which runs a command in pipeline `<pipeline>` — only an agent step can be held for a person. Its exit is not held. Change `gate_at:` in the task to an agent step, or delete it.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -744,7 +744,7 @@ An `enter` the resume refuses leaves the picker open and prints the reason above
 ### Pause panel
 
 `pause` from the options menu of a row with a running agent turn or command opens a panel titled
-`pause <task>`. It names the step it would abort and lists two answers:
+`pause <task>`. It names the step it would abort and lists its answers:
 
 ```
 ╭─ pause cart-empty-state ────────────╮
@@ -768,9 +768,9 @@ the panel says so in two lines above the answers: `Pausing terminates the comman
 and `Resuming restarts the command.`
 
 `pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
-named, so the named task pauses itself once that step reports, whatever it reports. For a
-command step, the task pauses once the command exits, whatever the exit code. On a row that
-already has a scheduled pause, the same answer reads `cancel the scheduled pause` and clears
+named, so the named task pauses itself once that step reports, whatever it reports. The answer is
+listed only on a running agent step. A running command step offers `pause now` alone. On a row
+that already has a scheduled pause, the same answer reads `cancel the scheduled pause` and clears
 it.
 
 ### Restart panel
@@ -985,9 +985,8 @@ the `unattended.blocked_*` keys until you restart it or it reloads on a request.
 
 ## Gates: when the pipeline waits for you
 
-A step with `gate:` stops the task on `paused` when the step reports the outcome the gate holds. The pane stays open
-for you to read. A shown command's pane stays open after the command exits, and a hidden command
-has no pane. The dispatcher stops the task on `paused` when the command exits with the outcome the gate holds.
+An agent step with `gate:` stops the task on `paused` when the step reports the outcome the gate
+holds. The pane stays open for you to read. A command step cannot be gated.
 
 Press `r` on the paused row to open the [resume picker](#resume-picker). The natural next step
 is preselected, so `enter` lets the task past the gate. Move the cursor to another step and press

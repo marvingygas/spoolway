@@ -209,7 +209,7 @@ page says `nothing to do here`. To reach them from the tasks pane, press `tab` f
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
 
-`gate` opens a picker of the steps the pending task will run. `enter` gates the task at the step
+`gate` opens a picker of the agent steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
 with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while a task above this one in its group runs a `last:` step of its own, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
 
@@ -954,7 +954,7 @@ transcript.
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
-it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
+it goes to `blocked`. A caught `--fail` goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events), forgets that
 hook's failed run, so it fires again; a task its `queued` or `started` hook stopped resumes to
 `queued`, and one its `done` hook stopped resumes straight back to `done`. With `--skip-hook`, the
@@ -1185,8 +1185,8 @@ The check also reads every task in the queue. It fails, naming the task, when th
 and the pipeline, when the task's `stage:`, `paused_at`, `blocked_from` or `parked_from` names
 a step its pipeline does not have. The stages `queued`, `paused`, `blocked` and `done` are never
 reported. It also fails, naming the task and the gate, when the task's `gate_at:` names a step its
-pipeline does not have, including a reserved word such as `done`. A task at `done` is not
-reported. Pending tasks and routines are not read.
+pipeline does not have, including a reserved word such as `done`, or a step that runs a command.
+A task at `done` is not reported. Pending tasks and routines are not read.
 
 The check also fails when two routine files hold one task id. It prints `routines:` followed by the
 text of the `routines` row of `spoolway doctor`.
@@ -1197,6 +1197,13 @@ pipeline does not have.
 ```
   problem: queued task `t2` has `gate_at: review`, which pipeline `default` does not define.
     Change `gate_at:` in the task to a step `default` has.
+```
+
+For a `gate_at:` that names a command step the line reads:
+
+```
+  problem: queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Its exit is not held.
+    Change `gate_at:` in the task to an agent step, or delete it.
 ```
 
 Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
@@ -2077,7 +2084,7 @@ A `FAIL` row labelled `no deleted task left a worktree or branch` names each wor
 that keeps the work. The row also fails when git cannot list the worktrees.
 
 A `FAIL` row labelled ``gate of task `<id>` `` names a task whose `gate_at:` names a step its
-pipeline does not have, with the line `spoolway pipeline check` prints. A task at `done` is not
+pipeline does not have or that runs a command, with the line `spoolway pipeline check` prints. A task at `done` is not
 reported. The row also shows on the warnings screen before dispatching.
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with

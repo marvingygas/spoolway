@@ -51,7 +51,7 @@ as JSON.
 | `group` | you | The group of work this task belongs to. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
 | `depends_on` | you | Task ids that must finish (reach `done`, be cleaned up and be archived) before this one starts. See [Expressing order](#expressing-order). |
-| `gate_at` | you | A step id. The task pauses after that step reports, or after a command step exits, once, whatever it reports or exits with. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
+| `gate_at` | you | An agent step id, or `blocked`. The task pauses after that step reports, once, whatever it reports. See [Paused is the other one, and it is not a block](#paused-is-the-other-one-and-it-is-not-a-block). |
 | `base` | `spoolway-tasks`, or you | The branch the group lands in. `spoolway-tasks` writes it from `spoolway task contract`'s own `base`, the branch your checkout has out. Otherwise required, here or with `spoolway queue add --base`. Must exist locally or on `origin`. |
 | `source` | you | The URL of the tracker item the task came from: an issue, a pull request or a Jira item. Never parsed. |
 | `plan` | you | The plan page's absolute path, whenever a page exists, with or without an issue. The `o` menu's `open plan` opens it in your default browser. Never parsed. |
@@ -126,25 +126,35 @@ mine.md sets `complexity: 250`, which is not a whole number from 1 to 100. Set i
 
 ### One constraint no key can express
 
-`gate_at` must name a step of the task's pipeline that the task runs. `done` is not a step.
+`gate_at` must name an agent step of the task's pipeline that the task runs, or `blocked`. `done`
+is not a step, and a step that runs a command cannot be held for a person.
 `spoolway queue add` and `spoolway task contract --from` refuse any other value, naming the task
-and the steps it may name. `spoolway task contract` lists the steps of each pipeline under
-`.pipelines.<name>.gate_at`.
-A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks. It also refuses
-a copy that would never run the gated step. See [Trials](planning.md#trials).
+and the steps it may name. For a step that runs a command the refusal reads:
 
-A `gate_at` can stop naming a step after the task is queued, when an edit to the pipeline renames
-or removes that step. The dispatcher then parks the task on `paused` before its first step and
-logs the gate with the fix:
+```
+task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Change `gate_at:` to an agent step, or delete it.
+```
+
+`spoolway task contract` lists the agent steps of each pipeline under
+`.pipelines.<name>.gate_at`.
+A trial refuses a task whose `gate_at:` names a step that a ticked pipeline lacks or runs as a
+command. It also refuses a copy that would never run the gated step. See [Trials](planning.md#trials).
+
+A `gate_at` can stop naming an agent step after the task is queued, when an edit to the pipeline
+renames or removes that step, or turns it into a command step. The dispatcher then parks the task
+on `paused` before its first step and logs the gate with the fix:
 
 ```
 t2: queued task `t2` has `gate_at: review`, which pipeline `default` does not define. Change `gate_at:` in the task to a step `default` has.
 ```
 
+For a step that runs a command, the line reads `queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Its exit is not held.` and the fix is to change `gate_at:` to an agent step or delete it.
+
 `spoolway pipeline check`, `spoolway doctor` and the task's row on the board and in
 `spoolway queue list` report the same line. A task at `done` is not reported. Resuming the task
-sends it back to `queued`, and the dispatcher parks it again until `gate_at:` names a step the
-pipeline has.
+sends it back to `queued`, and the dispatcher parks it again until `gate_at:` names an agent step
+the pipeline has. A task already running with such a `gate_at` is reported, and its command's exit
+is not held.
 
 `spoolway queue add` also refuses a `gate_at` on a step the task [walks
 past](pipelines.md#steps-a-task-walks-past), because that gate would never fire. An example is the
@@ -388,8 +398,8 @@ To throw the step's conversation away and brief the step from scratch, run
 ### Paused is the other one, and it is not a block
 
 A task that reports the outcome a step's [`gate:`](pipelines.md#gates) holds stops on `paused`. So does a
-task whose own `gate_at:` names the step it is reporting from, whatever that step reports. The
-same holds for a command step: `gate:` holds the exit its value names, and `gate_at:` holds any exit.
+task whose own `gate_at:` names the step it is reporting from, whatever that step reports. Only an
+agent step can be held. A command step's exit is never held.
 Nothing went wrong. You decide whether it goes on.
 
 Press `r` on the paused row. The picker preselects the step a plain resume lands on, and
@@ -407,7 +417,7 @@ the task stopped at, which is where an unheld pass would have gone. A command st
 at runs again. The board's resume picker says the block was cleared. When the stopped step has
 `gate: on_pass` or `gate: always`, the task waits at that step's gate instead, and the `gate_at` is spent.
 
-A `gate_at` that caught a `--fail`, at an agent step or a command step alike, sends a plain
+A `gate_at` that caught a `--fail` sends a plain
 resume down that step's `on_fail`, the route the failure chose. The picker preselects that
 step. A step with no `on_fail` sends the task to `blocked`. To wave the failure through
 instead, pick the step's `on_pass` step in the picker. To close the task instead, pick the

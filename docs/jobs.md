@@ -70,7 +70,7 @@ A project joined to a workspace keeps its routines elsewhere. Its lines, and the
 
 A firing that fails is recorded for its minute and is not tried again on every pass. This covers
 a failing `open` hook, one that is stopped after 60 seconds, and a routine that cannot be queued, such as one with a `gate_at:` that
-names no step. The dispatcher names the failure once for that minute. Only an `origin` that
+names no step or a command step. The dispatcher names the failure once for that minute. Only an `origin` that
 cannot be reached, or a routine that is being queued at that moment, leaves the minute open.
 
 A job also fires nothing while a file in the queue will not parse, and the dispatcher names the
@@ -319,7 +319,7 @@ not parse.
 | job `<name>` routine is a whole routine folder | The routine path is a task file, a folder inside a routine, or the routines directory itself. |
 | job `<name>` is the only job on its routine | Another enabled job runs the same routine. The check names that job and its store. |
 | job `<name>` pipeline is defined | `pipeline` names no defined pipeline. |
-| job `<name>` routine can be queued | Queueing the routine would be refused whatever the minute, such as a task with a `gate_at:` that names no step, a `*.md` file that does not parse, or a folder with no task. |
+| job `<name>` routine can be queued | Queueing the routine would be refused whatever the minute, such as a task with a `gate_at:` that names no step or a command step, a `*.md` file that does not parse, or a folder with no task. |
 | job `<name>` base exists | `base` is set, and it starts with `-`, is not a valid branch name, or names a branch that neither the repository nor `origin` has. |
 | job stores load | A name is in both stores, or a store is malformed TOML. |
 

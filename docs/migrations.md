@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.14.1 to the next release | `dispatch.backend` is retired; every run uses herdr, and only the test harness picks the headless backend, with `SPOOLWAY_TEST_BACKEND=headless`. A step's `gate:` is `on_pass`, `on_fail` or `always`, and older binaries refuse those values. | Run `spoolway sync` and commit what it writes, and export `SPOOLWAY_TEST_BACKEND=headless` in any script that ran `spoolway config set dispatch.backend headless`. |
+| 0.14.1 to the next release | `dispatch.backend` is retired; every run uses herdr, and only the test harness picks the headless backend, with `SPOOLWAY_TEST_BACKEND=headless`. A step's `gate:` is `on_pass`, `on_fail` or `always`, and older binaries refuse those values. A `gate:` on a `run:` step and a `gate_at:` that names a command step are refused. | Run `spoolway sync` and commit what it writes, export `SPOOLWAY_TEST_BACKEND=headless` in any script that ran `spoolway config set dispatch.backend headless`, and move each `gate:` on a `run:` step to the agent step after it or delete it. |
 | 0.13.0 to 0.14.0 | A step's `headless:` key is now `hide:` and older binaries refuse `hide:`; a new project keeps three lanes and shows command steps; `housekeeping.price_max_age_days` is retired; tasks are cut from `origin/<base>`; a lane never runs in the main checkout; matching `[models]` rows merge value by value; `eval` adds TURNS and COMPLEXITY; `queue list --json` lists `opening ticket` rows; `pipeline check` and `doctor` fail a stale `gate_at:` and a routine id held twice; `spoolway stack` runs only in its task's worktree; lanes cannot write the private overrides layer. | Run `spoolway sync` and commit what it writes, upgrade CI and teammates to the same release, set `visible_lanes` and `hide_commands` for the new defaults, push a task's base before queueing it, read `spoolway models` for merged rows, update scripts that read `eval` exports or `queue list --json`, and clear what `spoolway doctor` fails. |
 | 0.12.0 to 0.13.0 | The shipped pipelines end at a `create-pr` agent step and `spoolway stack` is deprecated; the shipped tracker hooks close a ticket with no pull request; a failing issue hook stops its task on `hook_failed` instead of `paused`; `eval --per-run` is `--per-task` and its export keys and columns change; unqueuing a routine copy deletes it; `sync` writes every `[dispatch]` key. | Run `spoolway sync` and `spoolway sync --replace` on your tracker hook, replace each `spoolway stack` step with a `create-pr` agent step, and update scripts that read `eval` exports, `--per-run`, held tasks' `state` or unqueued routine drafts. |
 | 0.11.0 to 0.12.0 | A model with no `prompt_cache_ttl` has no age limit; a task keeps its five newest lanes and `keep_finished_lanes` is retired; command steps run without a pane; herdr lanes are named `<step>-<tag>`; step ids are limited to 26 characters; resuming a caught `--fail` goes down `on_fail`; issue and git hooks have fixed time limits; `queue add` refuses misspelt keys, placeholders, ids in use and unreachable `gate_at:`; four commands refuse `--json`; `queue list --json` `stage` names the stopped step; deleting `dispatch.pid` stops the dispatcher; `doctor` fails more settings. | Run `spoolway sync`, set `prompt_cache_ttl`, rename long step ids and quoted `[models]` tables, set `visible_lanes` or `hide_commands` to taste, add `# spoolway-login:` to tracker hooks, update scripts that read lane names, `--json` or `stage`, and clear what `spoolway doctor` fails. |
@@ -59,7 +59,8 @@ wsl npm install -g spoolway
 ## 0.14.1 to the next release
 
 Run `spoolway sync` in each project and commit what it writes. It drops the retired
-`dispatch.backend` line and rewrites `gate: true` to `gate: on_pass`.
+`dispatch.backend` line and rewrites `gate: true` to `gate: on_pass`. It refuses a pipeline file
+that puts `gate:` on a `run:` step.
 
 - `dispatch.backend` is retired. Every run uses herdr, and only the end-to-end harness picks the
   headless backend, by exporting `SPOOLWAY_TEST_BACKEND=headless`. A config that still holds
@@ -76,6 +77,17 @@ Run `spoolway sync` in each project and commit what it writes. It drops the reti
 - Older spoolway binaries refuse a `gate:` value that is not `true` or `false`. Once a repo is
   synced, every machine and CI job that runs it needs the new release, or its pipelines will not
   load.
+- A `gate:` on a step with `run:` is refused when the pipeline loads, by `spoolway pipeline check`
+  and by `spoolway sync`. The message names the step. Delete the `gate:`, or put it on the agent
+  step after the command. `spoolway pipeline override --set <step>.gate=<value>` on a
+  command step is refused too.
+- A `gate_at:` that names a command step is refused by `spoolway queue add` and
+  `spoolway task contract`. For a task already queued, `spoolway pipeline check` and
+  `spoolway doctor` fail, the dispatcher parks a queued one on `paused`, and a running one carries
+  on with the command's exit not held. Change the task's `gate_at:` to an agent step or delete it.
+  `gate_at: blocked` is accepted.
+- The board's pause panel offers `pause when <step> finishes` only on a running agent step. A
+  running command step offers `pause now` alone.
 - `spoolway queue route --json` and `spoolway pipeline show --json` print a step's `gate` as
   `"on_pass"`, `"on_fail"`, `"always"` or `null`. A script that tests it for `true` or `false`
   reads the string or `null` instead.
