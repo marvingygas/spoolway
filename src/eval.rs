@@ -200,9 +200,10 @@ fn run_to(
     }
     if args.csv {
         // The CSV export is the lanes table alone. Where only command steps
-        // matched, a header and a Total of zeros would read as lanes that
-        // cost nothing, as the printed table above explains. Where nothing
-        // matched at all, the header and total print as data like `--json`.
+        // matched, a header and a `total` line of zeros would read as lanes
+        // that cost nothing, as the printed table above explains. Where
+        // nothing matched at all, the header and total print as data like
+        // `--json`.
         if rows.is_empty() && !command_rows.is_empty() {
             bail!(
                 "only command steps matched, and `--csv` exports lanes alone. Run `spoolway \
@@ -1041,7 +1042,7 @@ fn drawn_lane_columns(
 /// Totals is the default, since what the work cost in all is the first
 /// question a person opening the screen asks; `t` on the screen and
 /// `--per-task` on the command line switch to the other, for the exports
-/// as for the table. The divided view is named `average` for
+/// as for the table. The divided view is named `Average` for
 /// what both tables share, since the lanes table names it per task and the
 /// directory table per session — see [`Figures::label`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1573,6 +1574,8 @@ fn spans_more_than_one_project(rows: &[LaneRow]) -> bool {
 /// the totals view, whose figures are sums, and `average` over the average
 /// view, whose figures are those sums over the table's tasks or sessions.
 /// Named apart so a reader never takes an average task for the whole bill.
+/// An export's closing line reads the same in its first column, so a filter
+/// on that column can never read it as one more row.
 fn total_line_label(figures: Figures) -> &'static str {
     match figures {
         Figures::Totals => "total",
@@ -2083,16 +2086,6 @@ fn lane_total_cell(total: &LaneTotal, key: &str, figures: Figures) -> Option<Exp
     })
 }
 
-/// What an export's closing line reads in its first column: `total` or
-/// `average`, as the screen's own last line is labelled in `figures`' view,
-/// so a filter on that column can never read it as one more row.
-fn export_total_label(figures: Figures) -> &'static str {
-    match figures {
-        Figures::Totals => "total",
-        Figures::Average => "average",
-    }
-}
-
 /// `columns` as one CSV line: `label` in the first column — the closing
 /// line's — and every other cell through `cell`, blank where it is `None`.
 fn csv_total_line<'k>(
@@ -2130,11 +2123,9 @@ fn lanes_csv(
                 .join(",")
         })
         .collect();
-    lines.push(csv_total_line(
-        &columns,
-        export_total_label(figures),
-        |key| lane_total_cell(total, key, figures),
-    ));
+    lines.push(csv_total_line(&columns, total_line_label(figures), |key| {
+        lane_total_cell(total, key, figures)
+    }));
     (columns.join(","), lines)
 }
 
@@ -3463,7 +3454,7 @@ fn sessions_table(rows: &[SessionRow], sort: Option<&Sort>) -> Table {
     let total = session_line(
         dw,
         mw,
-        "total",
+        total_line_label(Figures::Totals),
         "",
         "",
         "",
@@ -3604,7 +3595,7 @@ fn dirs_csv(
     let total = match by {
         DirBy::Dir => {
             let total = dirs_total(dirs);
-            csv_total_line(&columns, export_total_label(figures), |key| match key {
+            csv_total_line(&columns, total_line_label(figures), |key| match key {
                 "dir" | "ctx_avg_tokens" | "ctx_avg_pct" => None,
                 "cost_usd" if figures == Figures::Average => None,
                 key => Some(dir_export_cell(&total, key)),
@@ -3620,7 +3611,7 @@ fn dirs_csv(
             let lines_n: usize = sessions.iter().map(|r| r.lines).sum();
             let unpriced: usize = sessions.iter().map(|r| r.unpriced).sum();
             let time: i64 = sessions.iter().map(|r| r.time_s.max(0)).sum();
-            csv_total_line(&columns, "total", |key| {
+            csv_total_line(&columns, total_line_label(Figures::Totals), |key| {
                 Some(match key {
                     "in_tokens" => ExportCell::count(tokens.input),
                     "out_tokens" => ExportCell::count(tokens.output),
@@ -10082,7 +10073,7 @@ mod screen_tests {
                 lane_export_columns(EvalBy::Pipeline, figures).join(",")
             );
             assert!(lines[1].contains(",default,1,"), "{body}");
-            let label = export_total_label(figures);
+            let label = total_line_label(figures);
             assert!(lines[2].starts_with(&format!("{label},")), "{body}");
             assert_eq!(lines.len(), 3, "one header, one row, one closing line");
         }
