@@ -155,7 +155,7 @@ nothing queued
 next: nightly-audit, Mon 8 Sep 03:00  (in 5h 48m)
 ```
 
-The board shows the greeting and `Nothing queued`, and under them the job ledger: every enabled job and when it next fires. See
+The board shows the greeting and `nothing queued`, and under them the job ledger: every enabled job and when it next fires. See
 [The empty board](dispatcher.md#the-empty-board).
 With no job enabled and both stores parsing, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).

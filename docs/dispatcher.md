@@ -281,7 +281,7 @@ pass itself. Its header names the pid of that child, or reads `dispatcher stoppe
 with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
 · 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
 turns while that count is above zero. On `enter`, until the child's first pass is over, or the
-dispatcher has started a lane or a command step, the tab covers the board with a keyless `Starting dispatcher` popup. See
+dispatcher has started a lane or a command step, the tab covers the board with a keyless `starting dispatcher` popup. See
 [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher stops it at once when no agent lane or command step is
@@ -291,8 +291,8 @@ or command step is running, `enter` opens the stop popup instead:
 ```
 ╭─ stop dispatching ──────────────────────────────────────────────────╮
 │                                                                     │
-│  No new steps will be started.                                      │
-│  Interrupting stops agents and commands. When resumed, agents pick  │
+│  no new steps will be started.                                      │
+│  interrupting stops agents and commands. when resumed, agents pick  │
 │  up where they left off and commands restart.                       │
 │                                                                     │
 │  > let running steps finish                                         │
@@ -366,11 +366,11 @@ at all. The frame is then cut from the bottom so it never scrolls the terminal.
 
 ### The empty board
 
-With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`.
+With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`.
 
 ```
 Good afternoon, Marvin.
-Nothing queued
+nothing queued
 ```
 
 The greeting follows the local hour and ends in a full stop.
@@ -384,11 +384,11 @@ The greeting follows the local hour and ends in a full stop.
 
 The greeting adds a comma and the first word of `git config user.name` for the board's repo. With no git, no name set or a blank value, it reads `Good afternoon.` instead. The board reads the name once, when it opens.
 
-While a dispatcher holds the lock and at least one job is enabled, the job ledger follows `Nothing queued`, after one blank row. It uses the busy board's own words and order, and is centred as one block. Jobs fire only inside a dispatcher's pass, so a board with no dispatcher running lists no jobs. When a job fires and queues its routine, the board switches back to the busy layout by itself.
+While a dispatcher holds the lock and at least one job is enabled, the job ledger follows `nothing queued`, after one blank row. It uses the busy board's own words and order, and is centred as one block. Jobs fire only inside a dispatcher's pass, so a board with no dispatcher running lists no jobs. When a job fires and queues its routine, the board switches back to the busy layout by itself.
 
 ```
 Good evening, Marvin.
-Nothing queued
+nothing queued
 
 jobs   2 active
        ○ nightly-audit   Sun 11 Oct 03:00   (in 5h 12m)
@@ -576,7 +576,7 @@ with `press u again.`
 ```
 ╭─ reload refused ──────────────────────────────────────────────╮
 │                                                               │
-│  Nothing changed. The run is still on what it had.            │
+│  nothing changed. the run is still on what it had.            │
 │                                                               │
 │  fix-login: sitting on `review`, which pipeline `feature`     │
 │  no longer defines                                            │
@@ -596,8 +596,8 @@ flowchart LR
   W -->|dispatcher stopped| S[stopped before answering, closes on enter]
 ```
 
-When the dispatcher stops before it answers, the popup reads `The dispatcher stopped before
-answering, so nothing was reloaded. A new run loads every file as it is now.` When the dispatch
+When the dispatcher stops before it answers, the popup reads `the dispatcher stopped before
+answering, so nothing was reloaded. a new run loads every file as it is now.` When the dispatch
 tab's own dispatcher stops, that sentence follows the reason it stopped in the exit popup. When
 the answer cannot be read, the popup says the board cannot tell whether the reload loaded, and to
 press `u` again if the footer still shows its `update` line.
@@ -750,7 +750,7 @@ An `enter` the resume refuses leaves the picker open and prints the reason above
 
 ```
 ╭─ pause cart-empty-state ────────────╮
-│  Pausing aborts the step it is on:  │
+│  pausing aborts the step it is on:  │
 │                                     │
 │  implement    agent    2m 21s       │
 │                                     │
@@ -766,8 +766,8 @@ When the board cannot route the task for an `r`, the picker lists no steps and s
 Pausing an agent turn sends Escape to the pane. A resume picks the session back up on a step that
 declares `session: true`, and opens a fresh conversation on any other step. Pausing
 a command step kills the run, and the command runs again in full on resume. On a command step
-the panel says so in two lines above the answers: `Pausing terminates the command's process.`
-and `Resuming restarts the command.`
+the panel says so in two lines above the answers: `pausing terminates the command's process.`
+and `resuming restarts the command.`
 
 `pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
 named, so the named task pauses itself once that step reports, whatever it reports. The answer is
@@ -788,8 +788,8 @@ The agent form names the step, the lane and the session that a restart throws aw
 │ lane      login · review                            │
 │ session   32b0d7bd — abandoned, already banked      │
 │                                                     │
-│ The lane is torn down and `review` is briefed from  │
-│ scratch. Its conversation is not kept.              │
+│ the lane is torn down and `review` is briefed from  │
+│ scratch. its conversation is not kept.              │
 │                                                     │
 │ > restart                                           │
 │                                                     │
@@ -805,8 +805,8 @@ The command form is drawn for a command step, which has no lane and no session. 
 │  step      build                                        │
 │  run       command · 4m 12s                             │
 │                                                         │
-│  The command's process is ended and `build` runs again  │
-│  from the start. Its log is kept as the previous log.   │
+│  the command's process is ended and `build` runs again  │
+│  from the start. its log is kept as the previous log.   │
 │                                                         │
 │  > restart                                              │
 │                                                         │
@@ -831,7 +831,7 @@ For a failed `done` hook the panel names the archive and the worktree removal. A
 ╭─ skip the done hook? ────────────────────────╮
 │  release-spoolway is archived and its        │
 │  worktree removed.                           │
-│  Ticket #1025 stays as it is.                │
+│  ticket #1025 stays as it is.                │
 │                                              │
 │  > skip and archive                          │
 │                                              │
