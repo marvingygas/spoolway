@@ -54,13 +54,14 @@ watch_run() { # <run-id> — blocks until the run has completed
   done
 }
 
-require_green() { # <run-id> [job allowed to be skipped]
-  local id="$1" skip="${2:-}" bad="" jobs name concl
+require_green() { # <run-id> [job that must be skipped]...
+  local id="$1" bad="" jobs name concl
+  local skip=" ${*:2} "
   jobs="$(gh run view "$id" --repo "$repo" --json jobs --jq '.jobs[] | "\(.name)=\(.conclusion)"')" \
     || die "could not read the jobs of run $id"
   [ -n "$jobs" ] || die "run $id reported no jobs at all"
   while IFS='=' read -r name concl; do
-    if [ "$name" = "$skip" ]; then
+    if [[ "$skip" == *" $name "* ]]; then
       [ "$concl" = skipped ] || bad="$bad $name=$concl"
     else
       [ "$concl" = success ] || bad="$bad $name=$concl"
@@ -102,8 +103,10 @@ rehearse() { # <head-sha> — the release workflow with publication off
   id="$(wait_for_run workflow_dispatch "$branch" "$head" "$since")" \
     || die "could not find the dispatched rehearsal run on $head"
   watch_run "$id"
-  require_green "$id" assets
-  say "rehearsal run $id on $head is green, with assets skipped by design"
+  # Both only run on a tag: `assets` uploads the release files and
+  # `homebrew` pushes the formula that points at them.
+  require_green "$id" assets homebrew
+  say "rehearsal run $id on $head is green, with assets and homebrew skipped by design"
 }
 
 land_pr() { # <pr>
