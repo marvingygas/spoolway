@@ -18918,9 +18918,9 @@ mod tests {
         pipelines
     }
 
-    /// The lane is told a person opens this pane, but that is all it is told:
-    /// spoolway still holds the pass on its own, in `commands::report`, and
-    /// nothing here asks the lane to hold it too.
+    /// The lane is told its pass is held for a person, and what to write
+    /// them, but nothing more: spoolway still holds the pass on its own, in
+    /// `commands::report`, and nothing here asks the lane to hold it too.
     #[test]
     fn a_gated_step_tells_its_lane_a_person_opens_this_pane_and_parks_its_pass() {
         let (repo, _root_guard) = fixture("checkpoint-holds");

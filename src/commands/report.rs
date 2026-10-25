@@ -398,20 +398,10 @@ pub fn report(
         // come last, where the pane leaves off. The board already offers
         // resuming, opening and parking on this task's row, so a hold prints
         // no `stop_choices`.
-        None if gated => {
-            let at = gated_at
-                .as_deref()
-                .map(|step| format!(", at `{step}`'s gate"))
-                .unwrap_or_default();
-            let account: String = handoffs
-                .iter()
-                .map(|handoff| format!("\n  {handoff}"))
-                .collect();
-            println!(
-                "{id}: {current} --{outcome}--> {} - held here for a person{at}\n{account}",
-                crate::pipeline::PAUSED,
-            )
-        }
+        None if gated => println!(
+            "{}",
+            held_account(&id, &current, outcome, gated_at.as_deref(), &handoffs)
+        ),
         // `blocked` had nowhere else to send this — see `paused_from_blocked`
         // above — so the lane that reported it, and anyone reading the log
         // afterwards, needs telling why the destination is `paused` rather
@@ -1910,6 +1900,30 @@ fn is_past_gate(pipeline: &Pipeline, origin: &str, gate_step: &str, candidate: &
         (Some(c), Some(g), Some(o)) => c > g && c > o,
         _ => false,
     }
+}
+
+/// What a held report prints last in its pane: the held line, a blank line,
+/// then each of `handoffs` on its own line, indented, in the order the lane
+/// gave them. `gated_at` is the step whose gate held an unblocker's pass,
+/// named because `current` is `blocked` there; `None` for every other hold.
+fn held_account(
+    id: &str,
+    current: &str,
+    outcome: Outcome,
+    gated_at: Option<&str>,
+    handoffs: &[String],
+) -> String {
+    let at = gated_at
+        .map(|step| format!(", at `{step}`'s gate"))
+        .unwrap_or_default();
+    let account: String = handoffs
+        .iter()
+        .map(|handoff| format!("\n  {handoff}"))
+        .collect();
+    format!(
+        "{id}: {current} --{outcome}--> {} - held here for a person{at}\n{account}",
+        crate::pipeline::PAUSED,
+    )
 }
 
 /// The three choices a stop offers, key first and then the command that does
@@ -3801,7 +3815,7 @@ mod tests {
     /// Every choice a stop offers is printed key first, then the command
     /// that does the same thing, and no offered choice lacks a key —
     /// acceptance criterion 3, checked against the exact three lines a
-    /// gated pass or a caught block prints into the pane it just parked.
+    /// pause no gate made prints into the pane it just parked.
     #[test]
     fn stop_choices_prints_every_action_key_first() {
         let choices = stop_choices("confirm-dialog", "confirm-dialog · look");
@@ -6124,6 +6138,43 @@ mod tests {
         pipelines
     }
 
+    /// An unblocker's pass held at its origin's gate answers to the same
+    /// rule as a lane's own: refused bare, naming the origin's gate, with
+    /// the task file untouched, and taken once it carries a handoff, which
+    /// lands in `## Handoff` credited to `blocked`.
+    #[test]
+    fn an_unblockers_held_pass_needs_a_handoff_too() {
+        let (repo, _root_guard) = fixture("blocked-pass-held-handoff");
+        add(&repo, "tab-shell", &[]);
+        let pipelines = gated_middle_staffed_pipelines();
+        let mut task = queued(&repo, "tab-shell");
+        task.bank_launch(crate::pipeline::QUEUED, "implement");
+        task.bank_launch("implement", "review");
+        task.bank_launch("review", "look");
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("look".into());
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+
+        let refusal = report_with_handoffs(&repo, &pipelines, "tab-shell", Outcome::Pass, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.starts_with("this pass is held at `look`'s gate for a person"),
+            "{refusal}"
+        );
+        assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+
+        report_with_handoffs(&repo, &pipelines, "tab-shell", Outcome::Pass, &["fixed it"]).unwrap();
+        let task = queued(&repo, "tab-shell");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(task.front.paused_at.as_deref(), Some("look"));
+        assert_eq!(
+            task.section("## Handoff").unwrap().trim(),
+            "- `blocked` — fixed it"
+        );
+    }
+
     /// The decision the task is named for: the gate belongs to the step,
     /// whoever does its work. A task blocked at `look` — which `look`'s own
     /// `gate: true` would have held had its own lane reported the pass — is
@@ -8166,6 +8217,144 @@ mod tests {
             crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
         );
         pipelines
+    }
+
+    /// `report` with the lane's own `--handoff` lines, returning its answer
+    /// rather than unwrapping it, so a refusal can be read.
+    fn report_with_handoffs(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        id: &str,
+        outcome: Outcome,
+        handoff: &[&str],
+    ) -> Result<()> {
+        report(
+            repo,
+            pipelines,
+            &ReportArgs {
+                task: Some(id.into()),
+                stage: None,
+                pass: outcome == Outcome::Pass,
+                fail: outcome == Outcome::Fail,
+                block: outcome == Outcome::Block,
+                pause: outcome == Outcome::Pause,
+                message: Some("deployed".into()),
+                handoff: handoff.iter().map(|h| h.to_string()).collect(),
+            },
+            None,
+        )
+    }
+
+    /// A pass a gate would hold, with no handoff or only blank ones, is
+    /// refused in the words a person reads, and the task file is left
+    /// byte for byte as it was: no Status Log line, no handoff, no stage.
+    #[test]
+    fn a_bare_held_report_is_refused_and_records_nothing() {
+        let (repo, _root_guard) = fixture("bare-held-report");
+        let pipelines = gate_pipelines();
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+
+        for handoff in [&[][..], &["", "   "][..]] {
+            let refusal = report_with_handoffs(&repo, &pipelines, "ship", Outcome::Pass, handoff)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                refusal,
+                "this pass is held at `deploy`'s gate for a person, and carries no handoff \
+                 for them. Report again with at least one --handoff: what this step did, in \
+                 plain words, then how to verify it. Nothing was recorded."
+            );
+            assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+            assert_eq!(queued(&repo, "ship").stage(), "deploy");
+        }
+
+        // Following the refusal's own advice is what gets the report taken.
+        report_with_handoffs(&repo, &pipelines, "ship", Outcome::Pass, &["it deployed"]).unwrap();
+        assert_eq!(queued(&repo, "ship").stage(), crate::pipeline::PAUSED);
+    }
+
+    /// A held report's handoffs land in `## Handoff`, in order and credited
+    /// to the step, where a step after the gate reads them, and the Status
+    /// Log gets the two lines it always did. No section is added.
+    #[test]
+    fn a_held_reports_handoffs_land_in_the_handoff_section() {
+        let (repo, _root_guard) = fixture("held-report-handoffs");
+        let pipelines = gate_pipelines();
+        add(&repo, "ship", &[]);
+        let mut task = queued(&repo, "ship");
+        task.set_stage("deploy", None);
+        task.save().unwrap();
+        let headings = |task: &Task| -> Vec<String> {
+            std::fs::read_to_string(&task.path)
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("## "))
+                .map(str::to_string)
+                .collect()
+        };
+        let mut before = headings(&task);
+
+        report_with_handoffs(
+            &repo,
+            &pipelines,
+            "ship",
+            Outcome::Pass,
+            &["shipped the build", "open https://example.test and log in"],
+        )
+        .unwrap();
+
+        let task = queued(&repo, "ship");
+        assert_eq!(task.stage(), crate::pipeline::PAUSED);
+        assert_eq!(
+            task.section("## Handoff").unwrap().trim(),
+            "- `deploy` — shipped the build\n\
+             - `deploy` — open https://example.test and log in"
+        );
+        let log = task.section("## Status Log").unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert!(
+            lines[lines.len() - 2].ends_with("→ `paused`: held by this step's own gate"),
+            "{log}"
+        );
+        assert!(
+            lines[lines.len() - 1].ends_with("`deploy`: deployed"),
+            "{log}"
+        );
+        if !before.iter().any(|heading| heading == "## Handoff") {
+            before.push("## Handoff".into());
+        }
+        let mut after = headings(&task);
+        before.sort();
+        after.sort();
+        assert_eq!(after, before);
+    }
+
+    /// The held pane's last lines: the held line, a blank line, then each
+    /// handoff indented in the order given, and no key lines after them. An
+    /// unblocker's hold names the gate it is held at.
+    #[test]
+    fn a_held_account_ends_on_the_lanes_handoffs() {
+        let handoffs = vec!["what it did".to_string(), "how to check it".to_string()];
+        assert_eq!(
+            held_account("ship", "deploy", Outcome::Fail, None, &handoffs),
+            "ship: deploy --fail--> paused - held here for a person\n\n  what it did\n  \
+             how to check it"
+        );
+        assert_eq!(
+            held_account(
+                "tab",
+                "blocked",
+                Outcome::Pass,
+                Some("look"),
+                &handoffs[..1]
+            ),
+            "tab: blocked --pass--> paused - held here for a person, at `look`'s gate\n\n  \
+             what it did"
+        );
     }
 
     /// A task parked on the gate, as `report` would have left it.

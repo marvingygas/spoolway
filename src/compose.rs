@@ -140,9 +140,9 @@ pub(crate) fn system_prompt(
 /// a prompt a project already has, so nothing a prompt says reaches every
 /// project the way this does. The prompt's own `## Never` list is what still
 /// bounds the lane. The rest
-/// read the same for every lane; a gated step's fact that a person opens
-/// this pane belongs to [`report_contract`], the form it qualifies, not
-/// here.
+/// read the same for every lane; a gated step's held line, and what its
+/// lane writes for the person who answers the gate, belong to
+/// [`report_contract`], the form they qualify, not here.
 ///
 /// The person bullets are fixed for every lane, gated or not, because
 /// composing happens once at launch and this file is all a pane has once the
@@ -983,8 +983,8 @@ pub(crate) fn report_contract(
     };
     if let Some(held) = held {
         // Wrapped as one paragraph, since the held sentence differs in
-        // length by gate; 68 columns keeps a pass's first line ending on
-        // "what they read," as the rest of the contract's prose is broken.
+        // length by gate, at 68 columns: about the width the forms above it
+        // are broken at.
         let lead = wrap(&format!("{held} {HELD_HANDOFF_LEAD}"), 68).join("\n");
         contract.push_str("\n\n");
         contract.push_str(&lead);
@@ -1219,6 +1219,78 @@ mod tests {
         )
         .unwrap();
         report_contract(&task, &pipeline, pipeline.step(step).unwrap(), unattended)
+    }
+
+    /// The contract of a task at `stage` on a pipeline whose `look` step
+    /// carries `gate`, with the task's own `front` lines added to its
+    /// frontmatter.
+    fn gated_contract(gate: &str, stage: &str, front: &str) -> String {
+        let yaml = format!(
+            "steps:\n  \
+             - id: look\n    agent: pi\n    {gate}\n    on_pass: done\n    on_fail: fix\n  \
+             - id: fix\n    agent: pi\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n"
+        );
+        let pipeline = Pipeline::parse("demo", &yaml).unwrap();
+        let task = Task::parse(
+            std::path::PathBuf::from("example.md"),
+            &format!("---\nid: example\nstage: {stage}\n{front}---\n"),
+        )
+        .unwrap();
+        report_contract(&task, &pipeline, pipeline.step(stage).unwrap(), false)
+    }
+
+    /// A held lane's contract closes on the held line for what holds it,
+    /// then the order its handoffs take for the person — an unblocker
+    /// standing in for a gated step included — and an ungated one on
+    /// neither.
+    #[test]
+    fn a_held_contract_ends_on_the_held_line_and_the_handoff_order() {
+        let order = "Your handoff is what they read,\n\
+             one --handoff per point, in this order:\n\n  \
+             1. What this step did, in plain words. Explain it as if they had\n     \
+             not seen this task. They run many at once, and this tells them\n     \
+             in one read what the step was about.\n  \
+             2. How to verify it: every path, URL or command, and what to\n     \
+             open, click or look at. Never leave them without one.\n  \
+             3. A step to skip or take instead, and why. Only when the usual\n     \
+             next step makes no sense for this task.";
+        let pass = format!("\n\nA pass is held here for a person. {order}");
+        assert!(gated_contract("gate: on_pass", "look", "").ends_with(&pass));
+        assert!(
+            gated_contract("gate: on_fail", "look", "")
+                .ends_with(&format!("\n\nA fail is held here for a person. {order}"))
+        );
+        let always = gated_contract("gate: always", "look", "");
+        assert!(
+            always.contains(
+                "\n\nA pass or a fail is held here for a person. Your handoff is what\n\
+                 they read, one --handoff per point, in this order:\n\n  1. What"
+            ),
+            "{always}"
+        );
+        assert!(
+            gated_contract("description: x", "look", "gate_at: look\n").contains(
+                "\n\nThis report is held here for a person, whatever it is. Your handoff\n\
+                 is what they read, one --handoff per point, in this order:\n\n  1."
+            )
+        );
+        assert!(
+            gated_contract("gate: on_pass", "blocked", "blocked_from: look\n").ends_with(&pass)
+        );
+        // A `gate_at: blocked` holds whatever the unblocker reports.
+        assert!(
+            gated_contract(
+                "description: x",
+                "blocked",
+                "blocked_from: look\ngate_at: blocked\n"
+            )
+            .contains("\n\nThis report is held here for a person, whatever it is.")
+        );
+
+        let plain = gated_contract("description: x", "look", "");
+        assert!(!plain.contains("held here"), "{plain}");
+        assert!(!plain.contains("in this order"), "{plain}");
     }
 
     /// Attended runs end `--block` with the sentence that tells a lane how to
