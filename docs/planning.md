@@ -452,9 +452,9 @@ not queued
 
   release-spoolway is still in the queue, at step ship.
 
-  A routine runs one copy at a time. Let it finish, resume or
+  a routine runs one copy at a time. let it finish, resume or
   restart it from the board if it has stopped, or unqueue it
-  if it has not started. Then queue the routine again.
+  if it has not started. then queue the routine again.
 
   [enter] close
 ```

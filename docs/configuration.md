@@ -517,7 +517,7 @@ Every task a hook moves to `hook_failed` adds a line to the dispatcher's problem
 hook exited non-zero or ran past its limit:
 
 ```
-`t5`'s `done` hook failed: issue_tracking hook exited 3. Fix the hook, then resume the task to run it again.
+`t5`'s `done` hook failed: issue_tracking hook exited 3. fix the hook, then resume the task to run it again.
 ```
 
 The board shows such a task as `● hook failed`, with `[r] rerun hook  [k] skip hook` in NEXT. No hook event
@@ -571,7 +571,7 @@ popup, under `problems`. The row gives the event, the task, the exit code, what 
 log path:
 
 ```
-issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task stopped on `hook_failed`. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
+issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task stopped on `hook_failed`. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 ```
 
 For a `queued`, `started` or `done` hook, `spoolway resume <task>` or `spoolway resume <task> --skip-hook` clears the row. A failed
@@ -619,7 +619,7 @@ same task, or the next job firing, picks up that run and uses its answer. A hook
 that nothing asks about is stopped by the dispatcher after 60 seconds, with this problem line:
 
 ```
-! the open hook for `hx2` was still running after 1m and was stopped — nothing was queued for it. Run `spoolway queue add` again, or let the job that fired it run again, to open it.
+! the open hook for `hx2` was still running after 1m and was stopped — nothing was queued for it. run `spoolway queue add` again, or let the job that fired it run again, to open it.
 ```
 
 The submission is refused, naming the group, when no task in a group sets

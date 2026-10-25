@@ -64,7 +64,7 @@ running, printing the one line and exiting without drawing anything:
 
 ```
 $ spoolway
-Dispatcher already running
+dispatcher already running
 ```
 
 A project is `-C <DIR>` or the current directory's repository. A screen open in one project
@@ -232,7 +232,7 @@ Queueing a group or a routine ends on a popup naming what queued. A copy of a ro
 is missing:
 
 ```
-cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+cart-totals starts from task/gh-412-checkout, which doesn't exist. set starts_from: in the task front matter and requeue.
 ```
 
 Below the list, a line says whether a dispatcher will pick the work up: `dispatcher is running`
@@ -320,7 +320,7 @@ A task whose id is the name of a routine is refused too, because the lanes of th
 copies take the routine's name. Nothing is queued:
 
 ```
-task id `nite` is the name of routine `nite`, whose copies' lanes are named `nite · <step>`. Give this task another id; nothing was queued.
+task id `nite` is the name of routine `nite`, whose copies' lanes are named `nite · <step>`. give this task another id; nothing was queued.
 ```
 
 When several adds of one id run at the same moment, exactly one is queued and the others are
@@ -341,10 +341,10 @@ A task body that still holds its skeleton's `[[…]]` placeholder text refuses t
 message names the section. See [One constraint no key can express](tasks.md#one-constraint-no-key-can-express).
 
 A task whose start branch exists neither locally nor on `origin` refuses the whole batch. The
-command prints one line for each such task and then `Nothing was queued.`:
+command prints one line for each such task and then `nothing was queued.`:
 
 ```
-cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+cart-totals starts from task/gh-412-checkout, which doesn't exist. set starts_from: in the task front matter and requeue.
 ```
 
 See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
@@ -394,8 +394,8 @@ queued:
 
 ```
 spoolway: --no-tracking names `chekout`, but no task in this batch belongs to that group.
-The batch's groups are cart, checkout, search.
-Fix the group name, or drop the flag to open every group's tickets. Nothing was queued.
+the batch's groups are cart, checkout, search.
+fix the group name, or drop the flag to open every group's tickets. nothing was queued.
 ```
 
 The command prints one row for each issue the hook answers. A group's issue reads `group issue`
@@ -652,9 +652,9 @@ refuses the whole start and dispatches nothing:
 
 ```
 refusing to start: task `auth-refresh` has no `pipeline:`
-  Set `pipeline:` to one of: bugfix, impl, impl_fast, impl_lite, impl_tdd, impl_ui, release.
+  set `pipeline:` to one of: bugfix, impl, impl_fast, impl_lite, impl_tdd, impl_ui, release.
 
-Nothing was dispatched.
+nothing was dispatched.
 ```
 
 It checks every live task's `base:` too. A task not yet cut whose base exists neither locally nor
@@ -663,9 +663,9 @@ on `origin` refuses the whole start:
 ```
 refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, which
 exists neither locally nor on `origin`
-  Set `base:` in cart-totals to a branch that exists.
+  set `base:` in cart-totals to a branch that exists.
 
-Nothing was dispatched.
+nothing was dispatched.
 ```
 
 Each question to `origin` about a base is given up after 10 seconds. An `origin` that cannot be
@@ -678,7 +678,7 @@ refuse the start. The dispatcher starts and runs the other tasks. Every pass hol
 and prints the reason, which is also written to the problem log:
 
 ```
-! task `cart-discounts` is based on `main` but depends on `cart-totals`, which is based on `plan/demo` — A chain has one base. Set `base:` in cart-discounts to `plan/demo`.
+! task `cart-discounts` is based on `main` but depends on `cart-totals`, which is based on `plan/demo` — a chain has one base. set `base:` in cart-discounts to `plan/demo`.
 ```
 
 See [Tasks and the queue](tasks.md#what-only-holds-across-a-set) for the other two shapes and for
@@ -688,7 +688,7 @@ If another dispatcher, or a screen opened with bare `spoolway`, already holds th
 prints the same line and exits:
 
 ```
-Dispatcher already running
+dispatcher already running
 ```
 
 Queueing a batch while another dispatcher already holds the lock works the same way: the batch
@@ -738,7 +738,7 @@ files
 problems
   prompt `archivist`: missing
   issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is
-    paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log:
+    paused. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log:
     ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 
 > start dispatching
@@ -983,7 +983,7 @@ A plain resume of such a task would restart it at the first step or put it back 
 runs. `--stage <step>` resumes it on the step you name. A task that stopped before it ever
 reported has no recorded step and resumes at the first step.
 
-A resume that sends the task to another step lands on the first step the task runs. When that destination is one the task [walks past](pipelines.md#steps-a-task-walks-past), the task lands on the step after it, and its `## Status Log` names the step passed. `--stage` refuses such a step instead: `` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. Nothing was resumed. ``
+A resume that sends the task to another step lands on the first step the task runs. When that destination is one the task [walks past](pipelines.md#steps-a-task-walks-past), the task lands on the step after it, and its `## Status Log` names the step passed. `--stage` refuses such a step instead: `` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. nothing was resumed. ``
 
 While a dispatcher runs, the destination comes from the pipelines it loaded at start. See
 [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
@@ -1030,11 +1030,11 @@ A task on any other stage is refused with exit 2. The message names the task's s
 ```
 $ spoolway resume build --skip-hook
 error: build is on `blocked`, not `hook_failed`, so there is no hook to skip.
-To carry it on from the step it stopped on:
+to carry it on from the step it stopped on:
   spoolway resume build
 ```
 
-A `queued` task is told `It starts on its own when the dispatcher reaches it.` A task on any other stage is told `It is not stopped, so there is nothing to carry on.`
+A `queued` task is told `it starts on its own when the dispatcher reaches it.` A task on any other stage is told `it is not stopped, so there is nothing to carry on.`
 
 ### `spoolway restart <task>`
 
@@ -1199,14 +1199,14 @@ pipeline does not have.
 
 ```
   problem: queued task `t2` has `gate_at: review`, which pipeline `default` does not define.
-    Change `gate_at:` in the task to a step `default` has.
+    change `gate_at:` in the task to a step `default` has.
 ```
 
 For a `gate_at:` that names a command step the line reads:
 
 ```
-  problem: queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Its exit is not held.
-    Change `gate_at:` in the task to an agent step, or delete it.
+  problem: queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. its exit is not held.
+    change `gate_at:` in the task to an agent step, or delete it.
 ```
 
 Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
@@ -2089,7 +2089,7 @@ A `FAIL` row labelled `routines` names each task id that two or more routine fil
 every file and an id to give one of them:
 
 ```
-  FAIL  routines: task id `lint` is in two routines — .spoolway/routines/backend/lint.md and .spoolway/routines/frontend/lint.md. Give one of them another id:, such as backend-lint.
+  FAIL  routines: task id `lint` is in two routines — .spoolway/routines/backend/lint.md and .spoolway/routines/frontend/lint.md. give one of them another id:, such as backend-lint.
 ```
 
 A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
@@ -2223,8 +2223,8 @@ A report a gate holds, with no non-empty `--handoff`, is refused with exit 2. No
 
 ```
 error: this pass is held at `deploy`'s gate for a person, and carries no
-handoff for them. Report again with at least one --handoff: what this step
-did, in plain words, then how to verify it. Nothing was recorded.
+handoff for them. report again with at least one --handoff: what this step
+did, in plain words, then how to verify it. nothing was recorded.
 ```
 
 A report that is held prints the held line, then each `--handoff` of the report indented, and nothing after them:

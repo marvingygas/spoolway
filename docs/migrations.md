@@ -587,7 +587,7 @@ dispatcher keeps routing on the pipelines it loaded when it started.
   `spoolway pipeline check` name each pipeline file changed since it started.
 - Handle exit 1 from `spoolway resume <task> --stage <step>` when the step is one the task walks
   past by `skip:`, `first:` or `last:`. It moves nothing and names the rule, for example
-  ``` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. Nothing was resumed. ```
+  ``` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. nothing was resumed. ```
 - Move a `.spoolway/` that sits below the top of the repository up to the top, or remove it. 0.8.0
   refuses it with ``<folder> is not at the top of the repo.`` A linked worktree on a branch with no
   `.spoolway/` now reads the main checkout's setup, and `spoolway sync` refuses to write a setup
@@ -740,7 +740,7 @@ the list. Nothing applies an update by itself. Run `spoolway sync` in each proje
   0.6.0 did, set `housekeeping.archive_retention_days` to the `housekeeping.retention_days` your
   project had, for example `spoolway config set housekeeping.archive_retention_days 14`.
 - `dispatch --plain` and `dispatch --force` are removed, and so is exit code 5. Drop both flags
-  from any script that calls `spoolway dispatch`, and match exit 4 (`Dispatcher already running`),
+  from any script that calls `spoolway dispatch`, and match exit 4 (`dispatcher already running`),
   which now also means a bare `spoolway` screen holds the project.
 - `spoolway queue` and `spoolway jobs` with no subcommand print usage, and `spoolway eval` always
   prints its table. Open bare `spoolway` for the screens.

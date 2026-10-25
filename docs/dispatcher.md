@@ -19,7 +19,7 @@ whatever flags are given:
 
 ```
 $ spoolway dispatch
-spoolway: Open herdr and start spoolway there:
+spoolway: open herdr and start spoolway there:
 
   herdr
   spoolway
@@ -36,7 +36,7 @@ while either is up prints the same line and exits without drawing a board:
 
 ```
 $ spoolway dispatch
-Dispatcher already running
+dispatcher already running
 ```
 
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
@@ -98,7 +98,7 @@ The run records itself in `dispatch.pid`. At the start of every pass it reads th
 If the file is deleted, or no longer names this run, the run prints one line and exits with code 0:
 
 ```
-  ! dispatch.pid no longer names this dispatcher (pid 4711); another one holds it. Stopping, so two dispatchers never work one queue.
+  ! dispatch.pid no longer names this dispatcher (pid 4711); another one holds it. stopping, so two dispatchers never work one queue.
 ```
 
 The same line goes to the problem log. Under the screen it is printed without the `  ! ` prefix.
@@ -411,7 +411,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` One whose `gate_at:` names a command step reads ``<queued or live> task `<id>` has `gate_at: <step>`, which runs a command in pipeline `<pipeline>` — only an agent step can be held for a person. Its exit is not held. Change `gate_at:` in the task to an agent step, or delete it.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. change `gate_at:` in the task to a step `<pipeline>` has.`` One whose `gate_at:` names a command step reads ``<queued or live> task `<id>` has `gate_at: <step>`, which runs a command in pipeline `<pipeline>` — only an agent step can be held for a person. its exit is not held. change `gate_at:` in the task to an agent step, or delete it.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -1501,7 +1501,7 @@ the command that resumes the task:
 
 ```
 ! <task>: the worktree is on a detached HEAD, not `task/<task>` — held on `blocked`.
-    Nothing was committed or removed. Put the work back on `task/<task>` in <path>, then: spoolway resume <task>
+    nothing was committed or removed. put the work back on `task/<task>` in <path>, then: spoolway resume <task>
 ```
 
 Put the work on `task/<id>`, or finish or abort the operation, then resume the task. Cleanup
@@ -1526,7 +1526,7 @@ The worktree counts as not removed when any of these is true:
 The dispatcher then prints this problem and keeps the task at `done`:
 
 ```
-! <task>: its worktree <path> could not be removed. To do it by hand, run `chmod -R u+w '<path>' 2>/dev/null; rm -rf '<path>'; git -C '<repo>' worktree unlock '<path>' 2>/dev/null; git -C '<repo>' worktree prune`
+! <task>: its worktree <path> could not be removed. to do it by hand, run `chmod -R u+w '<path>' 2>/dev/null; rm -rf '<path>'; git -C '<repo>' worktree unlock '<path>' 2>/dev/null; git -C '<repo>' worktree prune`
 ! <task>: stays at `done`; cleanup removes its worktree again on the next pass
 ```
 
