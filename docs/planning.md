@@ -214,13 +214,14 @@ A plan line always reads `0 open — plan <path>`, so a script that counts group
 `o` opens a menu for the row the focused pane highlights, titled with that row's name. With
 the tasks pane focused it acts on the highlighted task. With the groups pane focused it acts
 on the highlighted group, even though the tasks pane shows that group's tasks too. To reach a
-group's actions from the tasks pane, press `tab` first. The cursor opens on the first item:
+group's actions from the tasks pane, press `tab` first. The cursor opens on the first item.
+A group whose tasks name a plan page lists `open plan` first:
 
 ```
-╭─ cart-totals ───────────────────╮
-│  > open task                    │
-│    open plan                    │
-│    gate                         │
+╭─ cart ──────────────────────────╮
+│  > open plan                    │
+│    trial                        │
+│    save as routine              │
 │    delete                       │
 │                                 │
 │  [enter] confirm   [esc] close  │
@@ -230,7 +231,7 @@ group's actions from the tasks pane, press `tab` first. The cursor opens on the 
 | Item | Listed on | What it does |
 |---|---|---|
 | `open task` | A task. | Open the task in your editor. |
-| `open plan` | A task whose `plan:` is set and not empty, or a plan row. | Open the plan page `plan:` names, or the plan row's page, in your default browser. See [Options menu](dispatcher.md#options-menu). |
+| `open plan` | A group with at least one task whose `plan:` is set and not empty, or a plan row. Never a task. | Open every page the group's tasks name in `plan:`, each distinct page once and in task order, or the plan row's page, in your default browser. Pages that cannot open are listed together in one `open plan` popup, and the others still open. See [Options menu](dispatcher.md#options-menu). |
 | `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
 | `save as routine` | A group with tasks. | Save the group as a routine. See [Routines](#routines). |

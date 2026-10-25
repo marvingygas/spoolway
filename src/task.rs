@@ -396,10 +396,10 @@ pub struct Frontmatter {
 
     /// The plan page that argued this task's shape, as an absolute path —
     /// set whenever a page was written, with or without a tracker item
-    /// behind it. The `o` menu's `open plan`, on the board and on the queue
-    /// screen's tasks pane, opens it in the default browser. Nothing else in
-    /// spoolway reads it; it is carried for a person to follow back, same as
-    /// `source`.
+    /// behind it. The `o` menu's `open plan`, on the board's task rows and
+    /// on the queue screen's group rows, opens it in the default browser.
+    /// Nothing else in spoolway reads it; it is carried for a person to
+    /// follow back, same as `source`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
 
