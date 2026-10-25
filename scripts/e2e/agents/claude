@@ -11,6 +11,10 @@ E2E_SOLUTIONS=${E2E_SOLUTIONS:-}
 E2E_CTL=${E2E_CTL:-}
 SPOOLWAY=${E2E_SPOOLWAY:-spoolway}
 
+# Every report carries a handoff: a gate holds a bare one back and refuses it,
+# and the stand-in cannot know which of its steps a pipeline gates.
+lane_report() { "$SPOOLWAY" report "$@" --handoff "the stand-in did $SPOOLWAY_STEP"; }
+
 echo "stand-in argv: $*"
 # The compaction threshold a lane on this model was handed, if any: the one
 # observable of a model's `compact_ctx` that a stand-in can see.
@@ -42,15 +46,15 @@ mode=$(cat "$step_ctl" 2>/dev/null || true)
 
 verdict="$E2E_SOLUTIONS/$SPOOLWAY_TASK/review.verdict"
 case "$mode" in
-  decline) "$SPOOLWAY" report --block -m "needs a credential no lane can mint" ;;
+  decline) lane_report --block -m "needs a credential no lane can mint" ;;
   *)
     case "$SPOOLWAY_TASK" in
-      loop) "$SPOOLWAY" report --fail -m "still not right" ;;
+      loop) lane_report --fail -m "still not right" ;;
       *)
         if [ -n "$E2E_SOLUTIONS" ] && [ -f "$verdict" ] && grep -q fail "$verdict"; then
-          "$SPOOLWAY" report --fail -m "$(cat "$verdict")"
+          lane_report --fail -m "$(cat "$verdict")"
         else
-          "$SPOOLWAY" report --pass -m "review ok"
+          lane_report --pass -m "review ok"
         fi
         ;;
     esac

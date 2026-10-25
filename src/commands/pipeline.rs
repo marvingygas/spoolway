@@ -37,7 +37,7 @@ struct StepShowJson {
     effort: Option<String>,
     session: bool,
     slot: bool,
-    gate: bool,
+    gate: Option<String>,
     #[serde(rename = "loop")]
     loop_limit: Option<u32>,
     loop_exit: Option<String>,
@@ -98,7 +98,7 @@ fn build_show(pipelines: &Pipelines) -> PipelineShowJson {
                         effort: step.effort.clone(),
                         session: step.session,
                         slot: step.slot,
-                        gate: step.gate,
+                        gate: step.gate.as_ref().map(|gate| gate.as_str().to_string()),
                         loop_limit: step.r#loop.limit(),
                         loop_exit: (!step.r#loop.is_unbounded())
                             .then(|| step.loop_exit().to_string()),
@@ -367,9 +367,10 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     ),
     (
         "gate",
-        "A person approves this step's work before the task goes any further — \
-         its pass parks on `paused` until `spoolway resume`, instead of routing \
-         on.",
+        "A person sees this step's outcome before the task goes any further — \
+         `on_pass` parks a pass on `paused` until `spoolway resume`, `on_fail` \
+         parks a fail, `always` parks either. Absent holds nothing. `true` \
+         reads as `on_pass` and `false` as absent.",
     ),
     (
         "on_pass",
@@ -625,7 +626,7 @@ fn template() -> String {
          \x20\x20\x20\x20# effort: high             `medium` or `high`; the kind must carry a level\n\
          \x20\x20\x20\x20# skills: a, b             invoked at the top of this step's opening prompt\n\
          \x20\x20\x20\x20# slot: false              run without consuming one of the profile's lanes\n\
-         \x20\x20\x20\x20# gate: true               this step's pass parks on `paused` until `spoolway resume`\n\
+         \x20\x20\x20\x20# gate: on_pass            or on_fail, always: that outcome parks on `paused` for `spoolway resume`\n\
          \x20\x20\x20\x20on_pass: review\n\
          \x20\x20\x20\x20on_fail: fix\n\
          \n\
@@ -734,7 +735,7 @@ fn show_one(pipeline: &Pipeline) -> Result<()> {
             if !step.slot {
                 print!(" no-slot");
             }
-            if step.gate {
+            if step.gate.is_some() {
                 print!(" human-gate");
             }
             // Same marker a command step gets below: an agent step can walk
@@ -1130,8 +1131,9 @@ fn live_task_problems(
             ));
         }
         // `gate_at` names a step too, but the holds compare it with a step
-        // id, so a name no step has never matches and the task runs past
-        // where its author asked it to stop.
+        // id: a name no step has never matches, and a command step's exit is
+        // never held, so either way the task runs past where its author
+        // asked it to stop.
         if let Some(gate_at) = crate::commands::stale_gate_at(task, pipeline) {
             problems.push(crate::commands::stale_gate_note(task, pipeline, gate_at));
         }
@@ -1375,6 +1377,23 @@ pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
     let mut probe = step.clone();
     crate::overrides::apply_step_patch(&mut probe, &fields)
         .with_context(|| format!("`{key}` on step `{step_id}` of pipeline `{name}`"))?;
+    // `apply_step_patch` keeps an unknown `gate:` so that load can refuse it
+    // naming the step; refused here too, so it is never written.
+    if let Some(crate::pipeline::GateOn::Other(raw)) = &probe.gate {
+        bail!(
+            "{} (pipeline `{name}`)",
+            crate::pipeline::unknown_gate_message(step_id, raw)
+        );
+    }
+    // The same goes for a `gate:` on a command step. Load validates the
+    // patched pipeline and refuses it, which drops this step's whole patch
+    // entry as ignored — every other field patched on the step with it.
+    if probe.kind() == crate::pipeline::StepKind::Command && probe.gate.is_some() {
+        bail!(
+            "{} (pipeline `{name}`)",
+            crate::pipeline::command_gate_message(step_id)
+        );
+    }
 
     // `session: false` on `blocked` cannot be told apart from the key being
     // left out, so load fills it back in from `[unattended]`. Written anyway,
@@ -2875,6 +2894,44 @@ mod tests {
         )
         .unwrap();
         assert!(live_task_problems(&[finished], &pipelines, false).is_empty());
+    }
+
+    /// A queued task whose `gate_at:` names a command step is named by the
+    /// check with the step's kind and the fix, and `blocked` is not. Fails
+    /// without `command_gate_at` in `stale_gate_at`: nothing is listed.
+    #[test]
+    fn live_task_problems_name_a_gate_at_a_command_step_has() {
+        let (repo, _root_guard) = repo_for("live-task-command-gate");
+        let pipelines = Pipelines::load(&repo.checkout, &repo.config).unwrap();
+        let task = |id: &str, gate: &str| {
+            crate::task::Task::parse(
+                std::path::PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\npipeline: default\nstage: queued\ngate_at: {gate}\n---\n"),
+            )
+            .unwrap()
+        };
+        let mut pipelines = pipelines;
+        let yaml = "steps:\n  \
+                     - id: publish\n    run: make\n    on_pass: announce\n  \
+                     - id: announce\n    agent: pi\n    on_pass: done\n  \
+                     - id: blocked\n    agent: pi\n    session: true\n";
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let command = "publish";
+        let tasks = vec![task("stale", command), task("fine", "blocked")];
+
+        let problems = live_task_problems(&tasks, &pipelines, false);
+
+        assert_eq!(
+            problems,
+            [format!(
+                "queued task `stale` has `gate_at: {command}`, which runs a command in pipeline \
+                 `default` — only an agent step can be held for a person. Its exit is not \
+                 held.\n    Change `gate_at:` in the task to an agent step, or delete it."
+            )]
+        );
     }
 
     // -----------------------------------------------------------------
@@ -5967,6 +6024,64 @@ mod tests {
                     .is_none(),
                 "nothing should be written on a refusal"
             );
+        });
+    }
+
+    /// A `gate:` value load would refuse is refused before the patch is
+    /// written, naming the step and the three values.
+    #[test]
+    fn pipeline_override_refuses_a_gate_load_would_refuse() {
+        with_repo_and_pipeline("bad-gate", "demo", DEMO_PIPELINE, |repo| {
+            let step = Pipelines::load_tracked(&repo.checkout, &repo.config)
+                .unwrap()
+                .pipelines["demo"]
+                .steps[0]
+                .id
+                .clone();
+            let err = pipeline_override(repo, "demo", &format!("{step}.gate=nope")).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(&format!("step `{step}` declares `gate: nope`"))
+                    && msg.contains("`on_pass`, `on_fail` or `always`"),
+                "{msg}"
+            );
+            assert!(
+                crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                    .unwrap()
+                    .is_none(),
+                "nothing should be written on a refusal"
+            );
+            pipeline_override(repo, "demo", &format!("{step}.gate=always")).unwrap();
+        });
+    }
+
+    /// A `gate:` on a command step is refused before the patch is written,
+    /// naming both fixes, so it cannot drop the step's other patched fields
+    /// when load later refuses it.
+    #[test]
+    fn pipeline_override_refuses_a_gate_on_a_command_step() {
+        let pipeline = "steps:\n  - id: publish\n    run: make publish\n    on_pass: announce\n  \
+                        - id: announce\n    agent: pi\n    model: claude-sonnet-5\n    \
+                        on_pass: done\n";
+        with_repo_and_pipeline("command-gate", "demo", pipeline, |repo| {
+            pipeline_override(repo, "demo", "publish.timeout=5m").unwrap();
+            let err = pipeline_override(repo, "demo", "publish.gate=true").unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("step `publish` runs a command but declares `gate:`")
+                    && msg.contains("put it on the agent step after `publish`"),
+                "{msg}"
+            );
+            let patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                .unwrap()
+                .unwrap();
+            assert!(
+                patch.steps["publish"].get("gate").is_none(),
+                "the refused gate should not be written: {:?}",
+                patch.steps["publish"]
+            );
+            assert!(patch.steps["publish"].get("timeout").is_some());
+            pipeline_override(repo, "demo", "announce.gate=always").unwrap();
         });
     }
 

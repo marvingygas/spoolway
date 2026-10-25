@@ -209,7 +209,7 @@ page says `nothing to do here`. To reach them from the tasks pane, press `tab` f
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
 
-`gate` opens a picker of the steps the pending task will run. `enter` gates the task at the step
+`gate` opens a picker of the agent steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
 with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while a task above this one in its group runs a `last:` step of its own, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
 
@@ -484,7 +484,7 @@ spoolway queue route <task>
 spoolway queue route <task> --json
 ```
 
-The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: issue_tracking hook exited 1`, and no step is marked. Each step shows its id, its description and its routes. A step whose pass waits for a person says so. The `blocked` step is not listed.
+The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: issue_tracking hook exited 1`, and no step is marked. Each step shows its id, its description and its routes. A step with a `gate:` says which outcome waits for a person: `A pass waits for a person.`, `A fail waits for a person.` or `A pass or a fail waits for a person.` The `blocked` step is not listed.
 
 A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while an open task above this one in its group runs a `last:` step of its own. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
@@ -527,7 +527,7 @@ To skip it and archive the task: [k] on the board, or in your own shell
 
 For a `queued` or `started` hook, the second way reads `To skip it and start the task`. The lines for `--stage` are not printed.
 
-`--json` prints the same facts as one object.
+`--json` prints the same facts as one object. A step's `gate` is `"on_pass"`, `"on_fail"`, `"always"` or `null`.
 
 While a dispatcher runs, the command routes on the pipelines that dispatcher loaded at start, so the step it names is the one `spoolway resume` takes.
 
@@ -957,7 +957,7 @@ transcript.
 
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
-it goes to `blocked`. A caught `--fail`, at an agent or a command step, goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
+it goes to `blocked`. A caught `--fail` goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
 hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events), forgets that
 hook's failed run, so it fires again; a task its `queued` or `started` hook stopped resumes to
 `queued`, and one its `done` hook stopped resumes straight back to `done`. With `--skip-hook`, the
@@ -1153,12 +1153,12 @@ The same pipelines as JSON, each with its full list of steps.
 
 ```
 $ spoolway pipeline show --json
-{"pipelines": [{"name": "bugfix", "entry": "reproduce", "description": "...", "source": "tracked", "file": null, "steps": [{"id": "reproduce", "kind": "agent", "description": "...", "agent": "claude", "prompt": "reproducer", "model": "claude-sonnet-5", "effort": "medium", "session": true, "slot": true, "gate": false, "loop": null, "loop_exit": null, "on_pass": "fix", "on_fail": null, "run": null, "timeout_seconds": null, "background": false, "hide": null, "last": false, "first": false, "serial": false}, ...]}, ...]}
+{"pipelines": [{"name": "bugfix", "entry": "reproduce", "description": "...", "source": "tracked", "file": null, "steps": [{"id": "reproduce", "kind": "agent", "description": "...", "agent": "claude", "prompt": "reproducer", "model": "claude-sonnet-5", "effort": "medium", "session": true, "slot": true, "gate": null, "loop": null, "loop_exit": null, "on_pass": "fix", "on_fail": null, "run": null, "timeout_seconds": null, "background": false, "hide": null, "last": false, "first": false, "serial": false}, ...]}, ...]}
 ```
 
 `source` and `file` read the same as [`pipeline list
 --json`](#spoolway-pipeline-list---json). `kind` is `"agent"` or `"command"`.
-`loop` is `null` for a step with no `loop:` limit; `timeout_seconds` is `null` for an agent
+`gate` is `"on_pass"`, `"on_fail"`, `"always"` or `null`. `loop` is `null` for a step with no `loop:` limit; `timeout_seconds` is `null` for an agent
 step.
 
 ### `spoolway pipeline check`
@@ -1188,8 +1188,8 @@ The check also reads every task in the queue. It fails, naming the task, when th
 and the pipeline, when the task's `stage:`, `paused_at`, `blocked_from` or `parked_from` names
 a step its pipeline does not have. The stages `queued`, `paused`, `blocked` and `done` are never
 reported. It also fails, naming the task and the gate, when the task's `gate_at:` names a step its
-pipeline does not have, including a reserved word such as `done`. A task at `done` is not
-reported. Pending tasks and routines are not read.
+pipeline does not have, including a reserved word such as `done`, or a step that runs a command.
+A task at `done` is not reported. Pending tasks and routines are not read.
 
 The check also fails when two routine files hold one task id. It prints `routines:` followed by the
 text of the `routines` row of `spoolway doctor`.
@@ -1200,6 +1200,13 @@ pipeline does not have.
 ```
   problem: queued task `t2` has `gate_at: review`, which pipeline `default` does not define.
     Change `gate_at:` in the task to a step `default` has.
+```
+
+For a `gate_at:` that names a command step the line reads:
+
+```
+  problem: queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Its exit is not held.
+    Change `gate_at:` in the task to an agent step, or delete it.
 ```
 
 Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
@@ -2080,7 +2087,7 @@ A `FAIL` row labelled `no deleted task left a worktree or branch` names each wor
 that keeps the work. The row also fails when git cannot list the worktrees.
 
 A `FAIL` row labelled ``gate of task `<id>` `` names a task whose `gate_at:` names a step its
-pipeline does not have, with the line `spoolway pipeline check` prints. A task at `done` is not
+pipeline does not have or that runs a command, with the line `spoolway pipeline check` prints. A task at `done` is not
 reported. The row also shows on the warnings screen before dispatching.
 
 A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
@@ -2194,13 +2201,32 @@ spoolway report --fail -m "review found a missing migration" --handoff "add the 
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--pass` | | The step succeeded. Route along `on_pass`. On `blocked`, when the step this pass stands in for is a `gate: true` agent step, it lands on `paused` at that step's own gate instead. A command step is handed back to itself. In an unattended run the fourth such pass in a row parks the task on `paused` instead. See [Loops](pipelines.md#loops) |
+| `--pass` | | The step succeeded. Route along `on_pass`. On `blocked`, when the step this pass stands in for is an agent step with `gate: on_pass` or `gate: always`, it lands on `paused` at that step's own gate instead. A command step is handed back to itself. In an unattended run the fourth such pass in a row parks the task on `paused` instead. See [Loops](pipelines.md#loops) |
 | `--stage <STEP>` | | Only with `--pass` on `blocked`: land on `<STEP>` instead of the default. `<STEP>` must be one this task has already run, and never one past a gate this pass has not answered for |
-| `--fail` | | The step failed. Route along `on_fail` |
-| `--block` | | Something outside the step is in the way. Escalate |
+| `--fail` | | The step is not finished, or a requirement is not met, so another round is needed. Route along `on_fail` |
+| `--block` | | The step cannot be finished: something unexpected is in the way, or the planned solution does not work out. Escalate |
 | `--pause` | | Only on `blocked`: park the task on `paused` for a person |
 | `-m`, `--message <TEXT>` | | One line for the status log |
-| `--handoff <TEXT>` | | One thing the next step should know. Repeatable. Written into `## Handoff` |
+| `--handoff <TEXT>` | | One thing the next step should know. Repeatable. A blank one is left out. Written into `## Handoff`. A report a gate holds needs at least one |
+
+A report a gate holds, with no non-empty `--handoff`, is refused with exit 2. Nothing is recorded, and the task stays where it was:
+
+```
+error: this pass is held at `deploy`'s gate for a person, and carries no
+handoff for them. Report again with at least one --handoff: what this step
+did, in plain words, then how to verify it. Nothing was recorded.
+```
+
+A report that is held prints the held line, then each `--handoff` of the report indented, and nothing after them:
+
+```
+ship: deploy --pass--> paused - held here for a person
+
+  shipped the build
+  open https://example.test and log in
+```
+
+A pass from `blocked` held at an origin step's gate adds ``, at `<step>`'s gate`` to the held line.
 
 A report from a `queued`, `paused` or `hook_failed` task is refused, because no lane works at any of those stages. The refusal names the next action: `spoolway resume <task>` for a paused task, `spoolway resume <task>` to run the hook again for a `hook_failed` task, and waiting for the dispatcher for a queued one.
 

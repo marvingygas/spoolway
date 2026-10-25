@@ -15,6 +15,10 @@ E2E_FIXTURE_VERIFY=${E2E_FIXTURE_VERIFY:-}
 E2E_FORGE=${E2E_FORGE_DIR:-}
 SPOOLWAY=${E2E_SPOOLWAY:-spoolway}
 
+# Every report carries a handoff: a gate holds a bare one back and refuses it,
+# and the stand-in cannot know which of its steps a pipeline gates.
+lane_report() { "$SPOOLWAY" report "$@" --handoff "the stand-in did $SPOOLWAY_STEP"; }
+
 # The profile's own environment, echoed rather than used: the env table of an
 # agent profile is a setting whose only observable is a variable arriving in a
 # lane, and a stand-in that never mentioned it would leave it untestable.
@@ -73,7 +77,7 @@ case "$mode" in
 esac
 
 case "$mode" in
-  stage:*) "$SPOOLWAY" report --pass --stage "${mode#stage:}" -m "back to ${mode#stage:}" ;;
+  stage:*) lane_report --pass --stage "${mode#stage:}" -m "back to ${mode#stage:}" ;;
   crash) exit 0 ;;          # ends its turn without reporting
   hang | vanish) sleep 300 ;; # never finishes on its own
   # A turn that leaves a change behind and passes. A task cut straight onto
@@ -81,8 +85,8 @@ case "$mode" in
   # `create-pr` it is sent to would open a pull request for an empty diff.
   # The change keeps such a task shaped like one that ran.
   work) echo "work for $SPOOLWAY_TASK at $SPOOLWAY_STEP" >> "work-$SPOOLWAY_TASK.txt"
-        "$SPOOLWAY" report --pass -m "did $SPOOLWAY_STEP, leaving a change" ;;
-  bail) "$SPOOLWAY" report --block -m "needs a credential no lane can mint" ;;
+        lane_report --pass -m "did $SPOOLWAY_STEP, leaving a change" ;;
+  bail) lane_report --block -m "needs a credential no lane can mint" ;;
   *)
     case "$SPOOLWAY_STEP" in
       implement | fix)
@@ -91,22 +95,22 @@ case "$mode" in
           # Real work, replayed. The lane is standing in its own worktree, so
           # this lands on the task's branch exactly as an agent's edit would.
           if ! git apply --3way "$patch" >/dev/null 2>&1; then
-            "$SPOOLWAY" report --fail -m "the canned patch for $SPOOLWAY_STEP no longer applies"
+            lane_report --fail -m "the canned patch for $SPOOLWAY_STEP no longer applies"
             exit 0
           fi
           if [ -n "$E2E_FIXTURE_TEST" ] && [ -x "$E2E_FIXTURE_TEST" ]; then
             if ! "$E2E_FIXTURE_TEST" >/dev/null 2>&1; then
-              "$SPOOLWAY" report --fail -m "the fixture's own tests are red after $SPOOLWAY_STEP"
+              lane_report --fail -m "the fixture's own tests are red after $SPOOLWAY_STEP"
               exit 0
             fi
           fi
-          "$SPOOLWAY" report --pass -m "applied the canned $SPOOLWAY_STEP patch"
+          lane_report --pass -m "applied the canned $SPOOLWAY_STEP patch"
         else
           # A file of the task's own, so parallel tasks never conflict on the
           # merge — conflicts and the refresh step are a scenario of their own,
           # not a side effect every scenario pays.
           echo "work for $SPOOLWAY_TASK at $SPOOLWAY_STEP" >> "work-$SPOOLWAY_TASK.txt"
-          "$SPOOLWAY" report --pass -m "did $SPOOLWAY_STEP"
+          lane_report --pass -m "did $SPOOLWAY_STEP"
         fi
         ;;
       reproduce)
@@ -114,10 +118,10 @@ case "$mode" in
         # `norepro` mode is the bug nobody can make happen, which the pipeline
         # must hand to a person rather than loop on.
         if [ "$mode" = norepro ]; then
-          "$SPOOLWAY" report --fail -m "the bug will not reproduce: tried what the task describes and saw the documented behaviour"
+          lane_report --fail -m "the bug will not reproduce: tried what the task describes and saw the documented behaviour"
         else
           echo "exit 1 # the bug, captured" > "repro-$SPOOLWAY_TASK.sh"
-          "$SPOOLWAY" report --pass -m "captured the bug as a failing repro"
+          lane_report --pass -m "captured the bug as a failing repro"
         fi
         ;;
       reproduce-again)
@@ -127,11 +131,11 @@ case "$mode" in
         # then land, without steering it mid-run.
         if [ "$mode" = stillbroken ] && [ ! -f "$E2E_CTL/$SPOOLWAY_TASK.retried" ]; then
           touch "$E2E_CTL/$SPOOLWAY_TASK.retried"
-          "$SPOOLWAY" report --fail -m "the repro still fails"
+          lane_report --fail -m "the repro still fails"
         elif [ -f "repro-$SPOOLWAY_TASK.sh" ]; then
-          "$SPOOLWAY" report --pass -m "the repro passes now"
+          lane_report --pass -m "the repro passes now"
         else
-          "$SPOOLWAY" report --fail -m "no repro to run: the reproduce step left nothing behind"
+          lane_report --fail -m "no repro to run: the reproduce step left nothing behind"
         fi
         ;;
       e2e)
@@ -141,12 +145,12 @@ case "$mode" in
         # this the pipeline cannot be asked about any other way.
         if [ -n "$E2E_FIXTURE_VERIFY" ] && [ -x "$E2E_FIXTURE_VERIFY" ]; then
           if "$E2E_FIXTURE_VERIFY" "$SPOOLWAY_WORKTREE"; then
-            "$SPOOLWAY" report --pass -m "ran it and exercised it"
+            lane_report --pass -m "ran it and exercised it"
           else
-            "$SPOOLWAY" report --fail -m "the project did not behave when run"
+            lane_report --fail -m "the project did not behave when run"
           fi
         else
-          "$SPOOLWAY" report --pass -m "nothing to run in this fixture"
+          lane_report --pass -m "nothing to run in this fixture"
         fi
         ;;
       *)
@@ -180,7 +184,7 @@ case "$mode" in
           done
         fi
         if ! { [ -n "$prompt" ] && [ -f "$prompt" ] && grep -qE "^(You own git\.|# Create PR)" "$prompt"; }; then
-          "$SPOOLWAY" report --pass -m "ok"
+          lane_report --pass -m "ok"
           exit 0
         fi
 
@@ -197,12 +201,12 @@ case "$mode" in
         [ -n "$onto" ] || onto=$(sed -n "s/^base: //p" "$SPOOLWAY_TASK_FILE" 2>/dev/null | head -1)
 
         [ "$mode" = noland ] && {
-          "$SPOOLWAY" report --pass -m "left it unpushed on purpose"
+          lane_report --pass -m "left it unpushed on purpose"
           exit 0
         }
 
         if [ -z "$E2E_FORGE" ]; then
-          "$SPOOLWAY" report --pass -m "no forge to open a pull request on"
+          lane_report --pass -m "no forge to open a pull request on"
           exit 0
         fi
 
@@ -217,7 +221,7 @@ case "$mode" in
         # This ends every task's `create-pr`, whatever step reaches it last in
         # its plan: a push and an open pull request, and nothing else. No
         # merge, no plan pull request, no `plan list` — landing is a person's.
-        "$SPOOLWAY" report --pass -m "pull request open against \`${onto:-main}\`"
+        lane_report --pass -m "pull request open against \`${onto:-main}\`"
         ;;
     esac
     ;;

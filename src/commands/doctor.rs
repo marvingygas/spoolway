@@ -2633,9 +2633,10 @@ fn task_template_checks(repo: &Repo, pipelines: &Pipelines) -> Vec<Finding> {
 }
 
 /// One failed row for each task in the queue whose `gate_at:` names a step its
-/// pipeline lacks, except one already at `done`. The dispatcher parks such a
-/// task when it is still on `queued`; one past that, or already parked, is
-/// named here all the same, while the pipeline edit can still be undone.
+/// pipeline lacks, or a command step (a hand edit, or a step turned into a
+/// command), except one already at `done`. The dispatcher parks such a task
+/// when it is still on `queued`; one past that, or already parked, is named
+/// here all the same, while the pipeline edit can still be undone.
 fn stale_gate_checks(tasks: &[Task], pipelines: &Pipelines) -> Vec<Finding> {
     tasks
         .iter()
@@ -6688,6 +6689,36 @@ mod tests {
             }),
             "{warnings:?}"
         );
+    }
+
+    /// A queued task whose `gate_at:` names a command step is a failed row
+    /// naming the step, the same as one naming no step. Fails without
+    /// `command_gate_at` in `stale_gate_at`: no row is raised.
+    #[test]
+    fn a_gate_at_a_command_step_has_is_a_failed_row() {
+        let pipelines = Pipelines::builtin();
+        let tasks: Vec<Task> = [("stale", "handover"), ("fine", "blocked")]
+            .into_iter()
+            .map(|(id, gate)| {
+                Task::parse(
+                    std::path::PathBuf::from(format!("{id}.md")),
+                    &format!(
+                        "---\nid: {id}\npipeline: default\nstage: queued\ngate_at: {gate}\n---\n"
+                    ),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let findings = stale_gate_checks(&tasks, &pipelines);
+        assert_eq!(findings.len(), 1);
+        match &findings[0] {
+            Finding::Check(label, Err(why)) => {
+                assert_eq!(label, "gate of task `stale`");
+                assert!(format!("{why}").contains("runs a command"), "{why}");
+            }
+            _ => panic!("expected one failed check"),
+        }
     }
 
     /// A queued task whose `gate_at:` names a step its pipeline lacks is a

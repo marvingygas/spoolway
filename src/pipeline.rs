@@ -429,7 +429,11 @@ pub struct Step {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub slot: bool,
 
-    /// A person approves this step's work before the task goes any further.
+    /// A person sees this step's outcome before the task goes any further:
+    /// `on_pass` holds a pass, `on_fail` holds a fail and `always` holds
+    /// either. Absent holds nothing. `true` still reads as `on_pass` and
+    /// `false` as absent, so a project that has not run `spoolway sync` since
+    /// `gate:` was a yes or no behaves as it did.
     ///
     /// For a step that changes something without leaving a pull request behind
     /// — a deploy, a release, anything irreversible nobody would otherwise see
@@ -462,13 +466,21 @@ pub struct Step {
     /// design, and nobody staffing the run is a reason to wait longer for
     /// them, not a reason to let the pass through. See `unattended.enabled`.
     ///
+    /// Only an agent step can carry one: a command has no lane to tell the
+    /// person what it did, so `validate` refuses `gate:` on a `run:` step and
+    /// the check its result needs goes on the agent step after it.
+    ///
     /// The gate belongs to the step, whoever does its work: an unblocker's
     /// `--pass` from `blocked` is held here exactly the same way, at the gate
     /// of the step named by the task's own `blocked_from` rather than of
     /// `blocked` itself. See `commands::report::route` and
     /// `commands::gate_hold`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub gate: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_gate"
+    )]
+    pub gate: Option<GateOn>,
 
     /// Step to move to on a `pass`. Absent means the task stays put.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -902,6 +914,75 @@ fn deserialize_session<'de, D: serde::Deserializer<'de>>(
     }
 }
 
+/// Which outcome a step's `gate:` holds for a person.
+///
+/// `Other` is not a setting: it carries a value that is none of the three so
+/// [`Pipeline::validate`] can refuse it naming the step, which a serde error
+/// raised from inside one field cannot do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateOn {
+    /// Holds a pass.
+    OnPass,
+    /// Holds a fail.
+    OnFail,
+    /// Holds a pass or a fail.
+    Always,
+    /// Neither: the value as written, refused by `validate`.
+    Other(String),
+}
+
+impl GateOn {
+    /// Whether a pass is held.
+    pub fn holds_pass(&self) -> bool {
+        matches!(self, GateOn::OnPass | GateOn::Always)
+    }
+
+    /// Whether a fail is held.
+    pub fn holds_fail(&self) -> bool {
+        matches!(self, GateOn::OnFail | GateOn::Always)
+    }
+
+    /// The word the pipeline file spells it with.
+    pub fn as_str(&self) -> &str {
+        match self {
+            GateOn::OnPass => "on_pass",
+            GateOn::OnFail => "on_fail",
+            GateOn::Always => "always",
+            GateOn::Other(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for GateOn {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// Reads `gate:`. A bare `true` is `on_pass` and `false` is no gate, which is
+/// what a pipeline written when `gate:` was a yes or no says; the three names
+/// are the new spelling. Anything else is kept as [`GateOn::Other`].
+fn deserialize_gate<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<GateOn>, D::Error> {
+    Ok(match serde_norway::Value::deserialize(d)? {
+        serde_norway::Value::Null | serde_norway::Value::Bool(false) => None,
+        serde_norway::Value::Bool(true) => Some(GateOn::OnPass),
+        serde_norway::Value::String(s) => Some(match s.as_str() {
+            "on_pass" => GateOn::OnPass,
+            "on_fail" => GateOn::OnFail,
+            "always" => GateOn::Always,
+            _ => GateOn::Other(s),
+        }),
+        other => Some(GateOn::Other(
+            serde_norway::to_string(&other)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        )),
+    })
+}
+
 /// Rendering a default back out is noise in a file somebody has to read, so
 /// every key that has one is skipped when it still holds it. What is written is
 /// what the pipeline actually says.
@@ -976,6 +1057,12 @@ impl Step {
     /// has gone wrong.
     pub fn command_timeout(&self) -> Duration {
         self.timeout.unwrap_or(DEFAULT_COMMAND_TIMEOUT)
+    }
+
+    /// Whether this step's gate holds a pass — what an unblocker's `--pass`
+    /// from `blocked` is held at, since that pass stands in for this step's.
+    pub fn gates_pass(&self) -> bool {
+        self.gate.as_ref().is_some_and(GateOn::holds_pass)
     }
 
     /// Where a task goes when this step reports `outcome`.
@@ -1158,12 +1245,26 @@ fn end_message(step_id: &str) -> String {
     format!("step `{step_id}` sets end: true, which is gone — use on_pass: done")
 }
 
+/// A `gate:` on a step that runs a command. Shared with `pipeline check`.
+pub(crate) fn command_gate_message(step_id: &str) -> String {
+    format!(
+        "step `{step_id}` runs a command but declares `gate:` — only an agent step can be held \
+         for a person. Delete `gate:`, or put it on the agent step after `{step_id}`."
+    )
+}
+
+/// A `gate:` that names none of the three outcomes. Shared with
+/// `pipeline override --set`, which refuses it before writing a patch.
+pub(crate) fn unknown_gate_message(step_id: &str, raw: &str) -> String {
+    format!("step `{step_id}` declares `gate: {raw}` — `gate:` is `on_pass`, `on_fail` or `always`")
+}
+
 /// A step routing its pass to `blocked`. `blocked` is a stage a task is
 /// parked on, and an unattended run staffs it with a lane instead of a
-/// person, so a pass written to land there strands the task. `gate: true`
+/// person, so a pass written to land there strands the task. `gate: on_pass`
 /// holds the same pass for a person and keeps where it was headed.
 fn on_pass_blocked_message(step_id: &str) -> String {
-    format!("step `{step_id}` has on_pass: blocked — use gate: true to stop for a person")
+    format!("step `{step_id}` has on_pass: blocked — use gate: on_pass to stop for a person")
 }
 
 /// A background command step declaring `on_fail`. 0.10.0 routed a late
@@ -1357,6 +1458,28 @@ impl Pipeline {
         let known = |id: &str| id == DONE || id == BLOCKED || self.steps.iter().any(|s| s.id == id);
 
         for step in &self.steps {
+            match &step.gate {
+                Some(GateOn::Other(raw)) => bail!(unknown_gate_message(&step.id, raw)),
+                // A fail that goes where a block goes is never offered to the
+                // lane (see `compose::report_contract`), so nothing could ever
+                // reach this gate.
+                Some(GateOn::OnFail)
+                    if step.id != BLOCKED
+                        && step.destination(Outcome::Fail) == step.destination(Outcome::Block) =>
+                {
+                    bail!(
+                        "step `{}` declares `gate: on_fail` but {}, so its lane is never offered \
+                         a fail and the gate can never hold one. Add `on_fail: <step>`, or use \
+                         `gate: on_pass`.",
+                        step.id,
+                        match step.on_fail {
+                            Some(_) => "its `on_fail:` is `blocked`",
+                            None => "no `on_fail:`",
+                        }
+                    )
+                }
+                _ => {}
+            }
             for (label, target) in [("on_pass", &step.on_pass), ("on_fail", &step.on_fail)] {
                 if let Some(target) = target
                     && !known(target)
@@ -1395,7 +1518,7 @@ impl Pipeline {
                          itself; delete `on_fail:`"
                     );
                 }
-                if step.gate {
+                if step.gate.is_some() {
                     bail!(
                         "step `blocked` declares `gate:` — nobody approves a block clearing, \
                          the task just carries on from the step it blocked on; delete `gate:`"
@@ -1489,16 +1612,12 @@ impl Pipeline {
                     if step.background && step.on_fail.is_some() {
                         bail!(background_on_fail_message(&step.id));
                     }
-                    // A background step passes the moment it starts, so a
-                    // gate there would hold the start, not the exit the docs
-                    // promise.
-                    if step.background && step.gate {
-                        bail!(
-                            "step `{}` runs in the background but declares `gate` — its pass \
-                             comes when the command starts, so there is no exit to hold; delete \
-                             `gate:` or `background:`",
-                            step.id
-                        );
+                    // A command has no lane to tell the person what it did,
+                    // so a held exit would hand them an exit code and nothing
+                    // else. The check its result needs belongs on the agent
+                    // step after it.
+                    if step.gate.is_some() {
+                        bail!(command_gate_message(&step.id));
                     }
                 }
             }
@@ -1692,6 +1811,9 @@ impl Pipeline {
             if step.background && step.on_fail.is_some() {
                 problems.push(background_on_fail_message(&step.id));
             }
+            if step.kind() == StepKind::Command && step.gate.is_some() {
+                problems.push(command_gate_message(&step.id));
+            }
             if step.headless.is_some() {
                 problems.push(headless_message(&step.id));
             }
@@ -1700,8 +1822,7 @@ impl Pipeline {
     }
 
     /// Steps that gate but declare no `on_fail`, so a `spoolway report
-    /// --fail` at that step, or a command step's failing exit, has nowhere
-    /// named to go but `blocked`.
+    /// --fail` at that step has nowhere named to go but `blocked`.
     ///
     /// Not one of `validate`'s own refusals: a gated step with no `on_fail`
     /// is a legal shape — [`Step::destination`] already falls back to
@@ -1712,16 +1833,11 @@ impl Pipeline {
     pub fn gate_warnings(&self) -> Vec<String> {
         self.steps
             .iter()
-            .filter(|step| step.gate && step.on_fail.is_none())
+            .filter(|step| step.gate.is_some() && step.on_fail.is_none())
             .map(|step| {
-                // A command step reports nothing; its exit code is the outcome.
-                let failure = match step.kind() {
-                    StepKind::Command => "a failing exit",
-                    _ => "`spoolway report --fail`",
-                };
                 format!(
-                    "{}: `{}` gates but declares no `on_fail`, so {failure} there parks the \
-                     task on `{BLOCKED}`.",
+                    "{}: `{}` gates but declares no `on_fail`, so `spoolway report --fail` \
+                     there parks the task on `{BLOCKED}`.",
                     self.name, step.id
                 )
             })
@@ -2078,7 +2194,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         skills: Vec::new(),
         session: unattended.blocked_session,
         slot: true,
-        gate: false,
+        gate: None,
         on_pass: None,
         on_fail: None,
         r#loop: Loop::default(),
@@ -3125,9 +3241,10 @@ mod tests {
         for pipeline in Pipelines::builtin().pipelines.values() {
             for step in &pipeline.steps {
                 assert!(
-                    !step.gate,
+                    step.gate.is_none(),
                     "pipeline `{}` step `{}` gates",
-                    pipeline.name, step.id
+                    pipeline.name,
+                    step.id
                 );
             }
         }
@@ -3887,37 +4004,90 @@ mod tests {
         }
     }
 
-    /// `gate:` is not a lane's key: a command step's exit is its report, so
-    /// `gate: true` loads there and the dispatcher holds a passing exit. A
-    /// background step has no exit to wait for, so it still refuses it.
+    /// `gate:` takes the three outcome names, `true` reads as `on_pass` and
+    /// `false` as no gate, so a pipeline written before the names keeps its
+    /// meaning. Anything else is refused naming the step and the three.
     #[test]
-    fn gate_loads_on_a_command_step_and_is_refused_on_a_background_one() {
-        let pipeline = parse(
-            "steps:\n  - id: a\n    run: make\n    gate: true\n    on_pass: z\n  \
-             - id: z\n    run: x\n    on_pass: done\n",
-        )
-        .expect("a gated command step loads");
-        assert!(pipeline.step("a").unwrap().gate);
+    fn gate_reads_the_three_names_and_the_old_booleans() {
+        let gate = |value: &str| {
+            parse(&format!(
+                "steps:\n  - id: a\n    agent: x\n    model: m\n    gate: {value}\n    \
+                 on_pass: done\n    on_fail: a2\n  - id: a2\n    agent: x\n    model: m\n    \
+                 on_pass: done\n"
+            ))
+            .map(|pipeline| pipeline.step("a").unwrap().gate.clone())
+        };
+        assert_eq!(gate("on_pass").unwrap(), Some(GateOn::OnPass));
+        assert_eq!(gate("on_fail").unwrap(), Some(GateOn::OnFail));
+        assert_eq!(gate("always").unwrap(), Some(GateOn::Always));
+        assert_eq!(gate("true").unwrap(), Some(GateOn::OnPass));
+        assert_eq!(gate("false").unwrap(), None);
+        let err = format!("{:#}", gate("sometimes").unwrap_err());
+        assert!(err.contains("step `a`"), "{err}");
+        assert!(err.contains("`gate: sometimes`"), "{err}");
+        assert!(err.contains("`on_pass`, `on_fail` or `always`"), "{err}");
+    }
 
-        // A background step passes when it starts, so there is no exit for
-        // the gate to hold.
-        let err = parse(
-            "steps:\n  - id: a\n    run: make\n    background: true\n    gate: true\n    \
-             on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("step `a` runs in the background"), "{err}");
-        assert!(err.contains("delete `gate:` or `background:`"), "{err}");
-
-        // With no `on_fail`, the warning names what parks it: the exit, since
-        // a command step has no report to send.
-        let warnings = pipeline.gate_warnings();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
+    /// A fail that goes where a block goes is never offered to the lane, so a
+    /// `gate: on_fail` there could never hold anything and is refused, both
+    /// for a step with no `on_fail:` and for one that names `blocked`. A pass
+    /// gate or `always` on the same step is fine, and so is `on_fail` once
+    /// the step has a place to send a fail.
+    #[test]
+    fn a_fail_gate_on_a_step_that_cannot_fail_is_refused() {
+        let with = |gate: &str, on_fail: &str| {
+            parse(&format!(
+                "steps:\n  - id: approve\n    agent: x\n    model: m\n    gate: {gate}\n    \
+                 on_pass: done\n{on_fail}  - id: fix\n    agent: x\n    model: m\n    \
+                 on_pass: done\n"
+            ))
+        };
+        let none = format!("{:#}", with("on_fail", "").unwrap_err());
         assert!(
-            warnings[0].contains("a failing exit there parks"),
-            "{warnings:?}"
+            none.contains(
+                "step `approve` declares `gate: on_fail` but no `on_fail:`, so its lane is \
+                 never offered a fail and the gate can never hold one. Add `on_fail: <step>`, \
+                 or use `gate: on_pass`."
+            ),
+            "{none}"
         );
+        // The key sits under `approve`, so it is written into the step text.
+        let blocked = parse(
+            "steps:\n  - id: approve\n    agent: x\n    model: m\n    gate: on_fail\n    \
+             on_pass: done\n    on_fail: blocked\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{blocked:#}").contains("but its `on_fail:` is `blocked`"),
+            "{blocked:#}"
+        );
+        assert!(with("on_pass", "").is_ok());
+        assert!(with("always", "").is_ok());
+        let routed = parse(
+            "steps:\n  - id: approve\n    agent: x\n    model: m\n    gate: on_fail\n    \
+             on_pass: done\n    on_fail: fix\n  - id: fix\n    agent: x\n    model: m\n    \
+             on_pass: done\n",
+        );
+        assert!(routed.is_ok(), "{routed:?}");
+    }
+
+    /// `gate:` holds an agent's report, so a step that runs a command is
+    /// refused it, background or not, and both ways out are named.
+    #[test]
+    fn gate_is_refused_on_a_command_step_with_both_fixes_named() {
+        for background in ["", "    background: true\n"] {
+            let err = parse(&format!(
+                "steps:\n  - id: publish\n    run: make\n{background}    gate: true\n    \
+                 on_pass: z\n  - id: z\n    run: x\n    on_pass: done\n"
+            ))
+            .unwrap_err()
+            .to_string();
+            assert_eq!(
+                err,
+                "step `publish` runs a command but declares `gate:` — only an agent step can be \
+                 held for a person. Delete `gate:`, or put it on the agent step after `publish`.",
+            );
+        }
     }
 
     /// A background run is a sidecar, so a route on its exit is refused, and
@@ -4463,7 +4633,7 @@ mod tests {
         let err = parse(blocked).unwrap_err().to_string();
         assert_eq!(
             err,
-            "step `a` has on_pass: blocked — use gate: true to stop for a person"
+            "step `a` has on_pass: blocked — use gate: on_pass to stop for a person"
         );
 
         for raw in [end, blocked] {

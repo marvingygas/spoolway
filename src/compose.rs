@@ -140,9 +140,9 @@ pub(crate) fn system_prompt(
 /// a prompt a project already has, so nothing a prompt says reaches every
 /// project the way this does. The prompt's own `## Never` list is what still
 /// bounds the lane. The rest
-/// read the same for every lane; a gated step's fact that a person opens
-/// this pane belongs to [`report_contract`], the form it qualifies, not
-/// here.
+/// read the same for every lane; a gated step's held line, and what its
+/// lane writes for the person who answers the gate, belong to
+/// [`report_contract`], the form they qualify, not here.
 ///
 /// The person bullets are fixed for every lane, gated or not, because
 /// composing happens once at launch and this file is all a pane has once the
@@ -721,22 +721,25 @@ type Form = (&'static str, &'static str);
 
 const PASS: Form = (
     "    spoolway report --pass  -m \"<one line on what happened>\"",
-    "  This step's work is done and it came out right.",
+    "  Every requirement is met: the task's acceptance criteria and\n  \
+     what your role asks for. Nothing is left open.",
 );
 
 const FAIL: Form = (
-    "    spoolway report --fail  -m \"<what is not right, and where>\"",
-    "  This step's work is done, and what you found is not right. Your\n  \
-     message is what somebody works from to put it right, so say what\n  \
-     is wrong and where.",
+    "    spoolway report --fail  -m \"<what is wrong or unfinished>\"",
+    "  The step is not finished, or a requirement is not met, and\n  \
+     another round is needed. Say precisely what is wrong or what is\n  \
+     left to finish, and why, in your message and your handoff.",
 );
 
 const BLOCK: Form = (
     "    spoolway report --block -m \"<what is in the way>\"",
-    "  You cannot settle this within what this step is allowed to do. It\n  \
-     goes up to a person, or to a stronger agent. Say what you tried\n  \
-     and what stopped you. When a person has to act, name the\n  \
-     action and end with: then resume it on the board.",
+    "  The step cannot be finished: something unexpected is in the\n  \
+     way, or the planned solution does not work out. It needs\n  \
+     escalating: it goes up to a person, or to a stronger agent.\n  \
+     Say precisely what happened, what is in the way, and what you\n  \
+     tried. When a person has to act, name the action and end\n  \
+     with: then resume it on the board.",
 );
 
 /// `--block` in an unattended run. The unblocker reads a blocker first, and
@@ -744,9 +747,10 @@ const BLOCK: Form = (
 /// should have checked itself, so a stuck lane here writes facts only.
 const BLOCK_UNATTENDED: Form = (
     BLOCK.0,
-    "  You cannot settle this within what this step is allowed to do.\n  \
-     An unblocker lane picks it up next. Say what you tried and\n  \
-     what stopped you.",
+    "  The step cannot be finished: something unexpected is in the\n  \
+     way, or the planned solution does not work out. It needs\n  \
+     escalating. An unblocker lane picks it up next. Say precisely\n  \
+     what happened, what is in the way, and what you tried.",
 );
 
 const BLOCKED_PASS: Form = (
@@ -778,6 +782,24 @@ const HANDOFF: Form = (
     "    --handoff \"<what the next step should know>\"   repeatable",
     "  Anything worth passing on that one line cannot hold. One per thing.",
 );
+
+/// What follows the held line in [`report_contract`], ahead of
+/// [`HELD_HANDOFF`]'s numbered points.
+const HELD_HANDOFF_LEAD: &str =
+    "Your handoff is what they read, one --handoff per point, in this order:";
+
+/// What a held lane's `--handoff` lines say and in which order, under the
+/// held line in [`report_contract`]. A person running many tasks at once
+/// opens the held pane cold, so the first point tells them what the step was
+/// about and the second how to check it; the third is only for a task whose
+/// usual next step makes no sense.
+const HELD_HANDOFF: &str = "  1. What this step did, in plain words. Explain it as if they had
+     not seen this task. They run many at once, and this tells them
+     in one read what the step was about.
+  2. How to verify it: every path, URL or command, and what to
+     open, click or look at. Never leave them without one.
+  3. A step to skip or take instead, and why. Only when the usual
+     next step makes no sense for this task.";
 
 /// Render a list of [`Form`]s as `report_contract` prints them: the command
 /// line, a blank line, its explanation, a blank line, the next form. Takes
@@ -838,13 +860,16 @@ fn render_forms(forms: &[(&str, &str)]) -> String {
 /// `spoolway prompt contract` passes the one `config.toml` sets, so no
 /// caller keeps a copy of the text.
 ///
-/// One line closes the whole contract when `step` would hold a pass here —
-/// see [`crate::commands::gate_hold`], read against a hypothetical pass,
-/// since no real outcome exists yet while a prompt is being composed. Which
-/// gate answers picks the sentence: a step's own `gate: true` catches a pass
-/// and nothing else, so it reads *a pass is held here*; a task's own
-/// `gate_at` catches whatever is reported, so it reads *this report is held
-/// here, whatever it is*.
+/// The held line and [`HELD_HANDOFF`]'s order close the whole contract when
+/// `step` would hold a report here — see [`crate::commands::gate_hold`],
+/// read against a hypothetical pass and a hypothetical fail, since no real
+/// outcome exists yet while a prompt is being composed. Which gate answers
+/// picks the sentence: a step's own `gate:` names the outcomes it holds, so
+/// it reads *a pass*, *a fail* or *a pass or a fail is held here*; a task's
+/// own `gate_at` catches whatever is reported, so it reads *this report is
+/// held here, whatever it is*. The order follows because
+/// `commands::report` refuses a held report that carries no `--handoff`, and
+/// those handoffs are what the person reads in this pane.
 pub(crate) fn report_contract(
     task: &Task,
     pipeline: &Pipeline,
@@ -918,34 +943,53 @@ pub(crate) fn report_contract(
 
     // `blocked` asks this of the step it stands in for, not of itself: a
     // plain `--pass` is taken at the unblocker's word for `origin`, so
-    // `origin`'s own `gate: true` is what would hold it — never `blocked`'s,
-    // which no pipeline may even declare. Only an agent origin is held: a
-    // command step has no work for the unblocker to stand in for, so `route`
-    // hands it straight back to run again, with no person asked. A task's own
-    // `gate_at` plays no part here: it catches this step's outcome before the
-    // task ever reaches `blocked` — see `commands::report::route`'s own doc.
-    let gate = match &origin {
-        Some(origin) => pipeline
-            .step(origin)
-            .filter(|step| step.gate && step.kind() == crate::pipeline::StepKind::Agent)
-            .map(|_| crate::commands::Gate::Step),
+    // `origin`'s own `gate:` is what would hold it, when it holds a pass —
+    // never `blocked`'s, which no pipeline may even declare. Only an agent
+    // origin is held: a command step has no work for the unblocker to stand
+    // in for, so `route` hands it straight back to run again, with no person
+    // asked. A task's own `gate_at` plays no part here: it catches this
+    // step's outcome before the task ever reaches `blocked` — see
+    // `commands::report::route`'s own doc. A `gate_at: blocked` is the one
+    // exception, naming `blocked` itself: it holds whatever the unblocker
+    // reports, so it is asked first.
+    let whatever = "This report is held here for a person, whatever it is.";
+    let held = match &origin {
+        Some(origin) => (task.front.gate_at.as_deref() == Some(crate::pipeline::BLOCKED))
+            .then_some(whatever)
+            .or_else(|| {
+                pipeline
+                    .step(origin)
+                    .filter(|step| {
+                        step.gates_pass() && step.kind() == crate::pipeline::StepKind::Agent
+                    })
+                    .map(|_| "A pass is held here for a person.")
+            }),
         None => {
-            let hypothetical_destination = step
-                .destination(Outcome::Pass)
-                .unwrap_or(crate::pipeline::BLOCKED)
-                .to_string();
-            crate::commands::gate_hold(task, step, Outcome::Pass, &hypothetical_destination)
+            let hold = |outcome| {
+                let hypothetical_destination = step
+                    .destination(outcome)
+                    .unwrap_or(crate::pipeline::BLOCKED)
+                    .to_string();
+                crate::commands::gate_hold(task, step, outcome, &hypothetical_destination)
+            };
+            match (hold(Outcome::Pass), hold(Outcome::Fail)) {
+                (Some(crate::commands::Gate::Schedule), _) => Some(whatever),
+                (Some(_), Some(_)) => Some("A pass or a fail is held here for a person."),
+                (Some(_), None) => Some("A pass is held here for a person."),
+                (None, Some(_)) => Some("A fail is held here for a person."),
+                (None, None) => None,
+            }
         }
     };
-    if let Some(gate) = gate {
-        let line = match gate {
-            crate::commands::Gate::Step => "A pass is held here for a person, who opens this pane.",
-            crate::commands::Gate::Schedule => {
-                "This report is held here for a person, whatever it is."
-            }
-        };
+    if let Some(held) = held {
+        // Wrapped as one paragraph, since the held sentence differs in
+        // length by gate, at 68 columns: about the width the forms above it
+        // are broken at.
+        let lead = wrap(&format!("{held} {HELD_HANDOFF_LEAD}"), 68).join("\n");
         contract.push_str("\n\n");
-        contract.push_str(line);
+        contract.push_str(&lead);
+        contract.push_str("\n\n");
+        contract.push_str(HELD_HANDOFF);
     }
     contract
 }
@@ -1177,15 +1221,92 @@ mod tests {
         report_contract(&task, &pipeline, pipeline.step(step).unwrap(), unattended)
     }
 
-    /// Attended runs keep the `--block` text they always had, word for word.
+    /// The contract of a task at `stage` on a pipeline whose `look` step
+    /// carries `gate`, with the task's own `front` lines added to its
+    /// frontmatter.
+    fn gated_contract(gate: &str, stage: &str, front: &str) -> String {
+        let yaml = format!(
+            "steps:\n  \
+             - id: look\n    agent: pi\n    {gate}\n    on_pass: done\n    on_fail: fix\n  \
+             - id: fix\n    agent: pi\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n"
+        );
+        let pipeline = Pipeline::parse("demo", &yaml).unwrap();
+        let task = Task::parse(
+            std::path::PathBuf::from("example.md"),
+            &format!("---\nid: example\nstage: {stage}\n{front}---\n"),
+        )
+        .unwrap();
+        report_contract(&task, &pipeline, pipeline.step(stage).unwrap(), false)
+    }
+
+    /// A held lane's contract closes on the held line for what holds it,
+    /// then the order its handoffs take for the person — an unblocker
+    /// standing in for a gated step included — and an ungated one on
+    /// neither.
+    #[test]
+    fn a_held_contract_ends_on_the_held_line_and_the_handoff_order() {
+        let order = "Your handoff is what they read,\n\
+             one --handoff per point, in this order:\n\n  \
+             1. What this step did, in plain words. Explain it as if they had\n     \
+             not seen this task. They run many at once, and this tells them\n     \
+             in one read what the step was about.\n  \
+             2. How to verify it: every path, URL or command, and what to\n     \
+             open, click or look at. Never leave them without one.\n  \
+             3. A step to skip or take instead, and why. Only when the usual\n     \
+             next step makes no sense for this task.";
+        let pass = format!("\n\nA pass is held here for a person. {order}");
+        assert!(gated_contract("gate: on_pass", "look", "").ends_with(&pass));
+        assert!(
+            gated_contract("gate: on_fail", "look", "")
+                .ends_with(&format!("\n\nA fail is held here for a person. {order}"))
+        );
+        let always = gated_contract("gate: always", "look", "");
+        assert!(
+            always.contains(
+                "\n\nA pass or a fail is held here for a person. Your handoff is what\n\
+                 they read, one --handoff per point, in this order:\n\n  1. What"
+            ),
+            "{always}"
+        );
+        assert!(
+            gated_contract("description: x", "look", "gate_at: look\n").contains(
+                "\n\nThis report is held here for a person, whatever it is. Your handoff\n\
+                 is what they read, one --handoff per point, in this order:\n\n  1."
+            )
+        );
+        assert!(
+            gated_contract("gate: on_pass", "blocked", "blocked_from: look\n").ends_with(&pass)
+        );
+        // A `gate_at: blocked` holds whatever the unblocker reports.
+        assert!(
+            gated_contract(
+                "description: x",
+                "blocked",
+                "blocked_from: look\ngate_at: blocked\n"
+            )
+            .contains("\n\nThis report is held here for a person, whatever it is.")
+        );
+
+        let plain = gated_contract("description: x", "look", "");
+        assert!(!plain.contains("held here"), "{plain}");
+        assert!(!plain.contains("in this order"), "{plain}");
+    }
+
+    /// Attended runs end `--block` with the sentence that tells a lane how to
+    /// hand a person an action; unattended runs never carry it.
     #[test]
     fn an_attended_block_asks_for_a_person_when_one_has_to_act() {
         let text = contract("implement", false);
-        let expected = "  You cannot settle this within what this step is allowed to do. It\n  \
-             goes up to a person, or to a stronger agent. Say what you tried\n  \
-             and what stopped you. When a person has to act, name the\n  \
-             action and end with: then resume it on the board.";
+        let expected = "    spoolway report --block -m \"<what is in the way>\"\n\n  \
+             The step cannot be finished: something unexpected is in the\n  \
+             way, or the planned solution does not work out. It needs\n  \
+             escalating: it goes up to a person, or to a stronger agent.\n  \
+             Say precisely what happened, what is in the way, and what you\n  \
+             tried. When a person has to act, name the action and end\n  \
+             with: then resume it on the board.";
         assert!(text.contains(expected), "{text}");
+        assert!(!contract("implement", true).contains("When a person has to act"));
     }
 
     /// An unattended run's stuck lane writes facts only, for every step.
@@ -1193,12 +1314,47 @@ mod tests {
     fn an_unattended_block_names_the_unblocker_and_asks_for_no_person() {
         let text = contract("implement", true);
         let expected = "    spoolway report --block -m \"<what is in the way>\"\n\n  \
-             You cannot settle this within what this step is allowed to do.\n  \
-             An unblocker lane picks it up next. Say what you tried and\n  \
-             what stopped you.";
+             The step cannot be finished: something unexpected is in the\n  \
+             way, or the planned solution does not work out. It needs\n  \
+             escalating. An unblocker lane picks it up next. Say precisely\n  \
+             what happened, what is in the way, and what you tried.";
         assert!(text.contains(expected), "{text}");
         assert!(!text.contains("resume it on the board"), "{text}");
         assert!(!text.contains("a person"), "{text}");
+    }
+
+    /// `--pass` and `--fail` read the same in both modes, and say what each
+    /// claims: pass is every requirement met, fail is another round needed.
+    #[test]
+    fn pass_and_fail_say_what_each_report_claims_in_both_modes() {
+        let pass = "    spoolway report --pass  -m \"<one line on what happened>\"\n\n  \
+             Every requirement is met: the task's acceptance criteria and\n  \
+             what your role asks for. Nothing is left open.";
+        let fail = "    spoolway report --fail  -m \"<what is wrong or unfinished>\"\n\n  \
+             The step is not finished, or a requirement is not met, and\n  \
+             another round is needed. Say precisely what is wrong or what is\n  \
+             left to finish, and why, in your message and your handoff.";
+        for unattended in [false, true] {
+            let text = contract("implement", unattended);
+            assert!(text.contains(pass), "{text}");
+            assert!(!text.contains("--fail  -m"), "{text}");
+        }
+        let two_way = Pipeline::parse(
+            "demo",
+            "steps:\n  - id: implement\n    agent: pi\n    on_pass: done\n    on_fail: fix\n  \
+             - id: fix\n    agent: pi\n    on_pass: done\n",
+        )
+        .unwrap();
+        let task = Task::parse(
+            std::path::PathBuf::from("example.md"),
+            "---\nid: example\nstage: implement\n---\n",
+        )
+        .unwrap();
+        for unattended in [false, true] {
+            let step = two_way.step("implement").unwrap();
+            let text = report_contract(&task, &two_way, step, unattended);
+            assert!(text.contains(fail), "{text}");
+        }
     }
 
     /// `--pause` tells the unblocker to check a blocker written to a person,

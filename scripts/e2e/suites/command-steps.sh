@@ -1228,7 +1228,7 @@ else
   sed 's/^/        /' "$HSTATE/panes" "$HSTATE/agents"
 fi
 must "the agent step reports" env SPOOLWAY_TASK=lazy SPOOLWAY_STEP=watched \
-  "$SPOOLWAY" report --pass -m "done with watched"
+  "$SPOOLWAY" report --pass -m "done with watched" --handoff "done with watched"
 if drive lazy gone 120; then ok "the task finishes and is archived"
 else bad "the task finishes and is archived (at \`$(stage_of lazy)\`)"; fi
 

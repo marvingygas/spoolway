@@ -340,7 +340,7 @@ pub(crate) enum Reported {
 /// field the task file already carries — see `classify` in the parent module.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Cause {
-    /// The step's own `gate: true` held its pass.
+    /// The step's own `gate:` held its outcome.
     Gate,
     /// The task's own `gate_at` held the step's outcome.
     Scheduled,
@@ -420,12 +420,19 @@ pub(super) fn pause_confirm_panel(
 /// scheduled pause` instead while `scheduled` says that step already has one,
 /// since answering it then clears the schedule — see
 /// `Board::on_key_pause_confirm`.
-pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> [String; 2] {
-    let later = match scheduled {
-        true => "cancel the scheduled pause".to_string(),
-        false => format!("pause when {} finishes", abort.step),
-    };
-    ["pause now".to_string(), later]
+///
+/// Only an agent step is offered the second: a `gate_at:` naming a command
+/// step is refused everywhere else and its exit is never held, so the answer
+/// would write a checkpoint nothing honours.
+pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> Vec<String> {
+    let mut answers = vec!["pause now".to_string()];
+    if matches!(abort.kind, AbortKind::Agent) {
+        answers.push(match scheduled {
+            true => "cancel the scheduled pause".to_string(),
+            false => format!("pause when {} finishes", abort.step),
+        });
+    }
+    answers
 }
 
 /// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough

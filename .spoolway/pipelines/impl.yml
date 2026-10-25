@@ -30,8 +30,10 @@
 #   slot              true <default>     Consumes one of the profile's slots.
 #                     false              Runs without taking one. A model's own
 #                                        `slots` applies either way.
-#   gate              true               Holds the pass on `paused` for a person.
-#                     false <default>    The pass is acted on at once.
+#   gate              on_pass            Holds a pass on `paused` for a person.
+#                     on_fail            Holds a fail on `paused` for a person.
+#                     always             Holds a pass or a fail.
+#                     Absent: nothing is held. Agent steps only.
 #   on_pass           <step id>          Where a pass goes.
 #                     done               The task finishes.
 #                                        Absent: the task stays put.

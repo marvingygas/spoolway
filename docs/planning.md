@@ -341,8 +341,8 @@ minted id in the same copy. All arms, across every copy, share one trial id. A s
 skip on the second screen is skipped by every arm of that pipeline's own copy. The source tasks
 stay in the pending directory. Any refusal writes nothing at all. A trial refuses a group that
 fails validation, a task still holding its skeleton's `[[…]]` placeholder text, and a task whose
-`gate_at:` names a step that a ticked pipeline lacks. The `gate_at:` refusal names the task and
-tells you to untick that pipeline or to change `gate_at:` in the task.
+`gate_at:` names a step that a ticked pipeline lacks or runs as a command. The `gate_at:` refusal names the task and
+tells you to untick that pipeline or to change `gate_at:` in the task to an agent step.
 
 A trial also refuses a task whose `gate_at:` names a step its copy would never run. That happens
 when the step is ticked to skip, when it is the `last:` step and another task in the copy depends

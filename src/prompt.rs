@@ -1742,6 +1742,23 @@ mod tests {
         }
     }
 
+    /// The report forms say more than they did, and the warning exists to
+    /// stop a prompt restating them. The prompts that ship must stay clear
+    /// of it, or every project's `pipeline check` starts out with warnings
+    /// it cannot fix.
+    #[test]
+    fn the_shipped_prompts_do_not_restate_the_report_contract() {
+        for prompt in crate::assets::PROMPTS {
+            let findings = restated_report_contract(prompt.name, prompt.body, "");
+            assert!(
+                findings.is_empty(),
+                "{}: {:?}",
+                prompt.name,
+                messages(&findings)
+            );
+        }
+    }
+
     /// A flag some other command takes, not `spoolway report`'s, must not
     /// fire — this rule is about the report contract specifically, not
     /// every `--flag` in a prompt.
