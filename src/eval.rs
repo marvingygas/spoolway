@@ -9090,9 +9090,10 @@ mod screen_tests {
         assert_eq!(run("f\x1b[C\x1b[D").0, Leave::Quit);
     }
 
-    /// Every eval screen the test that checks TUI text for capitals walks:
-    /// a ledger of runs over two pipelines, drawn through each table, sort
-    /// and popup, as `(what is open, its lines)`.
+    /// Every eval screen the test that checks TUI text for capitals walks,
+    /// as `(what is drawn, its lines)`: a ledger of runs and trials drawn
+    /// through each table, sort and popup, and an empty ledger drawn through
+    /// each table.
     pub(super) fn tui_screens() -> Vec<(String, Vec<String>)> {
         let (repo, _root_guard) = fixture_with_one_run("tui-screens");
         for (task, step, pipeline, outcome) in [
@@ -9111,41 +9112,60 @@ mod screen_tests {
                 outcome,
             );
         }
+        bank_two_trials(&repo);
         let down = DOWN;
+        let trials = "\t\t";
+        // Lanes, then per task, directories and the trials; each table
+        // sorted, narrowed, refreshed, exported and opened.
         let walks = [
-            ("totals by pipeline", ""),
-            ("sorted ascending", "a"),
-            ("sorted descending", "d"),
-            ("one row down", down),
-            ("per task", "t"),
-            ("per task, one row down", &format!("t{down}")),
-            ("directories", "\t"),
-            ("filters", "f"),
-            ("filters, one down", &format!("f{down}")),
-            ("filters, entered", "f\r"),
-            ("filters, entered twice", &format!("f{down}\r")),
-            ("filters, closed", "f\x1b"),
-            ("export", "e"),
-            ("export, entered", "e\r"),
-            ("refreshed", "r"),
-            ("opened row", "\r"),
-            ("opened row, per task", "t\r"),
-            ("opened row, closed", "\r\x1b"),
+            String::new(),
+            "a".into(),
+            "d".into(),
+            down.into(),
+            "t".into(),
+            format!("t{down}"),
+            "\t".into(),
+            "f".into(),
+            format!("f{down}"),
+            "f\r".into(),
+            format!("f{down}\r"),
+            "f\x1b".into(),
+            "e".into(),
+            "e\r".into(),
+            "r".into(),
+            "\r".into(),
+            "t\r".into(),
+            "\r\x1b".into(),
+            trials.into(),
+            format!("{trials}a"),
+            format!("{trials}d"),
+            format!("{trials}{down}"),
+            format!("{trials}f"),
+            format!("{trials}r"),
+            format!("{trials}\r"),
+            format!("{trials}\r\t"),
         ];
         let mut screens = Vec::new();
-        for (name, input) in walks {
-            let drawn = screen(&repo, input);
-            for (n, frame) in frames(&drawn).iter().enumerate() {
-                screens.push((
-                    format!("eval tab, {name}, frame {n}"),
-                    crate::screen::shell::plain(frame)
-                        .lines()
-                        .map(str::to_string)
-                        .collect(),
-                ));
-            }
+        for input in &walks {
+            screens.extend(drawn_screens(&repo, input));
+        }
+        // No run, no trial: each table says there is nothing to show.
+        let (empty, _empty_guard) = fixture("tui-screens-empty");
+        for input in ["", "t", "\t", trials, "f", "e"] {
+            screens.extend(drawn_screens(&empty, input));
         }
         screens
+    }
+
+    /// What the eval screen over `repo` draws as `input` is typed at it, as
+    /// the screens [`crate::screen::walk_screens`] makes of it.
+    fn drawn_screens(repo: &Repo, input: &str) -> Vec<(String, Vec<String>)> {
+        let drawn = screen(repo, input);
+        let plain: Vec<String> = frames(&drawn)
+            .into_iter()
+            .map(crate::screen::shell::plain)
+            .collect();
+        crate::screen::walk_screens("eval", &plain)
     }
 
     /// Every draw opens with the shared frame writer's own start code, so a

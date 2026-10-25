@@ -316,7 +316,7 @@ the notes and failures `spoolway doctor` prints, work through the list, and rest
   `.spoolway-version` in each user skills folder, and list each as `removed`. See [The retired
   version marker](installation.md#the-retired-version-marker).
 - Update any pty or tmux script that answers the queue screen's or the routines tab's issue
-  question. It is now a checklist of groups headed `Deactivate issue tracking for selected
+  question. It is now a checklist of groups headed `deactivate issue tracking for selected
   groups:`, with nothing ticked, and the `create and queue` and `queue only` rows are gone.
 
   | 0.10.0 | 0.11.0 |

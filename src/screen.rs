@@ -1000,6 +1000,48 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
     }
 }
 
+/// What a test that reads a screen's text calls the screen `lines` draw: the
+/// tab the strip marks open, or `fallback` when there is no strip, and the
+/// title of a popup drawn over it, if there is one. A popup's top border
+/// sits inside the tab's own `│` border, which a pane's title never does.
+#[cfg(test)]
+pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
+    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "EVAL"]
+        .into_iter()
+        .find(|tab| {
+            lines
+                .iter()
+                .take(3)
+                .any(|line| line.contains(&format!("[{tab}]")))
+        })
+        .map_or(fallback.to_string(), str::to_lowercase);
+    let popup = lines.iter().find_map(|line| {
+        let (_, after) = line.split_once('│')?;
+        let (_, title) = after.split_once(corner::TOP_LEFT)?;
+        let title = title.trim_start_matches('─').split(" ─").next()?.trim();
+        (!title.is_empty()).then(|| title.to_string())
+    });
+    match popup {
+        Some(title) => format!("{tab} tab, popup \"{title}\""),
+        None => format!("{tab} tab"),
+    }
+}
+
+/// The frames one scripted walk drew, as the screens a test reads, each
+/// named by what it shows — see [`shown_screen`]. Named by content because a
+/// walk's earlier frames are not the screen its keys were written to reach,
+/// and a name written beside the keys would be wrong for them.
+#[cfg(test)]
+pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Vec<String>)> {
+    frames
+        .iter()
+        .map(|frame| {
+            let lines: Vec<String> = frame.lines().map(str::to_string).collect();
+            (shown_screen(&lines, fallback), lines)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,7 +1123,16 @@ mod tests {
         // column in the line.
         let mut line = line.to_string();
         for (phrase, _) in ALLOWED_PHRASES {
-            line = line.replace(phrase, &" ".repeat(phrase.len()));
+            while let Some(at) = line.find(phrase) {
+                let mut end = at + phrase.len();
+                // `Good morning, Marvin.`: the name after the greeting is git's
+                // `user.name`, a value read from the machine.
+                if line[end..].starts_with(", ") {
+                    let name = &line[end + 2..];
+                    end += 2 + name.find(['.', ' ', '│']).unwrap_or(name.len());
+                }
+                line.replace_range(at..end, &" ".repeat(line[at..end].chars().count()));
+            }
         }
         let chars: Vec<char> = line.chars().collect();
         let mut i = 0;
@@ -1120,14 +1171,21 @@ mod tests {
 
     /// Every capital in `screens` that the rule does not allow, as the
     /// message a failing test prints: the screen, the line, the word marked
-    /// and the fix.
+    /// and the fix. A word on one line is reported once, on the first screen
+    /// that draws it.
     fn capital_report(screens: &[(String, Vec<String>)]) -> String {
         let mut report = String::new();
+        // One record for a word on a line, however many screens draw it: the
+        // fixed label of a tab shows on every walk that passes through it.
+        let mut seen = std::collections::HashSet::new();
         for (screen, lines) in screens {
             for line in lines {
                 let Some((at, word)) = capital_violation(line) else {
                     continue;
                 };
+                if !seen.insert((line.clone(), word.clone())) {
+                    continue;
+                }
                 let mut fixed = word.chars();
                 let lower: String = fixed
                     .next()
@@ -1150,20 +1208,44 @@ mod tests {
         report
     }
 
+    /// One task in the queue, written as `queue add` would leave it. Written
+    /// by hand because `queue add` prints a line per task, which a failing
+    /// run would show above the report.
+    fn queue_directly(
+        repo: &crate::Repo,
+        id: &str,
+        depends_on: Option<&str>,
+        group: &str,
+        stage: &str,
+    ) {
+        let depends_on = depends_on.map_or(String::new(), |on| format!("depends_on:\n- {on}\n"));
+        let doc = format!(
+            "---\nid: {id}\ntitle: {id}, done\nstage: queued\n{depends_on}pipeline: default\n\
+             group: {group}\nbranch: task/{id}\nbase: group/demo\n---\n## Goal\n\ndo it.\n"
+        );
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(repo.queue_dir().join(format!("{id}.md")), doc).unwrap();
+        if stage != "queued" {
+            let mut task = repo.task(id).unwrap();
+            task.set_stage(stage, None);
+            task.save().unwrap();
+        }
+    }
+
     /// A project with something on every tab: a task queued, tasks pending
     /// in two groups, routines in two folders, a job on one of them and a
     /// job whose routine is gone. Every name is lowercase, so only the
     /// words the screens bring themselves can start with a capital.
     fn full_project(name: &str) -> (crate::Repo, crate::scratch::ScratchRoot) {
         let (repo, guard) = crate::status::testutil::fixture(name);
-        crate::status::testutil::add(&repo, "wire", &[], None);
-        crate::status::testutil::add(&repo, "route", &["wire"], None);
-        for (id, group, stage) in [
-            ("stuck", "one", "blocked"),
-            ("held", "two", "paused"),
-            ("review", "three", "review-code"),
+        for (id, depends_on, group, stage) in [
+            ("wire", None, "demo", "queued"),
+            ("route", Some("wire"), "demo", "queued"),
+            ("stuck", None, "one", "blocked"),
+            ("held", None, "two", "paused"),
+            ("review", None, "three", "review-code"),
         ] {
-            crate::status::testutil::add_to(&repo, id, &[], Some(stage), Some(group));
+            queue_directly(&repo, id, depends_on, group, stage);
         }
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         for (id, group) in [("cart", "shop"), ("pay", "shop"), ("logo", "site")] {
@@ -1222,6 +1304,45 @@ mod tests {
         );
     }
 
+    /// A word on one line is reported once, on the first screen that draws
+    /// it, so a tab's fixed label does not repeat for every walk that
+    /// passes through the tab.
+    #[test]
+    fn a_word_on_a_line_is_reported_once_however_many_screens_draw_it() {
+        let line = "  [h] Show done tasks".to_string();
+        let screens = [
+            ("queue tab".to_string(), vec![line.clone()]),
+            ("queue tab, popup \"site\"".to_string(), vec![line.clone()]),
+            (
+                "dispatch tab".to_string(),
+                vec!["  [h] Show done tasks!".to_string()],
+            ),
+        ];
+        let report = capital_report(&screens);
+        assert_eq!(report.matches("a TUI word starts").count(), 2, "{report}");
+        assert!(!report.contains("popup"), "{report}");
+    }
+
+    /// A screen is named by the tab the strip marks and the title of the
+    /// popup over it, and by the fallback tab when there is no strip.
+    #[test]
+    fn a_screen_is_named_by_its_tab_and_the_popup_over_it() {
+        let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
+        let plain = lines(
+            "\n  ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →\n\n ╭─ groups ──┬─ tasks ──╮\n │ > a       │          │\n",
+        );
+        assert_eq!(shown_screen(&plain, "eval"), "queue tab");
+        let popup = lines(
+            "\n  ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →\n\n ╭─ routines ┬─ details ╮\n │   ╭─ weekly ───╮  │\n",
+        );
+        assert_eq!(
+            shown_screen(&popup, "eval"),
+            "routines tab, popup \"weekly\""
+        );
+        let bare = lines(" ╭─ eval · by pipeline ─╮\n │  ╭─ filters ─╮ │");
+        assert_eq!(shown_screen(&bare, "eval"), "eval tab, popup \"filters\"");
+    }
+
     /// Each case the rule allows passes, and the capitals next to them do
     /// not: a sentence that starts `A`, a lone `R` after a lowercase word,
     /// and a greeting's first word cut off from the rest of it.
@@ -1254,13 +1375,15 @@ mod tests {
 
     /// No word of TUI text starts with a capital outside the allowed cases.
     ///
-    /// Renders every tab with something on it, the details panes and the
-    /// popups the keys below open, then reads each line: the dispatch,
-    /// queue and routines tabs through the shell on a scripted terminal,
-    /// the eval tab through its own synchronous loader, the popups no key
-    /// reaches from where they are built, and every list of asking popups.
-    /// Every name in the fixtures is lowercase, so a capital found is a word
-    /// a screen brought itself.
+    /// Renders every tab with something on it and with nothing on it, the
+    /// details panes and the popups the keys below open, then reads each
+    /// line: the dispatch, queue and routines tabs through the shell on a
+    /// scripted terminal, the eval tab and its trials table through its own
+    /// synchronous loader, the popups no key reaches from where they are
+    /// built, and every list of asking popups. Every name in the fixtures
+    /// is lowercase, so a capital found is a word a screen brought itself.
+    /// A screen is named by what it shows, since a walk's early frames are
+    /// not where its keys end.
     ///
     /// No walk presses `enter` on the dispatch tab outside a popup, which
     /// starts a dispatcher from the test binary, or picks a board row's
@@ -1269,134 +1392,92 @@ mod tests {
     fn tui_text_is_lowercase() {
         let _t = test_terminal((100, 30));
         let mut screens: Vec<(String, Vec<String>)> = Vec::new();
-        let right = "\x1b[C";
-        let walks = [
-            ("dispatch tab", "\x1b[D"),
-            ("queue tab", ""),
-            ("queue tab, options", "o"),
-            ("queue tab, tasks pane", "\t"),
-            ("queue tab, find", "f"),
-            ("queue tab, done tasks", "h"),
-            ("queue tab, queue the group", "\r"),
-            ("queue tab, select", " "),
-            ("queue tab, queue the selection", " \r"),
-            ("queue tab, queue the second group", "\x1b[B\r"),
-            ("queue tab, trial, next", "o\r\r"),
-            ("queue tab, trial, next, next", "o\r\r\r"),
-            ("queue tab, save as routine, name", "o\x1b[B\r\r"),
-            ("queue tab, delete, confirm", "o\x1b[B\x1b[B\r\r"),
-            ("queue tab, delete, close", "o\x1b[B\x1b[B\r\x1b"),
-            ("queue tab, find a task", "fwire"),
-            ("queue tab, find nothing", "fzzz"),
-            ("queue tab, done tasks pane", "h\t"),
-            ("routines tab", right),
-            ("routines tab, options", &format!("{right}o")),
-            ("routines tab, details", &format!("{right}\t")),
-            ("routines tab, second routine", &format!("{right}\x1b[B")),
-            ("routines tab, enter", &format!("{right}\r")),
-            ("queue tab, trial", "o\r"),
-            ("queue tab, save as routine", "o\x1b[B\r"),
-            ("queue tab, delete", "o\x1b[B\x1b[B\r"),
-            ("queue tab, pick pipelines", "\r\r"),
-            ("routines tab, edit schedule", &format!("{right}o\r")),
-            ("routines tab, deactivate job", &format!("{right}o\x1b[B\r")),
-            (
-                "routines tab, delete routine",
-                &format!("{right}o\x1b[B\x1b[B\r"),
-            ),
-            (
-                "routines tab, routine without a job",
-                &format!("{right}\x1b[B"),
-            ),
-            (
-                "routines tab, routine without a job, options",
-                &format!("{right}\x1b[Bo"),
-            ),
-            (
-                "routines tab, job without a routine",
-                &format!("{right}\x1b[B\x1b[B"),
-            ),
-            (
-                "routines tab, job without a routine, details",
-                &format!("{right}\x1b[B\x1b[B\t"),
-            ),
-            (
-                "routines tab, job without a routine, options",
-                &format!("{right}\x1b[B\x1b[Bo"),
-            ),
-            (
-                "routines tab, job without a routine, options, enter",
-                &format!("{right}\x1b[B\x1b[Bo\r"),
-            ),
-            ("dispatch tab, options key", "\x1b[Do"),
-            (
-                "routines tab, edit schedule, accept",
-                &format!("{right}o\r\r"),
-            ),
-            (
-                "routines tab, edit schedule, pipeline",
-                &format!("{right}o\r\r\r"),
-            ),
-            (
-                "routines tab, edit schedule, saved",
-                &format!("{right}o\r\r\r\r"),
-            ),
-            (
-                "routines tab, edit schedule, nonsense",
-                &format!("{right}o\r1\r"),
-            ),
-            (
-                "routines tab, deactivate, confirm",
-                &format!("{right}o\x1b[B\r\r"),
-            ),
-            (
-                "routines tab, delete routine, confirm",
-                &format!("{right}o\x1b[B\x1b[B\r\r"),
-            ),
-            ("routines tab, queue the routine", &format!("{right} \r")),
-            (
-                "routines tab, queue the routine, next",
-                &format!("{right} \r\r"),
-            ),
-            (
-                "routines tab, weekly options, enter",
-                &format!("{right}\x1b[Bo\r"),
-            ),
-            (
-                "routines tab, weekly options, enter, accept",
-                &format!("{right}\x1b[Bo\r\r"),
-            ),
-            (
-                "routines tab, weekly options, enter, pipeline",
-                &format!("{right}\x1b[Bo\r\r\r"),
-            ),
-            ("dispatch tab, update", "\x1b[Du"),
-            ("dispatch tab, rows", "\x1b[D\x1b[B"),
-            ("dispatch tab, rows, more", "\x1b[D\x1b[B\x1b[B\x1b[B"),
-            ("dispatch tab, options on a row", "\x1b[D\x1b[Bo"),
-            (
-                "dispatch tab, options on a blocked row",
-                "\x1b[D\x1b[B\x1b[B\x1b[Bo",
-            ),
-            (
-                "dispatch tab, options on a paused row",
-                "\x1b[D\x1b[B\x1b[B\x1b[B\x1b[Bo",
-            ),
-            ("dispatch tab, resume a row", "\x1b[D\x1b[B\x1b[B\x1b[Br"),
-            ("dispatch tab, skip a hook", "\x1b[D\x1b[B\x1b[B\x1b[Bk"),
-            ("eval tab", &format!("{right}{right}")),
+        let (left, right, down) = ("\x1b[D", "\x1b[C", "\x1b[B");
+        let walks: Vec<String> = vec![
+            // The tabs, each as the screen opens or is reached.
+            String::new(),
+            left.into(),
+            right.into(),
+            // Queue tab: panes, filters, the options menu and what each
+            // item asks, then what answering it says.
+            "\t".into(),
+            "f".into(),
+            "fwire".into(),
+            "fzzz".into(),
+            "h".into(),
+            "h\t".into(),
+            " ".into(),
+            " \r".into(),
+            "\r".into(),
+            format!("{down}\r"),
+            "\r\r".into(),
+            "o".into(),
+            "o\r".into(),
+            "o\r\r".into(),
+            "o\r\r\r".into(),
+            format!("o{down}\r"),
+            format!("o{down}\r\r"),
+            format!("o{down}{down}\r"),
+            format!("o{down}{down}\r\r"),
+            format!("o{down}{down}\r\x1b"),
+            // Routines tab: the list, its details pane, the job and the
+            // routine without a job or without a routine, and the options
+            // each has.
+            format!("{right}\t"),
+            format!("{right}\r"),
+            format!("{right}{down}"),
+            format!("{right}{down}{down}"),
+            format!("{right}{down}{down}\t"),
+            format!("{right}o"),
+            format!("{right}o\r"),
+            format!("{right}o\r\r"),
+            format!("{right}o\r\r\r"),
+            format!("{right}o\r\r\r\r"),
+            format!("{right}o\r1\r"),
+            format!("{right}o{down}\r"),
+            format!("{right}o{down}\r\r"),
+            format!("{right}o{down}{down}\r"),
+            format!("{right}o{down}{down}\r\r"),
+            format!("{right}{down}o"),
+            format!("{right}{down}o\r"),
+            format!("{right}{down}o\r\r"),
+            format!("{right}{down}o\r\r\r"),
+            format!("{right}{down}{down}o"),
+            format!("{right}{down}{down}o\r"),
+            format!("{right} \r"),
+            format!("{right} \r\r"),
+            // Dispatch tab: the board's rows, their options and the
+            // resume and skip-a-hook questions. Never `enter` outside a
+            // popup, and never an option that opens a file.
+            format!("{left}u"),
+            format!("{left}o"),
+            format!("{left}{down}"),
+            format!("{left}{down}{down}{down}"),
+            format!("{left}{down}o"),
+            format!("{left}{down}{down}{down}o"),
+            format!("{left}{down}{down}{down}{down}o"),
+            format!("{left}{down}{down}{down}r"),
+            format!("{left}{down}{down}{down}k"),
         ];
-        for (i, (name, keys)) in walks.into_iter().enumerate() {
+        for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
-            for (n, frame) in crate::screen::shell::drive_frames(&repo, keys)
-                .iter()
-                .enumerate()
-            {
-                screens.push((
-                    format!("{name} (keys {keys:?}), frame {n}"),
-                    frame.lines().map(str::to_string).collect(),
-                ));
-            }
+            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            screens.extend(walk_screens("queue tab", &frames));
+        }
+        // A project with nothing in it, where each tab says so and the
+        // dispatch tab greets instead of listing.
+        let empty_walks = [
+            String::new(),
+            "o".into(),
+            left.into(),
+            format!("{left}o"),
+            right.into(),
+            format!("{right}o"),
+        ];
+        for (i, keys) in empty_walks.iter().enumerate() {
+            let (repo, _guard) = crate::status::testutil::fixture(&format!("capitals-empty-{i}"));
+            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            screens.extend(walk_screens("queue tab", &frames));
         }
         for (name, panel) in [
             crate::status::asking_panels(),
