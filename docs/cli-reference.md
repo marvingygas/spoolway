@@ -1600,7 +1600,7 @@ close with this project's own hooks folder: `.spoolway/hooks/` in repo mode, or 
 
 ### `spoolway config contract`
 
-Print every setting `config.toml` may carry, its values, its default and one sentence each.
+Print every setting `config.toml` may carry, its values and one sentence each.
 
 ### `spoolway config show` / `list` / `path` / `get <key>` / `set <key> <value>` / `edit`
 

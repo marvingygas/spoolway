@@ -3857,7 +3857,7 @@ mod tests {
         assert!(after.contains("auto_commit"));
         // The explanation is not a comment standing above the key any more —
         // it is one row of the reference table on top of the whole file.
-        assert!(after.contains("Whether spoolway commits"));
+        assert!(after.contains("Commit any work an agent left uncommitted"));
         assert!(
             outcome_lines(&outcomes)
                 .iter()
@@ -3894,6 +3894,34 @@ mod tests {
         assert!(refusals(&outcomes).is_empty());
     }
 
+    /// The table that still had a Default column is an older copy too: a
+    /// config carrying it gets the three-column table and keeps its values.
+    #[test]
+    fn a_reference_table_with_a_default_column_is_replaced_and_the_values_kept() {
+        let (repo, _root_guard) = fixture("config-default-column-table");
+        let path = crate::config::Config::path_in(&repo.root);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n[dispatch]\nlane_quiet = \"45m\"\n",
+                crate::known_copies::older::config_reference_with_defaults()
+            ),
+        )
+        .unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            after.starts_with(&crate::confkv::reference_table()),
+            "{after}"
+        );
+        assert!(!after.contains("Default"), "{after}");
+        assert!(after.contains("lane_quiet = \"45m\""), "{after}");
+        assert!(refusals(&outcomes).is_empty());
+    }
+
     /// The config a 0.14.0 project scaffolded holds the reference table from
     /// before `reserve` joined `dispatch.priority`. `sync` rewrites that table
     /// to this binary's and keeps every value in the file, `retention_days`
@@ -3917,6 +3945,34 @@ mod tests {
         assert!(after.contains("retention_days = 45"), "{after}");
         assert!(after.contains("priority = \"group\""), "{after}");
         assert!(refusals(&outcomes).is_empty());
+    }
+
+    /// A config written before the cache-lifetime example was reworded opens
+    /// it with the old two lines. After `sync` the file has the new header
+    /// once, the old header nowhere, and one `claude-*` row.
+    #[test]
+    fn a_config_with_the_old_cache_example_header_ends_with_one_example() {
+        let (repo, _root_guard) = fixture("config-old-cache-header");
+        let path = crate::config::Config::path_in(&repo.root);
+        let shipped_0_14_0 = include_str!("../scripts/e2e/fixtures/0.14.0/.spoolway/config.toml");
+        let old = "# How long a session's prompt cache is trusted to stay warm.\n\
+                   # Unset means no limit. Uncomment a row to choose one.\n";
+        assert!(shipped_0_14_0.contains(old));
+        std::fs::write(&path, shipped_0_14_0).unwrap();
+
+        let mut outcomes = Vec::new();
+        config(&repo, &args(), &mut outcomes).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        let new = "# Start a fresh conversation when the last reply is older than this.\n\
+                   # Remove the # from a line below to turn it on.\n";
+        assert_eq!(after.matches(new).count(), 1, "{after}");
+        assert!(!after.contains(old), "{after}");
+        assert_eq!(
+            after.matches("# [models.\"claude-*\"]").count(),
+            1,
+            "{after}"
+        );
     }
 
     /// A table that is none of the shipped ones was written by a newer
@@ -4130,7 +4186,7 @@ mod tests {
 
         assert!(!after.contains(mine));
         // Still explained — just in the table, not standing above the key.
-        assert!(after.contains("How long a lane may say nothing"));
+        assert!(after.contains("How long an agent may stay silent"));
         assert!(
             after.contains("lane_quiet = \"10m\""),
             "the value is the one thing kept"
