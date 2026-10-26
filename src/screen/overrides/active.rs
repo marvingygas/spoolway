@@ -296,7 +296,9 @@ const WHOLE_FILE: &str = "whole file";
 /// What a key the setup already holds says.
 const MATCHES: &str = "matches the setup — o to delete";
 
-/// The row under an ignored key's reason.
+/// The row under an ignored key's reason, wrapped into the reason's column
+/// as the reason is: an 80-column terminal leaves the list too narrow for it
+/// on one line, and the border would otherwise cut it.
 const SET_AGAIN: &str = "[enter] to set it again, or o to delete";
 
 /// The column a file's note starts at, counted from its name, and the one a
@@ -631,11 +633,8 @@ impl ActiveSection {
                     };
                     lines.extend(beside(&head, &value, width));
                     if matches!(key.state, KeyState::Ignored(_)) {
-                        lines.push(format!(
-                            "{:indent$}{SET_AGAIN}",
-                            "",
-                            indent = head_len(&head)
-                        ));
+                        let under = " ".repeat(head_len(&head));
+                        lines.extend(beside(&under, SET_AGAIN, width));
                     }
                 }
             }
@@ -1192,6 +1191,43 @@ mod tests {
             format!("{indent}[enter] to set it again, or o to delete")
         );
         assert!(drawn.iter().all(|l| l.chars().count() <= 78), "{drawn:#?}");
+    }
+
+    // Under the shell at an 80-column terminal, the list is too narrow for
+    // the row under an ignored key on one line: it wraps under the reason
+    // and reads whole, for a key that fits its field and one that does not.
+    #[test]
+    fn the_row_under_an_ignored_key_wraps_at_an_80_column_terminal() {
+        let (repo, _guard) = project("active-narrow");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Overrides);
+        crate::commands::write_config_override(&repo, "dispatch.visible_lanes", "three").unwrap();
+        crate::commands::write_config_override(&repo, "dispatch.lane_child_ceiling", "never")
+            .unwrap();
+        let state = on_active(&repo);
+        // The shell's strip heads the frame, so the box starts below it.
+        let drawn: Vec<String> = rows_of(&state)
+            .into_iter()
+            .skip_while(|l| !l.starts_with('╭'))
+            .skip(1)
+            .collect();
+        let hints: Vec<String> = (0..drawn.len())
+            .filter_map(|at| {
+                let column = drawn[at].find("[enter]")?;
+                let indent = " ".repeat(column);
+                let mut reading = drawn[at][column..].to_string();
+                for line in drawn[at + 1..].iter().take_while(|l| {
+                    l.starts_with(&indent) && l.chars().nth(column).is_some_and(|c| c != ' ')
+                }) {
+                    reading = format!("{reading} {}", line.trim());
+                }
+                Some(reading)
+            })
+            .collect();
+        let hint = "[enter] to set it again, or o to delete";
+        assert_eq!(hints, [hint, hint], "{drawn:#?}");
+        // The box is 78 columns wide here, 76 inside its borders.
+        assert!(drawn.iter().all(|l| l.chars().count() <= 76), "{drawn:#?}");
     }
 
     // A key whose value the setup already holds reads `matches the setup`,
