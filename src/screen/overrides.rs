@@ -6,17 +6,21 @@
 //! under the strip would read as a second strip, so the box title carries
 //! them, bracketed the way the strip brackets the open tab.
 //!
-//! Only the config section has a list. It shows every key `spoolway config
-//! list` prints, grouped under its table, with the value in use now: the
-//! tracked config with the layer merged onto it. A key with no value reads
-//! `not set`, and `+ new key` takes any dotted key the list does not show,
-//! such as a `[models]` glob the config has no entry for yet.
+//! The config section shows every key `spoolway config list` prints,
+//! grouped under its table, with the value in use now: the tracked config
+//! with the layer merged onto it. A key with no value reads `not set`, and
+//! `+ new key` takes any dotted key the list does not show, such as a
+//! `[models]` glob the config has no entry for yet. The pipeline section
+//! sets one step field on many pipeline steps at once — see [`pipeline`].
+//! The prompts and active sections have no list yet.
 //!
 //! A value is written exactly as typed, through the same unchecked write
 //! `config override --set` makes after its own checks — see
 //! [`crate::commands::write_config_override`]. A value or key the merge
 //! cannot use is left in the layer, where `override list` reports it as
 //! ignored. Checking it here would add rules a person has to learn.
+
+mod pipeline;
 
 use std::io::Write;
 
@@ -122,6 +126,8 @@ struct State {
     /// Why [`State::settings`] holds the config the screen started with
     /// rather than the one in use now, drawn at the top of the box.
     stale: Option<String>,
+    /// The pipeline section, which keeps its own list and popups.
+    pipeline: pipeline::PipelineSection,
 }
 
 impl State {
@@ -134,16 +140,19 @@ impl State {
             settings: Vec::new(),
             active: 0,
             stale: None,
+            pipeline: pipeline::PipelineSection::new(),
         };
         state.reload(repo);
         state
     }
 
-    /// Read the config and the layer again, after a write or on a visit.
+    /// Read the config, the pipelines and the layer again, after a write or
+    /// on a visit.
     fn reload(&mut self, repo: &Repo) {
         let (config, stale) = in_use(repo);
         self.settings = settings(&config);
         self.stale = stale;
+        self.pipeline.reload(repo, &config);
         self.active = layer_key_count(&repo.overrides_dir());
         self.clamp();
     }
@@ -173,6 +182,13 @@ impl State {
     /// Keep the cursor on a row the search still shows.
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.matches().len());
+    }
+
+    /// Whether the open section's list has the keys, with nothing open over
+    /// it: the only time `tab`, `q` and `←`/`→` reach past the section.
+    fn at_rest(&self) -> bool {
+        matches!(self.mode, Mode::Browsing)
+            && (self.section != Section::Pipeline || self.pipeline.at_rest())
     }
 }
 
@@ -300,9 +316,9 @@ pub(crate) fn tab(
         }) else {
             return Ok(Leave::Quit);
         };
-        // Only while browsing: the search row, the fields and the notice
-        // read `q` and the arrows as their own.
-        if matches!(state.mode, Mode::Browsing)
+        // Only at rest: the search rows, the fields, the picking list and
+        // the notices read `q` and the arrows as their own.
+        if state.at_rest()
             && let Some(leave) = shell::leave_on(key)
         {
             return Ok(leave);
@@ -312,8 +328,17 @@ pub(crate) fn tab(
 }
 
 /// One key, read by whatever is open: the list, the search row, a popup or
-/// a notice.
+/// a notice. The pipeline section reads its own keys, all but the `tab` that
+/// leaves it.
 fn handle_key(repo: &Repo, state: &mut State, key: Key) {
+    if state.section == Section::Pipeline && matches!(state.mode, Mode::Browsing) {
+        if key == Key::Tab && state.pipeline.at_rest() {
+            state.section = state.section.next();
+        } else if state.pipeline.handle_key(repo, key) {
+            state.reload(repo);
+        }
+        return;
+    }
     match std::mem::replace(&mut state.mode, Mode::Browsing) {
         Mode::Browsing => browse(state, key),
         Mode::Search => match key {
@@ -377,7 +402,7 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
 fn browse(state: &mut State, key: Key) {
     match key {
         Key::Tab => state.section = state.section.next(),
-        // The other sections have no list yet: only `tab` reaches past them.
+        // Prompts and active have no list yet: only `tab` reaches past them.
         _ if state.section != Section::Config => {}
         Key::Up | Key::Down => move_cursor(state, key),
         Key::Char('f') => state.mode = Mode::Search,
@@ -472,7 +497,7 @@ fn frame(state: &State) -> Vec<String> {
             .max(1)
     });
     let inner = width.saturating_sub(2);
-    let popup = popup(state);
+    let popup = popup(state, rows);
 
     let mut body = list(state, rows, inner.saturating_sub(1));
     // A frame with no terminal under it is only as tall as its list, and
@@ -509,9 +534,27 @@ fn frame(state: &State) -> Vec<String> {
 }
 
 /// The box's top border, its title naming every section with the open one
-/// bracketed, and `active` carrying the layer's key count.
+/// bracketed, and `active` carrying the layer's key count. While the
+/// pipeline section picks a field's steps, the title names that instead.
 fn top_border(state: &State, width: usize) -> String {
-    let title = SECTIONS
+    let picking = match state.section {
+        Section::Pipeline => state.pipeline.title(),
+        _ => None,
+    };
+    let title = picking.unwrap_or_else(|| section_names(state));
+    let head = format!("─ {title} ");
+    let dashes = width.saturating_sub(head.chars().count() + 2);
+    format!(
+        "{}{head}{}{}",
+        super::corner::TOP_LEFT,
+        "─".repeat(dashes),
+        super::corner::TOP_RIGHT
+    )
+}
+
+/// Every section's name, the open one bracketed.
+fn section_names(state: &State) -> String {
+    SECTIONS
         .iter()
         .map(|section| {
             let name = match section {
@@ -526,28 +569,22 @@ fn top_border(state: &State, width: usize) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("   ");
-    let head = format!("─ {title} ");
-    let dashes = width.saturating_sub(head.chars().count() + 2);
-    format!(
-        "{}{head}{}{}",
-        super::corner::TOP_LEFT,
-        "─".repeat(dashes),
-        super::corner::TOP_RIGHT
-    )
+        .join("   ")
 }
 
-/// The list box's lines, `width` columns each: the search row while a
-/// query is typed, a blank row, then `+ new key` and every key under its
-/// table — cut to `rows` with the cursor's row kept in view and the last
-/// row saying how many keys are out of sight. The sections with no list
-/// yet draw the blank row alone.
+/// The list box's lines, `width` columns each: the open section's list, cut
+/// to `rows` with the cursor's row kept in view.
 ///
 /// Why the list is stale, when it is, heads the box above all of that and
 /// never scrolls: it is about every value shown, not about the rows near it.
 fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
+    let stale = match state.section {
+        Section::Config => &state.stale,
+        Section::Pipeline => &state.pipeline.stale,
+        Section::Prompts | Section::Active => &None,
+    };
     let mut head: Vec<String> = Vec::new();
-    if let Some(stale) = &state.stale {
+    if let Some(stale) = stale {
         head.push(String::new());
         // One column short of the box, so no word touches its right border.
         head.extend(super::wrap(&format!("  {stale}"), width.saturating_sub(1)));
@@ -557,11 +594,17 @@ fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
         head.truncate(rows.saturating_sub(1));
     }
     let rows = rows.map(|rows| rows.saturating_sub(head.len()).max(1));
-    head.extend(keys_list(state, rows, width));
+    match state.section {
+        Section::Pipeline => head.extend(state.pipeline.lines(rows, width)),
+        _ => head.extend(keys_list(state, rows, width)),
+    }
     head
 }
 
-/// [`list`]'s lines below the note on a stale config.
+/// [`list`]'s lines below the note on a stale config: the search row while
+/// a query is typed, a blank row, then `+ new key` and every key under its
+/// table, the last row saying how many keys are out of sight. Prompts and
+/// active, with no list yet, draw the blank row alone.
 fn keys_list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if matches!(state.mode, Mode::Search) {
@@ -612,8 +655,12 @@ fn keys_list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     )
 }
 
-/// The popup over the list, if one is open.
-fn popup(state: &State) -> Option<Vec<String>> {
+/// The popup over the list, if one is open. `rows` is how many rows the
+/// list box has.
+fn popup(state: &State, rows: Option<usize>) -> Option<Vec<String>> {
+    if state.section == Section::Pipeline && matches!(state.mode, Mode::Browsing) {
+        return state.pipeline.popup(rows);
+    }
     match &state.mode {
         Mode::Set { key, value } => {
             let body = vec![
@@ -688,6 +735,7 @@ fn footer(state: &State) -> String {
         Mode::Set { .. } => SET_KEYS.to_vec(),
         Mode::NewKey { .. } => NEW_KEY_KEYS.to_vec(),
         Mode::Notice(_) => vec![("enter", "confirm")],
+        Mode::Browsing if state.section == Section::Pipeline => state.pipeline.footer(),
         Mode::Browsing if state.section != Section::Config => {
             [[("tab", "section")].as_slice(), shell::quit_hint()].concat()
         }
