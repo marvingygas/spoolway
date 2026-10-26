@@ -22,7 +22,7 @@
 //! re-serialisation, see [`promote_pipeline_patch`] — rather than trusting a
 //! YAML writer with a file half of it doesn't own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -1091,13 +1091,27 @@ pub(crate) fn set_config_patch_key(
 pub(crate) const CONFIG_PATCH_HEADER: &str = "# Every key here overrides the same key in .spoolway/config.toml.\n\
      # `spoolway override promote config.toml` writes these into the tracked file.\n";
 
-/// Remove every one of `keys` from `overrides/config.toml` in one write,
+/// Remove every one of `keys` from `overrides/config.toml` in one step,
 /// leaving the others, so a process stopped partway leaves either every key
 /// or none. A key the file does not set refuses the whole call before
-/// anything is written. The file goes too when no key is left, with the
-/// empty folders above it, because a file holding only comments would still
-/// list as an override.
+/// anything is written. When no key is left the file is removed, with the
+/// empty folders above it, and never written first: a file holding only
+/// comments would still list as an override.
 pub(crate) fn remove_config_patch_keys(overrides: &Path, keys: &[String]) -> Result<()> {
+    match config_patch_after_removing(overrides, keys)? {
+        Some(text) => {
+            let path = config_patch_path(overrides);
+            crate::task::write_atomic(&path, &text)
+                .with_context(|| format!("writing {}", path.display()))
+        }
+        None => remove_config_patch(overrides),
+    }
+}
+
+/// The text of `overrides/config.toml` with `keys` taken out, or `None`
+/// when that leaves no key, for [`remove_config_patch_keys`] to remove the
+/// file instead of writing it. Refuses a key the file does not set.
+fn config_patch_after_removing(overrides: &Path, keys: &[String]) -> Result<Option<String>> {
     // Held against the leaves exactly as `override list` prints them, which is
     // the spelling the file holds. `config_patch_leaves_for` takes the spelling a
     // leaf is applied as, and would refuse a retired key the list shows.
@@ -1111,18 +1125,17 @@ pub(crate) fn remove_config_patch_keys(overrides: &Path, keys: &[String]) -> Res
         }
         paths.push(parts);
     }
+    let dropped: BTreeSet<String> = paths.iter().map(|parts| parts.join(".")).collect();
+    if held.iter().all(|key| dropped.contains(key)) {
+        return Ok(None);
+    }
     let path = config_patch_path(overrides);
     let mut text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     for parts in &paths {
         text = crate::confdoc::remove(&text, parts)?;
     }
-    crate::task::write_atomic(&path, &text)
-        .with_context(|| format!("writing {}", path.display()))?;
-    if config_patch_keys(overrides)?.is_some_and(|keys| keys.is_empty()) {
-        remove_config_patch(overrides)?;
-    }
-    Ok(())
+    Ok(Some(text))
 }
 
 /// Each leaf of `overrides/config.toml`, spelled as the file and `override
@@ -1171,12 +1184,12 @@ pub(crate) struct ConfigLeaf {
     pub(crate) input: String,
 }
 
-/// Remove every one of `keys` from a pipeline's patch in one write, so a
+/// Remove every one of `keys` from a pipeline's patch in one step, so a
 /// process stopped partway leaves either every key or none. Each is
 /// `<step>.<key>`, or `description` or `task_template`, the forms `override
 /// list` prints. A key the patch does not set refuses the whole call before
-/// anything is written. A step left with no key goes, and the file goes when
-/// nothing is left in it.
+/// anything is written. A step left with no key goes, and the file is
+/// removed, not written, when nothing is left in it.
 pub(crate) fn remove_pipeline_patch_keys(
     overrides: &Path,
     name: &str,
@@ -2045,6 +2058,37 @@ agent: pi
             config_patch_keys(&overrides).unwrap(),
             Some(vec!["dispatch.lane_quiet".to_string()])
         );
+    }
+
+    /// Removing every key the file holds removes the file without writing
+    /// it first, so no process stopped between the two can leave a file of
+    /// comments that still lists as an override. Removing fewer writes the
+    /// rest.
+    #[test]
+    fn remove_config_patch_keys_removes_an_emptied_file_without_writing_it() {
+        let overrides = crate::scratch::root("overrides-remove-config-keys-all");
+        let _ = std::fs::remove_dir_all(&overrides);
+        let path = config_patch_path(&overrides);
+        crate::task::write_atomic(
+            &path,
+            format!("{CONFIG_PATCH_HEADER}[dispatch]\nlane_quiet = \"5m\"\nvisible_lanes = 5\n"),
+        )
+        .unwrap();
+        let keys = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let both = keys(&["dispatch.lane_quiet", "dispatch.visible_lanes"]);
+
+        assert_eq!(
+            config_patch_after_removing(&overrides, &both).unwrap(),
+            None
+        );
+        let rest = config_patch_after_removing(&overrides, &keys(&["dispatch.lane_quiet"]))
+            .unwrap()
+            .unwrap();
+        assert!(!rest.contains("lane_quiet") && rest.contains("visible_lanes = 5"));
+
+        remove_config_patch_keys(&overrides, &both).unwrap();
+        assert!(!path.exists());
+        assert!(!overrides.is_dir());
     }
 
     /// Text after a TOML comment is part of what was typed, so the value is

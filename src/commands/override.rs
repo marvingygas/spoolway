@@ -653,10 +653,10 @@ pub(crate) fn drop_override_key(repo: &Repo, target: &str, key: &str) -> Result<
     drop_override_keys(repo, target, &[key.to_string()])
 }
 
-/// Remove `keys` from a target's patch in one write; returns the file as
-/// `override list` prints it. A key the patch does not set refuses the call
-/// with the file left as it was, and a file left with no key is removed from
-/// the layer.
+/// Remove `keys` from a target's patch in one step, one write or the file's
+/// removal; returns the file as `override list` prints it. A key the patch
+/// does not set refuses the call with the file left as it was, and a file
+/// left with no key is removed from the layer without being written first.
 ///
 /// The OVERRIDES tab calls this once per file, so a delete across several
 /// files that stops partway has changed whole files only.
