@@ -114,7 +114,8 @@ struct State {
     /// the `n`th key [`State::matches`] answers.
     cursor: usize,
     /// Every key, with its value in the tracked config with the layer
-    /// merged onto it.
+    /// merged onto it, or in the config the screen started with while that
+    /// does not load.
     settings: Vec<Setting>,
     /// The count `active` carries in the box title.
     active: usize,
@@ -191,9 +192,8 @@ fn in_use(repo: &Repo) -> (Config, Option<String>) {
             return (
                 repo.config.clone(),
                 Some(format!(
-                    "the tracked config {} no longer loads: {}. this list shows the config \
-                     the screen started with; fix the file with `spoolway config edit`.",
-                    Config::path_in(&repo.checkout).display(),
+                    "the tracked config no longer loads: {}. this list shows the config the \
+                     screen started with; fix the file with `spoolway config edit`.",
                     one_line(&err)
                 )),
             );
@@ -204,9 +204,8 @@ fn in_use(repo: &Repo) -> (Config, Option<String>) {
         Err(err) => (
             repo.config.clone(),
             Some(format!(
-                "{} no longer merges: {}. this list shows the config the screen started \
-                 with; reopen the file with `spoolway config override`.",
-                crate::overrides::config_patch_path(&repo.overrides_dir()).display(),
+                "overrides/config.toml no longer merges: {}. this list shows the config \
+                 the screen started with; reopen the file with `spoolway config override`.",
                 one_line(&err)
             )),
         ),
@@ -215,7 +214,9 @@ fn in_use(repo: &Repo) -> (Config, Option<String>) {
 
 /// `err` and its causes, the first line of each joined the way `{:#}` joins
 /// them. A TOML parse error spends its later lines drawing the bad line with
-/// a caret under it, which reads as noise once wrapped into a box.
+/// a caret under it, which reads as noise once wrapped into a box. A file
+/// that does not read or parse is named by its full path in the error
+/// itself, so the note names the file only by its short name.
 fn one_line(err: &anyhow::Error) -> String {
     err.chain()
         .filter_map(|cause| cause.to_string().lines().next().map(str::to_string))
@@ -250,7 +251,7 @@ fn settings(config: &Config) -> Vec<Setting> {
 /// field of every patched pipeline step, a pipeline's `description` and
 /// `task_template`, and each prompt as one. A file that does not read adds
 /// nothing, so a broken patch never hides the tab; `override list` is where
-/// it is reported.
+/// it is reported, and a config patch is named over the list as well.
 fn layer_key_count(overrides: &std::path::Path) -> usize {
     let config = crate::overrides::config_patch_keys(overrides)
         .ok()
@@ -548,7 +549,8 @@ fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let mut head: Vec<String> = Vec::new();
     if let Some(stale) = &state.stale {
         head.push(String::new());
-        head.extend(super::wrap(&format!("  {stale}"), width));
+        // One column short of the box, so no word touches its right border.
+        head.extend(super::wrap(&format!("  {stale}"), width.saturating_sub(1)));
     }
     // Held to the rows the box has, with one left for the list itself.
     if let Some(rows) = rows {
@@ -653,7 +655,8 @@ fn field(label: &str, text: &str, typing: bool) -> String {
 }
 
 /// The `current` row: the value `key` has in the list, which is the value in
-/// use now, or `not set` for a key with none or one the list does not show.
+/// use now unless the box says the list is stale, or `not set` for a key
+/// with none or one the list does not show.
 ///
 /// Read off the list rather than through `confkv::get`, which answers a
 /// `[models]` glob the config has never named with the zero that absence
