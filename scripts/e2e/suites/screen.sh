@@ -20,7 +20,8 @@
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
 # menu removes its page after one popup. On the overrides tab a listed config
 # key and a new one are each set through their popup, and both land in the
-# overrides layer, and one step field is set on steps in two pipelines.
+# overrides layer, one step field is set on steps in two pipelines, and one
+# prompt is copied into the layer.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -605,6 +606,24 @@ has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE
 PATCHES="$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
 has "bugfix's patch sets the effort its steps left out" "effort: low" "$PATCHES/bugfix.yml"
 has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
+
+# The overrides tab's prompts section copies one prompt into the layer.
+# `tab` twice moves onto the section, `f` searches it down to implementer,
+# `enter` leaves the search, and `enter` on the prompt writes the copy and
+# opens the popup naming it, which `enter` closes. `w` is left to the unit
+# tests, since it starts a file manager outside this run.
+PROMPTS_TAB="$LIVE/overrides-prompts.txt"
+on_screen '\x1b[C\x1b[C\t\tfimplementer\r\r\r' "$PROMPTS_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$PROMPTS_TAB" >"$PROMPTS_TAB.plain"
+has "tab twice moves onto the prompts section" \
+  "╭─ config   pipeline   [prompts]   active (" "$PROMPTS_TAB.plain"
+has "its key line names enter and w" \
+  "[enter] override   [f] search   [w] open workspace   [tab] section" "$PROMPTS_TAB.plain"
+has "enter says where the copy is" "wrote overrides/prompts/implementer/PROMPT.md" \
+  "$PROMPTS_TAB.plain"
+PROMPT_COPY="$SPOOLWAY_PROJECT_HOME/overrides/prompts/implementer/PROMPT.md"
+works "the copy is in the layer" test -f "$PROMPT_COPY"
+works "and holds the tracked prompt" cmp -s .spoolway/prompts/implementer/PROMPT.md "$PROMPT_COPY"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"
