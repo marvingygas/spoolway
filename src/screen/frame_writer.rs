@@ -175,6 +175,18 @@ pub(crate) fn as_terminal_would_receive(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A scrollback-free vt100 parser for a `(width, height)` pane.
+///
+/// vt100 0.18 takes `NonZeroU16` sizes. A zero side is raised to one
+/// instead of panicking, so a degenerate pane size still builds a parser.
+#[cfg(test)]
+pub(crate) fn test_parser(pane_size: (usize, usize)) -> vt100::Parser {
+    use std::num::NonZeroU16;
+    let side =
+        |n: usize| NonZeroU16::new(n.try_into().unwrap_or(u16::MAX)).unwrap_or(NonZeroU16::MIN);
+    vt100::Parser::new(side(pane_size.1), side(pane_size.0), 0)
+}
+
 /// Plays `old` and `new` into two `vt100` screens sized to `pane_size`
 /// (columns, rows) and requires every cell to agree in text, colour and
 /// bold — a byte comparison alone could pass on writes with the right
@@ -192,9 +204,9 @@ pub(crate) fn as_terminal_would_receive(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) fn assert_same_picture(old: &[u8], new: &[u8], pane_size: (usize, usize)) {
     let (width, height) = (pane_size.0 as u16, pane_size.1 as u16);
-    let mut old_parser = vt100::Parser::new(height, width, 0);
+    let mut old_parser = test_parser(pane_size);
     old_parser.process(&as_terminal_would_receive(old));
-    let mut new_parser = vt100::Parser::new(height, width, 0);
+    let mut new_parser = test_parser(pane_size);
     new_parser.process(&as_terminal_would_receive(new));
 
     for row in 0..height {
@@ -393,7 +405,7 @@ mod tests {
             pane_size,
             &mut out,
         );
-        let mut parser = vt100::Parser::new(pane_size.1 as u16, pane_size.0 as u16, 0);
+        let mut parser = test_parser(pane_size);
         parser.process(&as_terminal_would_receive(&out));
         let rows: Vec<String> = parser.screen().rows(0, pane_size.0 as u16).collect();
         assert_eq!(rows[..2], [" one", " two"]);
@@ -500,7 +512,7 @@ mod tests {
             "forget must make the tab's own frame repaint over whatever drew outside it"
         );
 
-        let mut parser = vt100::Parser::new(pane_size.1 as u16, pane_size.0 as u16, 0);
+        let mut parser = test_parser(pane_size);
         parser.process(&as_terminal_would_receive(&out));
         let screen = parser.screen().contents();
         assert!(
