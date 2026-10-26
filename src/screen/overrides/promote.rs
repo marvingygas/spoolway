@@ -94,7 +94,8 @@ const BRANCH_FIELD: usize = 46;
 const PICKER_ROWS: usize = 7;
 
 /// The picker's keys, in the popup and on the line under the frame.
-pub(super) const PICK_KEYS: &[(&str, &str)] = &[("enter", "pick"), ("f", "search"), ("esc", "close")];
+pub(super) const PICK_KEYS: &[(&str, &str)] =
+    &[("enter", "pick"), ("f", "search"), ("esc", "close")];
 
 /// The branch picker `promote selected` opens.
 pub(super) struct Picker {
@@ -193,15 +194,21 @@ impl Picker {
             false => 0,
         };
         let shown = &matches[offset..matches.len().min(offset + view)];
+        // Spelled here: `plural` adds a bare `s`.
         let marker = |n: usize, arrow: &str, word: &str| match n {
             0 => String::new(),
-            n => format!("  {arrow} {} {word}", plural(n, "branch")),
+            1 => format!("  {arrow} 1 branch {word}"),
+            n => format!("  {arrow} {n} branches {word}"),
         };
         if cut {
             body.push(marker(offset, "↑", "above"));
         }
         for (at, branch) in shown.iter().enumerate() {
-            let mark = if offset + at == self.cursor { "> " } else { "  " };
+            let mark = if offset + at == self.cursor {
+                "> "
+            } else {
+                "  "
+            };
             let row = format!("{mark}{}", branch.name);
             let row = match branch.remote_only {
                 true => format!(
@@ -215,7 +222,11 @@ impl Picker {
         if cut {
             body.push(marker(matches.len() - offset - shown.len(), "↓", "below"));
         }
-        crate::screen::panel(&format!("{} to", title(&self.files)), &body, &keys(PICK_KEYS))
+        crate::screen::panel(
+            &format!("{} to", title(&self.files)),
+            &body,
+            &keys(PICK_KEYS),
+        )
     }
 }
 
@@ -545,5 +556,487 @@ fn tracked_name(checkout: &Path, target: &str) -> String {
     match path.strip_prefix(checkout) {
         Ok(rest) => rest.display().to_string(),
         Err(_) => crate::repo::shorten_home(&path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{key_line, type_keys};
+    use super::super::{Section, State};
+    use crate::pipeline::Pipelines;
+    use crate::repo::Repo;
+    use crate::screen::shell;
+    use std::path::Path;
+
+    /// The tracked pipeline: two agent steps on sonnet.
+    const IMPL: &str = "steps:
+  - id: implement
+    agent: claude
+    model: claude-sonnet-5-5
+    on_pass: fix-spec-review
+  - id: fix-spec-review
+    agent: claude
+    model: claude-sonnet-5-5
+    on_pass: done
+";
+
+    /// The layer's patch for it: both steps on opus.
+    const PATCH: &str = "steps:\n  implement:\n    model: claude-opus-5-5\n  fix-spec-review:\n    model: \
+         claude-opus-5-5\n";
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        crate::repo::run(dir, "git", args).unwrap()
+    }
+
+    /// A main checkout `proj` on `main` tracking pipeline `impl`, inside a
+    /// scratch folder, so a worktree made beside it is removed with the
+    /// folder. It has a local branch `feature/config-update` with no
+    /// checkout, a branch `bare` from before `.spoolway/` was committed, a
+    /// task branch, and `origin`'s `feature/remote`, `main` and `HEAD`.
+    /// The layer sets both steps of `impl` to opus.
+    fn branched(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let scratch = crate::scratch::root(&format!("promote-{name}"));
+        let root = scratch.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+        git(&root, &["branch", "bare"]);
+        let file = Pipelines::file_in(&root, "impl");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, IMPL).unwrap();
+        git(&root, &["add", ".spoolway"]);
+        git(&root, &["commit", "-q", "-m", "setup"]);
+        for branch in ["feature/config-update", "task/some-lane"] {
+            git(&root, &["branch", branch]);
+        }
+        git(&root, &["remote", "add", "origin", "../origin.git"]);
+        for (remote, local) in [("feature/remote", "main"), ("main", "main")] {
+            git(
+                &root,
+                &[
+                    "update-ref",
+                    &format!("refs/remotes/origin/{remote}"),
+                    local,
+                ],
+            );
+        }
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        let repo = Repo {
+            borrowed: false,
+            home: scratch.join("home"),
+            checkout: root.clone(),
+            root,
+            config: crate::config::Config::default(),
+        };
+        let patch = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl");
+        std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+        std::fs::write(patch, PATCH).unwrap();
+        (repo, scratch)
+    }
+
+    /// The tab, opened on its active section, the cursor on
+    /// `pipelines/impl.yml`.
+    fn on_active(repo: &Repo) -> State {
+        let mut state = State::new(repo);
+        type_keys(repo, &mut state, "\t\t\t");
+        assert_eq!(state.section, Section::Active);
+        state
+    }
+
+    /// The popup over the list, with the colour of its key row taken out.
+    fn popup(state: &State) -> Vec<String> {
+        super::super::popup(state, None)
+            .unwrap()
+            .iter()
+            .map(|l| shell::plain(l))
+            .collect()
+    }
+
+    /// The popup's rows between its borders, the padding taken off.
+    fn inside(state: &State) -> Vec<String> {
+        let drawn = popup(state);
+        drawn[1..drawn.len() - 1]
+            .iter()
+            .map(|l| {
+                l.trim_start_matches('│')
+                    .trim_end_matches('│')
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The popup's text as one line, for a notice wrapped over rows.
+    fn text(state: &State) -> String {
+        inside(state)
+            .iter()
+            .map(|l| l.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The tracked `impl` pipeline under `checkout`.
+    fn tracked(checkout: &Path) -> String {
+        std::fs::read_to_string(Pipelines::file_in(checkout, "impl")).unwrap_or_default()
+    }
+
+    /// The layer's patch for `impl`, as the file holds it.
+    fn layered(repo: &Repo) -> String {
+        std::fs::read_to_string(crate::overrides::pipeline_patch_path(
+            &repo.overrides_dir(),
+            "impl",
+        ))
+        .unwrap()
+    }
+
+    /// Down `n` times, then `enter`.
+    fn down_enter(n: usize) -> String {
+        format!("{}\r", "\x1b[B".repeat(n))
+    }
+
+    // The picker lists local branches and `origin`'s in one list sorted by
+    // name, each once. Task branches and `origin/HEAD` are left out, the
+    // default branch is kept, and only a branch `origin` alone has carries
+    // `origin`.
+    #[test]
+    fn the_picker_lists_local_and_origin_branches_without_task_ones() {
+        let (repo, _guard) = branched("list");
+        let names: Vec<(String, bool)> = super::branches(&repo)
+            .unwrap()
+            .into_iter()
+            .map(|b| (b.name, b.remote_only))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("bare".to_string(), false),
+                ("feature/config-update".to_string(), false),
+                ("feature/remote".to_string(), true),
+                ("main".to_string(), false),
+            ]
+        );
+    }
+
+    // `promote selected` is offered first when everything selected is whole
+    // files, and opens the picker. On one key of a two-key file, selected or
+    // under the cursor, it is left out: it would write the other key too.
+    #[test]
+    fn promote_is_offered_only_when_every_selected_key_has_its_whole_file() {
+        let (repo, _guard) = branched("menu");
+        let mut state = on_active(&repo);
+
+        // One key selected out of two.
+        type_keys(&repo, &mut state, "\x1b[B o");
+        assert_eq!(
+            inside(&state)[1..3],
+            [
+                "  > delete selected".to_string(),
+                "    delete all overrides".to_string()
+            ]
+        );
+        type_keys(&repo, &mut state, "\x1b ");
+
+        // Nothing selected, the cursor on that key.
+        type_keys(&repo, &mut state, "o");
+        assert!(!popup(&state).join("\n").contains("promote selected"));
+        type_keys(&repo, &mut state, "\x1b");
+
+        // Both keys selected, the file whole.
+        type_keys(&repo, &mut state, "\x1b[B o");
+        assert_eq!(
+            popup(&state),
+            [
+                "╭─ 2 selected ─────────────────────────╮",
+                "│                                      │",
+                "│  > promote selected                  │",
+                "│    delete selected                   │",
+                "│    delete all overrides              │",
+                "│                                      │",
+                "│  [enter] confirm   [esc] close       │",
+                "╰──────────────────────────────────────╯",
+            ]
+        );
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ promote pipelines/impl.yml to ─"));
+    }
+
+    // The picker draws each branch with `origin` on the remote-only one, a
+    // search row, and its keys. `f` searches, `esc` in the search clears
+    // it, and `esc` closes the picker.
+    #[test]
+    fn the_picker_draws_its_branches_and_f_searches() {
+        let (repo, _guard) = branched("picker");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        assert_eq!(
+            popup(&state),
+            [
+                "╭─ promote pipelines/impl.yml to ──────────────────────────╮",
+                "│  search: ▏                                               │",
+                "│                                                          │",
+                "│  > bare                                                  │",
+                "│    feature/config-update                                 │",
+                "│    feature/remote                              origin    │",
+                "│    main                                                  │",
+                "│                                                          │",
+                "│  [enter] pick   [f] search   [esc] close                 │",
+                "╰──────────────────────────────────────────────────────────╯",
+            ]
+        );
+        assert_eq!(key_line(&state), " [enter] pick   [f] search   [esc] close");
+        type_keys(&repo, &mut state, "fREM");
+        assert_eq!(
+            inside(&state)[..3],
+            [
+                "  search: REM▏".to_string(),
+                String::new(),
+                "  > feature/remote                              origin".to_string(),
+            ]
+        );
+        assert_eq!(inside(&state)[3], "");
+        assert_eq!(key_line(&state), " [enter] leave search   [esc] cancel");
+        type_keys(&repo, &mut state, "x");
+        assert!(text(&state).contains("no branches match this search"));
+        type_keys(&repo, &mut state, "\x1b");
+        assert_eq!(inside(&state)[2], "  > bare");
+        type_keys(&repo, &mut state, "\x1b");
+        assert!(super::super::popup(&state, None).is_none());
+    }
+
+    // A list longer than the picker scrolls, counting what is out of sight
+    // above and below it.
+    #[test]
+    fn a_long_branch_list_scrolls_with_a_count_above_and_below() {
+        let (repo, _guard) = branched("scroll");
+        for n in 0..10 {
+            git(&repo.root, &["branch", &format!("fix/{n:02}")]);
+        }
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        let rows = inside(&state);
+        assert_eq!(rows[2], "");
+        assert_eq!(rows[3], "  > bare");
+        assert_eq!(rows[10], "    ↓ 7 branches below");
+        type_keys(&repo, &mut state, &"\x1b[B".repeat(9));
+        let rows = inside(&state);
+        assert_eq!(rows[2], "    ↑ 3 branches above");
+        assert_eq!(rows[9], "  > fix/06");
+        assert_eq!(rows[10], "    ↓ 4 branches below");
+
+        // Back up, the list stays where it is until the cursor reaches its
+        // top row.
+        type_keys(&repo, &mut state, &"\x1b[A".repeat(6));
+        let rows = inside(&state);
+        assert_eq!(rows[2], "    ↑ 3 branches above");
+        assert_eq!(rows[3], "  > fix/00");
+    }
+
+    // Picking a branch no checkout has opens the confirm popup naming the
+    // worktree to make, the file, the branch, `not committed` and each key.
+    // `enter` makes the worktree, writes the file there and nowhere else,
+    // commits nothing, and keeps the layer's entry.
+    #[test]
+    fn promote_onto_a_branch_with_no_checkout_makes_a_worktree_beside_it() {
+        let (repo, scratch) = branched("worktree");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+        let made = scratch.join("proj-feature-config-update");
+        // A scratch path is longer than the popup's text, so it wraps.
+        let folder = crate::screen::wrap(
+            &format!("  {}", crate::repo::shorten_home(&made)),
+            super::PROMOTE_TEXT,
+        );
+        let mut expected = vec![
+            String::new(),
+            "  makes a worktree for feature/config-update at".to_string(),
+        ];
+        expected.extend(folder.iter().map(|line| format!("  {line}")));
+        assert_eq!(
+            inside(&state),
+            [
+                expected,
+                vec![
+                    "  and writes .spoolway/pipelines/impl.yml there,".to_string(),
+                    "  not committed".to_string(),
+                    String::new(),
+                    "    fix-spec-review.model   claude-opus-5-5".to_string(),
+                    "    implement.model         claude-opus-5-5".to_string(),
+                    String::new(),
+                    "  the overrides stay in the layer until you delete them".to_string(),
+                    String::new(),
+                    "  [enter] confirm   [esc] close".to_string(),
+                ]
+            ]
+            .concat()
+        );
+        assert!(popup(&state)[0].starts_with("╭─ promote pipelines/impl.yml ─"));
+        assert_eq!(popup(&state)[0].chars().count(), 60);
+        assert!(!made.exists(), "nothing is made before enter");
+
+        let head = git(&repo.root, &["rev-parse", "feature/config-update"]);
+        type_keys(&repo, &mut state, "\r");
+        assert!(
+            popup(&state)[0].starts_with("╭─ promoted ─"),
+            "{:#?}",
+            popup(&state)
+        );
+        assert!(
+            text(&state).contains("nothing is committed"),
+            "{}",
+            text(&state)
+        );
+        assert_eq!(
+            git(&made, &["branch", "--show-current"]).trim(),
+            "feature/config-update"
+        );
+        assert!(
+            tracked(&made).contains("claude-opus-5-5"),
+            "{}",
+            tracked(&made)
+        );
+        assert_eq!(tracked(&repo.root), IMPL, "the main checkout is untouched");
+        assert_eq!(
+            git(&made, &["rev-parse", "HEAD"]),
+            head,
+            "nothing committed"
+        );
+        assert_eq!(layered(&repo), PATCH, "the layer keeps the entry");
+        type_keys(&repo, &mut state, "\r");
+        assert!(super::super::popup(&state, None).is_none());
+    }
+
+    // A branch only `origin` has gets a local branch tracking `origin`'s in
+    // the worktree made for it.
+    #[test]
+    fn promote_onto_a_remote_only_branch_makes_a_local_branch_tracking_it() {
+        let (repo, scratch) = branched("remote");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(2));
+        type_keys(&repo, &mut state, "\r");
+        let made = scratch.join("proj-feature-remote");
+        assert!(text(&state).contains("wrote"), "{}", text(&state));
+        assert_eq!(
+            git(&made, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(),
+            "origin/feature/remote"
+        );
+        assert!(tracked(&made).contains("claude-opus-5-5"));
+    }
+
+    // The branch the main checkout has out is written there, with no
+    // worktree made.
+    #[test]
+    fn promote_onto_the_main_checkouts_branch_writes_the_main_checkout() {
+        let (repo, scratch) = branched("main");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(3));
+        let rows = inside(&state);
+        assert_eq!(rows[1], "  main is checked out at");
+        assert_eq!(
+            rows[2],
+            format!("    {}", crate::repo::shorten_home(&repo.root))
+        );
+        assert_eq!(
+            rows[3],
+            "  and this writes .spoolway/pipelines/impl.yml there,"
+        );
+        type_keys(&repo, &mut state, "\r");
+        assert!(tracked(&repo.root).contains("claude-opus-5-5"));
+        assert!(!scratch.join("proj-main").exists());
+        assert_eq!(layered(&repo), PATCH);
+    }
+
+    // A folder already in the worktree's place stops `git worktree add`.
+    // The notice gives git's own error and the path, and nothing is
+    // written into the folder or anywhere else.
+    #[test]
+    fn a_folder_in_the_worktrees_place_writes_nothing() {
+        let (repo, scratch) = branched("in-the-way");
+        let made = scratch.join("proj-feature-config-update");
+        std::fs::create_dir_all(&made).unwrap();
+        std::fs::write(made.join("notes.txt"), "mine\n").unwrap();
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+        type_keys(&repo, &mut state, "\r");
+
+        assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+        // The notice wraps the path across rows, so it is read back with no
+        // spaces at all.
+        let said = text(&state).replace(' ', "");
+        assert!(said.contains("alreadyexists"), "{said}");
+        assert!(said.contains(&made.display().to_string()), "{said}");
+        let left: Vec<_> = std::fs::read_dir(&made)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["notes.txt"]);
+        assert_eq!(tracked(&repo.root), IMPL);
+        assert_eq!(layered(&repo), PATCH);
+    }
+
+    // A branch with no `.spoolway/` is refused in `tracked_write_root`'s
+    // own words, before any worktree is made.
+    #[test]
+    fn a_branch_with_no_setup_is_refused_before_a_worktree_is_made() {
+        let (repo, scratch) = branched("no-setup");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r\r");
+        assert!(text(&state).contains("makes a worktree for bare at"));
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+        let said = text(&state);
+        assert!(said.contains("has no .spoolway/ of its own"), "{said}");
+        assert!(!scratch.join("proj-bare").exists());
+        assert!(git(&repo.root, &["worktree", "list"]).lines().count() == 1);
+    }
+
+    // A branch checked out in a lane's worktree is refused in
+    // `tracked_write_root`'s own words, and the lane's file is untouched.
+    #[test]
+    fn a_branch_a_lane_has_out_is_refused_and_nothing_is_written() {
+        let (repo, _guard) = branched("lane");
+        let lane = repo.worktree_root().join("lane");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                lane.to_str().unwrap(),
+                "feature/config-update",
+            ],
+        );
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+        assert!(text(&state).contains("feature/config-update is checked out at"));
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+        let said = text(&state);
+        assert!(
+            said.contains("a lane does not change the project's setup"),
+            "{said}"
+        );
+        assert_eq!(tracked(&lane), IMPL);
+    }
+
+    // The worktree is named after the main checkout and the branch, each
+    // `/` in the branch a `-`, beside the main checkout.
+    #[test]
+    fn the_worktree_sits_beside_the_main_checkout() {
+        assert_eq!(
+            super::worktree_path(Path::new("/home/me/dev/spoolway"), "feature/config-update"),
+            Path::new("/home/me/dev/spoolway-feature-config-update")
+        );
     }
 }
