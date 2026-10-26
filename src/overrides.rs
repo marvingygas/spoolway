@@ -1027,6 +1027,98 @@ pub(crate) fn remove_config_patch(overrides: &Path) -> Result<()> {
     remove_empty_dirs_up_to(overrides, overrides.to_path_buf())
 }
 
+/// Write `key` into `overrides/config.toml` with the value `updated` holds
+/// for it, creating the file when there is none, and keep every other key and
+/// comment in it where it was.
+///
+/// `updated` is the config with the new value already applied through
+/// [`crate::confkv::set`], which is what types the text: `5m` stays a string
+/// and `5` becomes a number, as the layer will read them back. This does no
+/// check of its own on the value.
+pub(crate) fn set_config_patch_key(overrides: &Path, key: &str, updated: &Config) -> Result<()> {
+    let path = config_patch_path(overrides);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => CONFIG_PATCH_HEADER.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let value = toml::Value::try_from(updated).context("serialising config")?;
+    let rendered = updated.render()?;
+    // Switching a profile's `kind` settles its `permission_mode` onto the new
+    // kind, so the layer has to carry that key too or it would read back as
+    // the old kind's mode.
+    let mut keys = vec![key.to_string()];
+    if let Some(profile) = key
+        .strip_suffix(".kind")
+        .filter(|p| p.starts_with("agents."))
+    {
+        keys.push(format!("{profile}.permission_mode"));
+    }
+    let mut edited = text;
+    for key in &keys {
+        let parts = crate::confkv::parts(updated, key);
+        // Absent from the serialised config means the key was set to the
+        // value whose spelling is its absence; the layer then holds no line.
+        edited = match crate::confdoc::at(&value, &parts) {
+            Some(new) => crate::confdoc::set(&edited, &parts, new, &rendered),
+            None => crate::confdoc::remove(&edited, &parts),
+        }
+        .with_context(|| format!("editing {}", path.display()))?;
+    }
+    crate::task::write_atomic(&path, edited).with_context(|| format!("writing {}", path.display()))
+}
+
+/// What `spoolway config override` writes into a file it creates.
+pub(crate) const CONFIG_PATCH_HEADER: &str = "# Every key here overrides the same key in .spoolway/config.toml.\n\
+     # `spoolway override promote config.toml` writes these into the tracked file.\n";
+
+/// Remove one key from `overrides/config.toml`, leaving the others. The file
+/// goes too when no key is left, with the empty folders above it, because a
+/// file holding only comments would still list as an override.
+pub(crate) fn remove_config_patch_key(overrides: &Path, key: &str) -> Result<()> {
+    if !config_patch_sets(overrides, key)? {
+        bail!("`config.toml` in the layer does not set `{key}`");
+    }
+    let path = config_patch_path(overrides);
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let parts = crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
+    let edited = crate::confdoc::remove(&text, &parts)?;
+    crate::task::write_atomic(&path, &edited)
+        .with_context(|| format!("writing {}", path.display()))?;
+    if config_patch_keys(overrides)?.is_some_and(|keys| keys.is_empty()) {
+        remove_config_patch(overrides)?;
+    }
+    Ok(())
+}
+
+/// Remove `<step>.<key>` from a pipeline's patch, the form `override list`
+/// prints. A step left with no key goes, and the file goes when nothing is
+/// left in it.
+pub(crate) fn remove_pipeline_patch_key(
+    overrides: &Path,
+    name: &str,
+    step_key: &str,
+) -> Result<()> {
+    let (step_id, key) = step_key
+        .split_once('.')
+        .with_context(|| format!("`{step_key}` — expected `<step>.<key>`"))?;
+    let mut patch = read_pipeline_patch(overrides, name)?
+        .with_context(|| format!("no override for pipeline `{name}`"))?;
+    let fields = patch.steps.get_mut(step_id);
+    let removed = fields.is_some_and(|f| f.remove(key).is_some());
+    if !removed {
+        bail!("the override for pipeline `{name}` does not set `{step_key}`");
+    }
+    if patch.steps.get(step_id).is_some_and(|f| f.is_empty()) {
+        patch.steps.remove(step_id);
+    }
+    if patch.steps.is_empty() && patch.description.is_none() && patch.task_template.is_none() {
+        return remove_pipeline_patch(overrides, name);
+    }
+    write_pipeline_patch(overrides, name, &patch)
+}
+
 /// `value`, rendered the way it would sit after a YAML `key: `, trimmed of
 /// the trailing newline `serde_norway` always writes — for the display of a
 /// step field's current value, and for the line [`promote_pipeline_patch`]
