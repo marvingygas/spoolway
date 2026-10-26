@@ -648,7 +648,7 @@ impl ActiveSection {
     }
 
     /// The menu's title: how many keys are selected, or the row under the
-    /// cursor, which `delete selected` acts on when nothing is.
+    /// cursor, which the menu acts on when nothing is.
     fn menu_title(&self) -> String {
         if !self.selected.is_empty() {
             return format!("{} selected", self.selected.len());

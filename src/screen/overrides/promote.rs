@@ -79,7 +79,7 @@ pub(super) fn branches(repo: &Repo) -> Result<Vec<Branch>> {
         .collect())
 }
 
-/// The text inside both popups, so each is 60 columns wide inside its
+/// The text inside both popups, so each is 60 columns wide with its
 /// border, as the mockups draw them.
 const PROMOTE_TEXT: usize = 54;
 
