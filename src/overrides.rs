@@ -895,19 +895,13 @@ pub(crate) fn list_prompt_overrides(overrides: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Whether `overrides/config.toml` sets `key`, spelled as the config spells
-/// it today: a layer holding the retired `dispatch.keep_finished_lanes` sets
-/// `dispatch.visible_lanes`, since that is the key [`apply_config_table`]
-/// applies it as. `false` when there is no patch.
-pub(crate) fn config_patch_sets(overrides: &Path, key: &str) -> Result<bool> {
-    Ok(config_patch_leaf_for(overrides, key)?.is_some())
-}
-
 /// The leaf of `overrides/config.toml` that sets `key`, spelled as the file
-/// and `override list` hold it, or `None` when none does. It differs from
-/// `key` for a layer holding the retired `dispatch.keep_finished_lanes`,
-/// which sets `dispatch.visible_lanes`; `override drop config.toml <leaf>`
-/// takes that spelling.
+/// and `override list` hold it, or `None` when no leaf does.
+///
+/// `key` is read as the config spells it today. A layer holding the retired
+/// `dispatch.keep_finished_lanes` sets `dispatch.visible_lanes`, since that is
+/// the key [`apply_config_table`] applies it as, and the leaf returned is the
+/// retired spelling. `override drop config.toml <leaf>` takes that spelling.
 pub(crate) fn config_patch_leaf_for(overrides: &Path, key: &str) -> Result<Option<String>> {
     // A quoted model glob, `models."x".input`, is the key `models.x.input`
     // that `current_spelling` names a layer's leaf by.
@@ -1099,7 +1093,7 @@ pub(crate) const CONFIG_PATCH_HEADER: &str = "# Every key here overrides the sam
 /// file holding only comments would still list as an override.
 pub(crate) fn remove_config_patch_key(overrides: &Path, key: &str) -> Result<()> {
     // Held against the leaves exactly as `override list` prints them, which is
-    // the spelling the file holds. `config_patch_sets` compares the spelling a
+    // the spelling the file holds. `config_patch_leaf_for` takes the spelling a
     // leaf is applied as, and would refuse a retired key the list shows.
     let parts = crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
     let listed = parts.join(".");
@@ -2397,20 +2391,44 @@ agent: pi
     /// retired `keep_finished_lanes`, and a models glob with a dot in it is
     /// spelled as the key a person types; both are found by their current key.
     #[test]
-    fn config_patch_sets_reads_a_key_as_the_layer_applies_it() {
+    fn config_patch_leaf_for_reads_a_key_as_the_layer_applies_it() {
         let overrides = crate::scratch::root("overrides-patch-sets");
         let _ = std::fs::remove_dir_all(&overrides);
         std::fs::create_dir_all(&overrides).unwrap();
-        assert!(!config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
+        assert!(
+            !config_patch_leaf_for(&overrides, "dispatch.visible_lanes")
+                .unwrap()
+                .is_some()
+        );
         std::fs::write(
             config_patch_path(&overrides),
             "[dispatch]\nkeep_finished_lanes = true\n[models.\"gpt-5.1\"]\ncompact_ctx = 50\n",
         )
         .unwrap();
-        assert!(config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
-        assert!(!config_patch_sets(&overrides, "dispatch.keep_finished_lanes").unwrap());
-        assert!(config_patch_sets(&overrides, "models.gpt-5.1.compact_ctx").unwrap());
-        assert!(config_patch_sets(&overrides, "models.\"gpt-5.1\".compact_ctx").unwrap());
-        assert!(!config_patch_sets(&overrides, "dispatch.lane_quiet").unwrap());
+        assert!(
+            config_patch_leaf_for(&overrides, "dispatch.visible_lanes")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !config_patch_leaf_for(&overrides, "dispatch.keep_finished_lanes")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            config_patch_leaf_for(&overrides, "models.gpt-5.1.compact_ctx")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            config_patch_leaf_for(&overrides, "models.\"gpt-5.1\".compact_ctx")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !config_patch_leaf_for(&overrides, "dispatch.lane_quiet")
+                .unwrap()
+                .is_some()
+        );
     }
 }
