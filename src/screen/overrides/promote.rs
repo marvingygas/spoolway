@@ -412,7 +412,8 @@ impl Promotion {
     /// Make the worktree when one is needed, then write every file into
     /// the checkout. Answers the notice to show either way.
     ///
-    /// Nothing is written unless the worktree was made, and nothing is
+    /// Nothing is written unless the worktree was made, nothing is written
+    /// into a checkout that no longer has the branch out, and nothing is
     /// written anywhere [`Repo::tracked_write_root`] refuses: a checkout
     /// of a lane, on a detached HEAD, or of a branch with no `.spoolway/`.
     pub(super) fn run(&self, repo: &Repo) -> Notice {
@@ -1140,6 +1141,213 @@ mod tests {
             "{said}"
         );
         assert_eq!(tracked(&lane), IMPL);
+    }
+
+    /// A second pipeline `review`, one step on sonnet, in the main
+    /// checkout only, with the layer setting that step to opus. Every other
+    /// branch lacks the file, so a promote of it there fails.
+    fn add_review(repo: &Repo) {
+        std::fs::write(
+            Pipelines::file_in(&repo.root, "review"),
+            "steps:\n  - id: check\n    agent: claude\n    model: claude-sonnet-5-5\n    \
+             on_pass: done\n",
+        )
+        .unwrap();
+        std::fs::write(
+            crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "review"),
+            "steps:\n  check:\n    model: claude-opus-5-5\n",
+        )
+        .unwrap();
+    }
+
+    // Two whole files: the popup counts them in its title and lead, and
+    // names each file with its keys under it. `enter` writes both, and the
+    // notice names both.
+    #[test]
+    fn promote_of_two_files_names_each_and_writes_both() {
+        let (repo, _guard) = branched("two-files");
+        add_review(&repo);
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "ao\r");
+        assert!(popup(&state)[0].starts_with("╭─ promote 2 files to ─"));
+        type_keys(&repo, &mut state, &down_enter(3));
+        assert!(popup(&state)[0].starts_with("╭─ promote 2 files ─"));
+        let rows = inside(&state);
+        assert_eq!(rows[1], "  main is checked out at");
+        assert_eq!(
+            rows[3..],
+            [
+                "  and this writes 2 files there,",
+                "  not committed",
+                "",
+                "    .spoolway/pipelines/impl.yml",
+                "      fix-spec-review.model   claude-opus-5-5",
+                "      implement.model         claude-opus-5-5",
+                "    .spoolway/pipelines/review.yml",
+                "      check.model             claude-opus-5-5",
+                "",
+                "  the overrides stay in the layer until you delete them",
+                "",
+                "  [enter] confirm   [esc] close",
+            ]
+        );
+
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ promoted ─"));
+        let said = text(&state);
+        assert!(
+            said.contains(".spoolway/pipelines/impl.yml, .spoolway/pipelines/review.yml"),
+            "{said}"
+        );
+        assert!(tracked(&repo.root).contains("claude-opus-5-5"));
+        let review = std::fs::read_to_string(Pipelines::file_in(&repo.root, "review")).unwrap();
+        assert!(review.contains("claude-opus-5-5"), "{review}");
+        assert_eq!(layered(&repo), PATCH);
+    }
+
+    // When the second of two files fails, the notice says the first was
+    // written, where, and which was not, with the error. The first file
+    // stays written.
+    #[test]
+    fn a_second_file_failing_says_the_first_was_promoted_in_part() {
+        let (repo, scratch) = branched("in-part");
+        add_review(&repo);
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "ao\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+        type_keys(&repo, &mut state, "\r");
+
+        let made = scratch.join("proj-feature-config-update");
+        assert!(
+            popup(&state)[0].starts_with("╭─ promoted in part ─"),
+            "{:#?}",
+            popup(&state)
+        );
+        let said = text(&state).replace(' ', "");
+        assert!(said.contains("pipelines/impl.ymlwaswrittento"), "{said}");
+        assert!(said.contains("butnotpipelines/review.yml"), "{said}");
+        assert!(said.contains(&made.display().to_string()), "{said}");
+        assert!(tracked(&made).contains("claude-opus-5-5"));
+        assert!(!Pipelines::file_in(&made, "review").exists());
+    }
+
+    // A refusal of several files gives one `-C` line per file, since
+    // `override promote` takes one file and pasting a single line would
+    // promote only the first.
+    #[test]
+    fn a_refusal_of_two_files_advises_a_line_for_each() {
+        let (repo, _guard) = branched("two-refused");
+        add_review(&repo);
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "ao\r\r\r");
+        assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+        let said = text(&state).replace(' ', "");
+        let root = repo.root.display().to_string();
+        for file in ["pipelines/impl.yml", "pipelines/review.yml"] {
+            let line = format!("spoolway-C{root}overridepromote{file}");
+            assert!(said.contains(&line), "{line} in {said}");
+        }
+    }
+
+    // The main checkout switched to another branch while the confirm popup
+    // was open: `enter` writes nothing and names both branches.
+    #[test]
+    fn a_checkout_switched_after_the_pick_is_refused() {
+        let (repo, _guard) = branched("switched");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(3));
+        assert_eq!(inside(&state)[1], "  main is checked out at");
+        git(&repo.root, &["switch", "-q", "feature/config-update"]);
+        type_keys(&repo, &mut state, "\r");
+
+        assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+        let said = text(&state);
+        assert!(
+            said.contains("has feature/config-update out now, not main"),
+            "{said}"
+        );
+        assert_eq!(tracked(&repo.root), IMPL);
+        assert_eq!(git(&repo.root, &["status", "--porcelain"]), "");
+    }
+
+    // A worktree whose folder was deleted is still listed by git until it
+    // is pruned. Picking its branch says so instead of writing there.
+    #[test]
+    fn a_deleted_worktree_folder_is_named_with_prune() {
+        let (repo, scratch) = branched("pruned");
+        let gone = scratch.join("gone");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                gone.to_str().unwrap(),
+                "feature/config-update",
+            ],
+        );
+        std::fs::remove_dir_all(&gone).unwrap();
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+
+        assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+        let said = text(&state).replace(' ', "");
+        assert!(said.contains("nolongerexists"), "{said}");
+        assert!(said.contains("gitworktreeprune"), "{said}");
+        assert!(said.contains(&gone.display().to_string()), "{said}");
+        assert!(!gone.exists());
+        assert!(!scratch.join("proj-feature-config-update").exists());
+    }
+
+    // In home mode the setup is the workspace's, on no branch, so `promote
+    // selected` refuses before the picker and names `override promote`.
+    #[test]
+    fn home_mode_refuses_before_the_picker() {
+        let scratch = crate::scratch::root("promote-home-mode");
+        let root = scratch.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        let home = scratch.join("ws-home");
+        let workspace = home.join(".spoolway").join("promote-ws");
+        let pipelines = workspace.join("config").join("pipelines");
+        std::fs::create_dir_all(&pipelines).unwrap();
+        std::fs::write(pipelines.join("impl.yml"), IMPL).unwrap();
+        std::fs::write(
+            workspace.join(crate::repo::BINDING_FILE),
+            format!(
+                "id = \"promote-ws\"\nclones = [{{ root = {:?}, dispatcher = \"api\" }}]\n",
+                root.display(),
+            ),
+        )
+        .unwrap();
+        let repo = Repo {
+            borrowed: false,
+            home: scratch.join("home"),
+            checkout: root.clone(),
+            root,
+            config: crate::config::Config::default(),
+        };
+        let patch = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl");
+        std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+        std::fs::write(patch, PATCH).unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let mut state = on_active(&repo);
+            type_keys(&repo, &mut state, "o\r");
+            assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
+            let said = text(&state);
+            assert!(said.contains("no branch to promote onto"), "{said}");
+            assert!(
+                said.contains("spoolway override promote pipelines/impl.yml"),
+                "{said}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(pipelines.join("impl.yml")).unwrap(),
+                IMPL
+            );
+        });
     }
 
     // The worktree is named after the main checkout and the branch, each

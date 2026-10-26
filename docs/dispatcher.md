@@ -1346,6 +1346,15 @@ override promote` would refuse is refused here in the same words: a lane's workt
 detached HEAD, or a branch with no `.spoolway/` of its own. A branch with no `.spoolway/` is
 refused before any worktree is made.
 
+Nothing is written, either, when the checkout no longer has the branch out by the time you press
+`enter`, such as after a `git switch` there. The popup names the branch it has out now. A
+worktree whose folder was deleted is still listed by git until it is pruned. Picking its branch
+says so and asks you to run `git worktree prune` and promote again.
+
+A project in home mode keeps its setup in its workspace, which no branch carries. `promote
+selected` refuses there before the picker opens, and names the `spoolway override promote`
+command for each file, which writes the workspace's setup.
+
 ### Opening the overrides folder
 
 `w` on every section, and in both prompt popups, opens the overrides folder: the one on the
