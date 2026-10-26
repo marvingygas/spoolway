@@ -9,8 +9,9 @@
 //! checkout, the one the dispatcher reads, never from a worktree's copy.
 //!
 //! A delete names every file and key in one confirm popup first. Each file
-//! is changed with one write, so a delete that stops partway leaves whole
-//! files changed or not, and the notice names the ones already changed.
+//! is changed in one step, one write or its removal, so a delete that stops
+//! partway leaves whole files changed or not, and the notice names the ones
+//! already changed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,7 +96,8 @@ pub(super) enum Outcome {
 #[derive(Debug, Clone)]
 struct Doomed {
     target: String,
-    /// The keys to remove, or every key the file holds when `whole`.
+    /// The keys to remove. When `whole`, the keys the confirm popup lists
+    /// for a file that goes whatever it holds.
     keys: Vec<String>,
     /// Whether the file goes as a whole, whatever it holds.
     whole: bool,
@@ -211,7 +213,7 @@ impl Deletion {
         crate::screen::ask(self.title, &body, &["delete".to_string()], 0)
     }
 
-    /// Delete every file in turn, each with one write. A failure stops at
+    /// Delete every file in turn, each in one step. A failure stops at
     /// that file, and the notice names the files already changed and the
     /// ones not, so nobody reads a delete that stopped partway as undone.
     pub(super) fn run(&self, repo: &Repo) -> std::result::Result<(), Notice> {
@@ -299,15 +301,16 @@ const SET_AGAIN: &str = "[enter] to set it again, or o to delete";
 
 /// The column a file's note starts at, counted from its name, and the one a
 /// key's value starts at, counted from the key: both land on the same
-/// column, as the mockup lines them up. A longer name pushes only its own
-/// value along, one space past its end.
+/// column, so every value in the list lines up under the others. A longer
+/// name pushes only its own value along, one space past its end.
 const FILE_FIELD: usize = 31;
 const KEY_FIELD: usize = 25;
 
 /// The columns between a file and its first key in the confirm popup.
 const TARGET_GAP: usize = 3;
 
-/// The menu's items, inside a box as wide as the mockup draws it.
+/// The menu's items, padded so the menu is 40 columns wide whatever it
+/// lists, the same width with or without a selection.
 const MENU: [&str; 2] = ["delete selected", "delete all overrides"];
 const MENU_TEXT: usize = 32;
 
@@ -705,10 +708,9 @@ impl ActiveSection {
     }
 }
 
-/// A row's options menu drawn as the mockup draws the active section's: a
-/// blank row under the title, each item, and the answer keys, in a box 40
-/// columns wide. A menu with no items says there is nothing to do, as every
-/// tab's does.
+/// A row's options menu on the overrides tab: a blank row under the title,
+/// each item, and the answer keys, in a box 40 columns wide. A menu with no
+/// items says there is nothing to do, as every tab's does.
 pub(super) fn menu(title: &str, items: &[&str], cursor: usize) -> Vec<String> {
     if items.is_empty() {
         return crate::screen::options(title, items, cursor);
@@ -807,9 +809,9 @@ impl Reasons {
     }
 }
 
-/// Every file in the layer, config first, then pipelines, then prompts, as
-/// the mockup lists them, and why no key is marked ignored when `override
-/// list` cannot read the layer.
+/// Every file in the layer, config first, then pipelines, then prompts, and
+/// why no key is marked ignored when `override list` cannot read the layer.
+/// `override list` prints config last; the section lists it first.
 ///
 /// A file that does not read is listed with why, and no keys, so it can
 /// still be deleted as a whole.
@@ -1028,8 +1030,8 @@ mod tests {
     use crate::repo::Repo;
     use crate::screen::shell;
 
-    /// Two pipelines with agent steps on sonnet and a command step, as the
-    /// mockup's rows name them.
+    /// Two pipelines with agent steps on sonnet, and a command step with a
+    /// timeout.
     const IMPL: &str = "steps:
   - id: implement
     agent: claude
@@ -1115,7 +1117,7 @@ mod tests {
             .collect()
     }
 
-    /// Put the cursor on the row whose text holds `text`.
+    /// Put the cursor on the file or key named `text`.
     fn cursor_on(state: &mut State, text: &str) {
         let rows = state.layer.rows();
         let at = rows
@@ -1128,11 +1130,11 @@ mod tests {
         state.layer.cursor = at;
     }
 
-    // The section lists each file with its keys under it, as the mockup
-    // draws it: config first, the setup's value then the layer's, and a
-    // prompt as `whole file`, with `[w] open workspace` on the key line.
+    // The section lists each file with its keys under it: config first, the
+    // setup's value then the layer's as the layer spells it, and a prompt
+    // as `whole file`, with `[w] open workspace` on the key line.
     #[test]
-    fn the_section_lists_each_file_with_its_keys_as_the_mockup_draws_it() {
+    fn the_section_lists_each_file_with_its_keys_under_it() {
         let (repo, _guard) = layered("list");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = on_active(&repo);
@@ -1277,10 +1279,10 @@ mod tests {
         assert!(state.layer.selected.is_empty());
     }
 
-    // `o` with keys selected opens the menu as the mockup draws it, and
-    // `delete selected` names every file and key in its confirm popup, as
-    // the mockup draws that. `enter` deletes them, and a file left with no
-    // keys leaves the layer.
+    // `o` with keys selected opens the menu titled with how many, and
+    // `delete selected` names every file and key in its confirm popup, each
+    // file's keys under one another. `enter` deletes them, and a file left
+    // with no keys leaves the layer.
     #[test]
     fn delete_selected_names_every_file_and_key_then_deletes_them() {
         let (repo, _guard) = layered("delete-selected");
@@ -1309,9 +1311,9 @@ mod tests {
             drawn[0].starts_with("╭─ delete these overrides ─"),
             "{drawn:#?}"
         );
-        // Every row's text as the mockup draws it. The popup keeps the two
-        // columns every popup keeps inside its right border, so the longest
-        // row here draws the box one column wider than the mockup does.
+        // Every row's text. The longest row is one column wider than the
+        // other popups' text, and the box widens for it rather than drop the
+        // two columns every popup keeps inside its right border.
         let inside: Vec<&str> = drawn[1..drawn.len() - 1]
             .iter()
             .map(|l| l.trim_start_matches('│').trim_end_matches('│').trim_end())
@@ -1536,6 +1538,36 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(left.steps.keys().collect::<Vec<_>>(), ["test"]);
+    }
+
+    // A file that does not read says so on its row with no keys, and the
+    // note above the list says why no key is marked ignored. Its advice
+    // works: deleting the file here brings the reasons back.
+    #[test]
+    fn a_file_that_does_not_read_can_be_deleted_here() {
+        let (repo, _guard) = layered("unreadable");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        patch(&repo, "impl_fast", "steps: [\n");
+        let mut state = on_active(&repo);
+        let note = rows_of(&state).join(" ");
+        assert!(note.contains("the overrides layer does not read"), "{note}");
+        assert!(note.contains("delete it here"), "{note}");
+        assert!(
+            rows_of(&state)
+                .iter()
+                .any(|l| l.starts_with("   [ ] pipelines/impl_fast.yml        does not read — ")),
+            "{:#?}",
+            rows_of(&state)
+        );
+
+        cursor_on(&mut state, "pipelines/impl_fast.yml");
+        type_keys(&repo, &mut state, "o\r");
+        assert!(popup(&state).iter().any(|l| l.contains("whole file")));
+        type_keys(&repo, &mut state, "\r");
+        assert!(
+            !crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl_fast").exists()
+        );
+        assert_eq!(state.layer.stale, None);
     }
 
     // `enter` on an ignored config key opens the config section's set

@@ -394,8 +394,8 @@ pub(crate) fn tab(
         }) else {
             return Ok(Leave::Quit);
         };
-        // Only at rest: the search rows, the fields, the picking list and
-        // the notices read `q` and the arrows as their own.
+        // Only at rest: the search rows, the fields, the picking list, the
+        // menus and the notices read `q` and the arrows as their own.
         if state.at_rest()
             && let Some(leave) = shell::leave_on(key)
         {
@@ -406,8 +406,9 @@ pub(crate) fn tab(
 }
 
 /// One key, read by whatever is open: the list, the search row, a popup or
-/// a notice. The pipeline and prompts sections read their own keys, all but
-/// the `tab` that leaves them and the `w` that opens the overrides folder.
+/// a notice. The pipeline, prompts and active sections read their own keys,
+/// all but the `tab` that leaves them, the `w` that opens the overrides
+/// folder, and the `o` that opens the pipeline section's field menu.
 fn handle_key(repo: &Repo, state: &mut State, key: Key) {
     if key == Key::Char('w') && state.take_w() {
         if let Some(text) = workspace::open(repo) {
