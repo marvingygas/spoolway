@@ -227,7 +227,7 @@ fn stale_note(stale: &[(String, String)]) -> Option<String> {
 /// field it leaves out. A blank string reads as left out too. The shipped
 /// pipelines carry `model: ""` and `effort: ""` on every agent step, which
 /// send nothing, and YAML would spell them `''`. The active section reads
-/// values the same way, so the two sections never show one value two ways.
+/// the setup's values the same way.
 pub(super) fn step_value(step: &crate::pipeline::Step, name: &str) -> String {
     match crate::overrides::field_display(step, name) {
         Ok(value) if value != "''" => value,
