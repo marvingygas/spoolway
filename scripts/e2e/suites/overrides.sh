@@ -489,13 +489,14 @@ must "clean up: drop the config layer" "$SPOOLWAY" override drop config.toml
 # Bare `config override` opens an editor; `--set` writes one key, checked the
 # way `config set` checks it, and `override drop config.toml <key>` takes it
 # out again.
+cp "$TRACKED_CONFIG" "$LIVE/config.beforeset"
 says "config override --set shows the old and the new value" \
   "-> 5m" \
   "$SPOOLWAY" config override --set dispatch.lane_quiet=5m
 has "the key is in the layer's config.toml" "lane_quiet = \"5m\"" "$CONFIG_LAYER"
 says "config get reads the layer's value" "5m" "$SPOOLWAY" config get dispatch.lane_quiet
 works "the tracked config is untouched" \
-  git diff --quiet -- "$TRACKED_CONFIG"
+  cmp "$TRACKED_CONFIG" "$LIVE/config.beforeset"
 must "a second key in the layer" "$SPOOLWAY" config override --set dispatch.visible_lanes=5
 refuses "a value config set refuses is refused here too" \
   "unattended.max_cost_usd" \
