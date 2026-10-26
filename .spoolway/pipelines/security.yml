@@ -1,0 +1,42 @@
+# Full reference: docs/pipelines.md
+
+description: >-
+  Fix one open GitHub code-scanning alert with a single agent and open a pull
+  request for it, starting no agent when no alert needs a fix.
+
+steps:
+  # A command step, so a run with no open alert ends here without starting
+  # an agent.
+  - id: check
+    description: Go on to the fix only when an open code-scanning alert has no open pull request fixing it.
+    run: scripts/code-scanning-pending.sh
+    timeout: 5m
+    hide: true
+    on_pass: fix
+    on_fail: done
+
+  - id: fix
+    description: Fix the one alert the check picked, at its source, with a test that proves it gone.
+    agent: claude
+    prompt: security-fixer
+    model: claude-opus-5-5
+    effort: high
+    session: true
+    loop: 2
+    on_pass: test
+
+  - id: test
+    description: The mechanical verdict on this change, as an exit code.
+    run: scripts/gate.sh
+    timeout: 45m
+    on_pass: create-pr
+    on_fail: fix
+
+  - id: create-pr
+    description: >-
+      Push the branch and open this task's pull request with a summary.
+      Nothing is merged here; a person lands it.
+    agent: claude
+    prompt: create-pr
+    model: claude-haiku-5-5
+    on_pass: done
