@@ -915,9 +915,10 @@ const FIELD_COUNT: usize = 30;
 /// The column a pipeline's step count starts at, counted from its name.
 const PIPELINE_NAME: usize = 49;
 
-/// The column a step's value starts at, counted from its id: room for the
-/// 26 characters an id may run to would push the values past the middle
-/// of the box, so a longer id pushes only its own value along.
+/// The column a step's value starts at, counted from its id. An id may run
+/// to 26 characters, but room for that on every row would push every value
+/// right for the rare id that long, so a longer id pushes only its own
+/// value along.
 const STEP_ID: usize = 21;
 
 /// How wide the value popup's label column is at least: `current` and the

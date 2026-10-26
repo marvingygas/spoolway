@@ -1536,8 +1536,9 @@ mod tests {
             format!("{right}{down}{down}o\r"),
             format!("{right} \r"),
             format!("{right} \r\r"),
-            // Overrides tab: each section, the search row, and both
-            // popups with something typed into them.
+            // Overrides tab: each section, the search row, both config
+            // popups with something typed into them, and the pipeline
+            // section's step selection, searched, and its value field.
             format!("{right}{right}"),
             format!("{right}{right}\t"),
             format!("{right}{right}\t\t\t"),
@@ -1545,6 +1546,9 @@ mod tests {
             format!("{right}{right}fzzz"),
             format!("{right}{right}\rdispatch.x\t5"),
             format!("{right}{right}{down}\r"),
+            format!("{right}{right}\t\r"),
+            format!("{right}{right}\t\rfnot set"),
+            format!("{right}{right}\t\ra\rx"),
             // Dispatch tab: the board's rows, their options and the
             // resume and skip-a-hook questions. Never `enter` outside a
             // popup, and never an option that opens a file.

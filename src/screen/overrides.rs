@@ -297,7 +297,7 @@ fn layer_key_count(overrides: &std::path::Path) -> usize {
 
 /// Bare `spoolway`'s overrides tab, over the terminal the shell already
 /// holds. Answers the [`Leave`] that ended it. Every visit opens on config,
-/// with the config and the layer read again.
+/// with the config, the pipelines and the layer read again.
 pub(crate) fn tab(
     repo: &Repo,
     writer: &mut super::frame_writer::FrameWriter,
