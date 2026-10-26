@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 
 use super::{POPUP_TEXT, SEARCH_KEYS, SET_KEYS, edit, field, one_line, shown};
 use crate::config::Config;
+use crate::overrides::PipelinePatch;
 use crate::pipeline::{Pipelines, StepKind};
 use crate::repo::Repo;
 use crate::screen::{Key, Notice, keys, pad_to, plural};
@@ -122,7 +123,8 @@ impl PipelineRows {
 ///
 /// Each patch is merged here, from the repo's own layer, the way the config
 /// section merges `config.toml`. A patch that does not read leaves only its
-/// own pipeline on the tracked values, and is named above the list.
+/// own pipeline on the tracked values, and every such patch is named above
+/// the list.
 fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
     let tracked = match Pipelines::load_tracked(&repo.checkout, config) {
         Ok(tracked) => tracked,
@@ -138,7 +140,7 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
         }
     };
     let overrides = repo.overrides_dir();
-    let mut stale = None;
+    let mut stale = Vec::new();
     let pipelines = tracked
         .pipelines
         .values()
@@ -146,15 +148,7 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
             let mut merged = pipeline.clone();
             if let Err(err) = crate::overrides::apply_pipeline_patch(&mut merged, &overrides) {
                 merged = pipeline.clone();
-                stale.get_or_insert_with(|| {
-                    format!(
-                        "the patch on {} no longer merges: {}. its values are the tracked ones; \
-                         fix the file it names, or drop it with `spoolway override drop {}`.",
-                        pipeline.name,
-                        one_line(&err),
-                        pipeline.name
-                    )
-                });
+                stale.push((pipeline.name.clone(), one_line(&err)));
             }
             let patch = crate::overrides::read_pipeline_patch(&overrides, &pipeline.name)
                 .ok()
@@ -195,7 +189,38 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
             }
         })
         .collect();
-    (pipelines, stale)
+    (pipelines, stale_note(&stale))
+}
+
+/// The note above the list naming every pipeline whose patch no longer
+/// merges, each with why and the command that drops it, or `None` when
+/// every patch merges.
+fn stale_note(stale: &[(String, String)]) -> Option<String> {
+    match stale {
+        [] => None,
+        [(name, err)] => Some(format!(
+            "the patch on {name} no longer merges: {err}. its values are the tracked ones; fix \
+             the file it names, or drop it with `spoolway override drop {name}`."
+        )),
+        many => {
+            let names: Vec<&str> = many.iter().map(|(name, _)| name.as_str()).collect();
+            let errors: Vec<String> = many
+                .iter()
+                .map(|(name, err)| format!("{name}: {err}"))
+                .collect();
+            let drops: Vec<String> = names
+                .iter()
+                .map(|name| format!("`spoolway override drop {name}`"))
+                .collect();
+            Some(format!(
+                "the patches on {} no longer merge: {}. their values are the tracked ones; fix \
+                 the files they name, or drop them with {}.",
+                names.join(", "),
+                errors.join("; "),
+                drops.join(" and ")
+            ))
+        }
+    }
 }
 
 /// `step`'s value for the field `name`, as the list shows it: empty for a
@@ -589,6 +614,7 @@ impl PipelineSection {
 
     /// `a`: every pipeline and step the search leaves is selected, opening
     /// them all, unless they already are, and then the selection is cleared.
+    /// With no step left by the search it does nothing.
     fn toggle_all(&self, selection: &mut Selection) {
         let visible: Vec<(String, String)> = self
             .pipelines
@@ -599,6 +625,12 @@ impl PipelineSection {
                     .map(|s| (pipeline.name.clone(), pipeline.steps[s].id.clone()))
             })
             .collect();
+        // A search that leaves no step leaves nothing for `a` to select,
+        // and clearing the selection then would drop steps the person
+        // cannot see, the preselected ones among them.
+        if visible.is_empty() {
+            return;
+        }
         if visible.iter().all(|id| selection.selected.contains(id)) {
             selection.selected.clear();
             selection.open.clear();
@@ -611,7 +643,8 @@ impl PipelineSection {
     }
 
     /// Write `value` onto every selected step, then show what was written,
-    /// or why nothing was. Answers whether the layer changed.
+    /// or why none or only some of it was. Answers whether the layer
+    /// changed.
     fn save(&mut self, repo: &Repo, selection: Selection, value: &str) -> bool {
         let targets = selection.targets(&self.pipelines);
         let old = current_text(&self.pipelines, &selection);
@@ -629,20 +662,14 @@ impl PipelineSection {
                 };
                 true
             }
-            Err(err) => {
-                let field = selection.field.name;
+            Err(failure) => {
+                // Only a write that stopped partway changed the layer.
+                let changed = !failure.written.is_empty();
                 self.view = View::Failed {
-                    notice: Notice::new(
-                        "not written",
-                        format!(
-                            "{field} was not set: {err:#}. fix what stopped it and set the \
-                             value again."
-                        ),
-                    ),
+                    notice: unwritten_notice(selection.field.name, &failure),
                     selection,
                 };
-                // A write that stopped partway still changed the layer.
-                true
+                changed
             }
         }
     }
@@ -792,7 +819,7 @@ impl PipelineSection {
                     lines.push(format!(
                         "{mark}{} {}{count}",
                         tick(picked > 0),
-                        pad_to(&pipeline.name, PIPELINE_NAME)
+                        column(&pipeline.name, PIPELINE_NAME)
                     ));
                 }
                 Row::Step(p, s) => {
@@ -800,7 +827,7 @@ impl PipelineSection {
                     lines.push(format!(
                         "{mark}      {} {}{}",
                         tick(selection.is_selected(&pipeline.name, &step.id)),
-                        pad_to(&step.id, STEP_ID),
+                        column(&step.id, STEP_ID),
                         shown(step.value(selection.field))
                     ));
                 }
@@ -912,18 +939,28 @@ const FIELD_NAME: usize = 21;
 /// it on every row.
 const FIELD_COUNT: usize = 30;
 
-/// The column a pipeline's step count starts at, counted from its name.
+/// The column a pipeline's step count starts at, counted from its name. A
+/// name of 49 characters or more pushes only its own count along, one
+/// space past its end.
 const PIPELINE_NAME: usize = 49;
 
-/// The column a step's value starts at, counted from its id. An id may run
-/// to 26 characters, but room for that on every row would push every value
-/// right for the rare id that long, so a longer id pushes only its own
-/// value along.
+/// The column a step's value starts at, counted from its id. The shipped
+/// ids run to 15 characters. Room for a longer one on every row would push
+/// every value right for one rare id, so an id of 21 characters or more
+/// pushes only its own value along, one space past its end.
 const STEP_ID: usize = 21;
 
 /// How wide the value popup's label column is at least: `current` and the
 /// gap after it.
 const CURRENT_LABEL: usize = 10;
+
+/// `s` padded to `width` columns, or followed by one space when it is
+/// that long or longer. [`pad_to`] would cut a long pipeline name or step
+/// id to the width instead, and glue what is left of it to the count or
+/// value after it.
+fn column(s: &str, width: usize) -> String {
+    pad_to(s, width.max(s.chars().count() + 1))
+}
 
 /// `noun`, with an `s` unless `n` is one.
 fn noun(n: usize, noun: &str) -> String {
@@ -1017,8 +1054,14 @@ fn written_popup(written: &Written) -> Vec<String> {
 /// read, or a value that is not YAML, leaves every file as it was rather
 /// than some pipelines patched and some not. Each one starts from the patch
 /// already on disk, so a key a step's patch already holds is kept beside
-/// the new one.
-fn write(repo: &Repo, field: Field, value: &str, targets: &[(String, Vec<String>)]) -> Result<()> {
+/// the new one. A file that fails to write after others were written leaves
+/// those written, and the error names which pipelines they are.
+fn write(
+    repo: &Repo,
+    field: Field,
+    value: &str,
+    targets: &[(String, Vec<String>)],
+) -> std::result::Result<(), Unwritten> {
     repo.refuse_in_lane("the overrides layer")?;
     let parsed: serde_norway::Value = serde_norway::from_str(value)
         .with_context(|| format!("`{value}` does not read as YAML, so nothing was written"))?;
@@ -1037,19 +1080,76 @@ fn write(repo: &Repo, field: Field, value: &str, targets: &[(String, Vec<String>
                 parsed.clone(),
             );
         }
-        patches.push((name, patch));
+        patches.push((name.clone(), patch));
     }
-    let mut written: Vec<&str> = Vec::new();
-    for (name, patch) in &patches {
-        crate::overrides::write_pipeline_patch(&overrides, name, patch).with_context(|| {
-            match written.is_empty() {
-                true => "nothing was written".to_string(),
-                false => format!("{} had already been written", written.join(", ")),
-            }
-        })?;
-        written.push(name);
+    write_patches(&patches, |name, patch| {
+        crate::overrides::write_pipeline_patch(&overrides, name, patch)
+    })
+}
+
+/// Why [`write`] stopped, and which pipelines it had written by then.
+struct Unwritten {
+    /// The pipelines whose patch was written before the failure, in order.
+    /// Empty when nothing was.
+    written: Vec<String>,
+    /// The pipeline whose write failed and every one after it. Empty when
+    /// the write stopped before any file was touched.
+    unwritten: Vec<String>,
+    err: anyhow::Error,
+}
+
+/// An error from before the first file is written: nothing was.
+impl From<anyhow::Error> for Unwritten {
+    fn from(err: anyhow::Error) -> Self {
+        Unwritten {
+            written: Vec::new(),
+            unwritten: Vec::new(),
+            err,
+        }
+    }
+}
+
+/// Each of `patches` handed to `put` in order, stopping at the first that
+/// fails with the pipelines written before it and those left unwritten.
+fn write_patches(
+    patches: &[(String, PipelinePatch)],
+    mut put: impl FnMut(&str, &PipelinePatch) -> Result<()>,
+) -> std::result::Result<(), Unwritten> {
+    for (at, (name, patch)) in patches.iter().enumerate() {
+        if let Err(err) = put(name, patch) {
+            let names = |patches: &[(String, PipelinePatch)]| {
+                patches.iter().map(|(name, _)| name.clone()).collect()
+            };
+            return Err(Unwritten {
+                written: names(&patches[..at]),
+                unwritten: names(&patches[at..]),
+                err,
+            });
+        }
     }
     Ok(())
+}
+
+/// The notice for a write that stopped: `not written` when no file
+/// changed, and `written in part`, naming the pipelines on each side, when
+/// some did, so nobody reads a half-applied value as never set.
+fn unwritten_notice(field: &str, failure: &Unwritten) -> Notice {
+    let err = &failure.err;
+    match failure.written.is_empty() {
+        true => Notice::new(
+            "not written",
+            format!("{field} was not set: {err:#}. fix what stopped it and set the value again."),
+        ),
+        false => Notice::new(
+            "written in part",
+            format!(
+                "{field} was set on {} but not on {}: {err:#}. fix what stopped it and set the \
+                 value again.",
+                failure.written.join(", "),
+                failure.unwritten.join(", ")
+            ),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1328,6 +1428,52 @@ mod tests {
         assert!(rows_of(&state)[1].starts_with("> [ ] alpha"), "on alpha");
     }
 
+    // A pipeline name or step id as long as its column, or longer, is drawn
+    // whole with a space before the count or value after it.
+    #[test]
+    fn a_long_name_or_step_id_keeps_a_space_before_what_follows() {
+        let (repo, _guard) = pipelines_project("long-id");
+        let name = "a-pipeline-whose-name-runs-past-the-count-column-x";
+        std::fs::write(
+            Pipelines::file_in(&repo.checkout, name),
+            "steps:\n  - id: a-step-id-past-its-column\n    agent: claude\n    \
+             model: claude-opus-5-5\n    on_pass: done\n",
+        )
+        .unwrap();
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r ");
+        assert_eq!(
+            &rows_of(&state)[1..3],
+            [
+                "> [x] a-pipeline-whose-name-runs-past-the-count-column-x 1 of 1 selected",
+                "        [x] a-step-id-past-its-column claude-opus-5-5",
+            ]
+        );
+    }
+
+    // `a` with a search that leaves no step changes nothing, so the steps
+    // the layer already overrides stay selected out of sight.
+    #[test]
+    fn a_with_a_search_that_matches_nothing_keeps_the_selection() {
+        let (repo, _guard) = pipelines_project("all-none");
+        write_patch(
+            &repo,
+            "beta",
+            "steps:\n  fix:\n    model: claude-opus-5-5\n",
+        );
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\rfmatches-no-step\ra");
+        let View::Select(selection) = &state.pipeline.view else {
+            panic!("still picking");
+        };
+        assert!(
+            selection.is_selected("beta", "fix") && selection.open.contains("beta"),
+            "{:?}",
+            selection.selected
+        );
+    }
+
     // Search matches pipeline names, step ids, current values and `not
     // set`, and `a` then selects only what the search leaves.
     #[test]
@@ -1556,6 +1702,44 @@ mod tests {
         assert_eq!(patch(&repo, "alpha"), "");
     }
 
+    // A write that fails after earlier pipelines were written stops there,
+    // and its notice names what was written and what was not, rather than
+    // saying nothing was. A real file cannot be made to fail its write once
+    // it has read: every patch sits in the same directory, and a path that
+    // refuses the write refuses the read before it, so `put` fails instead.
+    #[test]
+    fn a_write_that_stops_partway_names_what_it_wrote() {
+        let patches: Vec<(String, PipelinePatch)> = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(|name| (name.to_string(), PipelinePatch::default()))
+            .collect();
+        let mut tried = Vec::new();
+        let failure = write_patches(&patches, |name, _| {
+            tried.push(name.to_string());
+            match name {
+                "beta" => anyhow::bail!("writing beta.yml: disk full"),
+                _ => Ok(()),
+            }
+        })
+        .unwrap_err();
+        assert_eq!(tried, ["alpha", "beta"]);
+        assert_eq!(failure.written, ["alpha"]);
+        assert_eq!(failure.unwritten, ["beta", "gamma"]);
+        let notice = unwritten_notice("model", &failure);
+        assert_eq!(notice.title, "written in part");
+        assert!(
+            notice
+                .text
+                .starts_with("model was set on alpha but not on beta, gamma: writing beta.yml"),
+            "{}",
+            notice.text
+        );
+
+        let before = unwritten_notice("model", &anyhow::anyhow!("no lock").into());
+        assert_eq!(before.title, "not written");
+        assert!(before.text.starts_with("model was not set: no lock"));
+    }
+
     // `enter` with nothing selected waits for a step, and `enter` on an
     // emptied field or `esc` goes back to the picking list with nothing
     // written.
@@ -1618,6 +1802,28 @@ mod tests {
         let beta = &state.pipeline.pipelines[1];
         assert_eq!(beta.steps[0].value(FIELDS[0]), "claude-opus-5-5");
         assert!(lines(&state).join(" ").contains("no longer merges"));
+    }
+
+    // Every patch that no longer merges is named above the list, each with
+    // why and the command that drops it, not only the first.
+    #[test]
+    fn every_patch_that_no_longer_merges_is_said_above_the_list() {
+        let (repo, _guard) = pipelines_project("stale-patches");
+        write_patch(&repo, "alpha", "steps: [\n");
+        write_patch(&repo, "beta", "steps: [\n");
+        let state = on_pipeline(&repo);
+        let stale = state.pipeline.stale.as_deref().unwrap_or_default();
+        assert!(
+            stale.starts_with("the patches on alpha, beta no longer merge: alpha: "),
+            "{stale}"
+        );
+        assert!(stale.contains("; beta: "), "{stale}");
+        assert!(
+            stale.contains(
+                "drop them with `spoolway override drop alpha` and `spoolway override drop beta`."
+            ),
+            "{stale}"
+        );
     }
 
     // Tracked pipelines that no longer load leave the list with no
