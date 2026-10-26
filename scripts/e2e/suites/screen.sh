@@ -494,7 +494,7 @@ has "delete opens the delete popup" "─ delete group cart " "$LAST"
 has "counting every pending task it takes" "delete 3 pending tasks:" "$LAST"
 has "naming the dependent in another group" "checkout-total   (depends on cart-totals)" "$LAST"
 lacks "never a task nothing in the set depends on" "checkout-page" "$LAST"
-has "its one answer under the cursor" "> delete" "$LAST"
+lacks "and no row for its one answer" "> delete" "$LAST"
 
 # Delete asks, enter removes the files and the group leaves the list.
 on_screen 'o\x1b[B\x1b[B\r\r' "$DELETE"
@@ -535,7 +535,24 @@ works "delete then enter removes the plan page" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/plans/2026-10-21-search.html"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$PLAN_DELETE" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-lacks "the plan row has left the list" "search" "$LAST"
+# Matched with the row's indent: the key line under the frame says
+# `[f] search` too.
+lacks "the plan row has left the list" "    search " "$LAST"
+
+# Delete routine on the routines tab (`→`, `o`, down, `enter`) asks with one
+# answer, so its popup draws no `> delete` row: it ends on its body, a blank
+# row and the shared key row, and `enter` still deletes the routine folder.
+ROUTINE_DELETE="$LIVE/routine-delete.txt"
+on_screen '\x1b[Co\x1b[B\r\r' "$ROUTINE_DELETE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete this routine/ { last = $0 } END { print last }' \
+  "$ROUTINE_DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "delete routine opens its popup" "─ delete this routine " "$LAST"
+has "naming the routine and its task count" "nightly · 1 task" "$LAST"
+lacks "with no answer row" "> delete" "$LAST"
+works "its body is followed by a blank row and the key row" bash -c \
+  'grep -B2 -F "[enter] confirm   [esc] close" "$1" | head -1 |
+     grep -qF "and only git can bring it back."' _ "$LAST"
+works "enter deletes the routine" test ! -e .spoolway/routines/nightly
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

@@ -18,7 +18,7 @@ use crate::screen::plural;
 /// below" when four tasks were out of sight. Only the builder that draws a
 /// pane knows where one item ends and the next begins, so it notes each
 /// start in the same loop that pushes the item's first line. A line no
-/// start points into ahead of the first item — the filter's `find:` row —
+/// start points into ahead of the first item — the filter's `search:` row —
 /// and a blank separator row are never counted.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Items<'a> {

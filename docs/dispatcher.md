@@ -546,6 +546,10 @@ cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it,
 with nothing changed. No letter answers a menu or a panel. The cursor opens on the first answer,
 such as `open task` or `pause now`, and on the `(next)` step in the resume picker.
 
+A panel with only one answer draws no answer row. It ends on its text and
+`[enter] confirm   [esc] close`, and `enter` runs its one answer. The restart, skip and unqueue
+panels are drawn this way, and so is the pause panel on a command step.
+
 ### Updating the config
 
 `u` writes the same reload request as `spoolway dispatch reload` and waits for the dispatcher's
@@ -766,12 +770,13 @@ When the board cannot route the task for an `r`, the picker lists no steps and s
 Pausing an agent turn sends Escape to the pane. A resume picks the session back up on a step that
 declares `session: true`, and opens a fresh conversation on any other step. Pausing
 a command step kills the run, and the command runs again in full on resume. On a command step
-the panel says so in two lines above the answers: `pausing terminates the command's process.`
+the panel says so in two lines under the step: `pausing terminates the command's process.`
 and `resuming restarts the command.`
 
 `pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
 named, so the named task pauses itself once that step reports, whatever it reports. The answer is
-listed only on a running agent step. A running command step offers `pause now` alone. On a row
+listed only on a running agent step. A running command step offers `pause now` alone, so its
+panel draws no answer row and `enter` pauses at once. On a row
 that already has a scheduled pause, the same answer reads `cancel the scheduled pause` and clears
 it.
 
@@ -791,8 +796,6 @@ The agent form names the step, the lane and the session that a restart throws aw
 │ the lane is torn down and `review` is briefed from  │
 │ scratch. its conversation is not kept.              │
 │                                                     │
-│ > restart                                           │
-│                                                     │
 │ [enter] confirm   [esc] close                       │
 ╰─────────────────────────────────────────────────────╯
 ```
@@ -808,24 +811,22 @@ The command form is drawn for a command step, which has no lane and no session. 
 │  the command's process is ended and `build` runs again  │
 │  from the start. its log is kept as the previous log.   │
 │                                                         │
-│  > restart                                              │
-│                                                         │
 │  [enter] confirm   [esc] close                          │
 ╰─────────────────────────────────────────────────────────╯
 ```
 
 | Key | What it does |
 |---|---|
-| `enter` on `restart` | The same as `spoolway restart <task>`. |
+| `enter` | The same as `spoolway restart <task>`. |
 | `esc` | Close the panel and change nothing. |
 
-The options menu lists `restart` only for a task that `spoolway restart` accepts, judged on the pipelines the running dispatcher loaded. A queued, done or hook-held row does not list it. When those pipelines refuse the task, the panel opens with the refusal in it and `enter` restarts nothing. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
+The options menu lists `restart` only for a task that `spoolway restart` accepts, judged on the pipelines the running dispatcher loaded. A queued, done or hook-held row does not list it. When those pipelines refuse the task, the panel opens with the refusal in it and `enter` restarts nothing. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the key row. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
 
 ### Skip panel
 
-`k` on a `hook_failed` row opens a panel titled `skip the <event> hook?`, where `<event>` is the hook that failed. The panel says where the task goes without that hook. It has one answer.
+`k` on a `hook_failed` row opens a panel titled `skip the <event> hook?`, where `<event>` is the hook that failed. The panel says where the task goes without that hook. It has one answer, so it draws no answer row.
 
-For a failed `done` hook the panel names the archive and the worktree removal. A line about the ticket follows when the task has a `ticket:`. The answer is `skip and archive`.
+For a failed `done` hook the panel names the archive and the worktree removal. A line about the ticket follows when the task has a `ticket:`.
 
 ```
 ╭─ skip the done hook? ────────────────────────╮
@@ -833,20 +834,18 @@ For a failed `done` hook the panel names the archive and the worktree removal. A
 │  worktree removed.                           │
 │  ticket #1025 stays as it is.                │
 │                                              │
-│  > skip and archive                          │
-│                                              │
 │  [enter] confirm   [esc] close               │
 ╰──────────────────────────────────────────────╯
 ```
 
-For a failed `queued` or `started` hook the panel names the step the task starts on, and the answer reads `skip and start <step>`.
+For a failed `queued` or `started` hook the panel names the step the task starts on.
 
 | Key | What it does |
 |---|---|
-| `enter` on the answer | The same as `spoolway resume <task> --skip-hook`. The board prints nothing over itself. RECENT reads `skipped <event> hook, archived` or `skipped <event> hook, moved to <step>`. |
+| `enter` | The same as `spoolway resume <task> --skip-hook`. The board prints nothing over itself. RECENT reads `skipped <event> hook, archived` or `skipped <event> hook, moved to <step>`. |
 | `esc` | Close the panel and change nothing. The task stays on `hook_failed`. |
 
-When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the answer. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
+When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the key row. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
 
 ### Footer
 
