@@ -329,8 +329,9 @@ tracked file stays as it was, and the layer keeps all its keys.
 overridden values until you remove the entry with `spoolway override drop`. In a linked worktree
 that has its own `.spoolway/`, it writes that worktree's pipeline file, prompt or `config.toml`.
 The layer belongs to the whole project, so the entry stays there for every checkout. The main
-checkout's files stay as they were until the branch merges. A worktree with no `.spoolway/` of its own, a dispatcher lane's worktree and a worktree
-on a detached HEAD refuse, as `config set` does.
+checkout's files stay as they were until the branch merges. A worktree with no `.spoolway/` of
+its own, a dispatcher lane's worktree and a worktree on a detached HEAD refuse, as `config set`
+does.
 
 ### When an override takes effect
 
