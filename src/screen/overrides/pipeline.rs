@@ -111,15 +111,18 @@ impl PipelineRows {
     }
 }
 
-/// Every tracked pipeline, with each step's values read off the merged
-/// pipelines, and why the list is empty or shows the tracked values when
-/// it does.
+/// Every tracked pipeline, each step with its values in use now, and why
+/// the list is empty or shows a pipeline's tracked values when it does.
 ///
 /// Only the pipelines in the repo's `.spoolway/`: a private pipeline's patch
 /// waits until the pipeline is promoted, so a value set on one would read as
 /// written and do nothing. The `blocked` step is left out too: every
 /// pipeline gets it from `[unattended]`, which the config section sets once
 /// for all of them.
+///
+/// Each patch is merged here, from the repo's own layer, the way the config
+/// section merges `config.toml`. A patch that does not read leaves only its
+/// own pipeline on the tracked values, and is named above the list.
 fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
     let tracked = match Pipelines::load_tracked(&repo.checkout, config) {
         Ok(tracked) => tracked,
@@ -134,42 +137,40 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
             );
         }
     };
-    let (merged, stale) = match Pipelines::load_quietly(&repo.checkout, config) {
-        Ok(merged) => (Some(merged), None),
-        Err(err) => (
-            None,
-            Some(format!(
-                "the pipeline overrides no longer merge: {}. the values shown are the tracked \
-                 ones; fix or delete the patch it names.",
-                one_line(&err)
-            )),
-        ),
-    };
     let overrides = repo.overrides_dir();
+    let mut stale = None;
     let pipelines = tracked
         .pipelines
         .values()
         .map(|pipeline| {
+            let mut merged = pipeline.clone();
+            if let Err(err) = crate::overrides::apply_pipeline_patch(&mut merged, &overrides) {
+                merged = pipeline.clone();
+                stale.get_or_insert_with(|| {
+                    format!(
+                        "the patch on {} no longer merges: {}. its values are the tracked ones; \
+                         fix the file it names, or drop it with `spoolway override drop {}`.",
+                        pipeline.name,
+                        one_line(&err),
+                        pipeline.name
+                    )
+                });
+            }
             let patch = crate::overrides::read_pipeline_patch(&overrides, &pipeline.name)
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            let steps = pipeline
+            let steps = merged
                 .steps
                 .iter()
                 .filter(|step| step.id != crate::pipeline::BLOCKED)
                 .map(|step| {
-                    let in_use = merged
-                        .as_ref()
-                        .and_then(|m| m.pipelines.get(&pipeline.name))
-                        .and_then(|p| p.steps.iter().find(|s| s.id == step.id))
-                        .unwrap_or(step);
                     let kind = step.kind();
                     let values = FIELDS
                         .iter()
                         .filter(|field| field.kind == kind)
                         .map(|field| {
-                            let value = crate::overrides::field_display(in_use, field.name)
+                            let value = crate::overrides::field_display(step, field.name)
                                 .unwrap_or_default();
                             (field.name, value)
                         })
@@ -494,7 +495,10 @@ impl PipelineSection {
                     selection.filter.clear();
                     selection.searching = false;
                 }
-                Key::Up | Key::Down => self.move_selection(&mut selection, key),
+                Key::Up | Key::Down => {
+                    self.move_selection(&mut selection, key);
+                    return View::Select(selection);
+                }
                 other => edit(&mut selection.filter, other),
             }
             self.refocus(&mut selection, before);
@@ -502,7 +506,10 @@ impl PipelineSection {
         }
         match key {
             Key::Esc => return View::Fields,
-            Key::Up | Key::Down => self.move_selection(&mut selection, key),
+            Key::Up | Key::Down => {
+                self.move_selection(&mut selection, key);
+                return View::Select(selection);
+            }
             Key::Char('f') => selection.searching = true,
             Key::Char(' ') => match before {
                 Some(Row::Pipeline(p)) => self.toggle_pipeline(&mut selection, p),
@@ -964,9 +971,9 @@ fn fit_blocks(mut blocks: Vec<Vec<String>>, room: Option<usize>, label: usize) -
     let mut lines: Vec<String> = blocks.into_iter().flatten().collect();
     if left_out > 0 {
         lines.push(format!(
-            "{:label$}and {} more",
+            "{:label$}and {left_out} more {}",
             "",
-            plural(left_out, "pipeline")
+            noun(left_out, "pipeline")
         ));
     }
     lines
@@ -1035,4 +1042,559 @@ fn write(repo: &Repo, field: Field, value: &str, targets: &[(String, Vec<String>
         written.push(name);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{lines, project, type_keys};
+    use super::super::{State, handle_key};
+    use super::*;
+
+    /// Two agent steps on sonnet with an effort, one step that sets no
+    /// effort, and a command step.
+    const ALPHA: &str = "steps:
+  - id: implement
+    agent: claude
+    model: claude-sonnet-5-5
+    effort: high
+    on_pass: review
+  - id: review
+    agent: claude
+    model: claude-sonnet-5-5
+    effort: high
+    on_pass: check
+  - id: check
+    run: make test
+    on_pass: create-pr
+  - id: create-pr
+    agent: claude
+    model: claude-haiku-5-5
+    on_pass: done
+";
+
+    /// One agent step on sonnet with an effort, and one with no effort.
+    const BETA: &str = "steps:
+  - id: fix
+    agent: claude
+    model: claude-sonnet-5-5
+    effort: medium
+    on_pass: create-pr
+  - id: create-pr
+    agent: claude
+    model: claude-haiku-5-5
+    on_pass: done
+";
+
+    /// Command steps alone, so it takes no agent field.
+    const GAMMA: &str = "steps:
+  - id: build
+    run: make
+    on_pass: done
+";
+
+    /// A project with the three pipelines above tracked, and no layer yet.
+    fn pipelines_project(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (repo, guard) = project(&format!("pipeline-{name}"));
+        let dir = Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in [("alpha", ALPHA), ("beta", BETA), ("gamma", GAMMA)] {
+            std::fs::write(dir.join(format!("{name}.yml")), body).unwrap();
+        }
+        (repo, guard)
+    }
+
+    /// The overrides tab, opened on its pipeline section.
+    fn on_pipeline(repo: &Repo) -> State {
+        let mut state = State::new(repo);
+        type_keys(repo, &mut state, "\t");
+        state
+    }
+
+    /// `pipeline`'s patch as the file holds it, or empty with none.
+    fn patch(repo: &Repo, pipeline: &str) -> String {
+        std::fs::read_to_string(crate::overrides::pipeline_patch_path(
+            &repo.overrides_dir(),
+            pipeline,
+        ))
+        .unwrap_or_default()
+    }
+
+    /// Write `body` as `pipeline`'s patch.
+    fn write_patch(repo: &Repo, pipeline: &str, body: &str) {
+        let path = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), pipeline);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The box's rows with its borders and the padding after the text taken
+    /// off, so a row reads as the mockup writes it.
+    fn rows_of(state: &State) -> Vec<String> {
+        lines(state)
+            .iter()
+            .filter_map(|l| l.strip_prefix("│ "))
+            .map(|l| l.trim_end_matches('│').trim_end().to_string())
+            .collect()
+    }
+
+    /// The popup's rows, cut out of the frame between its borders, with
+    /// its two-column margin and the padding after the text taken off.
+    fn popup_rows(state: &State) -> Vec<String> {
+        let drawn: Vec<Vec<char>> = lines(state).iter().map(|l| l.chars().collect()).collect();
+        let Some(top) = (1..drawn.len()).find(|&at| drawn[at].contains(&'╭')) else {
+            return Vec::new();
+        };
+        let left = drawn[top].iter().position(|c| *c == '╭').unwrap();
+        let right = drawn[top].iter().position(|c| *c == '╮').unwrap();
+        drawn[top + 1..]
+            .iter()
+            .take_while(|row| row.get(left) == Some(&'│'))
+            .map(|row| {
+                let inner: String = row[left + 1..right].iter().collect();
+                let inner = inner.trim_end();
+                inner.strip_prefix("  ").unwrap_or(inner).to_string()
+            })
+            .collect()
+    }
+
+    /// `esc`, on its own: the reader takes the byte after an escape as part
+    /// of it, so it is never typed together with the next key.
+    fn esc(repo: &Repo, state: &mut State) {
+        type_keys(repo, state, "\x1b");
+    }
+
+    // The field list as the mockup draws it: each kind's fields under its
+    // own header, with how many steps in how many pipelines take each one
+    // and how many of them the layer already sets it on.
+    #[test]
+    fn the_section_lists_step_fields_under_a_header_per_kind() {
+        let (repo, _guard) = pipelines_project("fields");
+        write_patch(&repo, "gamma", "steps:\n  build:\n    timeout: 5m\n");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let state = on_pipeline(&repo);
+        let rows = rows_of(&state);
+        assert_eq!(
+            &rows[..14],
+            [
+                "",
+                "  agent steps",
+                ">   model                5 steps in 2 pipelines",
+                "    effort               5 steps in 2 pipelines",
+                "    agent                5 steps in 2 pipelines",
+                "    prompt               5 steps in 2 pipelines",
+                "    session              5 steps in 2 pipelines",
+                "    skills               5 steps in 2 pipelines",
+                "  command steps",
+                "    run                  2 steps in 2 pipelines",
+                "    timeout              2 steps in 2 pipelines        1 overridden",
+                "    hide                 2 steps in 2 pipelines",
+                "",
+                "",
+            ]
+        );
+        assert!(
+            lines(&state)[0].starts_with("╭─ config   [pipeline]   prompts   active (1) ─"),
+            "{:?}",
+            lines(&state)[0]
+        );
+        assert_eq!(
+            lines(&state).last().unwrap(),
+            " [enter] select steps   [f] search   [tab] section"
+        );
+    }
+
+    // `enter` on a field lists only the pipelines with a step that takes it,
+    // each closed to one row with its step count.
+    #[test]
+    fn enter_on_a_field_lists_the_pipelines_with_a_step_that_takes_it() {
+        let (repo, _guard) = pipelines_project("select");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r");
+        let drawn = lines(&state);
+        assert!(
+            drawn[0].starts_with("╭─ select steps for model ─"),
+            "{:?}",
+            drawn[0]
+        );
+        let rows = rows_of(&state);
+        assert_eq!(
+            &rows[..3],
+            [
+                "",
+                "> [ ] alpha                                            3 steps",
+                "  [ ] beta                                             2 steps",
+            ]
+        );
+        assert!(!rows.iter().any(|r| r.contains("gamma")), "{rows:#?}");
+        assert_eq!(
+            drawn.last().unwrap(),
+            " [space] select   [a] all   [enter] set value   [esc] back"
+        );
+
+        // `esc` goes back to the fields, and `tab` only then leaves.
+        type_keys(&repo, &mut state, "\t");
+        assert!(
+            state.pipeline.title().is_some(),
+            "tab does not leave a pick"
+        );
+        esc(&repo, &mut state);
+        type_keys(&repo, &mut state, "\t");
+        assert_eq!(state.section, super::super::Section::Prompts);
+    }
+
+    // A step that leaves the field out reads `not set`, and a pipeline whose
+    // steps the layer already sets the field on starts open, with those
+    // steps selected.
+    #[test]
+    fn overridden_steps_start_selected_and_a_missing_field_reads_not_set() {
+        let (repo, _guard) = pipelines_project("preselected");
+        write_patch(&repo, "beta", "steps:\n  fix:\n    effort: low\n");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\r");
+        let rows = rows_of(&state);
+        assert_eq!(
+            &rows[..5],
+            [
+                "",
+                "> [ ] alpha                                            3 steps",
+                "  [x] beta                                             1 of 2 selected",
+                "        [x] fix                  low",
+                "        [ ] create-pr            not set",
+            ]
+        );
+    }
+
+    // `space` on a pipeline opens it with every step selected, and again
+    // closes it with them cleared. `a` selects every pipeline and step, and
+    // a second `a` clears the selection.
+    #[test]
+    fn space_selects_a_pipeline_and_a_selects_everything() {
+        let (repo, _guard) = pipelines_project("space");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r ");
+        let rows = rows_of(&state);
+        assert_eq!(
+            &rows[1..6],
+            [
+                "> [x] alpha                                            3 of 3 selected",
+                "        [x] implement            claude-sonnet-5-5",
+                "        [x] review               claude-sonnet-5-5",
+                "        [x] create-pr            claude-haiku-5-5",
+                "  [ ] beta                                             2 steps",
+            ]
+        );
+        // A step is unselected on its own, and the pipeline stays open.
+        type_keys(&repo, &mut state, "\x1b[B\x1b[B ");
+        assert!(rows_of(&state)[1].ends_with("2 of 3 selected"));
+        assert!(rows_of(&state)[3].starts_with(">       [ ] review"));
+
+        type_keys(&repo, &mut state, "\x1b[A\x1b[A ");
+        assert_eq!(
+            &rows_of(&state)[1..3],
+            [
+                "> [ ] alpha                                            3 steps",
+                "  [ ] beta                                             2 steps",
+            ]
+        );
+
+        type_keys(&repo, &mut state, "a");
+        let View::Select(selection) = &state.pipeline.view else {
+            panic!("still picking");
+        };
+        assert_eq!(selection.selected.len(), 5);
+        assert!(
+            rows_of(&state)
+                .iter()
+                .any(|r| r
+                    == "  [x] beta                                             2 of 2 selected")
+        );
+        type_keys(&repo, &mut state, "a");
+        let View::Select(selection) = &state.pipeline.view else {
+            panic!("still picking");
+        };
+        assert!(selection.selected.is_empty() && selection.open.is_empty());
+        assert!(rows_of(&state)[1].starts_with("> [ ] alpha"), "on alpha");
+    }
+
+    // Search matches pipeline names, step ids, current values and `not
+    // set`, and `a` then selects only what the search leaves.
+    #[test]
+    fn search_matches_names_ids_values_and_not_set() {
+        let (repo, _guard) = pipelines_project("search");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        let picked = |state: &State| -> Vec<String> {
+            let View::Select(selection) = &state.pipeline.view else {
+                panic!("still picking");
+            };
+            selection
+                .selected
+                .iter()
+                .map(|(p, s)| format!("{p}.{s}"))
+                .collect()
+        };
+        // On effort: `not set` finds the two steps that leave it out.
+        type_keys(&repo, &mut state, "\x1b[B\rfnot set\ra");
+        assert_eq!(picked(&state), ["alpha.create-pr", "beta.create-pr"]);
+        let rows = rows_of(&state);
+        assert_eq!(rows[0], "search: not set");
+        assert_eq!(
+            &rows[2..6],
+            [
+                "> [x] alpha                                            1 of 3 selected",
+                "        [x] create-pr            not set",
+                "  [x] beta                                             1 of 2 selected",
+                "        [x] create-pr            not set",
+            ]
+        );
+        // A value, a step id and a pipeline name.
+        for (query, expected) in [
+            ("medium", vec!["beta.fix"]),
+            ("review", vec!["alpha.review"]),
+            ("beta", vec!["beta.create-pr", "beta.fix"]),
+        ] {
+            type_keys(&repo, &mut state, "a");
+            esc(&repo, &mut state);
+            type_keys(&repo, &mut state, "\rf");
+            type_keys(&repo, &mut state, query);
+            type_keys(&repo, &mut state, "\ra");
+            assert_eq!(picked(&state), expected, "{query}");
+        }
+    }
+
+    // `enter` opens the value field filled with the value every selected
+    // step shares, and its `current` row says so, as the mockup draws it.
+    #[test]
+    fn the_value_field_opens_on_the_shared_value() {
+        let (repo, _guard) = pipelines_project("value");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        // implement and review, on alpha, share sonnet.
+        type_keys(&repo, &mut state, "\r \x1b[B\x1b[B\x1b[B \r");
+        assert_eq!(
+            popup_rows(&state),
+            [
+                "",
+                "value: claude-sonnet-5-5▏",
+                "",
+                "current   claude-sonnet-5-5",
+                "alpha     implement, review",
+                "",
+                "[enter] save   [esc] back",
+            ]
+        );
+        assert!(
+            lines(&state)
+                .iter()
+                .any(|l| l.contains("╭─ set model on 2 steps ─")),
+            "{:#?}",
+            lines(&state)
+        );
+        assert_eq!(lines(&state).last().unwrap(), " [enter] save   [esc] back");
+    }
+
+    // Selected steps that differ open an empty field over `varies`, and
+    // steps that all leave the field out an empty one over `not set`.
+    #[test]
+    fn the_value_field_is_empty_when_the_steps_differ_or_leave_it_out() {
+        let (repo, _guard) = pipelines_project("varies");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r \r");
+        let rows = popup_rows(&state);
+        assert_eq!(rows[1], "value: ▏");
+        assert_eq!(rows[3], "current   varies");
+
+        esc(&repo, &mut state);
+        esc(&repo, &mut state);
+        type_keys(&repo, &mut state, "\x1b[B\rfnot set\ra\r");
+        let rows = popup_rows(&state);
+        assert_eq!(rows[1], "value: ▏");
+        assert_eq!(rows[3], "current   not set");
+        assert_eq!(rows[4], "alpha     create-pr");
+        assert_eq!(rows[5], "beta      create-pr");
+    }
+
+    // Saving writes the value, read as YAML, into every pipeline with a
+    // selected step, steps that leave the field out included, and shows
+    // the popup the mockup draws.
+    #[test]
+    fn saving_writes_one_patch_per_pipeline_and_says_so() {
+        let (repo, _guard) = pipelines_project("save");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\rfnot set\ra\rmax\r");
+        assert_eq!(
+            popup_rows(&state),
+            [
+                "",
+                "effort on 2 steps in 2 pipelines",
+                "  not set → max",
+                "",
+                "[enter] close",
+            ]
+        );
+        assert!(
+            lines(&state)
+                .iter()
+                .any(|l| l.contains("╭─ overrides written ──────────────────────────────╮"))
+        );
+        assert!(
+            patch(&repo, "alpha").contains("steps:\n  create-pr:\n    effort: max\n"),
+            "{}",
+            patch(&repo, "alpha")
+        );
+        assert!(patch(&repo, "beta").contains("steps:\n  create-pr:\n    effort: max\n"));
+        assert_eq!(state.active, 2);
+
+        // `enter` closes it onto the field list, which counts the new
+        // overrides and shows the new value.
+        type_keys(&repo, &mut state, "\r");
+        assert!(state.pipeline.at_rest());
+        assert!(
+            rows_of(&state)[3].ends_with("2 overridden"),
+            "{:?}",
+            rows_of(&state)
+        );
+        type_keys(&repo, &mut state, "\r \x1b[B\x1b[B\x1b[B");
+        assert!(
+            rows_of(&state)
+                .iter()
+                .any(|r| r == ">       [x] create-pr            max")
+        );
+    }
+
+    // A value is written as the YAML it reads as: a boolean stays one, and
+    // a duration is a string.
+    #[test]
+    fn a_value_is_written_as_the_yaml_it_reads_as() {
+        let (repo, _guard) = pipelines_project("yaml");
+        let mut state = on_pipeline(&repo);
+        // hide, then timeout, on alpha's check.
+        let down = "\x1b[B".repeat(8);
+        type_keys(&repo, &mut state, &format!("{down}\r \rtrue\r\r"));
+        type_keys(&repo, &mut state, "\x1b[A\r \r\x7f\x7f\x7f\x7f5m\r\r");
+        let text = patch(&repo, "alpha");
+        assert!(text.contains("    hide: true\n"), "{text}");
+        assert!(text.contains("    timeout: 5m\n"), "{text}");
+        let parsed = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "alpha")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.steps["check"]["hide"],
+            serde_norway::Value::Bool(true)
+        );
+        assert_eq!(parsed.steps["check"]["timeout"].as_str(), Some("5m"));
+    }
+
+    // A step whose patch already sets another field keeps it beside the
+    // new one.
+    #[test]
+    fn a_write_keeps_a_field_the_patch_already_sets() {
+        let (repo, _guard) = pipelines_project("keeps");
+        write_patch(&repo, "beta", "steps:\n  fix:\n    effort: low\n");
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r\x1b[B \rclaude-opus-5-5\r");
+        let parsed = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "beta")
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.steps["fix"]["effort"].as_str(), Some("low"));
+        assert_eq!(
+            parsed.steps["fix"]["model"].as_str(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            parsed.steps["create-pr"]["model"].as_str(),
+            Some("claude-opus-5-5")
+        );
+    }
+
+    // A patch that does not read stops the whole write before any file is
+    // touched: alpha, written first by name, is left with no patch, and the
+    // broken one is left as it was. The notice says so until `enter` goes
+    // back to the picking list.
+    #[test]
+    fn a_patch_that_does_not_read_leaves_every_file_as_it_was() {
+        let (repo, _guard) = pipelines_project("atomic");
+        write_patch(&repo, "beta", "steps: [\n");
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\ra\rclaude-opus-5-5\r");
+        let drawn = lines(&state);
+        assert!(
+            drawn.iter().any(|l| l.contains("╭─ not written ─")),
+            "{drawn:#?}"
+        );
+        let text = drawn.join(" ");
+        assert!(text.contains("model was not set"), "{text}");
+        assert!(text.contains("nothing was written"), "{text}");
+        assert_eq!(patch(&repo, "alpha"), "");
+        assert_eq!(patch(&repo, "beta"), "steps: [\n");
+
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.pipeline.view, View::Select(_)));
+    }
+
+    // A value that does not read as YAML is refused the same way.
+    #[test]
+    fn a_value_that_is_not_yaml_writes_nothing() {
+        let (repo, _guard) = pipelines_project("not-yaml");
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r \r[oops\r");
+        assert!(lines(&state).join(" ").contains("does not read as YAML"));
+        assert_eq!(patch(&repo, "alpha"), "");
+    }
+
+    // `enter` with nothing selected waits for a step, and `enter` on an
+    // emptied field or `esc` goes back to the picking list with nothing
+    // written.
+    #[test]
+    fn nothing_selected_or_an_empty_value_writes_nothing() {
+        let (repo, _guard) = pipelines_project("empty");
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r\r");
+        assert!(matches!(state.pipeline.view, View::Select(_)));
+        type_keys(&repo, &mut state, " \r");
+        let erase = "\x7f".repeat(20);
+        type_keys(&repo, &mut state, &format!("{erase}\r"));
+        assert!(matches!(state.pipeline.view, View::Select(_)));
+        type_keys(&repo, &mut state, "\rx");
+        esc(&repo, &mut state);
+        assert!(matches!(state.pipeline.view, View::Select(_)));
+        assert!(!crate::overrides::pipeline_patches_dir(&repo.overrides_dir()).exists());
+    }
+
+    // A value popup naming more pipelines than a short terminal has rows
+    // for says how many it left out, and keeps the frame inside it.
+    #[test]
+    fn a_value_popup_on_a_short_terminal_leaves_pipelines_out() {
+        let (repo, _guard) = pipelines_project("short");
+        let _terminal = crate::screen::test_terminal((80, 12));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\ra\r");
+        let drawn = lines(&state);
+        assert_eq!(drawn.len(), 12 - 1, "{drawn:#?}");
+        let rows = popup_rows(&state);
+        assert!(
+            rows.iter().any(|r| r == "          and 2 more pipelines"),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r == "[enter] save   [esc] back"),
+            "{rows:#?}"
+        );
+    }
+
+    // A picking list taller than the screen keeps the cursor's row in view
+    // and counts the pipelines out of sight under the rows' indent.
+    #[test]
+    fn a_long_picking_list_scrolls_by_pipeline() {
+        let (repo, _guard) = pipelines_project("scroll");
+        let _terminal = crate::screen::test_terminal((80, 10));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\ra");
+        let rows = rows_of(&state);
+        assert_eq!(rows.last().unwrap(), "  ↓ 1 pipeline below", "{rows:#?}");
+    }
 }

@@ -760,7 +760,7 @@ mod tests {
 
     /// A project with a tracked config and no layer yet, its machine home
     /// inside the fixture so a write never reaches the real one.
-    fn project(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+    pub(super) fn project(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let (repo, guard) = crate::status::testutil::fixture(&format!("overrides-tab-{name}"));
         let path = Config::path_in(&repo.root);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -770,7 +770,7 @@ mod tests {
 
     /// `keys` typed at `state` one key at a time, decoded the way the
     /// terminal's bytes are.
-    fn type_keys(repo: &Repo, state: &mut State, keys: &str) {
+    pub(super) fn type_keys(repo: &Repo, state: &mut State, keys: &str) {
         let mut input = std::io::Cursor::new(keys.as_bytes().to_vec());
         while let Some(key) = super::super::read_key(&mut input) {
             handle_key(repo, state, key);
@@ -778,7 +778,7 @@ mod tests {
     }
 
     /// The frame's lines with the colour of its key line taken out.
-    fn lines(state: &State) -> Vec<String> {
+    pub(super) fn lines(state: &State) -> Vec<String> {
         frame(state).iter().map(|l| shell::plain(l)).collect()
     }
 
@@ -839,7 +839,7 @@ mod tests {
     fn a_section_with_no_list_yet_draws_an_empty_box() {
         let (repo, _guard) = project("empty-sections");
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\t\t");
         let drawn = lines(&state);
         assert!(!drawn.iter().any(|l| l.contains("new key")), "{drawn:?}");
         assert_eq!(drawn.last().unwrap(), " [tab] section");
