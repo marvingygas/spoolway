@@ -916,7 +916,7 @@ section right, wrapping from active back to config. `←` and `→` still change
 The count on active is the number of keys in the layer: every config key, every field of every
 patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
 The active section shows an empty list, and `tab` is the only key it reads. On the other three
-sections `w` opens the overrides folder — see [Opening the overrides folder](#opening-the-overrides-folder).
+sections `w` opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
 
 ### The config section
 
@@ -1193,7 +1193,7 @@ board's own pane, starts in the folder and takes focus.
 ╭─ config  pipeline  [prompts]  active (2) ───╮ │ $ pwd
 │                                             │ │ /home/marvin/.spoolway/
 │   archivist                                 │ │ spoolway-1axtn7/overrides
-│   code-reviewer                             │ │ $ ls
+│   create-pr                                 │ │ $ ls
 │ > implementer                               │ │ prompts
 │                                             │ │ $ ▏
 ╰─────────────────────────────────────────────╯ │
