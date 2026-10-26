@@ -1097,8 +1097,10 @@ share, and empty when they differ. The `current` row shows the shared value, `no
 value is written as the YAML it reads as: `true` is a boolean, and `claude-opus-5-5` and `5m` are
 strings. A field the patch already sets on another step, or another field on the same step, is
 kept. Every patch is built before any file is written, so a patch that does not parse, or a value
-that is not YAML, writes nothing at all and opens a `not written` popup with the reason. `enter`
-closes it onto the selection. `enter` on an empty field, or `esc`, goes back to the selection
+that is not YAML, writes nothing at all and opens a `not written` popup with the reason. A file
+that fails to write after others were written leaves those written, and opens a `written in part`
+popup naming the pipelines that took the value and those that did not. `enter` closes either
+popup onto the selection. `enter` on an empty field, or `esc`, goes back to the selection
 with nothing written. A popup naming more pipelines than the screen has rows for ends on a line
 such as `and 2 more pipelines`.
 
