@@ -149,12 +149,12 @@ forgotten. A page counts as named once any pending, queued or archived task poin
 `plan:`. In home mode a task in any clone of the workspace counts, so a page leaves every
 clone's list once one clone cuts it. Plan rows sit right under the queueable groups, newest first, and above the done
 groups. A plan row shows only its name, without the date in front of it, with no checkbox and
-no tail. With a plan row highlighted, the tasks pane says only `Use /spoolway-tasks`:
+no tail. With a plan row highlighted, the tasks pane says only `use /spoolway-tasks`:
 
 ```
 ╭─ groups ───────────────┬─ tasks ────────────────────────────────────────────╮
 │   [ ] checkout         │                                                    │
-│   [ ] cart             │   Use /spoolway-tasks                              │
+│   [ ] cart             │   use /spoolway-tasks                              │
 │ >     search           │                                                    │
 │       onboarding       │                                                    │
 ╰────────────────────────┴────────────────────────────────────────────────────╯
@@ -257,7 +257,7 @@ another group. One popup lists them all, titled `delete group <name>` for a grou
 ```
 ╭─ delete group cart ─────────────────────────────╮
 │                                                 │
-│  Delete 4 pending tasks:                        │
+│  delete 4 pending tasks:                        │
 │                                                 │
 │  cart                                           │
 │    cart-empty-state                             │
@@ -280,8 +280,8 @@ Some outcomes open a notice instead of closing the popup:
 
 | Title | When | What it says |
 |---|---|---|
-| `not deleted` | The pending tasks changed after the popup opened. | `Nothing was deleted.` and `Pick delete again to see the current list.` |
-| `tasks not fully deleted` | A file could not be removed. | The error, the `removed:` and `left:` lists, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` |
+| `not deleted` | The pending tasks changed after the popup opened. | `nothing was deleted.` and `pick delete again to see the current list.` |
+| `tasks not fully deleted` | A file could not be removed. | The error, the `removed:` and `left:` lists, and the remedy. A permission error says `fix the file's permissions, then pick delete again.` Any other error says `fix the error above, then pick delete again.` |
 | `tasks deleted` | The delete finished, but the pending directory would not read again. | The read error. |
 
 ### Deleting a plan page
@@ -294,7 +294,7 @@ clone cannot delete a page that a task in another clone names. The popup is titl
 ```
 ╭─ delete plan search ─────────────╮
 │                                  │
-│  Delete 1 plan page:             │
+│  delete 1 plan page:             │
 │                                  │
 │    plans/2026-10-21-search.html  │
 │                                  │
@@ -311,8 +311,8 @@ Two outcomes open a notice instead:
 
 | Title | When | What it says |
 |---|---|---|
-| `not deleted` | A task, in home mode in any clone, names the page in `plan:` by the time you press `enter`. | `A task names plans/<file> in plan: now.` and `Nothing was deleted.` |
-| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `Fix the file's permissions, then pick delete again.` Any other error says `Fix the error above, then pick delete again.` In home mode, another clone's pending, queue or archive folder that cannot be read is also such an error, and it names the folder. Only `esc` closes it. |
+| `not deleted` | A task, in home mode in any clone, names the page in `plan:` by the time you press `enter`. | `a task names plans/<file> in plan: now.` and `nothing was deleted.` |
+| `plan not deleted` | The page could not be removed. | The error, the file, and the remedy. A permission error says `fix the file's permissions, then pick delete again.` Any other error says `fix the error above, then pick delete again.` In home mode, another clone's pending, queue or archive folder that cannot be read is also such an error, and it names the folder. Only `esc` closes it. |
 
 ### Trials
 
@@ -373,18 +373,18 @@ pane, titled `details`, shows the highlighted routine's job, then its tasks unde
 ```
 ┌ routines ────────────────┬ details ──────────────────────────────────────────────────────────────┐
 │ > [ ] dependabot         │                                                                       │
-│   [ ] release-spoolway   │   Schedule:    0 */2 * * *                                            │
-│                          │   Pipeline:    dependabot                                             │
-│                          │   Scope:       project                                                │
-│                          │   Next:        Fri 23 Oct, 18:00                                      │
-│                          │   Last:        Fri 23 Oct, 16:00  ok                                  │
-│                          │   Job:         dependabot-review                                      │
+│   [ ] release-spoolway   │   schedule:    0 */2 * * *                                            │
+│                          │   pipeline:    dependabot                                             │
+│                          │   scope:       project                                                │
+│                          │   next:        Fri 23 Oct 18:00                                       │
+│                          │   last:        Fri 23 Oct 16:00  ok                                   │
+│                          │   job:         dependabot-review                                      │
 │                          │                                                                       │
 │                          │   tasks                                                               │
 │                          │     review-dependabot-prs                                             │
-│                          │       Pipeline:    dependabot                                         │
-│                          │       Depends on:  -                                                  │
-│                          │       Description: chore(deps): review and merge open Dependabot pull │
+│                          │       pipeline:    dependabot                                         │
+│                          │       depends on:  -                                                  │
+│                          │       description: chore(deps): review and merge open Dependabot pull │
 │                          │                    requests                                           │
 └──────────────────────────┴───────────────────────────────────────────────────────────────────────┘
  [space] select   [enter] queue   [o] options   [tab] details   [q] quit
@@ -394,18 +394,18 @@ What the job rows say depends on how many jobs point at the routine:
 
 | Jobs on the routine | What the pane shows |
 |---|---|
-| None | One row, `Schedule:    none`. |
-| One | `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and `Job:` rows. |
-| Two or more | A `Jobs:` row that says which job fires, then every job by name with its scope, `inactive` on an inactive one, and a line saying which to deactivate or activate. |
-| A job store that will not load | A `Jobs:` row, `will not load:` and the error. The tasks are still drawn. |
+| None | One row, `schedule:    none`. |
+| One | `schedule:`, `pipeline:`, `scope:`, `next:`, `last:` and `job:` rows. |
+| Two or more | A `jobs:` row that says which job fires, then every job by name with its scope, `inactive` on an inactive one, and a line saying which to deactivate or activate. |
+| A job store that will not load | A `jobs:` row, `will not load:` and the error. The tasks are still drawn. |
 
-Two enabled jobs on one routine fire neither. The `Jobs:` row then reads
+Two enabled jobs on one routine fire neither. The `jobs:` row then reads
 `2 run this routine, so neither fires`. With one enabled and one inactive job it reads
 `2 run this routine; only <name> fires`. Deactivating all but one job settles the clash, and
 `activate job` on a job beside an active one is refused, writing nothing.
 
 A job whose routine is not a routine the list shows gets a row of its own at the bottom of the
-list, under a blank line, where `edit job` can point it at a routine. See
+list, under a blank line, where `edit schedule` can point it at a routine. See
 [A job without a routine](jobs.md#a-job-without-a-routine).
 
 The pane reads both job stores again while the list sits idle, so a job edited by hand shows
@@ -424,8 +424,7 @@ highlighted row's name:
 
 | Item | Listed on | What it does |
 |---|---|---|
-| `new job` | A routine with no job. | Make a job from the routine. See [Jobs](jobs.md). |
-| `edit job` | A routine with one job. | Change the job's schedule and pipeline. |
+| `edit schedule` | A routine with no job, or with one job. | Make a job from the routine, or change the job's schedule and pipeline. See [Jobs](jobs.md). |
 | `deactivate job` | A routine with one enabled job. | Deactivate the job. |
 | `activate job` | A routine with one inactive job. | Activate the job, unless another job on the routine is active. |
 | `deactivate job <name>` | A routine with two or more jobs, for each enabled job. One item per job, sorted by name. | Deactivate that job. |
@@ -436,7 +435,7 @@ highlighted row's name:
 A routine with a job store that will not load offers only `delete routine`.
 
 A task `id:` is unique across all routine folders. When two routine files hold one id, the
-routines tab shows a `Problem:` row beside the task. The row names both files and an id to give
+routines tab shows a `problem:` row beside the task. The row names both files and an id to give
 one of them. `spoolway doctor` and `spoolway pipeline check` fail with the same text. Give one of
 the files another `id:` to clear it.
 
@@ -454,9 +453,9 @@ not queued
 
   release-spoolway is still in the queue, at step ship.
 
-  A routine runs one copy at a time. Let it finish, resume or
+  a routine runs one copy at a time. let it finish, resume or
   restart it from the board if it has stopped, or unqueue it
-  if it has not started. Then queue the routine again.
+  if it has not started. then queue the routine again.
 
   [enter] close
 ```
@@ -497,19 +496,19 @@ the folder. `esc` keeps everything. The folder leaves disk without touching git,
 store that will not read refuses the delete before anything is removed, naming the store and
 `spoolway doctor`.
 
-A job queues a routine on a cron schedule. Pick `new job` from a routine's options menu to make
+A job queues a routine on a cron schedule. Pick `edit schedule` from a routine's options menu to make
 one: it opens the schedule and pipeline panels for that routine, and `enter` on
-the pipeline panel saves it. `edit job` opens the same two panels filled with the job's own
-values and saves the job back to the store it came from. `esc` on either panel cancels and writes
+the pipeline panel saves it. On a routine that has a job, the same two panels open filled with
+the job's own values, and the job is saved back to the store it came from. `esc` on either panel cancels and writes
 nothing. See [Jobs](jobs.md).
 
 `deactivate job` and `activate job` write the job back to its own store with the schedule unchanged.
 No menu deletes a job: `delete routine` deletes the jobs on the routine it removes.
 
 `activate job` on a job whose routine has another active job writes nothing. It opens a popup
-titled `activate job` that reads `<name> also runs <routine> and is active. Deactivate it first,
+titled `activate job` that reads `<name> also runs <routine> and is active. deactivate it first,
 then activate this one.` With two or more active, it names them all and reads `… also run
-<routine> and are active. Deactivate them first, …`. `enter` closes it.
+<routine> and are active. deactivate them first, …`. `enter` closes it.
 
 ## Closing a plan out
 

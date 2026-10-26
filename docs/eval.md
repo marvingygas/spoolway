@@ -15,7 +15,7 @@ spoolway eval
 PIPELINE  TASKS  PASS  BLOCKS  TURNS  CTX AVG       IN  IN USD      OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
 impl         28   79%       1   1640      13%    11.6k    0.01    2.95M    37.19  952.76M       190.55   12.15M        66.00    293.86   16h 18m
 impl_ui      11   84%       1    612      13%     4.7k    0.01    1.34M    20.10  267.48M        53.50    5.74M        40.26    113.87    5h 55m
-Total        39             2   2252            16.3k    0.02    4.29M    57.29    1.22B       244.05   17.89M       106.26    407.73   22h 13m
+total        39             2   2252            16.3k    0.02    4.29M    57.29    1.22B       244.05   17.89M       106.26    407.73   22h 13m
 ```
 
 The turn, token, cost and time columns show each row's totals. `spoolway eval --per-task` prints
@@ -32,7 +32,7 @@ The screen holds three tables. The lanes table groups dispatched lanes. The dire
 groups sessions run by hand in a watched directory. The trials table lists every trial. `tab`
 cycles through them, lanes to directories to trials and back.
 
-Opening the tab, pressing `[r]`, or applying the filter panel shows a small `Loading…` popup
+Opening the tab, pressing `[r]`, or applying the filter panel shows a small `loading…` popup
 while spoolway rereads the ledger. It reads a session's transcript again only if the
 transcript's size or modification time changed since the last read. The same read prices every
 model once from the price table. The screen keeps those prices until the next read, so a price
@@ -91,7 +91,7 @@ name, so no column moves.
 
 The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts correctly against
 `54m` and `54.2k` against `9.1M`. Ties keep the table's default order. A blank figure, such as
-`—` or an unpriced cost, sorts last in both directions, and the `Total` or `Average` line always
+`—` or an unpriced cost, sorts last in both directions, and the `total` or `average` line always
 stays last.
 
 The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
@@ -148,10 +148,10 @@ of the screen however far the rows have scrolled. The column header stays at the
 row fits, the line sits right under the last row. A frame with fewer than 3 body rows scrolls the
 line with the rows, and a frame with fewer than 4 scrolls the header too.
 
-The line is called `Total` in the totals view and `Average` in the per-task view. Both are
+The line is called `total` in the totals view and `average` in the per-task view. Both are
 computed from the ledger entries on screen.
 
-| Column | `Total` | `Average` |
+| Column | `total` | `average` |
 |---|---|---|
 | `TASKS` | Distinct tasks in the table | The same |
 | `BLOCKS` | The `BLOCKS` lanes counted above | `BLOCKS/TASK`: that count divided by distinct tasks, with two decimals |
@@ -163,7 +163,7 @@ computed from the ledger entries on screen.
 | `TIME` | Lane time added up | `TIME/TASK`: lane time added up, divided by distinct tasks |
 | `PASS`, `CTX AVG`, `CTX PEAK` | Blank | Blank |
 
-`TIME` on `Total` is the wall time of every lane added together. Lanes that ran at the same time
+`TIME` on `total` is the wall time of every lane added together. Lanes that ran at the same time
 each count in full, so it is not the calendar time the work took.
 
 Tasks are counted once per table. Under `by step`, one task spans several rows, so `TASKS` on
@@ -236,7 +236,7 @@ spoolway eval --by task --trial t-8c21e0
 TASK                PIPELINE   VER  WHEN             COMPLEXITY  TASKS  PASS  BLOCKS  TURNS  CTX AVG  CTX PEAK       IN  IN USD     OUT  OUT USD  CACHE R  CACHE R USD  CACHE W  CACHE W USD       USD      TIME
 cart-totals-1       impl       1.0  2026-09-26 14:05         24      1   83%       0     52      19%       31%      433    0.00  105.1k     1.58   28.27M         8.48   539.2k         2.02     11.40   38m 20s
 cart-totals-2       impl_fast  1.0  2026-09-26 14:07         24      1  100%       0     41      14%       22%      276    0.00   67.1k     1.01   18.05M         5.42   344.3k         1.29      7.28   28m 40s
-Total                                                                2             0     93                         709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68    1h 07m
+total                                                                2             0     93                         709    0.00  172.2k     2.58   46.32M        13.90   883.5k         3.31     18.68    1h 07m
 
 cart-totals-2 vs cart-totals-1: pass +17pp, cost -$4.12, time -9m 40s
 ```
@@ -261,7 +261,7 @@ Command steps
 PIPELINE  STEP    RUNS  PASS  BLOCKS      TIME
 impl      suite     14   86%       2  1h 12m
 impl      test      31   74%       5    48m 09s
-Total               45             7  2h 00m
+total               45             7  2h 00m
 ```
 
 | Column | What it is |
@@ -271,7 +271,7 @@ Total               45             7  2h 00m
 | `BLOCKS` | Runs whose move went to `blocked`: a failing run with no `on_fail`, a spent `loop:`, or the third kill in a row. |
 | `TIME` | Wall time, summed. |
 
-The `Total` line adds `RUNS`, `BLOCKS` and `TIME` and leaves `PASS` blank. The table has the
+The `total` line adds `RUNS`, `BLOCKS` and `TIME` and leaves `PASS` blank. The table has the
 same four columns under `--per-task`, which changes only the lanes table. `--sort` does not
 reach it, and `--csv` does not carry it. When only command steps match, `--csv` stops with a
 message that points at `--json`. The filters `--since`, `--until`, `--group`, `--task`,
@@ -340,13 +340,13 @@ from a plugin folder counts.
 A subagent's tokens, cost and skills count on the session that ran it, not on a row of its own.
 
 A summary line closes the `by dir` table and is pinned the same way as the lanes table's. In the
-totals view it is `Total`: the session count and the sums of every token class, the four class
-costs, `USD` and `TIME`. In the per-session view it is `Average`: the session count, each token class,
+totals view it is `total`: the session count and the sums of every token class, the four class
+costs, `USD` and `TIME`. In the per-session view it is `average`: the session count, each token class,
 each class cost and `TIME` divided by `SESSIONS`, `USD` blank and `USD/SESSION` carrying the cost
 divided by `SESSIONS`. `CTX AVG` is blank. A table with no sessions shows a
 dash in its token, `TIME` and cost cells.
 
-Under `by session`, the `Total` line carries every token class, the four class costs, `USD` and
+Under `by session`, the `total` line carries every token class, the four class costs, `USD` and
 `TIME` in both views.
 
 Its filter panel has five rows: `by`, `dir`, `skill`, `since` and `until`. The `skill` filter
@@ -367,7 +367,7 @@ per ticked pipeline, under one trial id. See [Trials](planning.md#trials).
 | `ARMS` | The trial's own tasks, one per ticked pipeline |
 | `STATE` | `running` while a queued task still carries the trial's id, `settled` otherwise |
 
-The table has no `Total` line and no `[e]` export.
+The table has no `total` line and no `[e]` export.
 
 `enter` opens the highlighted trial. It sets the lanes table's `trial` filter to it, switches
 `by` to `pipeline`, clears `pipeline` and `version`, and shows the lanes table, so every one of

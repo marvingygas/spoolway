@@ -539,7 +539,7 @@ TRACKING="$SPOOLWAY_PROJECT_HOME/tracking"
 ASK_ESC="$LIVE/ask-esc.out"
 on_screen ' \r\x1b' "$ASK_ESC"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_ESC"
 has "enter on the queue tab asks before any ticket is opened" \
-  "Deactivate issue tracking for selected groups:" "$ASK_ESC"
+  "deactivate issue tracking for selected groups:" "$ASK_ESC"
 has "in a popup over the queue tab" "╭─ issue tracking " "$ASK_ESC"
 has "listing the group with nothing ticked and its task count" \
   "> [ ] asked   2 tasks" "$ASK_ESC"
@@ -581,10 +581,10 @@ works "enter on the question queues the group" \
 works "after calling the hook for it" test -e "$TRACKING/task-file.asked-yes"
 has "whose ticket landed on the task" "ticket: acme/app#" \
   "$SPOOLWAY_PROJECT_HOME/queue/asked-yes.md"
-has "and the result popup says the hook ran" "Hook executed successfully" "$ASK_YES"
+has "and the result popup says the hook ran" "hook executed successfully" "$ASK_YES"
 has "above the queued list" "╭─ queued " "$ASK_YES"
 lacks "with no ticket rows" "issues created" "$ASK_YES"
-lacks "and the untracked popup carries no success line" "Hook executed successfully" "$ASK_N"
+lacks "and the untracked popup carries no success line" "hook executed successfully" "$ASK_N"
 
 # -------------------------------------------- tracking off: no hook, ever
 # Ticking a group above proved the hook never runs at `open`. This is this task's own

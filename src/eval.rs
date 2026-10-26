@@ -22,8 +22,8 @@
 //! come in two views, every row's totals or each total over the row's tasks
 //! — see [`Figures`] — and an export carries the one on screen. A last line
 //! closes each table with only what adds up across its rows, built from the
-//! ledger rather than from the drawn cells: `Total`, the sums, in the totals
-//! view, and `Average`, those sums over its tasks or sessions, in the average
+//! ledger rather than from the drawn cells: `total`, the sums, in the totals
+//! view, and `average`, those sums over its tasks or sessions, in the average
 //! view. A share or a peak summed over rows would be a number nobody could
 //! use, so those cells stay blank. The screen pins that line under its
 //! scrolled rows.
@@ -200,9 +200,10 @@ fn run_to(
     }
     if args.csv {
         // The CSV export is the lanes table alone. Where only command steps
-        // matched, a header and a Total of zeros would read as lanes that
-        // cost nothing, as the printed table above explains. Where nothing
-        // matched at all, the header and total print as data like `--json`.
+        // matched, a header and a `total` line of zeros would read as lanes
+        // that cost nothing, as the printed table above explains. Where
+        // nothing matched at all, the header and total print as data like
+        // `--json`.
         if rows.is_empty() && !command_rows.is_empty() {
             bail!(
                 "only command steps matched, and `--csv` exports lanes alone. Run `spoolway \
@@ -579,7 +580,7 @@ impl PriceBook for BTreeMap<String, ModelPrice> {
 /// The prices of one load: every model its lines name, resolved once when
 /// the ledger was read.
 ///
-/// Rows, the `Total` line and the export all price from this one result, so
+/// Rows, the `total` line and the export all price from this one result, so
 /// a keypress never reads `~/.spoolway/model-prices.json` — a file that runs
 /// to hundreds of kilobytes, which [`crate::models::resolve`] reads and
 /// compares on every call. A refresh of that file shows from the next load.
@@ -711,7 +712,7 @@ impl ClassCost {
         });
     }
 
-    /// `self` and `other` as one set of lines — what a `Total` line adds up
+    /// `self` and `other` as one set of lines — what a `total` line adds up
     /// from rows that each priced their own. The line counts add too, so
     /// [`ClassCost::priced`] reads the same as if the lines had been priced
     /// together.
@@ -852,7 +853,7 @@ fn ctx_tokens_human(n: u64) -> String {
 }
 
 /// A token cell: [`crate::fmt::tokens_human`], plus a `B` step it does not
-/// have. A session table's `Total` sums every cache read a directory ever
+/// have. A session table's `total` sums every cache read a directory ever
 /// made, which passes a billion within weeks, and `1370.00M` reads as a
 /// typo where `1.37B` reads as a number.
 fn tokens_cell(n: u64) -> String {
@@ -1434,7 +1435,7 @@ impl LaneTotal {
 
     /// `value` over the table's distinct tasks: the average task, the way
     /// [`Metrics::per_task`] is a row's. `0.0` for an empty table, which no
-    /// screen or print ever draws a `Total` line for.
+    /// screen or print ever draws a `total` line for.
     fn per_task(&self, value: f64) -> f64 {
         match self.runs {
             0 => 0.0,
@@ -1450,7 +1451,7 @@ impl LaneTotal {
 // ------------------------------------------------------------- lanes table
 
 /// The lanes table as plain text: its header, one line per row, and the
-/// `Total` line — no marker column and no colour, so the screen can lay its
+/// `total` line — no marker column and no colour, so the screen can lay its
 /// own frame over exactly these columns and the printing path can print
 /// them as they are.
 struct Table {
@@ -1569,20 +1570,22 @@ fn spans_more_than_one_project(rows: &[LaneRow]) -> bool {
         > 1
 }
 
-/// What the lanes and directory tables call their last line: `Total` over
-/// the totals view, whose figures are sums, and `Average` over the average
+/// What the lanes and directory tables call their last line: `total` over
+/// the totals view, whose figures are sums, and `average` over the average
 /// view, whose figures are those sums over the table's tasks or sessions.
 /// Named apart so a reader never takes an average task for the whole bill.
+/// An export's closing line reads the same in its first column, so a filter
+/// on that column can never read it as one more row.
 fn total_line_label(figures: Figures) -> &'static str {
     match figures {
-        Figures::Totals => "Total",
-        Figures::Average => "Average",
+        Figures::Totals => "total",
+        Figures::Average => "average",
     }
 }
 
 /// The lanes table over `rows`, in the order they are given, drawing the
 /// figures of `figures`. `sort` only marks its column's header; the rows are
-/// already sorted by then. The last line is the table's `Total` in the
+/// already sorted by then. The last line is the table's `total` in the
 /// totals view and its average task in the per-task view — see
 /// [`total_line_label`].
 fn lanes_table(
@@ -2043,7 +2046,7 @@ fn lane_export_cell(by: EvalBy, row: &LaneRow, key: &str) -> ExportCell {
 }
 
 /// The closing line's cell under export column `key` in the view `figures`,
-/// `None` where the screen's own `Total` or `Average` line leaves it blank:
+/// `None` where the screen's own `total` or `average` line leaves it blank:
 /// every naming column, `PASS` and the context figures, which do not add up
 /// across rows, and `USD` on a line of averages — see [`lanes_table`].
 fn lane_total_cell(total: &LaneTotal, key: &str, figures: Figures) -> Option<ExportCell> {
@@ -2083,16 +2086,6 @@ fn lane_total_cell(total: &LaneTotal, key: &str, figures: Figures) -> Option<Exp
     })
 }
 
-/// What an export's closing line reads in its first column: `total` or
-/// `average`, as the screen's own last line is labelled in `figures`' view,
-/// so a filter on that column can never read it as one more row.
-fn export_total_label(figures: Figures) -> &'static str {
-    match figures {
-        Figures::Totals => "total",
-        Figures::Average => "average",
-    }
-}
-
 /// `columns` as one CSV line: `label` in the first column — the closing
 /// line's — and every other cell through `cell`, blank where it is `None`.
 fn csv_total_line<'k>(
@@ -2130,11 +2123,9 @@ fn lanes_csv(
                 .join(",")
         })
         .collect();
-    lines.push(csv_total_line(
-        &columns,
-        export_total_label(figures),
-        |key| lane_total_cell(total, key, figures),
-    ));
+    lines.push(csv_total_line(&columns, total_line_label(figures), |key| {
+        lane_total_cell(total, key, figures)
+    }));
     (columns.join(","), lines)
 }
 
@@ -2241,7 +2232,7 @@ fn command_rows(
 
 /// The command steps table over `rows`, drawn like [`lanes_table`]: the
 /// naming columns of `by`, the four figures `RUNS`, `PASS`, `BLOCKS` and `TIME` padded as
-/// the lanes table's totals view pads them, and a `Total` line. `PASS` stays
+/// the lanes table's totals view pads them, and a `total` line. `PASS` stays
 /// blank on that line, as it does there: a share is not a figure that adds
 /// up.
 fn commands_table(by: EvalBy, rows: &[CommandRow], total: &CommandMetrics) -> Table {
@@ -2850,7 +2841,7 @@ impl DirRow {
     }
 }
 
-/// The `by dir` table's rows added into one, for its `Total` line and its
+/// The `by dir` table's rows added into one, for its `total` line and its
 /// export's: every figure here adds up across directories, because a
 /// session ran in exactly one of them. `TIME` is the sessions' own time
 /// added up, not the calendar time they spanned. `CTX AVG` is left empty,
@@ -3166,7 +3157,7 @@ fn dirs_table(rows: &[DirRow], sort: Option<&Sort>, figures: Figures) -> Table {
     let dw = rows
         .iter()
         .map(|r| r.dir.chars().count())
-        .chain(["DIR".len(), "Average".len()])
+        .chain(["DIR".len(), "average".len()])
         .max()
         .unwrap_or(3);
     let header = match figures {
@@ -3391,7 +3382,7 @@ fn session_line(
     )
 }
 
-/// Every session's class costs added into one, for the `by session` `Total`
+/// Every session's class costs added into one, for the `by session` `total`
 /// line and its export's.
 fn sessions_class_cost(rows: &[SessionRow]) -> ClassCost {
     rows.iter()
@@ -3463,7 +3454,7 @@ fn sessions_table(rows: &[SessionRow], sort: Option<&Sort>) -> Table {
     let total = session_line(
         dw,
         mw,
-        "Total",
+        total_line_label(Figures::Totals),
         "",
         "",
         "",
@@ -3604,7 +3595,7 @@ fn dirs_csv(
     let total = match by {
         DirBy::Dir => {
             let total = dirs_total(dirs);
-            csv_total_line(&columns, export_total_label(figures), |key| match key {
+            csv_total_line(&columns, total_line_label(figures), |key| match key {
                 "dir" | "ctx_avg_tokens" | "ctx_avg_pct" => None,
                 "cost_usd" if figures == Figures::Average => None,
                 key => Some(dir_export_cell(&total, key)),
@@ -3620,7 +3611,7 @@ fn dirs_csv(
             let lines_n: usize = sessions.iter().map(|r| r.lines).sum();
             let unpriced: usize = sessions.iter().map(|r| r.unpriced).sum();
             let time: i64 = sessions.iter().map(|r| r.time_s.max(0)).sum();
-            csv_total_line(&columns, "total", |key| {
+            csv_total_line(&columns, total_line_label(Figures::Totals), |key| {
                 Some(match key {
                     "in_tokens" => ExportCell::count(tokens.input),
                     "out_tokens" => ExportCell::count(tokens.output),
@@ -3792,7 +3783,7 @@ fn trial_line(
 }
 
 /// The trials table over `rows`, in the order they are given — `sort` only
-/// marks its header, as [`lanes_table`]'s does. No `Total` line: a trial is
+/// marks its header, as [`lanes_table`]'s does. No `total` line: a trial is
 /// a comparison of its own, and adding arms across trials answers nothing.
 fn trials_table(rows: &[TrialRow], sort: Option<&Sort>) -> Vec<Line> {
     let gw = rows
@@ -4062,7 +4053,7 @@ struct Loaded {
     spans_by_session: Spans,
     fallback: HashMap<(String, String), String>,
     /// Every model the lines above name, priced once at this load — what the
-    /// rows, the `Total` line and the export all price from.
+    /// rows, the `total` line and the export all price from.
     models: Prices,
     /// Every trial id a task in this project's queue still carries — what
     /// tells a trial's `STATE` `running` from `settled`. Read once here for
@@ -4433,11 +4424,11 @@ struct Row {
 }
 
 /// One line of a table's body: a row the cursor can land on, or text — the
-/// header, the `Total` line, a note that nothing is here — that it skips
+/// header, the `total` line, a note that nothing is here — that it skips
 /// over.
 enum Line {
     Text(String),
-    /// A table's `Total` line, always its last. Drawn as [`Line::Text`] is,
+    /// A table's `total` line, always its last. Drawn as [`Line::Text`] is,
     /// but kept out of the scroll: [`eval_frame_rows`] pins it under the
     /// rows and the scroll indicator, so a long table's total is on screen
     /// wherever the cursor has scrolled to.
@@ -4468,7 +4459,7 @@ fn render_lines(lines: &[Line], cursor: usize, width: usize) -> Vec<String> {
     for (line, row_n) in lines.iter().zip(row_numbers(lines)) {
         match line {
             // One column of filler where a row would carry its marker — so a
-            // header or the `Total` line lines up under the very columns its
+            // header or the `total` line lines up under the very columns its
             // rows are printed in, rather than sitting a column to their
             // left. The mockup's own frame carries the marker flush against
             // the border, with nothing between it and the row's first
@@ -4506,7 +4497,7 @@ fn row_numbers(lines: &[Line]) -> Vec<Option<usize>> {
 }
 
 /// A [`Table`] as the screen's body lines: its header, a cursor row per
-/// row, and its `Total` line.
+/// row, and its `total` line.
 fn table_lines(table: Table) -> Vec<Line> {
     let mut out = vec![Line::Head(table.lead, table.header)];
     out.extend(table.rows.into_iter().map(|text| Line::Row(Row { text })));
@@ -4614,7 +4605,7 @@ fn view_lines(
         TableKind::Lanes => {
             let entries = scoped_entries(loaded, filters);
             if entries.is_empty() {
-                return vec![Line::Text("Nothing to compare in this window.".to_string())];
+                return vec![Line::Text("nothing to compare in this window.".to_string())];
             }
             let (rows, sort) = screen_lane_rows(loaded, filters, pipelines, &entries);
             let total = LaneTotal::of(&entries, &loaded.fallback, &loaded.models);
@@ -4633,7 +4624,7 @@ fn view_lines(
                     let (rows, sort) = screen_dir_rows(loaded, filters, &entries);
                     if rows.is_empty() {
                         return vec![Line::Text(
-                            "Nothing outside the lanes in this window.".to_string(),
+                            "nothing outside the lanes in this window.".to_string(),
                         )];
                     }
                     table_lines(dirs_table(&rows, sort.as_ref(), filters.figures))
@@ -4641,7 +4632,7 @@ fn view_lines(
                 DirBy::Session => {
                     if entries.is_empty() {
                         return vec![Line::Text(
-                            "No sessions outside the lanes in that window.".to_string(),
+                            "no sessions outside the lanes in that window.".to_string(),
                         )];
                     }
                     let (rows, sort) = screen_sessions(loaded, filters, &entries);
@@ -4652,7 +4643,7 @@ fn view_lines(
         TableKind::Trials => {
             let (rows, sort) = screen_trial_rows(loaded, filters);
             if rows.is_empty() {
-                return vec![Line::Text("No trials in this window.".to_string())];
+                return vec![Line::Text("no trials in this window.".to_string())];
             }
             trials_table(&rows, sort)
         }
@@ -4995,16 +4986,17 @@ fn filters_label(
 /// The keys, under the frame — the one line that says what the screen does,
 /// bracketed the way the board brackets its own by [`key_hint`]. The frame
 /// sits one column in from the key line's own leading space, so one more is
-/// added in front to line `[↑↓]` up under the frame's first column of
-/// content, as the mockup draws it. The trials table trades `[e] export`
-/// for `[enter] open`: it has nothing to export, and a trial to open. Nor
-/// has it a `[t]`, which names the figures the other two would switch to.
+/// added in front to line the first key up under the frame's first column
+/// of content. No `[↑↓] move` leads it: no other tab lists the arrows on
+/// its key line, which only the popups name. The trials table trades
+/// `[e] export` for `[enter] open`: it has nothing to export, and a trial
+/// to open. Nor has it a `[t]`, which names the figures the other two would
+/// switch to.
 fn footer(table: TableKind, figures: Figures) -> String {
     let tab = ("tab", table.next().label());
     let flip = ("t", figures.other().label(table));
     let keys: &[(&str, &str)] = match table {
         TableKind::Trials => &[
-            ("↑↓", "move"),
             ("enter", "open"),
             ("a", "ascending"),
             ("d", "descending"),
@@ -5014,7 +5006,6 @@ fn footer(table: TableKind, figures: Figures) -> String {
             ("q", "quit"),
         ],
         TableKind::Lanes | TableKind::Dirs => &[
-            ("↑↓", "move"),
             ("a", "ascending"),
             ("d", "descending"),
             flip,
@@ -5093,7 +5084,7 @@ fn eval_frame_rows_at(
     let rows = frame_rows(height, keys.len());
     let mut body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
-    // The `Total` line comes off before `clip` and goes back after it, so a
+    // The `total` line comes off before `clip` and goes back after it, so a
     // table taller than the frame scrolls its rows under a total that stays
     // put — the last body line, under the scroll indicator. The column header
     // is pinned the same way at the top, but only on a table that pins its
@@ -5144,7 +5135,7 @@ fn eval_frame_rows_at(
                 None => boxed(title, &lines),
             })
         }
-        Mode::Loading { .. } => Some(boxed("eval", &["Loading…".to_string()])),
+        Mode::Loading { .. } => Some(boxed("eval", &["loading…".to_string()])),
         Mode::Filter(draft) => loaded.map(|loaded| filter_panel(loaded, draft)),
         Mode::Calendar {
             field,
@@ -5300,7 +5291,7 @@ enum Mode {
         keys: Option<&'static str>,
     },
     /// A [`load`] running on its own thread, under a keyless `eval` popup
-    /// reading `Loading…` — over an empty frame on a visit's first load, and
+    /// reading `loading…` — over an empty frame on a visit's first load, and
     /// over the table already shown on `r` or the filter panel's `enter`.
     /// Only `←`, `→` and `q` are read: every other key would act on a table
     /// that is about to be replaced. `filters` are the ones loaded through,
@@ -7199,7 +7190,7 @@ mod tests {
         // `USD/TASK` carrying the average.
         assert_eq!(
             table.total,
-            "Average       2               0.00           1               642         0.00    \
+            "average       2               0.00           1               642         0.00    \
              155.8k          2.34        41.91M             12.57        799.4k              3.00               \
              16.90     1h 12m"
         );
@@ -7207,7 +7198,7 @@ mod tests {
 
     /// The totals view draws the same row's sums under `IN` … `TIME`, with
     /// no `USD/TASK`, and its header is the one the screen opens on. The
-    /// `Total` line carries every sum, each under its own column.
+    /// `total` line carries every sum, each under its own column.
     #[test]
     fn a_row_draws_its_totals_under_the_totals_columns() {
         let mut entries = Vec::new();
@@ -7245,7 +7236,7 @@ mod tests {
         );
         assert_eq!(
             table.total,
-            "Total         2             0      2              1.3k    0.00   311.6k     \
+            "total         2             0      2              1.3k    0.00   311.6k     \
              4.67   83.82M        25.15    1.60M         6.00     33.80    2h 24m"
         );
     }
@@ -7427,7 +7418,7 @@ mod tests {
 
     /// A row whose every lane has no price today draws its four class
     /// cells blank, never `0.00`; a priced row beside it draws its own, and
-    /// the `Total` line sums what could be priced.
+    /// the `total` line sums what could be priced.
     #[test]
     fn an_unpriced_row_draws_its_class_costs_blank() {
         let mut unpriced = lane("t1", "implement", 1, Some("pass"));
@@ -7645,7 +7636,7 @@ mod tests {
         }
     }
 
-    /// `TASKS` on the `Total` line is distinct runs over the whole table: a
+    /// `TASKS` on the `total` line is distinct runs over the whole table: a
     /// run under `--by step` touches every step it ran, and summing the
     /// rows would count it once per step. `BLOCKS`, the tokens, `USD` and
     /// `TIME` do sum, and the average task divides each sum by those two
@@ -7673,7 +7664,7 @@ mod tests {
         assert_eq!(
             cells,
             [
-                "Total", "2", "1", "3", "0", "3.0k", "0", "0", "3.00", "3m", "00s"
+                "total", "2", "1", "3", "0", "3.0k", "0", "0", "3.00", "3m", "00s"
             ],
             "{:?}",
             table.total
@@ -7684,14 +7675,14 @@ mod tests {
         assert_eq!(
             cells,
             [
-                "Average", "2", "0.50", "2", "0", "1.5k", "0", "0", "1.50", "1m", "30s"
+                "average", "2", "0.50", "2", "0", "1.5k", "0", "0", "1.50", "1m", "30s"
             ],
             "{:?}",
             table.total
         );
     }
 
-    /// `TURNS` sums each row's turns, and the `Total` line sums every row's;
+    /// `TURNS` sums each row's turns, and the `total` line sums every row's;
     /// per task it is that sum over the row's tasks, the way `BLOCKS/TASK`
     /// is. `--json` carries the figure under `turns` or `turns_per_task`, and
     /// `--csv` the figure the table draws, a tie rounded the same way. Fails
@@ -7731,7 +7722,7 @@ mod tests {
             "{}",
             table.rows[1]
         );
-        // `Total`, TASKS, BLOCKS, then TURNS: `PASS` stays blank.
+        // `total`, TASKS, BLOCKS, then TURNS: `PASS` stays blank.
         assert_eq!(
             cell(&table.total, 3).as_deref(),
             Some("21"),
@@ -7810,7 +7801,7 @@ mod tests {
     }
 
     /// A turn count wider than its title widens the `TURNS` column for every
-    /// line, so the header, each row and the `Total` line still end their
+    /// line, so the header, each row and the `total` line still end their
     /// cell at the same place. Fails while the column is drawn at a fixed
     /// width, which pushes only the wide row out of line.
     #[test]
@@ -7951,7 +7942,7 @@ mod tests {
             [
                 "demo,default,implement,2,0.50,0.50,1,,,150,,0,,0,,0,,2.00,1.00,60",
                 // Each figure over the table's two tasks, and `USD` blank, as
-                // the screen's `Average` line leaves it.
+                // the screen's `average` line leaves it.
                 "average,,,2,,0.50,1,,,150,,0,,0,,0,,,1.00,60",
             ]
         );
@@ -8073,7 +8064,7 @@ mod tests {
         }
     }
 
-    /// `--json` keeps the `Total` line out of `rows`, where a consumer
+    /// `--json` keeps the `total` line out of `rows`, where a consumer
     /// iterating them could read it as one more.
     #[test]
     fn a_lanes_json_keeps_the_total_apart_from_the_rows() {
@@ -8099,7 +8090,7 @@ mod tests {
         for gone in ["by", "lanes", "unpriced", "pipeline_version", "in_per_task"] {
             assert!(row.get(gone).is_none(), "{gone}: {row}");
         }
-        // The sums the `Total` line draws, and nothing it leaves blank.
+        // The sums the `total` line draws, and nothing it leaves blank.
         let total = &json["total"];
         assert_eq!(total["tasks"], 2);
         assert_eq!(total["blocks"], 0);
@@ -8234,7 +8225,7 @@ mod tests {
     }
 
     /// The mockup's own `by dir` header, and its last line in either view:
-    /// the sums on `Total`, and on `Average` each sum over the table's
+    /// the sums on `total`, and on `average` each sum over the table's
     /// sessions with `USD` left blank. `CTX AVG` does not add up, so it stays
     /// blank on both.
     #[test]
@@ -8261,20 +8252,20 @@ mod tests {
         );
         assert_eq!(
             table.total,
-            "Average                            2           0            0.00           10             \
+            "average                            2           0            0.00           10             \
              0.00                0                 0.00                0                 0.00                   \
              0.44                     0s"
         );
         let table = dirs_table(&rows, None, Figures::Totals);
         assert_eq!(
             table.total,
-            "Total                              2        0    0.00       20     0.00        0         \
+            "total                              2        0    0.00       20     0.00        0         \
              0.00        0         0.00      0.88                 0s"
         );
     }
 
     /// The mockup's own `by session` header, each token class followed by
-    /// its cost, and a `Total` line carrying every token class and its cost,
+    /// its cost, and a `total` line carrying every token class and its cost,
     /// USD and time.
     #[test]
     fn the_sessions_table_is_the_mockup_s_own() {
@@ -8348,7 +8339,7 @@ mod tests {
         assert_eq!(
             table.total.split_whitespace().collect::<Vec<_>>(),
             [
-                "Total", "144", "0.00", "35.1k", "0.53", "9.45M", "3.78", "180.2k", "0.68", "4.71",
+                "total", "144", "0.00", "35.1k", "0.53", "9.45M", "3.78", "180.2k", "0.68", "4.71",
                 "0s"
             ]
         );
@@ -8404,7 +8395,7 @@ mod tests {
             lines,
             [
                 "demo,/w/proj,2,0,0.00,10,0.00,0,0.00,0,0.00,0.88,0.44,,,0",
-                // `USD` blank, as the screen's `Average` line leaves it.
+                // `USD` blank, as the screen's `average` line leaves it.
                 "average,,2,0,0.00,10,0.00,0,0.00,0,0.00,,0.44,,,0",
             ]
         );
@@ -8539,7 +8530,7 @@ mod tests {
     }
 
     /// `by session` draws each class cost after its token column, blank
-    /// for a session no table prices, and its `Total` line sums them.
+    /// for a session no table prices, and its `total` line sums them.
     #[test]
     fn the_sessions_table_prices_each_token_class_beside_it() {
         let (entries, _, models) = priced_dirs();
@@ -8862,6 +8853,13 @@ mod tests {
     }
 }
 
+/// Every eval screen the test that checks TUI text for capitals walks — see
+/// `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn tui_screens() -> Vec<(String, Vec<String>)> {
+    screen_tests::tui_screens()
+}
+
 #[cfg(test)]
 mod screen_tests {
     use super::*;
@@ -9092,6 +9090,84 @@ mod screen_tests {
         assert_eq!(run("f\x1b[C\x1b[D").0, Leave::Quit);
     }
 
+    /// Every eval screen the test that checks TUI text for capitals walks,
+    /// as `(what is drawn, its lines)`: a ledger of runs and trials drawn
+    /// through each table, sort and popup, and an empty ledger drawn through
+    /// each table.
+    pub(super) fn tui_screens() -> Vec<(String, Vec<String>)> {
+        let (repo, _root_guard) = fixture_with_one_run("tui-screens");
+        for (task, step, pipeline, outcome) in [
+            ("b", "review", "default", Some("fail")),
+            ("c", "implement", "bugfix", Some("pass")),
+            ("d", "test", "bugfix", None),
+        ] {
+            bank(
+                &repo,
+                "2026-08-02T09:00:00+00:00",
+                task,
+                step,
+                pipeline,
+                "sonnet",
+                2.0,
+                outcome,
+            );
+        }
+        bank_two_trials(&repo);
+        let down = DOWN;
+        let trials = "\t\t";
+        // Lanes, then per task, directories and the trials; each table
+        // sorted, narrowed, refreshed, exported and opened.
+        let walks = [
+            String::new(),
+            "a".into(),
+            "d".into(),
+            down.into(),
+            "t".into(),
+            format!("t{down}"),
+            "\t".into(),
+            "f".into(),
+            format!("f{down}"),
+            "f\r".into(),
+            format!("f{down}\r"),
+            "f\x1b".into(),
+            "e".into(),
+            "e\r".into(),
+            "r".into(),
+            "\r".into(),
+            "t\r".into(),
+            "\r\x1b".into(),
+            trials.into(),
+            format!("{trials}a"),
+            format!("{trials}d"),
+            format!("{trials}{down}"),
+            format!("{trials}f"),
+            format!("{trials}r"),
+            format!("{trials}\r"),
+            format!("{trials}\r\t"),
+        ];
+        let mut screens = Vec::new();
+        for input in &walks {
+            screens.extend(drawn_screens(&repo, input));
+        }
+        // No run, no trial: each table says there is nothing to show.
+        let (empty, _empty_guard) = fixture("tui-screens-empty");
+        for input in ["", "t", "\t", trials, "f", "e"] {
+            screens.extend(drawn_screens(&empty, input));
+        }
+        screens
+    }
+
+    /// What the eval screen over `repo` draws as `input` is typed at it, as
+    /// the screens [`crate::screen::walk_screens`] makes of it.
+    fn drawn_screens(repo: &Repo, input: &str) -> Vec<(String, Vec<String>)> {
+        let drawn = screen(repo, input);
+        let plain: Vec<String> = frames(&drawn)
+            .into_iter()
+            .map(crate::screen::shell::plain)
+            .collect();
+        crate::screen::walk_screens("eval", &plain)
+    }
+
     /// Every draw opens with the shared frame writer's own start code, so a
     /// whole captured transcript holds every frame the screen ever drew,
     /// back to back — a plain `text.contains(...)` over it can true
@@ -9111,7 +9187,7 @@ mod screen_tests {
     fn shows_loading(frame: &str) -> bool {
         let loading = [
             format!("{TOP_LEFT}─ eval ─────{TOP_RIGHT}"),
-            "│  Loading…  │".to_string(),
+            "│  loading…  │".to_string(),
             format!("{BOTTOM_LEFT}────────────{BOTTOM_RIGHT}"),
         ];
         loading.iter().all(|line| frame.contains(line.as_str()))
@@ -9172,9 +9248,7 @@ mod screen_tests {
                 "`f` was not read: {frame}"
             );
             assert!(
-                frame.contains(
-                    "[↑↓] move   [a] ascending   [d] descending   [t] per task   [tab] dirs"
-                ),
+                frame.contains("[a] ascending   [d] descending   [t] per task   [tab] dirs"),
                 "{frame}"
             );
         }
@@ -9399,7 +9473,7 @@ mod screen_tests {
         assert_eq!(all.len(), 2, "the loading frame, then the landed one");
         assert!(shows_loading(all[0]), "{}", all[0]);
         assert!(!all[0].contains("PIPELINE"), "{}", all[0]);
-        assert!(!all[1].contains("Loading…"), "{}", all[1]);
+        assert!(!all[1].contains("loading…"), "{}", all[1]);
         assert!(all[1].contains("│ PIPELINE"), "{}", all[1]);
         assert!(all[1].contains("│>default"), "{}", all[1]);
     }
@@ -9726,7 +9800,7 @@ mod screen_tests {
     }
 
     /// A table far taller than the terminal — 270 tasks on a 20-row one —
-    /// keeps its `Total` line as the frame's last body line, under the
+    /// keeps its `total` line as the frame's last body line, under the
     /// scroll indicator, and its header as the first, wherever the cursor
     /// has scrolled to. The filter panel drawn over it still closes its own
     /// bottom border.
@@ -9752,7 +9826,7 @@ mod screen_tests {
             let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20));
             assert!(frame.len() <= 20, "{}", frame.join("\n"));
             let (above, last) = last_body_lines(&frame);
-            assert!(last.starts_with("│ Total "), "{}", frame.join("\n"));
+            assert!(last.starts_with("│ total "), "{}", frame.join("\n"));
             assert!(last.contains(" 270 "), "{last}");
             assert!(above.starts_with(&format!("│ {indicator}")), "{above}");
             let top = frame.iter().position(|l| l.starts_with(TOP_LEFT)).unwrap();
@@ -9778,15 +9852,15 @@ mod screen_tests {
             2,
             "the panel's bottom border and the frame's: {text}"
         );
-        assert!(last_body_lines(&frame).1.starts_with("│ Total "), "{text}");
+        assert!(last_body_lines(&frame).1.starts_with("│ total "), "{text}");
 
-        // A table that fits keeps its `Total` line right under its last row.
+        // A table that fits keeps its `total` line right under its last row.
         let few = loaded(vec![tests_entry("a", "implement")]);
         state.mode = Mode::Browsing;
         let frame = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
         let total = frame
             .iter()
-            .position(|l| l.starts_with("│ Total "))
+            .position(|l| l.starts_with("│ total "))
             .unwrap();
         assert!(frame[total - 1].starts_with("│>a "), "{}", frame.join("\n"));
     }
@@ -9818,7 +9892,7 @@ mod screen_tests {
                 "{height}: the cursor's row is drawn: {text}"
             );
             assert_eq!(
-                body.last().unwrap().starts_with("│ Total "),
+                body.last().unwrap().starts_with("│ total "),
                 total,
                 "{height}: {text}"
             );
@@ -9965,11 +10039,33 @@ mod screen_tests {
     fn an_empty_ledger_says_so_and_the_screen_ends_when_input_runs_out() {
         let (repo, _root_guard) = fixture("screen-empty");
         let text = screen(&repo, "");
-        assert!(text.contains("Nothing to compare"), "{text}");
+        assert!(text.contains("nothing to compare"), "{text}");
+    }
+
+    /// Every table's key line starts on its first letter key, the way every
+    /// other tab's does: the arrows are named only in the popups. Checked on
+    /// what `footer` builds, since a frame holding `[a] ascending` would
+    /// still pass with `[↑↓] move` in front of it.
+    #[test]
+    fn the_key_line_names_no_arrows_and_starts_on_a_letter_key() {
+        for (table, first) in [
+            (TableKind::Lanes, "[a] ascending"),
+            (TableKind::Dirs, "[a] ascending"),
+            (TableKind::Trials, "[enter] open"),
+        ] {
+            for figures in [Figures::Totals, Figures::Average] {
+                let line = footer(table, figures);
+                assert!(!line.contains("↑↓"), "{line:?}");
+                assert!(
+                    line.starts_with(&format!(" {} {first}", crate::status::DIM)),
+                    "{line:?}"
+                );
+            }
+        }
     }
 
     /// The screen opens on the lanes table by pipeline, on its totals, with
-    /// its `Total` line and the bracketed key line naming the figures `t`
+    /// its `total` line and the bracketed key line naming the figures `t`
     /// switches to and the table `tab` moves to.
     #[test]
     fn the_screen_opens_by_pipeline_with_a_total_and_bracketed_keys() {
@@ -9982,10 +10078,10 @@ mod screen_tests {
         );
         assert!(last.contains("│ PIPELINE"), "{last}");
         assert!(last.contains("│>default"), "{last}");
-        assert!(last.contains("│ Total"), "{last}");
+        assert!(last.contains("│ total"), "{last}");
         assert!(
             last.contains(
-                "[↑↓] move   [a] ascending   [d] descending   [t] per task   [tab] dirs   [f] filters   [e] export   [r] refresh   [q] quit"
+                "[a] ascending   [d] descending   [t] per task   [tab] dirs   [f] filters   [e] export   [r] refresh   [q] quit"
             ),
             "{last}"
         );
@@ -10015,10 +10111,10 @@ mod screen_tests {
             trials.contains(&format!("{TOP_LEFT}─ eval · trials ")),
             "{trials}"
         );
-        assert!(trials.contains("No trials in this window."), "{trials}");
+        assert!(trials.contains("no trials in this window."), "{trials}");
         assert!(
             trials.contains(
-                "[↑↓] move   [enter] open   [a] ascending   [d] descending   [tab] tasks   [f] filters   [r] refresh   [q] quit"
+                "[enter] open   [a] ascending   [d] descending   [tab] tasks   [f] filters   [r] refresh   [q] quit"
             ),
             "{trials}"
         );
@@ -10062,7 +10158,7 @@ mod screen_tests {
                 lane_export_columns(EvalBy::Pipeline, figures).join(",")
             );
             assert!(lines[1].contains(",default,1,"), "{body}");
-            let label = export_total_label(figures);
+            let label = total_line_label(figures);
             assert!(lines[2].starts_with(&format!("{label},")), "{body}");
             assert_eq!(lines.len(), 3, "one header, one row, one closing line");
         }
@@ -11377,7 +11473,7 @@ mod screen_tests {
     }
 
     /// `e` writes the rows in the order the screen shows them, on both
-    /// tables, the `Total` line still last.
+    /// tables, the `total` line still last.
     #[test]
     fn e_writes_rows_in_the_order_shown() {
         let (repo, _root_guard) = fixture_to_sort("screen-sort-export");
@@ -11531,7 +11627,7 @@ mod screen_tests {
     }
 
     /// A ledger holding command lines draws every lane figure as one without
-    /// them does: the lanes table and its `Total` line print the same text,
+    /// them does: the lanes table and its `total` line print the same text,
     /// and `--json`'s `by`, `rows` and `total` hold the same values. The
     /// command lines have no session and no tokens, so counted as lanes they
     /// would add rows and runs.
@@ -11599,7 +11695,7 @@ mod screen_tests {
             "{table}"
         );
         assert!(
-            commands.lines().last().unwrap().starts_with("Total"),
+            commands.lines().last().unwrap().starts_with("total"),
             "{table}"
         );
 
@@ -12026,7 +12122,7 @@ mod screen_tests {
                 local_date("2026-10-02T09:00:00+00:00")
             )
         );
-        assert_eq!(lines.len(), 3, "no `Total` line");
+        assert_eq!(lines.len(), 3, "no `total` line");
 
         let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -12339,7 +12435,7 @@ mod screen_tests {
         assert!(header_of(last).contains("      ▼USD"), "{last}");
     }
 
-    /// `spoolway eval` prints the totals columns closed by `Total`, and
+    /// `spoolway eval` prints the totals columns closed by `total`, and
     /// `--per-task` the per-task ones closed by the average task.
     #[test]
     fn the_printed_table_is_totals_unless_per_task() {
@@ -12354,7 +12450,7 @@ mod screen_tests {
             "{table}"
         );
         assert!(
-            table.lines().last().unwrap().starts_with("Total "),
+            table.lines().last().unwrap().starts_with("total "),
             "{table}"
         );
 
@@ -12368,8 +12464,8 @@ mod screen_tests {
             "{table}"
         );
         let last = table.lines().last().unwrap();
-        assert!(last.starts_with("Average "), "{table}");
-        assert!(!table.contains("Total"), "{table}");
+        assert!(last.starts_with("average "), "{table}");
+        assert!(!table.contains("total"), "{table}");
 
         // Every name `--sort` took before it still takes, in either view;
         // a column the view does not draw sorts the rows and marks nothing.

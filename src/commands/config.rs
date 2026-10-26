@@ -177,14 +177,14 @@ fn shadow_note(
     let Some(path) = layer_file else {
         return Ok(Some(format!(
             "note: the value in effect for `{key}` is {effective}, not the value just set, \
-             and no override sets it. Another change to the config landed after this one; \
+             and no override sets it. another change to the config landed after this one; \
              run `spoolway config get {key}` to see what it holds, and set it again if \
              that is not what you want."
         )));
     };
     Ok(Some(format!(
         "note: {} still sets `{key}`, so the value in effect is {effective}.\n  \
-         Remove `{key}` from that file to let the value just set apply. \
+         remove `{key}` from that file to let the value just set apply. \
          `spoolway override drop config.toml` clears the whole config layer, and \
          `spoolway override promote config.toml` writes all of its keys, this one \
          included, into the tracked file.",
@@ -869,7 +869,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "the dispatcher reads the project's config, not this worktree's.\n  \
-             A lane does not change the project's setup. Write the\n  \
+             a lane does not change the project's setup. write the\n  \
              setting you wanted into your report, and a person\n  \
              will make the change."
         );

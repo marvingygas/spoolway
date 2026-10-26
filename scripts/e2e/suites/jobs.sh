@@ -306,10 +306,10 @@ rm -f "$SPOOLWAY_PROJECT_HOME"/queue/*.md
 
 BEFORE=$(wc -l < "$BOARD_LOG" 2>/dev/null || echo 0)
 board_open
-if poll_until 15 screen_drew_since "$BEFORE" "Nothing queued"; then
-  ok "an empty board still says Nothing queued with jobs enabled"
+if poll_until 15 screen_drew_since "$BEFORE" "nothing queued"; then
+  ok "an empty board still says nothing queued with jobs enabled"
 else
-  bad "an empty board still says Nothing queued with jobs enabled"
+  bad "an empty board still says nothing queued with jobs enabled"
 fi
 tail -n +"$((BEFORE + 1))" "$BOARD_LOG" > "$LIVE/stopped-board.out"
 # With no dispatcher up nothing will fire, so the stopped board lists no job;

@@ -110,7 +110,7 @@ has "naming the stage it is actually on" "is on \`implement\`, not \`queued\`" "
 has "the checkout holding it back" "$SOLO_WORKTREE" "$UNQUEUE_OUT"
 has "the route that stops it where it stands" "spoolway queue pause solo" "$UNQUEUE_OUT"
 has "and the route that tears it down" "spoolway queue unqueue solo --force" "$UNQUEUE_OUT"
-has "and says plainly that nothing moved" "Nothing was changed." "$UNQUEUE_OUT"
+has "and says plainly that nothing moved" "nothing was changed." "$UNQUEUE_OUT"
 works "the refusal changed nothing: still queued" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"

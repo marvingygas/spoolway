@@ -1245,10 +1245,10 @@ works "it never touched the pending directory" \
 # The pending directory is empty at this point — both cases above already
 # cleared every document out of it — so this is also the one place proving
 # the screen opens on an empty pending directory rather than refusing with
-# "Nothing to list", so long as the queue itself still holds a group. The
+# "nothing to list", so long as the queue itself still holds a group. The
 # queue tab never lists a queued group, so not even `h` draws its row.
 on_screen 'h' "$LIVE/queue-screen-only.out"
-if grep -q "Nothing to list" "$LIVE/queue-screen-only.out"; then
+if grep -q "nothing to list" "$LIVE/queue-screen-only.out"; then
   bad "a group with nothing left in pending still opens the screen"
   sed 's/^/        /' "$LIVE/queue-screen-only.out"
 else

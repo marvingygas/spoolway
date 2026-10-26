@@ -3207,7 +3207,7 @@ mod tests {
                 err.contains("c1 and c2 hold worktrees in this checkout"),
                 "every holding task is named, and only those: {err}"
             );
-            assert!(err.contains("Finish or unqueue them"), "{err}");
+            assert!(err.contains("finish or unqueue them"), "{err}");
             assert_eq!(snapshot(&state), before, "nothing is written");
         });
         let _ = std::fs::remove_dir_all(&parent);

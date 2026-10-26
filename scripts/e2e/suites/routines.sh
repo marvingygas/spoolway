@@ -10,7 +10,7 @@
 # the right task files in the queue directory, under minted ids, with their
 # bodies untouched, that save as routine copies a pending group's documents back
 # into the checkout, that delete removes a routine with the jobs that point
-# into it, that new job saves a job for a routine to the user store, that
+# into it, that edit schedule saves a job for a routine to the user store, that
 # the details pane draws a routine's job above its tasks, that the
 # routine's options menu deactivates, activates and edits that job, that
 # activating one beside an active job is refused, and that a job whose
@@ -257,7 +257,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "a routine with two jobs offers to activate the inactive one" "> activate job audit-docs" "$LAST"
 has "or to deactivate the active one" "deactivate job nightly-audit" "$LAST"
 has "then delete routine" "delete routine" "$LAST"
-lacks "and never edit job" "edit job" "$LAST"
+lacks "and never edit schedule" "edit schedule" "$LAST"
 lacks "nor delete job" "delete job" "$LAST"
 
 # Activate job beside an active job on the same routine (`o`, `enter`)
@@ -269,7 +269,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /also runs/ { last = $0 } END { pr
 has "activate job beside an active job opens a popup" "─ activate job " "$LAST"
 has "naming the active job and the routine" "nightly-audit also runs nightly" "$LAST"
 # The sentence wraps inside the popup, so its two halves are matched apart.
-has "and what to do instead" "and is active. Deactivate it" "$LAST"
+has "and what to do instead" "and is active. deactivate it" "$LAST"
 has "before activating this one" "then activate this one." "$LAST"
 has "activate job writes nothing" "enabled = false" "$PROJECT_STORE"
 
@@ -284,14 +284,26 @@ works "the other routines stay" test -d .spoolway/routines/maintenance
 works "nothing is staged" \
   bash -c '[ -z "$(git diff --cached --name-only -- .spoolway/routines .spoolway/jobs.toml)" ]'
 
-# New job (`o`, `enter`) makes a job of the highlighted routine: a schedule, a pipeline found by
-# typing, `enter` — and the job is in the user store under the routine's own
-# name. The folders now sort `archived-reuse`, `maintenance`, `release`, so
-# `jj` puts the cursor on `release`.
+# A routine with no job offers edit schedule first, and neither new job nor
+# edit job. The folders now sort `archived-reuse`, `maintenance`, `release`,
+# so `jj` puts the cursor on `release`, which has no job yet.
+MENU="$LIVE/routine-no-job-menu.txt"
+LAST="$LIVE/routine-no-job-menu-last.txt"
+on_screen '\x1b[Cjjo' "$MENU"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "a routine with no job offers edit schedule first" "> edit schedule" "$LAST"
+has "then delete routine" "delete routine" "$LAST"
+lacks "and no new job" "new job" "$LAST"
+lacks "nor edit job" "edit job" "$LAST"
+
+# Edit schedule (`o`, `enter`) makes a job of the highlighted routine: a
+# schedule, a pipeline found by typing, `enter` — and the job is in the user
+# store under the routine's own name.
 NEW_JOB="$LIVE/routine-new-job.txt"
 LAST="$LIVE/routine-new-job-saved.txt"
 on_screen '\x1b[Cjjo\r0 3 * * 1-5\rbug\r' "$NEW_JOB"
-has "new job saves the job to the user store" "[jobs.release]" "$USER_STORE"
+has "edit schedule saves the job to the user store" "[jobs.release]" "$USER_STORE"
 has "with the routine it was made on" 'routine = "release"' "$USER_STORE"
 has "with the schedule typed" 'schedule = "0 3 * * 1-5"' "$USER_STORE"
 has "with the pipeline picked" 'pipeline = "bugfix"' "$USER_STORE"
@@ -299,17 +311,20 @@ lacks "never in the project store" "[jobs.release]" "$PROJECT_STORE"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /job saved/ { last = $0 } END { print last }' \
   "$NEW_JOB" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "and says so in a popup" "release runs at 03:00, Monday to Friday, on bugfix." "$LAST"
+has "with its next firing" "next: " "$LAST"
+has "and where to change it" "edit or deactivate it with o on its routine." "$LAST"
 
 # A routine with a job offers no second one: its menu is the job's own,
-# edit job, deactivate job, then delete routine.
+# edit schedule, deactivate job, then delete routine.
 MENU="$LIVE/routine-one-job-menu.txt"
 on_screen '\x1b[Cjjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "a routine with a job offers edit job first" "> edit job" "$LAST"
+has "a routine with a job offers edit schedule first" "> edit schedule" "$LAST"
 has "then deactivate job" "deactivate job" "$LAST"
 has "then delete routine" "delete routine" "$LAST"
 lacks "and no new job" "new job" "$LAST"
+lacks "nor edit job" "edit job" "$LAST"
 lacks "nor delete job" "delete job" "$LAST"
 
 # The right pane is titled details and draws the highlighted routine's job
@@ -321,14 +336,14 @@ on_screen '\x1b[C' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the routines tab's right pane is titled details" "─ details ─" "$LAST"
-has "a routine with no job says its schedule is none" "Schedule:    none" "$LAST"
+has "a routine with no job says its schedule is none" "schedule:    none" "$LAST"
 has "and the list's key line names tab details" "[tab] details" "$LAST"
 lacks "a routine row carries no task count" "1 task" "$LAST"
 on_screen '\x1b[Cjj' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "a routine with a job draws the job's schedule" "Schedule:    0 3 * * 1-5" "$LAST"
-has "and names the job" "Job:         release" "$LAST"
+has "a routine with a job draws the job's schedule" "schedule:    0 3 * * 1-5" "$LAST"
+has "and names the job" "job:         release" "$LAST"
 
 # Deactivate job (`o`, down, `enter`) writes the job back disabled, to the
 # user store it lives in and nowhere else, and the details pane says it is
@@ -337,7 +352,7 @@ on_screen '\x1b[Cjjo\x1b[B\r' "$DETAILS"
 has "deactivate job writes the job disabled" "enabled = false" "$USER_STORE"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "and the details pane says the job is inactive" "Next:        inactive" "$LAST"
+has "and the details pane says the job is inactive" "next:        inactive" "$LAST"
 lacks "never into the project store" "[jobs.release]" "$PROJECT_STORE"
 on_screen '\x1b[Cjjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
@@ -348,12 +363,12 @@ on_screen '\x1b[Cjjo\x1b[B\r' /dev/null
 lacks "activate job writes the job enabled again" "enabled" "$USER_STORE"
 has "and keeps it" "[jobs.release]" "$USER_STORE"
 
-# Edit job (`o`, `enter`) opens the schedule popup on the job's own
+# Edit schedule (`o`, `enter`) opens the schedule popup on the job's own
 # schedule: eleven backspaces clear `0 3 * * 1-5`, a new one is typed, and
 # `enter` on the pipeline popup keeps the job's own pipeline. The job keeps
 # its name, its routine and its store.
 on_screen "\x1b[Cjjo\r$(printf '\\x7f%.0s' {1..11})0 4 * * *\r\r" /dev/null
-has "edit job saves the new schedule" 'schedule = "0 4 * * *"' "$USER_STORE"
+has "edit schedule saves the new schedule" 'schedule = "0 4 * * *"' "$USER_STORE"
 lacks "in place of the old one" 'schedule = "0 3 * * 1-5"' "$USER_STORE"
 has "under the job's own name" "[jobs.release]" "$USER_STORE"
 has "keeping its routine" 'routine = "release"' "$USER_STORE"
@@ -376,14 +391,14 @@ ORPHAN="$LIVE/routine-orphan.txt"
 on_screen '\x1b[Cjjj' "$ORPHAN"
 sed 's/\x1b\[[0-9;]*m//g' "$ORPHAN" >"$ORPHAN.plain"
 has "a job without a routine gets a row named after its routine" "> nightly    " "$ORPHAN.plain"
-# On the row itself: the details' `Next:` line says "missing" too, so the
+# On the row itself: the details' `next:` line says "missing" too, so the
 # bare word would pass with no mark drawn.
 works "marked missing at the row's edge" grep -qE '> nightly +missing' "$ORPHAN.plain"
 has "its details say it never fires" "never, its routine is missing" "$ORPHAN.plain"
 # The two sentences under them wrap on a narrow pane, so only their
 # openings are matched.
-has "and why" "No routine nightly" "$ORPHAN.plain"
-has "and what to do" "Press o to point" "$ORPHAN.plain"
+has "and why" "no routine nightly" "$ORPHAN.plain"
+has "and what to do" "press o to point" "$ORPHAN.plain"
 has "its key line is options and quit" "[o] options   [q] quit" "$ORPHAN.plain"
 
 # The row takes no tick and queues nothing: `space` ticks `archived-reuse`,
@@ -394,11 +409,11 @@ on_screen '\x1b[C jjj \r' /dev/null
 works "space and enter on the job's row queue nothing" \
   test "$(find "$SPOOLWAY_PROJECT_HOME/queue" -name '*.md' | wc -l)" -eq "$QUEUED_BEFORE"
 
-# Its menu offers edit job alone, and nothing a routine offers.
+# Its menu offers edit schedule alone, and nothing a routine offers.
 MENU="$LIVE/routine-orphan-menu.txt"
 on_screen '\x1b[Cjjjo' "$MENU"
 sed 's/\x1b\[[0-9;]*m//g' "$MENU" >"$MENU.plain"
-has "the job's row offers edit job" "> edit job" "$MENU.plain"
+has "the job's row offers edit schedule" "> edit schedule" "$MENU.plain"
 lacks "and no delete job" "delete job" "$MENU.plain"
 lacks "and never delete routine" "delete routine" "$MENU.plain"
 

@@ -155,7 +155,7 @@ nothing queued
 next: nightly-audit, Mon 8 Sep 03:00  (in 5h 48m)
 ```
 
-The board shows the greeting and `Nothing queued`, and under them the job ledger: every enabled job and when it next fires. See
+The board shows the greeting and `nothing queued`, and under them the job ledger: every enabled job and when it next fires. See
 [The empty board](dispatcher.md#the-empty-board).
 With no job enabled and both stores parsing, an empty queue stops the run as usual. See
 [When it stops](dispatcher.md#when-it-stops).
@@ -170,38 +170,38 @@ A routine's options menu offers these items for its job, then `delete routine`.
 
 | Item | What it does |
 |---|---|
-| `new job` | Write a job for the routine. Offered only while the routine has no job. |
-| `edit job` | Edit the routine's job. |
+| `edit schedule` | Write a job for the routine, or edit the routine's job. |
 | `deactivate job` | Deactivate the job, keeping its schedule. An inactive job shows `activate job` here instead, which activates it. |
 
 No menu deletes a job. Deactivating one keeps its schedule, and `delete routine` deletes the
 routine together with every job that points into it.
 
 A routine with two or more jobs offers, for each job sorted by name, `activate job <name>` for an
-inactive one or `deactivate job <name>` for an active one, and no `edit job`. Deactivate all but
+inactive one or `deactivate job <name>` for an active one, and no `edit schedule`. Deactivate all but
 one of them to settle the clash.
 
 `activate job` writes nothing while another job on the same routine is active. It opens a popup
 titled `activate job` instead:
 
 ```
-dependabot-review also runs dependabot and is active. Deactivate it first, then activate this one.
+dependabot-review also runs dependabot and is active. deactivate it first, then activate this one.
 ```
 
 With two or more such jobs active, the popup names them all and reads `… also run <routine> and
-are active. Deactivate them first, …`.
+are active. deactivate them first, …`.
 
 ### The two choices
 
-`new job` and `edit job` walk two panels. `esc` on either writes nothing.
+`edit schedule` walks two panels. `esc` on either writes nothing.
 
 1. The schedule. The field states the expression in words and shows its next three firings as
    you type. `enter` is refused until the expression parses.
 2. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
    you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 
-`new job` writes a job for the routine its options menu was opened on. `edit job` opens with
-the job's own schedule and pipeline filled in, and the job keeps its name, routine and store.
+On a routine with no job, `edit schedule` writes a job for the routine its options menu was
+opened on. On a routine with one job, it opens with the job's own schedule and pipeline filled
+in, and the job keeps its name, routine and store.
 
 ### A job without a routine
 
@@ -218,7 +218,7 @@ Its options menu offers one item:
 
 | Item | What it does |
 |---|---|
-| `edit job` | Open the routine picker, which lists the routine folders and nothing else. `enter` picks the folder under the cursor, then the schedule and pipeline panels follow. The save points the job at that routine and keeps its name and store. `esc` on the picker writes nothing. |
+| `edit schedule` | Open the routine picker, which lists the routine folders and nothing else. `enter` picks the folder under the cursor, then the schedule and pipeline panels follow. The save points the job at that routine and keeps its name and store. `esc` on the picker writes nothing. |
 
 ### What the screen decides for you
 

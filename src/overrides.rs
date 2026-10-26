@@ -1903,21 +1903,21 @@ agent: pi
         for (layer, expected) in [
             (
                 "keep_finished_lanes = true\n",
-                Some("it loads as dispatch.visible_lanes = all. Run `spoolway sync` to rewrite"),
+                Some("it loads as dispatch.visible_lanes = all. run `spoolway sync` to rewrite"),
             ),
             (
                 "keep_finished_lanes = false\n",
-                Some("it loads as dispatch.visible_lanes = 1. Run `spoolway sync` to rewrite"),
+                Some("it loads as dispatch.visible_lanes = 1. run `spoolway sync` to rewrite"),
             ),
             (
                 "keep_finished_lanes = false\nvisible_lanes = 2\n",
                 Some(
-                    "the dispatch.visible_lanes = 2 beside it is the limit that loads. Run `spoolway sync` to drop",
+                    "the dispatch.visible_lanes = 2 beside it is the limit that loads. run `spoolway sync` to drop",
                 ),
             ),
             (
                 "keep_finished_lanes = false\nvisible_lanes = 0\n",
-                Some("it loads as dispatch.visible_lanes = 1. Run `spoolway sync` to rewrite"),
+                Some("it loads as dispatch.visible_lanes = 1. run `spoolway sync` to rewrite"),
             ),
             ("keep_finished_lanes = \"yes\"\n", None),
             ("visible_lanes = 3\n", None),

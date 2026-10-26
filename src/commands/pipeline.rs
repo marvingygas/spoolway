@@ -2880,7 +2880,7 @@ mod tests {
             problems[0].contains("queued task `stale`")
                 && problems[0].contains("`gate_at: review-renamed`")
                 && problems[0].contains(
-                    "does not define.\n    Change `gate_at:` in the task to a step `default` has."
+                    "does not define.\n    change `gate_at:` in the task to a step `default` has."
                 ),
             "{problems:?}"
         );
@@ -2928,8 +2928,8 @@ mod tests {
             problems,
             [format!(
                 "queued task `stale` has `gate_at: {command}`, which runs a command in pipeline \
-                 `default` — only an agent step can be held for a person. Its exit is not \
-                 held.\n    Change `gate_at:` in the task to an agent step, or delete it."
+                 `default` — only an agent step can be held for a person. its exit is not \
+                 held.\n    change `gate_at:` in the task to an agent step, or delete it."
             )]
         );
     }
@@ -4655,7 +4655,7 @@ mod tests {
 
         let err = pipeline_rename(&lane, "mine", "mine-2", false).unwrap_err();
         assert!(
-            format!("{err:#}").contains("A lane does not change the project's setup"),
+            format!("{err:#}").contains("a lane does not change the project's setup"),
             "{err:#}"
         );
         assert!(
@@ -4704,7 +4704,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "the dispatcher reads the project's pipelines, not this worktree's.\n  \
-             A lane does not change the project's setup. Write the\n  \
+             a lane does not change the project's setup. write the\n  \
              setting you wanted into your report, and a person\n  \
              will make the change."
         );

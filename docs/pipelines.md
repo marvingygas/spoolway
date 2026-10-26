@@ -585,7 +585,7 @@ Only an agent step can be gated. A `gate:` on a step with `run:` is refused when
 loads and by `spoolway pipeline check`:
 
 ```
-step `publish` runs a command but declares `gate:` — only an agent step can be held for a person. Delete `gate:`, or put it on the agent step after `publish`.
+step `publish` runs a command but declares `gate:` — only an agent step can be held for a person. delete `gate:`, or put it on the agent step after `publish`.
 ```
 
 The lane runs and reports as usual. On the outcome the gate holds, the task lands on `paused` and

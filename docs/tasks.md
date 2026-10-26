@@ -121,7 +121,7 @@ task and the value. A task without the key is accepted.
 
 ```
 $ spoolway queue add --from mine.md
-mine.md sets `complexity: 250`, which is not a whole number from 1 to 100. Set it to a whole number in that range, 100 being extremely complex, or remove the key.
+mine.md sets `complexity: 250`, which is not a whole number from 1 to 100. set it to a whole number in that range, 100 being extremely complex, or remove the key.
 ```
 
 ### One constraint no key can express
@@ -132,7 +132,7 @@ is not a step, and a step that runs a command cannot be held for a person.
 and the steps it may name. For a step that runs a command the refusal reads:
 
 ```
-task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Change `gate_at:` to an agent step, or delete it.
+task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. change `gate_at:` to an agent step, or delete it.
 ```
 
 `spoolway task contract` lists the agent steps of each pipeline under
@@ -145,10 +145,10 @@ renames or removes that step, or turns it into a command step. The dispatcher th
 on `paused` before its first step and logs the gate with the fix:
 
 ```
-t2: queued task `t2` has `gate_at: review`, which pipeline `default` does not define. Change `gate_at:` in the task to a step `default` has.
+t2: queued task `t2` has `gate_at: review`, which pipeline `default` does not define. change `gate_at:` in the task to a step `default` has.
 ```
 
-For a step that runs a command, the line reads `queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Its exit is not held.` and the fix is to change `gate_at:` to an agent step or delete it.
+For a step that runs a command, the line reads `queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. its exit is not held.` and the fix is to change `gate_at:` to an agent step or delete it.
 
 `spoolway pipeline check`, `spoolway doctor` and the task's row on the board and in
 `spoolway queue list` report the same line. A task at `done` is not reported. Resuming the task
@@ -322,7 +322,7 @@ profile    queued     waiting on: sessions
 ```
 $ spoolway task contract --from pending/
 group `cart` has two tasks with no dependency in it: cart-totals and cart-empty — a group is
-one chain. Give one a `depends_on`, or move it to a group of its own.
+one chain. give one a `depends_on`, or move it to a group of its own.
 ```
 
 A task stays `queued` until every task it names has finished. A dependency has finished once it
@@ -511,7 +511,7 @@ started. The dispatcher moves it to `paused`, writes `missing_start_branch: <bra
 one line:
 
 ```
-! paused `cart-totals`: it starts from `task/gh-412-checkout`, which doesn't exist. Set `starts_from:` in the task front matter and resume.
+! paused `cart-totals`: it starts from `task/gh-412-checkout`, which doesn't exist. set `starts_from:` in the task front matter and resume.
 ```
 
 This applies to a task that sets `starts_from:` or names a `depends_on`. The start branch is its
@@ -524,7 +524,7 @@ Queueing checks the same branch. `spoolway queue add` refuses the whole batch wh
 branch exists neither locally nor on `origin`. It prints, for each such task:
 
 ```
-cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+cart-totals starts from task/gh-412-checkout, which doesn't exist. set starts_from: in the task front matter and requeue.
 ```
 
 `spoolway task contract --from` prints the same line for such a task.

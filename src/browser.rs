@@ -34,7 +34,7 @@ pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
     if !file.is_absolute() {
         bail!(
             "could not open the plan page: {} is not an absolute path.\n\
-             Give the full path of the file, starting with /.",
+             give the full path of the file, starting with /.",
             file.display()
         );
     }
@@ -52,7 +52,7 @@ pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
         } else {
             bail!(
                 "could not open the plan page: neither wslview nor explorer.exe is on PATH.\n\
-                 Install wslu, or open this file in a browser yourself:\n{shown}"
+                 install wslu, or open this file in a browser yourself:\n{shown}"
             );
         };
         // A Windows program cannot read `/home/…`, and an old `wslview` does
@@ -67,7 +67,7 @@ pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
     if !found("xdg-open") {
         bail!(
             "could not open the plan page: xdg-open is not on PATH.\n\
-             Install xdg-utils, or open this file in a browser yourself:\n{shown}"
+             install xdg-utils, or open this file in a browser yourself:\n{shown}"
         );
     }
     Ok(format!("xdg-open {}", crate::platform::quote(&shown)))
@@ -90,7 +90,7 @@ pub(crate) fn open_plan(plan: &str) -> Option<crate::screen::Notice> {
             "open plan",
             format!(
                 "o: the plan page is gone.\n{plan}\n\
-                 Pick open task to fix or remove plan: in the task file."
+                 pick open task to fix or remove plan: in the task file."
             ),
         ));
     }
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(
             notice.text,
             "o: the plan page is gone.\n/nowhere/2026-10-17-cart.html\n\
-             Pick open task to fix or remove plan: in the task file."
+             pick open task to fix or remove plan: in the task file."
         );
         assert!(opened().is_empty());
     }
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "could not open the plan page: xdg-open is not on PATH.\n\
-             Install xdg-utils, or open this file in a browser yourself:\n/a/b.html"
+             install xdg-utils, or open this file in a browser yourself:\n/a/b.html"
         );
     }
 
@@ -326,7 +326,7 @@ mod tests {
             err.contains("wslview") && err.contains("explorer.exe"),
             "{err}"
         );
-        assert!(err.contains("Install wslu"), "{err}");
+        assert!(err.contains("install wslu"), "{err}");
         assert!(err.ends_with("\n/a/b.html"), "{err}");
     }
 

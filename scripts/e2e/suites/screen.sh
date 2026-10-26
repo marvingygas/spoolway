@@ -17,7 +17,7 @@
 # Delete off the queue tab's options menu removes a pending group and every
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
-# pane beside it says `Use /spoolway-tasks`. Delete off that row's options
+# pane beside it says `use /spoolway-tasks`. Delete off that row's options
 # menu removes its page after one popup.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
@@ -136,7 +136,7 @@ has "and the shared key row" "[enter] confirm   [esc] close" "$RUN.plain"
 lacks "with no letter answer left" "[x] hide until" "$RUN.plain"
 has "the header names the child's pid while it runs" "dispatcher running · pid " "$RUN.plain"
 has "and enter is offered to stop it" "[enter] stop dispatching" "$RUN.plain"
-has "and it stays up on an empty queue" "Nothing queued" "$RUN.plain"
+has "and it stays up on an empty queue" "nothing queued" "$RUN.plain"
 if grep -qaE "Good (morning|afternoon|evening)|Working late" "$RUN.plain"; then
   ok "the empty board greets the person"
 else
@@ -219,7 +219,7 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" "$SPOOLWAY_PROJECT_HOME/queue/
 # a real child serving a real request, which no unit test runs. The key line
 # offers `u` only once the lock is held and a pipeline file has changed since
 # the run started: with nothing to load, a held lock alone draws no pair.
-# The board names the kind of change on a `Config changed:` line above the
+# The board names the kind of change on a `config changed:` line above the
 # key line while the edit waits, and drops it once the reload has loaded it.
 # `updating config…` stays up until the answer lands; `successfully loaded`
 # then shows and closes itself, with no key pressed. Looked for in the whole
@@ -238,16 +238,16 @@ sleep 2
 if now_lacks "[u] update config"
 then ok "the key line leaves u off while nothing changed"
 else bad "the key line leaves u off while nothing changed"; fi
-if now_lacks "Config changed"
-then ok "the board draws no Config changed line while nothing changed"
-else bad "the board draws no Config changed line while nothing changed"; fi
+if now_lacks "config changed"
+then ok "the board draws no config changed line while nothing changed"
+else bad "the board draws no config changed line while nothing changed"; fi
 printf '# edited while the dispatcher runs\n' >> .spoolway/pipelines/default.yml
 if poll_until 10 now_says "[u] update config"
 then ok "the key line offers u once a pipeline file changed"
 else bad "the key line offers u once a pipeline file changed"; fi
-if now_says "Config changed: pipelines updated"
-then ok "the board names the change on its Config changed line"
-else bad "the board names the change on its Config changed line"; fi
+if now_says "config changed: pipelines updated"
+then ok "the board names the change on its config changed line"
+else bad "the board names the change on its config changed line"; fi
 UPDATE_MARK=$(wc -l < "$UPDATE")
 screen_press u
 if poll_until 15 screen_drew_since "$UPDATE_MARK" "successfully loaded"
@@ -262,9 +262,9 @@ has "leaving the dispatcher running" "dispatcher running · pid " "$LAST"
 if poll_until 10 now_lacks "[u] update config"
 then ok "and u goes once the edit is loaded"
 else bad "and u goes once the edit is loaded"; fi
-if now_lacks "Config changed"
-then ok "and so does the Config changed line"
-else bad "and so does the Config changed line"; fi
+if now_lacks "config changed"
+then ok "and so does the config changed line"
+else bad "and so does the config changed line"; fi
 screen_stop
 cp "$LIVE/default.yml.update" .spoolway/pipelines/default.yml
 
@@ -300,10 +300,10 @@ SECOND="$LIVE/second.txt"
 works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
-has "and says the one line" "Dispatcher already running" "$SECOND.plain"
+has "and says the one line" "dispatcher already running" "$SECOND.plain"
 lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
-  "Dispatcher already running" "$SPOOLWAY" dispatch
+  "dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
 
 wait "$HELD_PID"
@@ -314,7 +314,7 @@ AFTER="$LIVE/after.txt"
 works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
-lacks "not refused" "Dispatcher already running" "$AFTER.plain"
+lacks "not refused" "dispatcher already running" "$AFTER.plain"
 has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
@@ -350,8 +350,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queued popup is drawn over the tab" "╭─ queued " "$LAST"
 has "naming the task it queued" "billing-export" "$LAST"
-has "saying no dispatcher will pick it up yet" "Start the dispatcher to begin working" "$LAST"
-lacks "never that one is running" "Dispatcher is running" "$LAST"
+has "saying no dispatcher will pick it up yet" "start the dispatcher to begin working" "$LAST"
+lacks "never that one is running" "dispatcher is running" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
 
@@ -491,7 +491,7 @@ works "and the dependent in another group" test -f "$PENDING/checkout-total.md"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete group cart/ { last = $0 } END { print last }' \
   "$DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "delete opens the delete popup" "─ delete group cart " "$LAST"
-has "counting every pending task it takes" "Delete 3 pending tasks:" "$LAST"
+has "counting every pending task it takes" "delete 3 pending tasks:" "$LAST"
 has "naming the dependent in another group" "checkout-total   (depends on cart-totals)" "$LAST"
 lacks "never a task nothing in the set depends on" "checkout-page" "$LAST"
 has "its one answer under the cursor" "> delete" "$LAST"
@@ -520,8 +520,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queueable group keeps its checkbox" "[ ] checkout" "$LAST"
 has "the plan row is drawn under it, by name, with no checkbox" "│ >     search " "$LAST"
-has "the tasks pane beside it says how to cut it" "│   Use /spoolway-tasks " "$LAST"
-lacks "with no task drawn for it" "Pipeline:" "$LAST"
+has "the tasks pane beside it says how to cut it" "│   use /spoolway-tasks " "$LAST"
+lacks "with no task drawn for it" "pipeline:" "$LAST"
 
 # The plan row's menu opens on open plan; delete, its second item, asks
 # once, and `enter` removes the page, so the row leaves the list.

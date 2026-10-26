@@ -2923,7 +2923,7 @@ impl<'a> Dispatcher<'a> {
         // stops it, the way `pause_for_missing_start_branch` says its own.
         report.moved = true;
         report.problems.push(format!(
-            "`{}`'s `{stage}` hook failed: {reason}. Fix the hook, then resume the task to \
+            "`{}`'s `{stage}` hook failed: {reason}. fix the hook, then resume the task to \
              run it again.",
             task.id()
         ));
@@ -2975,7 +2975,7 @@ impl<'a> Dispatcher<'a> {
         self.persist(task)?;
         report.moved = true;
         report.problems.push(format!(
-            "paused `{}`: it starts from `{branch}`, which doesn't exist. Set `starts_from:` in \
+            "paused `{}`: it starts from `{branch}`, which doesn't exist. set `starts_from:` in \
              the task front matter and resume.",
             task.id()
         ));
@@ -6764,7 +6764,7 @@ impl<'a> Dispatcher<'a> {
         Some(Ceiling {
             note: format!(
                 "this run has spent {spent} output tokens against a max_output_tokens of \
-                 {ceiling} — starting nothing further. Lanes still open will finish, and the \
+                 {ceiling} — starting nothing further. lanes still open will finish, and the \
                  queue keeps its place for the next run"
             ),
             reached: format!("unattended.max_output_tokens reached: {spent} of {ceiling}"),
@@ -6812,7 +6812,7 @@ impl<'a> Dispatcher<'a> {
         Some(Ceiling {
             note: format!(
                 "this run has spent ${} against a max_cost_usd of ${} — \
-                 starting nothing further. Lanes still open will finish, and the queue keeps its \
+                 starting nothing further. lanes still open will finish, and the queue keeps its \
                  place for the next run",
                 crate::fmt::usd_exact(spent),
                 crate::fmt::usd_exact(ceiling),
@@ -6998,7 +6998,7 @@ fn take_back_fresh_cut(
         {
             report.problems.push(format!(
                 "{}: its worktree {} could not be removed after the task was unqueued: {err:#}. \
-                 Run `{}`",
+                 run `{}`",
                 task.id(),
                 path.display(),
                 crate::mux::remove_by_hand_command(&repo.root, path)
@@ -7117,7 +7117,7 @@ fn chain_base_problem(repo: &Repo, task: &Task) -> Option<(String, String)> {
                 "task `{id}` is based on `{base}` but depends on `{dep}`, which is based on \
                  `{dep_base}`"
             ),
-            format!("A chain has one base. Set `base:` in {id} to `{dep_base}`."),
+            format!("a chain has one base. set `base:` in {id} to `{dep_base}`."),
         ));
     }
     None
@@ -7154,7 +7154,7 @@ pub(crate) fn base_existence_problem(
                 "task `{id}` is based on `{base}`, which exists neither locally nor on \
                  `origin`"
             ),
-            format!("Set `base:` in {id} to a branch that exists."),
+            format!("set `base:` in {id} to a branch that exists."),
         )),
         // Nothing says the branch is missing, so the task is not what is
         // wrong: the hold lifts by itself on the first pass `origin`
@@ -7165,7 +7165,7 @@ pub(crate) fn base_existence_problem(
                 "task `{id}` is based on `{base}`, which is not a local branch, and `origin` \
                  could not be asked whether it has it"
             ),
-            "Nothing in the task needs changing. It is tried again on the next pass; check that \
+            "nothing in the task needs changing. it is tried again on the next pass; check that \
              `origin` can be reached."
                 .to_string(),
         )),
@@ -7252,7 +7252,7 @@ pub(crate) fn vanished_worktree_reason(step: &str, vanished: &Path) -> String {
     format!(
         "`{step}` lost its worktree {} while it was running, so anything it had not \
          committed is gone and its result would route work that no longer exists. \
-         Resume the task to run the step again in a fresh worktree",
+         resume the task to run the step again in a fresh worktree",
         vanished.display()
     )
 }
@@ -7303,7 +7303,7 @@ fn refuse_main_checkout(repo: &Repo, task: &Task, checkout: &Path) -> Result<()>
         .unwrap_or_else(|| crate::task::default_branch(task.id()));
     anyhow::bail!(
         "{}: the branch `{branch}` is checked out in the main checkout, {}. \
-         A lane never runs there. Switch that checkout to another branch, \
+         a lane never runs there. switch that checkout to another branch, \
          such as `git switch main`, then resume the task.",
         task.id(),
         repo.root.display()
@@ -7716,9 +7716,9 @@ fn ensure_checkout(
                 if branch_exists && !cut_before {
                     anyhow::bail!(
                         "{}: the branch `{branch}` already exists and this task has no checkout on record. \
-                         It is either left over from an earlier task with the same id, or it holds this task's own saved work from before an unqueue. \
-                         To keep it, rename it with `git branch -m {branch} <name>` and set `starts_from: <name>` in the task. \
-                         To drop it, run `git branch -D {branch}`. Then resume the task",
+                         it is either left over from an earlier task with the same id, or it holds this task's own saved work from before an unqueue. \
+                         to keep it, rename it with `git branch -m {branch} <name>` and set `starts_from: <name>` in the task. \
+                         to drop it, run `git branch -D {branch}`. then resume the task",
                         task.id()
                     );
                 }
@@ -7883,7 +7883,7 @@ fn recorded_worktree(task: &Task) -> Result<PathBuf> {
     task.front.worktree_path.clone().with_context(|| {
         format!(
             "{}: it has no checkout on record, and a lane never falls back to the main checkout. \
-             Remove `workspace_id` from its task file so spoolway cuts one, \
+             remove `workspace_id` from its task file so spoolway cuts one, \
              then resume the task",
             task.id()
         )
@@ -11517,7 +11517,7 @@ mod tests {
             "the hold does not claim the base is missing: {reason}"
         );
         assert!(
-            !fix.contains("Set `base:`"),
+            !fix.contains("set `base:`"),
             "and does not send a person to edit a task that is right: {fix}"
         );
         assert!(
@@ -23763,7 +23763,7 @@ mod tests {
         assert_eq!(task.stage(), "blocked");
         assert!(
             task.body
-                .contains("A lane never runs there. Switch that checkout to another branch, such as `git switch main`, then resume the task."),
+                .contains("a lane never runs there. switch that checkout to another branch, such as `git switch main`, then resume the task."),
             "{}",
             task.body
         );
@@ -26455,13 +26455,13 @@ mod tests {
                 "task `joined` is based on `work` but depends on `other`, which is based on \
                  `elsewhere`"
                     .to_string(),
-                "A chain has one base. Set `base:` in joined to `elsewhere`.".to_string()
+                "a chain has one base. set `base:` in joined to `elsewhere`.".to_string()
             ))
         );
     }
 
     /// A dependent whose `base:` disagrees with its dependency's is held on
-    /// the pass's problem list with the "A chain has one base" line, and a
+    /// the pass's problem list with the "a chain has one base" line, and a
     /// task outside that chain still launches. That list is what reaches the
     /// problem log, so this is the line a person starting the dispatcher
     /// reads.
@@ -26485,7 +26485,7 @@ mod tests {
         assert!(
             report.problems.contains(
                 &"task `held` is based on `elsewhere` but depends on `first`, which is based on \
-                  `work` — A chain has one base. Set `base:` in held to `work`."
+                  `work` — a chain has one base. set `base:` in held to `work`."
                     .to_string()
             ),
             "{:?}",
@@ -26519,7 +26519,7 @@ mod tests {
         assert_eq!(
             report.problems,
             vec![
-                "paused `demo`: it starts from `task/nowhere`, which doesn't exist. Set \
+                "paused `demo`: it starts from `task/nowhere`, which doesn't exist. set \
                  `starts_from:` in the task front matter and resume."
                     .to_string()
             ]

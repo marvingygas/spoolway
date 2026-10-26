@@ -817,9 +817,9 @@ fn deserialize_retired_max_new_sessions<'de, D: serde::Deserializer<'de>>(
     Err(serde::de::Error::custom(
         "`max_new_sessions:` is now `loop:` — it bounds how many times this step may send a \
          task on to a given one, a lap of the loop, not how many fresh conversations that \
-         cost. A step with `session: true` may re-prompt a live session as often as it needs; \
+         cost. a step with `session: true` may re-prompt a live session as often as it needs; \
          what may bound a conversation's own size is `session_reuse_ctx` on the agent \
-         profile, entirely separate from this. Rename the key, and consider raising the \
+         profile, entirely separate from this. rename the key, and consider raising the \
          number: a whole conversation was stingier than a lap now is",
     ))
 }
@@ -833,7 +833,7 @@ fn deserialize_max_rounds<'de, D: serde::Deserializer<'de>>(
     let _ = serde_norway::Value::deserialize(d)?;
     Err(serde::de::Error::custom(
         "`max_rounds:` is now `loop:` — it bounds how many times this step may send a task \
-         on to a given one. Rename the key, and consider raising the number: what it \
+         on to a given one. rename the key, and consider raising the number: what it \
          counts has changed twice since",
     ))
 }
@@ -1207,7 +1207,7 @@ impl Pipeline {
 fn self_route_message(step_id: &str, key: &str) -> String {
     format!(
         "step `{step_id}`: `{key}` names `{step_id}` itself — a step may not route back to \
-         its own id. Send the failure to a step that leaves, or delete the step."
+         its own id. send the failure to a step that leaves, or delete the step."
     )
 }
 
@@ -1220,7 +1220,7 @@ fn loop_map_message(step_id: &str, by_route: &BTreeMap<String, u32>) -> String {
         .join("; ");
     format!(
         "step `{step_id}` declares `loop:` as a map — a limit now counts arrivals at the step \
-         that carries it. Delete it here and {give}."
+         that carries it. delete it here and {give}."
     )
 }
 
@@ -1249,7 +1249,7 @@ fn end_message(step_id: &str) -> String {
 pub(crate) fn command_gate_message(step_id: &str) -> String {
     format!(
         "step `{step_id}` runs a command but declares `gate:` — only an agent step can be held \
-         for a person. Delete `gate:`, or put it on the agent step after `{step_id}`."
+         for a person. delete `gate:`, or put it on the agent step after `{step_id}`."
     )
 }
 
@@ -1469,7 +1469,7 @@ impl Pipeline {
                 {
                     bail!(
                         "step `{}` declares `gate: on_fail` but {}, so its lane is never offered \
-                         a fail and the gate can never hold one. Add `on_fail: <step>`, or use \
+                         a fail and the gate can never hold one. add `on_fail: <step>`, or use \
                          `gate: on_pass`.",
                         step.id,
                         match step.on_fail {
@@ -1600,7 +1600,7 @@ impl Pipeline {
                     if step.timeout == Some(Duration::ZERO) {
                         bail!(
                             "step `{}` sets `timeout: 0s`, which would kill the command as soon \
-                             as it started. There is no way to say `no limit` here — write the \
+                             as it started. there is no way to say `no limit` here — write the \
                              longest this command may reasonably take",
                             step.id
                         );
@@ -1962,7 +1962,7 @@ impl Pipeline {
             if let Some(cycle) = self.find_unbounded_cycle(&step.id, &mut state, &mut path) {
                 bail!(
                     "steps {} form a loop nothing bounds — no step along it carries a `loop:`, \
-                     so a task could go round it forever. Give one of them a `loop: <n>`: the \
+                     so a task could go round it forever. give one of them a `loop: <n>`: the \
                      arrival past it parks on `blocked`.",
                     cycle
                         .iter()
@@ -2317,7 +2317,7 @@ impl Clash {
         format!(
             "private pipeline `{name}` clashes with the tracked one — both {} and {} name \
              `{name}`; run `spoolway pipeline rename {name} <new-name>` to rename the private \
-             file. Tasks on `{name}` are held until then, and every other task runs",
+             file. tasks on `{name}` are held until then, and every other task runs",
             self.tracked.display(),
             self.private.display(),
         )
@@ -2519,7 +2519,7 @@ impl Pipelines {
                 if old.exists() {
                     bail!(
                         "{} is the old single-file shape, which this spoolway no longer \
-                         reads. Split it by hand: one `.spoolway/pipelines/<name>.yml` per \
+                         reads. split it by hand: one `.spoolway/pipelines/<name>.yml` per \
                          `pipelines:` entry (the file name is the pipeline name, so drop the \
                          map key and the old `default:` — every task now names its own \
                          pipeline instead), then delete the old file. `spoolway pipeline \
@@ -2754,6 +2754,22 @@ impl Pipelines {
                 .iter_mut()
                 .filter(|step| step.on_pass.as_deref() == Some("create-pr"))
                 .for_each(|step| step.on_pass = Some("handover".into()));
+        }
+        pipelines
+    }
+
+    /// [`Pipelines::builtin`] with every pipeline's own description swapped
+    /// for a lowercase stand-in. Step descriptions stay: no screen draws
+    /// them, only `queue route` prints them. A description is text a
+    /// pipeline's author wrote, which a screen shows as a row value; the
+    /// shipped ones start with a capital.
+    /// A test that checks the words a screen brings itself for capitals
+    /// draws its pickers over these, so the shipped prose stays out of it.
+    #[cfg(test)]
+    pub fn builtin_with_plain_descriptions() -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        for pipeline in pipelines.pipelines.values_mut() {
+            pipeline.description = Some("what this pipeline is for".to_string());
         }
         pipelines
     }
@@ -4046,7 +4062,7 @@ mod tests {
         assert!(
             none.contains(
                 "step `approve` declares `gate: on_fail` but no `on_fail:`, so its lane is \
-                 never offered a fail and the gate can never hold one. Add `on_fail: <step>`, \
+                 never offered a fail and the gate can never hold one. add `on_fail: <step>`, \
                  or use `gate: on_pass`."
             ),
             "{none}"
@@ -4085,7 +4101,7 @@ mod tests {
             assert_eq!(
                 err,
                 "step `publish` runs a command but declares `gate:` — only an agent step can be \
-                 held for a person. Delete `gate:`, or put it on the agent step after `publish`.",
+                 held for a person. delete `gate:`, or put it on the agent step after `publish`.",
             );
         }
     }

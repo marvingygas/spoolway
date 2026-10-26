@@ -19,7 +19,7 @@ whatever flags are given:
 
 ```
 $ spoolway dispatch
-spoolway: Open herdr and start spoolway there:
+spoolway: open herdr and start spoolway there:
 
   herdr
   spoolway
@@ -36,7 +36,7 @@ while either is up prints the same line and exits without drawing a board:
 
 ```
 $ spoolway dispatch
-Dispatcher already running
+dispatcher already running
 ```
 
 Queueing a batch from the queue screen while another dispatcher holds the lock works the same
@@ -98,7 +98,7 @@ The run records itself in `dispatch.pid`. At the start of every pass it reads th
 If the file is deleted, or no longer names this run, the run prints one line and exits with code 0:
 
 ```
-  ! dispatch.pid no longer names this dispatcher (pid 4711); another one holds it. Stopping, so two dispatchers never work one queue.
+  ! dispatch.pid no longer names this dispatcher (pid 4711); another one holds it. stopping, so two dispatchers never work one queue.
 ```
 
 The same line goes to the problem log. Under the screen it is printed without the `  ! ` prefix.
@@ -281,7 +281,7 @@ pass itself. Its header names the pid of that child, or reads `dispatcher stoppe
 with no pid once it has stopped, next to a count of the steps still working: `dispatcher stopped
 · 3 steps finishing` (`1 step finishing` for one), left out once none are. The wordmark's spool
 turns while that count is above zero. On `enter`, until the child's first pass is over, or the
-dispatcher has started a lane or a command step, the tab covers the board with a keyless `Starting dispatcher` popup. See
+dispatcher has started a lane or a command step, the tab covers the board with a keyless `starting dispatcher` popup. See
 [`spoolway`](cli-reference.md#spoolway).
 
 `enter` over a running dispatcher stops it at once when no agent lane or command step is
@@ -291,8 +291,8 @@ or command step is running, `enter` opens the stop popup instead:
 ```
 ╭─ stop dispatching ──────────────────────────────────────────────────╮
 │                                                                     │
-│  No new steps will be started.                                      │
-│  Interrupting stops agents and commands. When resumed, agents pick  │
+│  no new steps will be started.                                      │
+│  interrupting stops agents and commands. when resumed, agents pick  │
 │  up where they left off and commands restart.                       │
 │                                                                     │
 │  > let running steps finish                                         │
@@ -366,11 +366,11 @@ at all. The frame is then cut from the bottom so it never scrolls the terminal.
 
 ### The empty board
 
-With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`. `[u] update config` joins it under the rule in [Keys](#keys).
+With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`. `[u] update config` joins it under the rule in [Keys](#keys).
 
 ```
 Good afternoon, Marvin.
-Nothing queued
+nothing queued
 ```
 
 The greeting follows the local hour and ends in a full stop.
@@ -384,18 +384,18 @@ The greeting follows the local hour and ends in a full stop.
 
 The greeting adds a comma and the first word of `git config user.name` for the board's repo. With no git, no name set or a blank value, it reads `Good afternoon.` instead. The board reads the name once, when it opens.
 
-While a dispatcher holds the lock and at least one job is enabled, the job ledger follows `Nothing queued`, after one blank row. It uses the busy board's own words and order, and is centred as one block. Jobs fire only inside a dispatcher's pass, so a board with no dispatcher running lists no jobs. When a job fires and queues its routine, the board switches back to the busy layout by itself.
+While a dispatcher holds the lock and at least one job is enabled, the job ledger follows `nothing queued`, after one blank row. It uses the busy board's own words and order, and is centred as one block. Jobs fire only inside a dispatcher's pass, so a board with no dispatcher running lists no jobs. When a job fires and queues its routine, the board switches back to the busy layout by itself.
 
 ```
 Good evening, Marvin.
-Nothing queued
+nothing queued
 
 jobs   2 active
        ○ nightly-audit   Sun 11 Oct 03:00   (in 5h 12m)
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`Config changed` line](#the-config-changed-line) still shows while a reload has something to load. The wordmark turns while a dispatcher is running, and holds still otherwise.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`config changed` line](#the-config-changed-line) still shows while a reload has something to load. The wordmark turns while a dispatcher is running, and holds still otherwise.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
@@ -411,7 +411,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
 | TIME | How long the lane's pane has been busy on this step. A paused or blocked row's TIME does not grow. |
-| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. Change `gate_at:` in the task to a step `<pipeline>` has.`` One whose `gate_at:` names a command step reads ``<queued or live> task `<id>` has `gate_at: <step>`, which runs a command in pipeline `<pipeline>` — only an agent step can be held for a person. Its exit is not held. Change `gate_at:` in the task to an agent step, or delete it.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
+| NEXT | For a running or starting task, the step it goes to on pass. For one with a scheduled pause, `→ paused after <step>`. For a queued task, what it waits on, the issue hook it is running, such as `` `started` hook running 2m (stopped at 10m)``, the worktree cut it is waiting on, such as `cutting worktree 24s (stopped at 10m)`, or that a dependency it names is not a task. Under `dispatch.priority = "reserve"`, a task that a held slot keeps out reads `<cap> slot held for group <group>`, where `<cap>` is the agent profile or, for a model's own `slots`, the model. A task that waits because the cap is full reads `waiting for a worker slot to free up`. A queued task whose first dependency was closed without a pull request reads `` based on `main`: `a-noop` closed without a pull request `` once nothing else holds it. For a command step that has exited non-zero, the destination of its failure: the step's `on_fail`, or `blocked` when it names none, or the exit of its destination's spent `loop:`. For a paused task, the outcome the pause caught and where a resume sends it, key first: `[r] review failed → implement`; a caught pass reads `[r] → e2e`. A task parked before it ever started reads `→ queued — [r] resumes it`. A queued task, or one parked before it started, whose `gate_at:` names a step its pipeline does not define reads ``<queued or live> task `<id>` has `gate_at: <step>`, which pipeline `<pipeline>` does not define. change `gate_at:` in the task to a step `<pipeline>` has.`` One whose `gate_at:` names a command step reads ``<queued or live> task `<id>` has `gate_at: <step>`, which runs a command in pipeline `<pipeline>` — only an agent step can be held for a person. its exit is not held. change `gate_at:` in the task to an agent step, or delete it.`` A task the dispatch tab's stop popup parked reads `→ <step> — resumes when dispatching starts`. A paused task held or parked on a step its pipeline no longer defines reads ``stopped at `<step>`, which `<pipeline>` no longer defines``. A paused task whose resume has no other step to name reads `[r] resume`, or `no step named` while a dependency or its own lane is busy. A `hook_failed` task reads `[r] rerun hook  [k] skip hook`. A blocked task waiting for a person reads `[r] → <step>`, naming the step a resume sends it back to. When that step is not in the pipeline, it reads ``[r] pick a step — `<step>` is gone``. A task that cleanup held for a worktree off its branch reads `[r]` and the reason instead, such as ``[r] worktree on a detached HEAD, not `task/cart-totals` ``. While a dependency or the task's own lane is busy, the row reads `→ <step>` with no key. For a lane holding a permission prompt, `press a key in pane \`<task> · <step>\``. NEXT never names a step the task walks past. When a pass or a resume leads onto one, NEXT names the first step after it that the task runs. |
 
 `spoolway eval --by task` gives the task's whole bill.
 
@@ -529,7 +529,7 @@ The key line under the board reads `[enter] start dispatching   [o] options   [q
 reads `stop dispatching` while the dispatcher is running, and `q` shows only inside the dispatch
 tab. `[r] resume` joins it, between the `enter` pair and `[o] options`, only while the `▸`
 cursor sits on a row it can resume. `[u] update config` joins it, between `[o] options` and
-`[q] quit`, only while a dispatcher holds the lock and the `Config changed` line is up. On an empty board it sits between `enter` and `q`. It is drawn in normal
+`[q] quit`, only while a dispatcher holds the lock and the `config changed` line is up. On an empty board it sits between `enter` and `q`. It is drawn in normal
 text, and every other pair on the line is dim.
 
 | Key | What it does |
@@ -576,12 +576,12 @@ with `press u again.`
 ```
 ╭─ reload refused ──────────────────────────────────────────────╮
 │                                                               │
-│  Nothing changed. The run is still on what it had.            │
+│  nothing changed. the run is still on what it had.            │
 │                                                               │
 │  fix-login: sitting on `review`, which pipeline `feature`     │
 │  no longer defines                                            │
 │                                                               │
-│  Put `review` back in feature.yml, or wait until fix-login    │
+│  put `review` back in feature.yml, or wait until fix-login    │
 │  has left it, then press u again.                             │
 │                                                               │
 │  [enter] confirm                                              │
@@ -596,11 +596,11 @@ flowchart LR
   W -->|dispatcher stopped| S[stopped before answering, closes on enter]
 ```
 
-When the dispatcher stops before it answers, the popup reads `The dispatcher stopped before
-answering, so nothing was reloaded. A new run loads every file as it is now.` When the dispatch
+When the dispatcher stops before it answers, the popup reads `the dispatcher stopped before
+answering, so nothing was reloaded. a new run loads every file as it is now.` When the dispatch
 tab's own dispatcher stops, that sentence follows the reason it stopped in the exit popup. When
 the answer cannot be read, the popup says the board cannot tell whether the reload loaded, and to
-press `u` again if the board still shows its `Config changed` line.
+press `u` again if the board still shows its `config changed` line.
 
 ### Options menu
 
@@ -750,7 +750,7 @@ An `enter` the resume refuses leaves the picker open and prints the reason above
 
 ```
 ╭─ pause cart-empty-state ────────────╮
-│  Pausing aborts the step it is on:  │
+│  pausing aborts the step it is on:  │
 │                                     │
 │  implement    agent    2m 21s       │
 │                                     │
@@ -766,8 +766,8 @@ When the board cannot route the task for an `r`, the picker lists no steps and s
 Pausing an agent turn sends Escape to the pane. A resume picks the session back up on a step that
 declares `session: true`, and opens a fresh conversation on any other step. Pausing
 a command step kills the run, and the command runs again in full on resume. On a command step
-the panel says so in two lines above the answers: `Pausing terminates the command's process.`
-and `Resuming restarts the command.`
+the panel says so in two lines above the answers: `pausing terminates the command's process.`
+and `resuming restarts the command.`
 
 `pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
 named, so the named task pauses itself once that step reports, whatever it reports. The answer is
@@ -788,8 +788,8 @@ The agent form names the step, the lane and the session that a restart throws aw
 │ lane      login · review                            │
 │ session   32b0d7bd — abandoned, already banked      │
 │                                                     │
-│ The lane is torn down and `review` is briefed from  │
-│ scratch. Its conversation is not kept.              │
+│ the lane is torn down and `review` is briefed from  │
+│ scratch. its conversation is not kept.              │
 │                                                     │
 │ > restart                                           │
 │                                                     │
@@ -805,8 +805,8 @@ The command form is drawn for a command step, which has no lane and no session. 
 │  step      build                                        │
 │  run       command · 4m 12s                             │
 │                                                         │
-│  The command's process is ended and `build` runs again  │
-│  from the start. Its log is kept as the previous log.   │
+│  the command's process is ended and `build` runs again  │
+│  from the start. its log is kept as the previous log.   │
 │                                                         │
 │  > restart                                              │
 │                                                         │
@@ -831,7 +831,7 @@ For a failed `done` hook the panel names the archive and the worktree removal. A
 ╭─ skip the done hook? ────────────────────────╮
 │  release-spoolway is archived and its        │
 │  worktree removed.                           │
-│  Ticket #1025 stays as it is.                │
+│  ticket #1025 stays as it is.                │
 │                                              │
 │  > skip and archive                          │
 │                                              │
@@ -874,11 +874,11 @@ jobs    2 active
 `spoolway queue list` prints the same table from another terminal, and `spoolway lane <lane>`
 shows what one lane is doing.
 
-### The Config changed line
+### The config changed line
 
 The busy board and the empty board draw one line above the key line while a reload has something
 to load. Inside the dispatch tab it is the last row of the box, with a blank row above it. It
-starts with a bold `Config changed:` and names the kinds of change, joined by `, `.
+starts with a bold `config changed:` and names the kinds of change, joined by `, `.
 
 | Kind | Shown while |
 |---|---|
@@ -886,7 +886,7 @@ starts with a bold `Config changed:` and names the kinds of change, joined by `,
 | `config.toml updated` | `config.toml` holds a different value than the run is using for `unattended.enabled` or an `unattended.blocked_*` key. |
 
 ```
-Config changed: pipelines updated, config.toml updated
+config changed: pipelines updated, config.toml updated
 ```
 
 The line names no file or key. Press `u` to load them; see
@@ -924,7 +924,7 @@ An edit to a pipeline file changes nothing until the dispatcher restarts or relo
 override follows the same rule: `spoolway pipeline override` writes a patch file, and the running
 dispatcher uses it only after a restart or a reload. `spoolway pipeline check` names each
 pipeline file or override patch that differs from the loaded copy. The board's
-[`Config changed` line](#the-config-changed-line) says when pipelines or config keys differ, and
+[`config changed` line](#the-config-changed-line) says when pipelines or config keys differ, and
 its `u` key reloads them. `spoolway pipeline check` prints:
 
 ```
@@ -948,7 +948,7 @@ dispatcher wakes when the file appears. On every system it answers at the top of
 On a good reload, the dispatcher writes the new pipelines to `dispatch-pipelines.json` before it
 starts any lane on them. From then on `spoolway report`, `spoolway queue route` and the board route
 on the new pipelines, and `spoolway pipeline check` stops naming the reloaded
-files and keys. The `Config changed` line goes. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
+files and keys. The `config changed` line goes. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
 keys all take effect.
 
 A good reload also sets the run to attended or unattended, as `unattended.enabled` says. This
@@ -1518,7 +1518,7 @@ the command that resumes the task:
 
 ```
 ! <task>: the worktree is on a detached HEAD, not `task/<task>` — held on `blocked`.
-    Nothing was committed or removed. Put the work back on `task/<task>` in <path>, then: spoolway resume <task>
+    nothing was committed or removed. put the work back on `task/<task>` in <path>, then: spoolway resume <task>
 ```
 
 Put the work on `task/<id>`, or finish or abort the operation, then resume the task. Cleanup
@@ -1543,7 +1543,7 @@ The worktree counts as not removed when any of these is true:
 The dispatcher then prints this problem and keeps the task at `done`:
 
 ```
-! <task>: its worktree <path> could not be removed. To do it by hand, run `chmod -R u+w '<path>' 2>/dev/null; rm -rf '<path>'; git -C '<repo>' worktree unlock '<path>' 2>/dev/null; git -C '<repo>' worktree prune`
+! <task>: its worktree <path> could not be removed. to do it by hand, run `chmod -R u+w '<path>' 2>/dev/null; rm -rf '<path>'; git -C '<repo>' worktree unlock '<path>' 2>/dev/null; git -C '<repo>' worktree prune`
 ! <task>: stays at `done`; cleanup removes its worktree again on the next pass
 ```
 

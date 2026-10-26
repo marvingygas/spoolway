@@ -1073,7 +1073,7 @@ fn issue_tracking_config_checks(
         match !tracking.hook.trim().is_empty() && tracking.project_key.trim().is_empty() {
             true => Err(anyhow::anyhow!(
                 "{config_path}: [issue_tracking] names `{}` but project_key is empty — no \
-                 ticket will ever open. Set it, or clear hook to switch issue tracking off.",
+                 ticket will ever open. set it, or clear hook to switch issue tracking off.",
                 tracking.hook.trim()
             )),
             false => Ok(None),
@@ -1144,7 +1144,7 @@ fn issue_tracking_config_checks(
             Some(name) => Err(anyhow::anyhow!(
                 "{config_path}: [issue_tracking] names `{name}`, whose script has no `fetch` \
                  branch — `spoolway issue show` needs one to read an issue back out of the \
-                 tracker. Add a case for `SPOOLWAY_EVENT=fetch` the way the shipped samples \
+                 tracker. add a case for `SPOOLWAY_EVENT=fetch` the way the shipped samples \
                  do, or regenerate one with `spoolway init` into a fresh directory to copy \
                  the branch across by hand."
             )),
@@ -1171,7 +1171,7 @@ fn issue_tracking_config_checks(
         ) {
             Some(name) => Err(anyhow::anyhow!(
                 "{config_path}: [issue_tracking] key_in_names is on, but {name} never writes \
-                 `slug=` — groups, branches and worktrees will be named without a prefix. Add a \
+                 `slug=` — groups, branches and worktrees will be named without a prefix. add a \
                  slug= line the way the shipped samples do, or clear key_in_names."
             )),
             None => Ok(None),
@@ -1229,7 +1229,7 @@ fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
             } = failure;
             let remedy = match crate::tracking::STOPPING_EVENTS.contains(&event.as_str()) {
                 true => format!(
-                    "so the task stopped on `hook_failed`. Fix what its log names, then run \
+                    "so the task stopped on `hook_failed`. fix what its log names, then run \
                      `spoolway resume {task}`."
                 ),
                 false => "which holds nothing, so `spoolway resume` does not clear it; it \
@@ -1239,7 +1239,7 @@ fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
             Finding::Check(
                 HOOK_FAILURE_LABEL.into(),
                 Err(anyhow::anyhow!(
-                    "`{event}` failed for {task} (exit {exit_code}), {remedy} Its log: {}",
+                    "`{event}` failed for {task} (exit {exit_code}), {remedy} its log: {}",
                     crate::repo::shorten_home(&log)
                 )),
             )
@@ -1361,7 +1361,7 @@ fn tool_version_finding(
         label,
         if below_floor(&found, &floor) {
             Err(anyhow::anyhow!(
-                "`{}` is {}, and {hook_display} requires {} >= {}. Upgrade {}, or clear \
+                "`{}` is {}, and {hook_display} requires {} >= {}. upgrade {}, or clear \
                  issue_tracking.hook.",
                 required.tool,
                 format_version(&found),
@@ -1453,7 +1453,7 @@ fn login_checks(checkout: &Path, hook_name: &str, gh_reported: bool) -> Vec<Find
         return if declares_tools {
             vec![Finding::Note(format!(
                 "{hook} declares `# spoolway-requires:` tools but no `# spoolway-login:` line, \
-                 so `spoolway doctor` cannot tell when its tracker login lapses. Add a line \
+                 so `spoolway doctor` cannot tell when its tracker login lapses. add a line \
                  such as `# spoolway-login: acli jira auth status` naming the command that \
                  exits 0 while you are logged in."
             ))]
@@ -1505,13 +1505,13 @@ fn login_checks(checkout: &Path, hook_name: &str, gh_reported: bool) -> Vec<Find
             ))
         }
         crate::tracking::LoginOutcome::TimedOut => Err(anyhow::anyhow!(
-            "`{shown}` did not answer within {} seconds. Check the network. {}, then re-run \
+            "`{shown}` did not answer within {} seconds. check the network. {}, then re-run \
              `spoolway doctor`.",
             crate::tracking::LOGIN_TIMEOUT.as_secs(),
             relogin_advice(&command)
         )),
         crate::tracking::LoginOutcome::NotRun(why) => Err(anyhow::anyhow!(
-            "`{shown}` could not be run: {why}. Fix the `# spoolway-login:` line in {hook}."
+            "`{shown}` could not be run: {why}. fix the `# spoolway-login:` line in {hook}."
         )),
     };
     vec![Finding::Check(format!("{hook} login"), outcome)]
@@ -1537,9 +1537,9 @@ fn login_tool_reported_elsewhere(tool: &str, hook: &str, gh_reported: bool) -> b
 fn relogin_advice(command: &[String]) -> String {
     match command.split_last() {
         Some((last, rest)) if last == "status" && !rest.is_empty() => {
-            format!("Log in again with `{} login`", rest.join(" "))
+            format!("log in again with `{} login`", rest.join(" "))
         }
-        _ => format!("See `{} --help` for how to log in again", command[0]),
+        _ => format!("see `{} --help` for how to log in again", command[0]),
     }
 }
 
@@ -2191,8 +2191,8 @@ pub(crate) fn stack_deprecation(pipelines: &Pipelines) -> Option<[String; 3]> {
         .collect();
     Some([
         "`spoolway stack` is deprecated and may be removed in a future release.".into(),
-        format!("Still run by: {}.", named.join(", ")),
-        "Run `spoolway init` to add the `create-pr` prompt, then replace each step \
+        format!("still run by: {}.", named.join(", ")),
+        "run `spoolway init` to add the `create-pr` prompt, then replace each step \
          with an agent step on it — see docs/migrations.md"
             .into(),
     ])
@@ -2726,9 +2726,9 @@ fn queue_id_checks(repo: &Repo) -> Vec<Finding> {
                 .iter()
                 .map(|(path, branch)| {
                     format!(
-                        "worktree {} and branch `{branch}` belong to no queued task. To drop \
+                        "worktree {} and branch `{branch}` belong to no queued task. to drop \
                          them, run `git worktree remove --force {}` and `git branch -D \
-                         {branch}`. To keep the work, rename the branch with `git branch -m \
+                         {branch}`. to keep the work, rename the branch with `git branch -m \
                          {branch} <name>` after removing the worktree, and set `starts_from: \
                          <name>` in the task you queue next",
                         path.display(),
@@ -4823,8 +4823,8 @@ mod tests {
             rows,
             vec![format!(
                 "`started` failed for compact-ctx-launch (exit 1), so the task stopped on \
-                 `hook_failed`. Fix what its log names, then run `spoolway resume \
-                 compact-ctx-launch`. Its log: {}",
+                 `hook_failed`. fix what its log names, then run `spoolway resume \
+                 compact-ctx-launch`. its log: {}",
                 crate::repo::shorten_home(&log)
             )]
         );
@@ -5283,7 +5283,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.contains(&format!("Log in again with `{shown} login`")),
+            err.contains(&format!("log in again with `{shown} login`")),
             "{err}"
         );
     }
@@ -5527,8 +5527,8 @@ mod tests {
         assert_eq!(
             stack_deprecation(&pipelines).unwrap().join(" "),
             "`spoolway stack` is deprecated and may be removed in a future release. \
-             Still run by: bugfix · land, default · handover. \
-             Run `spoolway init` to add the `create-pr` prompt, then replace each step \
+             still run by: bugfix · land, default · handover. \
+             run `spoolway init` to add the `create-pr` prompt, then replace each step \
              with an agent step on it — see docs/migrations.md"
         );
     }

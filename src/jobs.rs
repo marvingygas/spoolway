@@ -934,7 +934,7 @@ pub fn stop_stray_opens(repo: &Repo, problems: &mut Vec<String>) {
     for (task, ran) in crate::tracking::stop_overdue_strays(repo, &waited_on) {
         problems.push(format!(
             "the open hook for `{task}` was still running after {} and was stopped — \
-             nothing was queued for it. Run `spoolway queue add` again, or let the job \
+             nothing was queued for it. run `spoolway queue add` again, or let the job \
              that fired it run again, to open it.",
             crate::tracking::minutes(ran),
         ));
@@ -1416,7 +1416,7 @@ pub fn staying_up(repo: &Repo) -> StayingUp {
 
 /// The two lines the plain run prints on an empty queue kept resident by a
 /// job: `nothing queued`, then which job fires next and when — or that none
-/// ever will. The board says `Nothing queued` under its own greeting instead,
+/// ever will. The board says `nothing queued` under its own greeting instead,
 /// and under that draws the busy board's job ledger, every enabled job and
 /// its next firing, while a dispatcher holds the lock — see
 /// `crate::status::view::greeting_screen`. Assumes at least one job is

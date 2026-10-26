@@ -235,7 +235,7 @@ fn check_id_within(kind: &str, id: &str, max: usize, reason: &str) -> Result<()>
     check_id(kind, id)?;
     if id.len() > max {
         bail!(
-            "{kind} `{id}` is {} characters long, and the limit is {max} — {reason}. Shorten it \
+            "{kind} `{id}` is {} characters long, and the limit is {max} — {reason}. shorten it \
              to {max} characters or fewer.",
             id.len()
         );
@@ -1671,7 +1671,7 @@ pub(crate) fn keep_finished_lanes_note(
         ),
     };
     format!(
-        "note: dispatch.keep_finished_lanes in {} is no longer read — {outcome}. Run \
+        "note: dispatch.keep_finished_lanes in {} is no longer read — {outcome}. run \
          `spoolway sync` to {then} the key.",
         path.display(),
     )
@@ -1726,7 +1726,7 @@ fn strip_refused_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
         if let [_] = unknown.as_slice() {
             notices.push(format!(
                 "note: `{shown}` in {} is not a table or setting this spoolway knows — kept in \
-                 the file and otherwise ignored. A newer spoolway may read it; if not, it is \
+                 the file and otherwise ignored. a newer spoolway may read it; if not, it is \
                  a typo.",
                 path.display(),
             ));
@@ -1735,7 +1735,7 @@ fn strip_refused_keys(raw: &str, path: &Path) -> Result<(String, Vec<String>)> {
             stripped = crate::confdoc::remove(&stripped, &parts)?;
             notices.push(format!(
                 "note: `{shown}` in {} is not a setting this spoolway knows — loaded past it \
-                 and kept in the file. A newer spoolway may read it; if not, it is a typo.",
+                 and kept in the file. a newer spoolway may read it; if not, it is a typo.",
                 path.display(),
             ));
         }
@@ -2064,7 +2064,7 @@ impl Config {
                          the dispatcher never removes a worktree, workspace, pane or tab any \
                          more: every interrupted lane is left standing, its spend banked and \
                          its launch counter forgiven, so the next run resumes it where it \
-                         stood. The key is dropped on the next save.",
+                         stood. the key is dropped on the next save.",
                         path.display(),
                     ));
                 }
@@ -2074,7 +2074,7 @@ impl Config {
                 if config.dispatch.herdr_mode.is_some() {
                     notices.push(format!(
                         "note: dispatch.herdr_mode in {} is no longer read — every task now \
-                         runs in a herdr workspace of its own. Run `spoolway sync` to drop \
+                         runs in a herdr workspace of its own. run `spoolway sync` to drop \
                          the key.",
                         path.display(),
                     ));
@@ -2095,7 +2095,7 @@ impl Config {
                         notices.push(format!(
                             "note: [agents.{name}.env] in {} is no longer read — a lane \
                              inherits the dispatcher's environment, and anything one agent \
-                             needs belongs in that agent's own config. Dropped on the next \
+                             needs belongs in that agent's own config. dropped on the next \
                              save.",
                             path.display(),
                         ));
@@ -2892,7 +2892,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.ends_with("Shorten it to 26 characters or fewer."),
+            err.ends_with("shorten it to 26 characters or fewer."),
             "{err}"
         );
         assert!(check_task_id(&"t".repeat(TASK_ID_MAX + 1)).is_err());
@@ -4061,7 +4061,7 @@ mod tests {
             assert!(
                 notices[0].contains(&format!(
                     "dispatch.keep_finished_lanes in {} is no longer read — it loads as \
-                     dispatch.visible_lanes = {loads_as}. Run `spoolway sync` to rewrite \
+                     dispatch.visible_lanes = {loads_as}. run `spoolway sync` to rewrite \
                      the key.",
                     Config::path_in(&dir).display()
                 )),
@@ -4084,7 +4084,7 @@ mod tests {
         assert!(
             notices[0].contains(
                 "is no longer read — the dispatch.visible_lanes = 2 beside it is the limit \
-                 that loads. Run `spoolway sync` to drop the key."
+                 that loads. run `spoolway sync` to drop the key."
             ),
             "{notices:?}"
         );
@@ -4846,7 +4846,7 @@ mod tests {
                 assert!(
                     notices.iter().any(|note| note.contains(&layer)
                         && note.contains("dispatch.keep_finished_lanes")
-                        && note.contains("Run `spoolway sync` to rewrite the key")),
+                        && note.contains("run `spoolway sync` to rewrite the key")),
                     "{notices:?}"
                 );
             },

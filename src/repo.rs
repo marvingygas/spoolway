@@ -1182,9 +1182,9 @@ impl Repo {
                 return Ok(branch);
             }
             bail!(
-                "The branch of dependency `{dep_id}` could not be resolved: its task file is \
+                "the branch of dependency `{dep_id}` could not be resolved: its task file is \
                  in neither this project's queue nor its archive, and no `{branch}` branch \
-                 exists. Add its task file back to the queue or archive before running a \
+                 exists. add its task file back to the queue or archive before running a \
                  task that depends on it."
             );
         }
@@ -1192,7 +1192,7 @@ impl Repo {
         // fails to parse; this only adds why it matters and what to do.
         let dep = self.task(dep_id).with_context(|| {
             format!(
-                "The branch of dependency `{dep_id}` could not be resolved. Repair its task \
+                "the branch of dependency `{dep_id}` could not be resolved. repair its task \
                  file before running a task that depends on it."
             )
         })?;
@@ -1380,7 +1380,7 @@ impl Repo {
             // the main checkout's setup while its task is still running.
             bail!(
                 "the dispatcher reads the project's {reads}, not this worktree's.\n  \
-                 A lane does not change the project's setup. Write the\n  \
+                 a lane does not change the project's setup. write the\n  \
                  setting you wanted into your report, and a person\n  \
                  will make the change."
             );
@@ -1402,7 +1402,7 @@ impl Repo {
         let Some(branch) = branch else {
             bail!(
                 "this worktree is on a detached HEAD, so a change written here would have no \
-                 branch to be committed on. Check a branch out here to write its setup, or \
+                 branch to be committed on. check a branch out here to write its setup, or \
                  write the main checkout's:\n  {dash_c}"
             );
         };
@@ -1427,7 +1427,7 @@ impl Repo {
         if self.in_lane_worktree() {
             bail!(
                 "{owner} belongs to the project, not this worktree.\n  \
-                 A lane does not change the project's setup. Write the\n  \
+                 a lane does not change the project's setup. write the\n  \
                  change you wanted into your report, and a person\n  \
                  will make the change."
             );
@@ -2323,7 +2323,7 @@ fn bind_stamped(root: &Path, id: &str, mode: Bind) -> Result<PathBuf> {
                 format!(
                     "could not tell whether {} still carries the id {id} recorded in {} — \
                      refusing rather than guessing which checkout this binding belongs to. \
-                     Fix whatever stopped that checkout's own stamp from being read (often a \
+                     fix whatever stopped that checkout's own stamp from being read (often a \
                      permissions problem) and run this again, or delete {} and run `spoolway \
                      init` again in {} to stop depending on the answer at all.",
                     binding.root.display(),
@@ -2933,7 +2933,7 @@ fn bind_unstamped(root: &Path, mode: Bind) -> Result<PathBuf> {
             Some(false) => format!(
                 "this clone is a different repository from the one that home was made for, \
                  so do not restore its stamp — that would attach the old queue to it. \
-                 Instead {fresh}"
+                 instead {fresh}"
             ),
             None => format!(
                 "that home recorded no first commit, so this cannot tell whether this clone \
@@ -3428,7 +3428,7 @@ pub(crate) fn join_workspace(root: &Path, name: &str) -> Result<(WorkspaceClone,
     {
         bail!(
             "workspace {name} holds another repository, so this checkout cannot join it.\n  \
-             Pick a workspace of this repository, or start a new one with `--workspace new`."
+             pick a workspace of this repository, or start a new one with `--workspace new`."
         );
     }
     // `create_workspace` writes `config/` before `project.toml`, so a
@@ -3644,7 +3644,7 @@ pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone
             ("hold", "worktrees", "them")
         };
         bail!(
-            "{} {verb} {noun} in this checkout.\n  Finish or unqueue {them}, then run `spoolway \
+            "{} {verb} {noun} in this checkout.\n  finish or unqueue {them}, then run `spoolway \
              init` again.",
             and_list(&held),
         );
@@ -3652,7 +3652,7 @@ pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone
     let Some(to) = to else { return Ok(from) };
     let Some(target) = workspaces().into_iter().find(|w| w.name == to) else {
         bail!(
-            "no workspace named {to} exists under {}.\n  Run `spoolway init` and pick one from \
+            "no workspace named {to} exists under {}.\n  run `spoolway init` and pick one from \
              the menu.",
             shorten_home(&crate::mux::state_root())
         );
@@ -3660,7 +3660,7 @@ pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone
     if !target.may_move_into(root, root_commit(root).as_deref()) {
         bail!(
             "workspace {to} holds another repository, so this checkout cannot move there.\n  \
-             Run `spoolway init` and pick a workspace of this repository, or create a new one."
+             run `spoolway init` and pick a workspace of this repository, or create a new one."
         );
     }
     let record = crate::mux::state_root().join(to).join(BINDING_FILE);
@@ -3674,7 +3674,7 @@ pub(crate) fn check_move(root: &Path, to: Option<&str>) -> Result<WorkspaceClone
     let config = crate::mux::state_root().join(to).join("config");
     if !config.is_dir() {
         bail!(
-            "workspace {to} has no setup: {} is missing.\n  Restore it, or run `spoolway init` \
+            "workspace {to} has no setup: {} is missing.\n  restore it, or run `spoolway init` \
              and pick another workspace.",
             config.display()
         );
@@ -3770,7 +3770,7 @@ pub(crate) fn move_clone(
     }
     let from = workspace_clone_checked(root)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "{} is not listed in any workspace — there is nothing to move. Run `spoolway init \
+            "{} is not listed in any workspace — there is nothing to move. run `spoolway init \
              --setup home` first.",
             root.display()
         )
@@ -4410,7 +4410,7 @@ pub(crate) fn head_pull_requests(gh: &str, dir: &Path, branch: &str) -> Result<O
 pub fn branch_at(dir: &Path) -> Result<String> {
     current_branch_at(dir)?.with_context(|| {
         format!(
-            "{} is not on a branch (detached HEAD). Work is based on the branch of the \
+            "{} is not on a branch (detached HEAD). work is based on the branch of the \
              checkout it is queued in, so check one out first.",
             dir.display()
         )
@@ -4846,9 +4846,9 @@ pub(crate) fn hook_stopped_message(
              hook exit, then run this again."
         ),
         None => format!(
-            "`{shown}` was still running after {after} and was stopped. It runs these \
+            "`{shown}` was still running after {after} and was stopped. it runs these \
              git hooks: {}; one of them may be stuck, or git may be waiting on \
-             something else, such as a signing prompt or a lock. Find what is hung, then \
+             something else, such as a signing prompt or a lock. find what is hung, then \
              run this again.",
             hooks
                 .iter()

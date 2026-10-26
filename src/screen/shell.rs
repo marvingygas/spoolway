@@ -348,6 +348,81 @@ fn host(
     }
 }
 
+/// `line` with every escape code taken out — the colour a tab's own
+/// frame paints under the strip, the strip's own bold, and the frame
+/// writer's own codes around it. A CSI code (`ESC [ ... letter`) ends on
+/// any letter, not only `m`: the frame writer's `H`, `J` and `K` would
+/// otherwise run the skip on into real text. `ESC7`/`ESC8` (DECSC/DECRC,
+/// the frame writer's save and restore around each clear — see
+/// [`super::frame_writer::CLEAR_TO_END`]) are not CSI at all: `7` and
+/// `8` are not letters, so hunting for one the way a CSI code is skipped
+/// would eat every character up to the next stray letter in the frame's
+/// own text instead of stopping after the one byte the code actually
+/// spends.
+#[cfg(test)]
+pub(crate) fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    chars.by_ref().find(char::is_ascii_alphabetic);
+                }
+                _ => continue,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The popups the dispatch tab opens that no key reaches on a scripted
+/// terminal: the config reload's waiting and loaded ones, the refused one
+/// with a reason in it, and the starting one, for the test that checks TUI
+/// text for capitals — see `crate::screen`'s own tests.
+#[cfg(test)]
+pub(crate) fn tui_screens() -> Vec<(String, Vec<String>)> {
+    let reason = crate::reload::Reason {
+        what: "wire is at a step the pipeline no longer defines".to_string(),
+        fix: "put the step back, then press u again.".to_string(),
+    };
+    vec![
+        ("updating popup".to_string(), Popup::Updating.panel()),
+        (
+            "loaded popup".to_string(),
+            Popup::Loaded(Instant::now()).panel(),
+        ),
+        ("refused popup".to_string(), refused_panel(&[reason])),
+        ("starting popup".to_string(), starting_panel()),
+    ]
+}
+
+/// The frames `host` draws over `input` typed at it, each with its colour
+/// codes taken out, for a test that reads what a person would see on every
+/// tab, over pipelines whose descriptions are plain stand-ins. The same
+/// scripted-terminal drive the shell's own tests use.
+#[cfg(test)]
+pub(crate) fn drive_frames(repo: &Repo, input: &str) -> Vec<String> {
+    let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
+    let mut out = Vec::new();
+    host(
+        repo,
+        &Pipelines::builtin_with_plain_descriptions(),
+        &repo.root,
+        &mut input,
+        &mut out,
+    )
+    .unwrap();
+    let drawn = String::from_utf8(out).unwrap();
+    drawn
+        .split("\x1b[?2026h\x1b[H")
+        .skip(1)
+        .map(plain)
+        .collect()
+}
+
 /// What the dispatch tab keeps between visits beyond the board itself: the
 /// dispatcher it started, if any, the popup it has open, and the reload `u`
 /// asked for that has not been settled yet.
@@ -484,7 +559,7 @@ const REFUSAL_WRAP: usize = 58;
 fn refused_panel(reasons: &[crate::reload::Reason]) -> Vec<String> {
     let mut body = vec![
         format!("{:<REFUSAL_WIDTH$}", ""),
-        "Nothing changed. The run is still on what it had.".to_string(),
+        "nothing changed. the run is still on what it had.".to_string(),
     ];
     for reason in reasons {
         body.push(String::new());
@@ -526,11 +601,11 @@ impl Came {
             Came::Answer(answer) => answered(answer),
             // Only the dispatcher writes an answer, so it did take the
             // request: whether the reload loaded is what cannot be told. The
-            // board's `Config changed:` line goes once a reload loads, which
+            // board's `config changed:` line goes once a reload loads, which
             // is what the advice leans on.
             Came::Unreadable(err) => update_notice(&format!(
-                "{err:#}, so the board cannot tell whether the reload loaded. If the \
-                 board still shows its Config changed line, press u again."
+                "{err:#}, so the board cannot tell whether the reload loaded. if the \
+                 board still shows its config changed line, press u again."
             )),
             Came::Unanswered => update_notice(UNANSWERED),
         }
@@ -563,8 +638,8 @@ fn came(repo: &Repo, asked: &Asked) -> Option<Came> {
 
 /// What the board says of a reload whose dispatcher let go of the lock
 /// before it answered.
-const UNANSWERED: &str = "The dispatcher stopped before answering, so nothing was \
-                          reloaded. A new run loads every file as it is now.";
+const UNANSWERED: &str = "the dispatcher stopped before answering, so nothing was \
+                          reloaded. a new run loads every file as it is now.";
 
 /// The popup for the dispatcher's `answer`.
 fn answered(answer: crate::reload::Answer) -> Popup {
@@ -589,7 +664,7 @@ fn update_notice(text: &str) -> Popup {
 /// line, since nothing answers it.
 fn starting_panel() -> Vec<String> {
     super::boxed(
-        "Starting dispatcher",
+        "starting dispatcher",
         &["checking herdr, git, queue…".to_string()],
     )
 }
@@ -784,7 +859,7 @@ impl DispatchTab {
             Ok(None) => return,
             Err(err) => {
                 self.popup = Some(update_notice(&format!(
-                    "{err:#}, so no reload was asked for. Press u again once the lock \
+                    "{err:#}, so no reload was asked for. press u again once the lock \
                      can be read."
                 )));
                 return;
@@ -796,7 +871,7 @@ impl DispatchTab {
                 Popup::Updating
             }
             Err(err) => update_notice(&format!(
-                "{err:#}, so no reload was asked for. Make the project home writable, then \
+                "{err:#}, so no reload was asked for. make the project home writable, then \
                  press u again."
             )),
         });
@@ -915,7 +990,7 @@ impl DispatchTab {
                 if let Err(err) = interrupted {
                     self.popup = Some(Popup::Ended(super::notice(
                         "stop dispatching",
-                        &format!("Not every running step could be interrupted: {err:#}"),
+                        &format!("not every running step could be interrupted: {err:#}"),
                         &super::confirm(),
                         super::NOTICE_WRAP,
                     )));
@@ -1252,35 +1327,6 @@ mod tests {
     use super::*;
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
-    /// `line` with every escape code taken out — the colour a tab's own
-    /// frame paints under the strip, the strip's own bold, and the frame
-    /// writer's own codes around it. A CSI code (`ESC [ ... letter`) ends on
-    /// any letter, not only `m`: the frame writer's `H`, `J` and `K` would
-    /// otherwise run the skip on into real text. `ESC7`/`ESC8` (DECSC/DECRC,
-    /// the frame writer's save and restore around each clear — see
-    /// [`super::frame_writer::CLEAR_TO_END`]) are not CSI at all: `7` and
-    /// `8` are not letters, so hunting for one the way a CSI code is skipped
-    /// would eat every character up to the next stray letter in the frame's
-    /// own text instead of stopping after the one byte the code actually
-    /// spends.
-    fn plain(line: &str) -> String {
-        let mut out = String::new();
-        let mut chars = line.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                match chars.next() {
-                    Some('[') => {
-                        chars.by_ref().find(char::is_ascii_alphabetic);
-                    }
-                    _ => continue,
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
     /// A live `dispatch.pid` — a dispatcher started from the CLI — refuses
     /// bare `spoolway` exactly as a second screen would. Against
     /// [`crate::commands::already_running`] itself, the one check `run`
@@ -1369,22 +1415,7 @@ mod tests {
     /// ask: that starts a child from `current_exe`, which under `cargo test`
     /// is the test binary itself. The e2e suite `screen` covers the start.
     fn drive_host(repo: &Repo, input: &str) -> Vec<String> {
-        let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
-        let mut out = Vec::new();
-        host(
-            repo,
-            &Pipelines::builtin(),
-            &repo.root,
-            &mut input,
-            &mut out,
-        )
-        .unwrap();
-        let drawn = String::from_utf8(out).unwrap();
-        drawn
-            .split("\x1b[?2026h\x1b[H")
-            .skip(1)
-            .map(plain)
-            .collect()
+        drive_frames(repo, input)
     }
 
     // The e2e suite's own gesture, at unit level: the screen opens on the
@@ -1405,7 +1436,7 @@ mod tests {
         assert!(last.contains("dispatcher stopped"), "{last}");
         assert!(!last.contains("─ dispatch"), "the box has no title: {last}");
         assert!(!last.contains("─ groups"), "{last}");
-        assert!(last.contains("Nothing queued"), "{last}");
+        assert!(last.contains("nothing queued"), "{last}");
         assert!(
             last.contains("\n  [enter] start dispatching   [q] quit\n"),
             "{last}"
@@ -2270,7 +2301,7 @@ mod tests {
         let panel = refused_panel(&[crate::reload::Reason {
             what: "fix-login: sitting on `review`, which pipeline `feature` no longer defines"
                 .to_string(),
-            fix: "Put `review` back in feature.yml, or wait until fix-login has left it, then \
+            fix: "put `review` back in feature.yml, or wait until fix-login has left it, then \
                   reload again."
                 .to_string(),
         }]);
@@ -2280,12 +2311,12 @@ mod tests {
             [
                 format!("{TOP_LEFT}─ reload refused {}{TOP_RIGHT}", "─".repeat(46)),
                 row(""),
-                row("Nothing changed. The run is still on what it had."),
+                row("nothing changed. the run is still on what it had."),
                 row(""),
                 row("fix-login: sitting on `review`, which pipeline `feature`"),
                 row("no longer defines"),
                 row(""),
-                row("Put `review` back in feature.yml, or wait until fix-login"),
+                row("put `review` back in feature.yml, or wait until fix-login"),
                 row("has left it, then press u again."),
                 row(""),
                 row("[enter] confirm"),
@@ -2315,7 +2346,7 @@ mod tests {
         assert!(text.contains("─ reload refused "), "{text}");
         assert!(text.contains("config.toml does not load"), "{text}");
         assert!(
-            text.contains("Fix config.toml, then press u again."),
+            text.contains("fix config.toml, then press u again."),
             "{text}"
         );
         assert!(text.contains("[enter] confirm"), "{text}");
@@ -2344,7 +2375,7 @@ mod tests {
         let text = popup.panel().join("\n");
         assert!(text.contains("─ update config "), "{text}");
         assert!(
-            text.contains("The dispatcher stopped before answering"),
+            text.contains("the dispatcher stopped before answering"),
             "{text}"
         );
         assert!(text.contains("[enter] confirm"), "{text}");
@@ -2398,7 +2429,7 @@ mod tests {
         let text = popup.panel().join("\n");
         assert!(text.contains("SIGKILL"), "{text}");
         assert!(
-            text.contains("The dispatcher stopped before answering"),
+            text.contains("the dispatcher stopped before answering"),
             "{text}"
         );
         assert!(text.contains("[enter] confirm"), "{text}");
@@ -2479,7 +2510,7 @@ mod tests {
             .join("\n");
         assert!(text.contains("─ update config "), "{text}");
         assert!(
-            text.contains("The dispatcher stopped before answering"),
+            text.contains("the dispatcher stopped before answering"),
             "{text}"
         );
         assert!(tab.asked.is_none());
@@ -2487,7 +2518,7 @@ mod tests {
 
     // An answer that is there but cannot be read says the board cannot tell
     // whether the reload loaded, and what to do next: look for the board's
-    // `Config changed` line. Fails before the change: the advice pointed at
+    // `config changed` line. Fails before the change: the advice pointed at
     // the footer's update line, which the board no longer draws.
     #[test]
     fn an_answer_that_cannot_be_read_says_what_to_do() {
@@ -2512,7 +2543,7 @@ mod tests {
             .join(" ");
         assert!(text.contains("cannot tell whether the reload"), "{text}");
         assert!(
-            text.contains("If the board still shows its Config changed line, press u again."),
+            text.contains("if the board still shows its config changed line, press u again."),
             "{text}"
         );
         assert!(!text.contains("update line"), "{text}");
@@ -2530,7 +2561,7 @@ mod tests {
         super::super::dispatcher::Dispatcher::stand_in(script)
     }
 
-    // A started child puts the keyless `Starting dispatcher` popup up at
+    // A started child puts the keyless `starting dispatcher` popup up at
     // once, drawn as the mockup draws it, and it reads no key.
     #[test]
     fn a_start_opens_the_keyless_starting_popup() {
@@ -2543,7 +2574,7 @@ mod tests {
         assert_eq!(
             popup.panel(),
             [
-                format!("{TOP_LEFT}─ Starting dispatcher ─────────{TOP_RIGHT}").as_str(),
+                format!("{TOP_LEFT}─ starting dispatcher ─────────{TOP_RIGHT}").as_str(),
                 "│  checking herdr, git, queue…  │",
                 format!("{BOTTOM_LEFT}───────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]

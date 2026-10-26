@@ -2,8 +2,8 @@
 //! that has never seen the two store files, and the popups bare `spoolway`'s
 //! routines tab writes a job through. That tab is where a person writes a
 //! job; the only other writer is `spoolway pipeline rename`, which moves jobs
-//! onto a renamed pipeline. Its new job and edit job walk the cron expression
-//! and the pipeline, then save through [`crate::jobs::write`] — see
+//! onto a renamed pipeline. Its edit schedule walks the cron expression and
+//! the pipeline, then saves through [`crate::jobs::write`] — see
 //! [`NewJobWalk`]. Deactivate and activate are [`set_enabled`]; no popup
 //! here deletes a job, which leaves only with the routine the routines tab's
 //! delete routine removes. No `jobs add`, no config key. A job only schedules:
@@ -355,9 +355,9 @@ fn store_label(repo: &Repo, path: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 /// A job being written, carried through the schedule and pipeline popups.
-/// `editing` is `Some` for edit job over an existing job and `None` for a new
-/// one; a new job takes its name from the routine's own leaf, an edited one
-/// keeps the name it had.
+/// `editing` is `Some` for edit schedule over an existing job and `None` for
+/// a new one; a new job takes its name from the routine's own leaf, an
+/// edited one keeps the name it had.
 #[derive(Debug, Clone)]
 pub(super) struct Draft {
     editing: Option<String>,
@@ -413,7 +413,7 @@ impl Draft {
 }
 
 /// The schedule popup and then the pipeline popup, and the save at the end
-/// of them — what the routines tab's new job and edit job both go through.
+/// of them — what the routines tab's edit schedule goes through.
 /// The routine is settled before the walk opens: the highlighted one, the
 /// edited job's own, or the one picked for a job whose routine is gone.
 #[derive(Debug, Clone)]
@@ -449,9 +449,10 @@ impl NewJobWalk {
         NewJobWalk::Schedule(draft)
     }
 
-    /// The routines tab's new job: a new job over the routine folder at
-    /// `folder`, for the user store, named after the folder's leaf. `None`
-    /// for a folder outside `routines_dir`, which no job can point at.
+    /// The routines tab's edit schedule on a routine with no job: a new job
+    /// over the routine folder at `folder`, for the user store, named after
+    /// the folder's leaf. `None` for a folder outside `routines_dir`, which
+    /// no job can point at.
     pub(super) fn for_routine(
         pipelines: &Pipelines,
         folder: &Path,
@@ -462,17 +463,18 @@ impl NewJobWalk {
         Some(NewJobWalk::schedule(draft))
     }
 
-    /// The routines tab's edit job: the schedule popup over `job`'s own
-    /// schedule, then the pipeline popup on its own pipeline. The routine is
-    /// never asked for, so the job keeps it, and the save goes back under
-    /// the job's own name to the store its `scope` names.
+    /// The routines tab's edit schedule on a routine's job: the schedule
+    /// popup over `job`'s own schedule, then the pipeline popup on its own
+    /// pipeline. The routine is never asked for, so the job keeps it, and
+    /// the save goes back under the job's own name to the store its `scope`
+    /// names.
     pub(super) fn edit(job: &Job) -> NewJobWalk {
         NewJobWalk::schedule(Draft::from_job(job))
     }
 
-    /// Edit job on a job whose routine is not a listed one, once the routine
-    /// picker has picked `folder`: [`NewJobWalk::edit`], with the job moved
-    /// onto that folder when it saves. `None` for a folder outside
+    /// Edit schedule on a job whose routine is not a listed one, once the
+    /// routine picker has picked `folder`: [`NewJobWalk::edit`], with the
+    /// job moved onto that folder when it saves. `None` for a folder outside
     /// `routines_dir`, the same as [`NewJobWalk::for_routine`].
     pub(super) fn repoint(job: &Job, folder: &Path, routines_dir: &Path) -> Option<NewJobWalk> {
         let mut draft = Draft::from_job(job);
@@ -580,7 +582,7 @@ impl NewJobWalk {
 /// The schedule popup's keys, in the popup and on the line under the frame.
 const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
 
-/// The routines tab's popup once its new job or edit job has saved a job:
+/// The routines tab's popup once its edit schedule has saved a job:
 /// what it runs, when, on which pipeline, and where to change it.
 pub(super) fn saved_notice(draft: &Draft) -> Notice {
     let schedule = draft.schedule.trim();
@@ -611,10 +613,10 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
         Err(_) => format!("on `{schedule}`"),
     };
     let next = match jobs::next_fire(schedule) {
-        Some(at) => at.format("%a %-d %b %H:%M").to_string(),
+        Some(at) => at.format(FIRING_TIME).to_string(),
         None => "never".to_string(),
     };
-    // Edit job keeps an inactive job inactive, and its routine's menu then
+    // Edit schedule keeps an inactive job inactive, and its routine's menu then
     // offers activate job, not deactivate job, so the notice names that.
     let toggle = if draft.enabled {
         "deactivate"
@@ -624,7 +626,7 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
     Notice::new(
         "job saved",
         format!(
-            "{} runs {when}, on {}.\nNext: {next}.\nEdit or {toggle} it with o on its routine.",
+            "{} runs {when}, on {}.\nnext: {next}.\nedit or {toggle} it with o on its routine.",
             draft.name(),
             draft.pipeline,
         ),
@@ -660,7 +662,7 @@ pub(super) fn set_enabled(
         Notice::new(
             verb,
             format!(
-                "Could not {verb} the job `{}` in `{}`: {err:#}. Check the file is writable and \
+                "could not {verb} the job `{}` in `{}`: {err:#}. check the file is writable and \
                  try again.",
                 job.name,
                 store_label(repo, &store_of(repo, job.scope)),
@@ -681,12 +683,12 @@ pub(super) fn set_enabled(
 fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String> {
     let name = draft.name();
     if draft.editing.is_none() && draft.routine.is_empty() {
-        return Err("Pick a routine before saving — a job runs one.".to_string());
+        return Err("pick a routine before saving — a job runs one.".to_string());
     }
 
     let current = jobs::load(repo).map_err(|err| {
         format!(
-            "Could not read the job stores to check that `{name}` is free: {err:#}. Fix `{}` or \
+            "could not read the job stores to check that `{name}` is free: {err:#}. fix `{}` or \
              `{}` — or run `spoolway doctor` for the exact fault — then save again.",
             store_label(repo, &repo.user_jobs_file()),
             store_label(repo, &repo.jobs_file()),
@@ -697,7 +699,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         .any(|job| job.name == name && draft.editing.as_deref() != Some(name.as_str()));
     if taken {
         return Err(format!(
-            "A job named `{name}` already exists, in `{}` or `{}`. Pick another name and save \
+            "a job named `{name}` already exists, in `{}` or `{}`. pick another name and save \
              again.",
             store_label(repo, &repo.user_jobs_file()),
             store_label(repo, &repo.jobs_file()),
@@ -715,7 +717,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
             && job.target(repo).is_ok_and(|target| target == wanted)
     }) {
         return Err(format!(
-            "Routine `{}` already has the job `{}`, in `{}`. A routine has at most one job: \
+            "routine `{}` already has the job `{}`, in `{}`. a routine has at most one job: \
              edit that job instead, or pick another routine.",
             draft.routine,
             holder.name,
@@ -735,7 +737,7 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
 
     jobs::write(repo, draft.scope, &name, &spec).map_err(|err| {
         format!(
-            "Could not save the job `{name}` to `{}`: {err:#}. Check the file is writable and try \
+            "could not save the job `{name}` to `{}`: {err:#}. check the file is writable and try \
              again.",
             store_label(repo, &store_of(repo, draft.scope)),
         )
@@ -793,7 +795,13 @@ fn pipeline_index(pipelines: &Pipelines, name: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// The `Next:` value on the routines tab's details pane.
+/// How the routines tab writes a job's firing time: `Mon 26 Oct 03:00`, with
+/// no comma. The details pane's `next:` and `last:` rows and the `job saved`
+/// notice's `next:` line all use it, so the tab never shows the same moment
+/// two ways.
+const FIRING_TIME: &str = "%a %-d %b %H:%M";
+
+/// The `next:` value on the routines tab's details pane.
 pub(super) fn detail_next(job: &Job) -> String {
     if !job.spec.enabled {
         return "inactive".to_string();
@@ -802,19 +810,16 @@ pub(super) fn detail_next(job: &Job) -> String {
         return "will not parse".to_string();
     }
     match jobs::next_fire(&job.spec.schedule) {
-        Some(when) => when.format("%a %-d %b, %H:%M").to_string(),
+        Some(when) => when.format(FIRING_TIME).to_string(),
         None => "never".to_string(),
     }
 }
 
-/// The `Last:` value on the routines tab's details pane.
+/// The `last:` value on the routines tab's details pane.
 pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
     match jobs::last_fired(repo, name) {
         Some(epoch) => match chrono::DateTime::from_timestamp(epoch, 0) {
-            Some(when) => format!(
-                "{}  ok",
-                when.with_timezone(&Local).format("%a %-d %b, %H:%M")
-            ),
+            Some(when) => format!("{}  ok", when.with_timezone(&Local).format(FIRING_TIME)),
             None => "never".to_string(),
         },
         None => "never".to_string(),
@@ -920,10 +925,8 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
 /// project; see `crate::screen`'s own tests.
 #[cfg(test)]
 pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
-    vec![(
-        "jobs pipeline picker",
-        pipeline_panel(&Pipelines::builtin(), "", 0),
-    )]
+    let pipelines = Pipelines::builtin_with_plain_descriptions();
+    vec![("jobs pipeline picker", pipeline_panel(&pipelines, "", 0))]
 }
 
 #[cfg(test)]
@@ -1103,7 +1106,7 @@ mod tests {
             assert!(
                 notice
                     .text
-                    .starts_with(&format!("Could not {verb} the job `nightly-audit`")),
+                    .starts_with(&format!("could not {verb} the job `nightly-audit`")),
                 "{}",
                 notice.text
             );
@@ -1196,7 +1199,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.ends_with("\nEdit or deactivate it with o on its routine."),
+            text.ends_with("\nedit or deactivate it with o on its routine."),
             "{text}"
         );
 
@@ -1216,7 +1219,7 @@ mod tests {
         );
     }
 
-    /// An inactive job saved through edit job stays inactive, so "job
+    /// An inactive job saved through edit schedule stays inactive, so "job
     /// saved" points at activate job, the item its routine's menu offers.
     #[test]
     fn saved_notice_names_activate_for_an_inactive_job() {
@@ -1228,9 +1231,36 @@ mod tests {
 
         let text = saved_notice(&draft).text;
         assert!(
-            text.ends_with("\nEdit or activate it with o on its routine."),
+            text.ends_with("\nedit or activate it with o on its routine."),
             "{text}"
         );
+    }
+
+    /// The details pane's `next:` value is written `Mon 26 Oct 03:00`: day,
+    /// date, month and clock time, with no comma before the time.
+    #[test]
+    fn detail_next_writes_the_date_and_time_with_no_comma() {
+        let (repo, _root_guard) = fixture("jobs-detail-next");
+        jobs::write(
+            &repo,
+            Scope::User,
+            "nightly",
+            &JobSpec {
+                schedule: "0 3 * * *".to_string(),
+                pipeline: "bugfix".to_string(),
+                routine: "nightly".to_string(),
+                ..JobSpec::neutral()
+            },
+        )
+        .unwrap();
+        let job = &jobs::load(&repo).unwrap()[0];
+
+        let next = detail_next(job);
+        let words: Vec<&str> = next.split(' ').collect();
+        assert!(!next.contains(','), "{next}");
+        assert_eq!(words.len(), 4, "{next}");
+        assert_eq!(words[3], "03:00", "{next}");
+        assert!(words[1].parse::<u32>().is_ok(), "{next}");
     }
 
     #[test]
@@ -1305,7 +1335,7 @@ mod tests {
         let refusal = commit_draft(&repo, draft).unwrap_err();
         assert!(refusal.contains("already exists"), "{refusal}");
         assert!(
-            refusal.ends_with("Pick another name and save again."),
+            refusal.ends_with("pick another name and save again."),
             "{refusal}"
         );
         assert!(

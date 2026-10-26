@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One `spoolway` per project: a second `spoolway dispatch` against a repo
 # another dispatcher already holds refuses every time with the same line,
-# `Dispatcher already running`, and its own exit code — never a count that
+# `dispatcher already running`, and its own exit code — never a count that
 # eventually gives up and never one that is let through.
 #
 # `dispatch.lane_child_ceiling` has no case here: it needs a lane actually
@@ -58,7 +58,7 @@ echo $$ > "$SPOOLWAY_PROJECT_HOME/dispatch.pid"
 for n in 1 2 3 4 5; do
   exit_code "start $n could not run and says so, not an error" 4 "$SPOOLWAY" dispatch
   says "start $n prints the same line every time" \
-    "Dispatcher already running" "$SPOOLWAY" dispatch
+    "dispatcher already running" "$SPOOLWAY" dispatch
 done
 
 rm -f "$SPOOLWAY_PROJECT_HOME/dispatch.pid"

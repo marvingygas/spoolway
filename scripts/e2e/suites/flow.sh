@@ -188,7 +188,7 @@ printf 'steps:\n  - id: %s\n    run: x\n    on_pass: done\n' "$STEP26" > "$LONG_
 works "pipeline check loads a 26-character step id" "$SPOOLWAY" pipeline check
 printf 'steps:\n  - id: %s\n    run: x\n    on_pass: done\n' "$STEP27" > "$LONG_STEP"
 refuses "pipeline check refuses a 27-character step id, naming the herdr limit" \
-  "is 27 characters long, and the limit is 26 — a lane's herdr name is its step plus a short task tag, and herdr refuses a name past 32 characters. Shorten it to 26 characters or fewer." \
+  "is 27 characters long, and the limit is 26 — a lane's herdr name is its step plus a short task tag, and herdr refuses a name past 32 characters. shorten it to 26 characters or fewer." \
   "$SPOOLWAY" pipeline check
 rm -f "$LONG_STEP"
 

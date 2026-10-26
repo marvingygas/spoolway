@@ -762,7 +762,7 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
         if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
             bail!(
                 "`{}` depends on `{id}` and has not started either — unqueuing `{id}` alone \
-                 would leave it waiting on a dependency the queue no longer shows. Unqueue \
+                 would leave it waiting on a dependency the queue no longer shows. unqueue \
                  `{}` first, or pass `--all` to carry both back together.",
                 sibling.id(),
                 sibling.id(),
@@ -781,12 +781,12 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
         );
         if let Some(path) = &checkout {
             message += &format!(
-                "\n  It has a checkout at {}, and unqueuing it\n  would leave that standing.\n",
+                "\n  it has a checkout at {}, and unqueuing it\n  would leave that standing.\n",
                 path.display()
             );
         }
         message += &format!(
-            "\n  To stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n"
+            "\n  to stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n"
         );
         // `--force` is refused while a queued task depends on this one, so
         // offering it here would send the person into a second refusal.
@@ -794,18 +794,18 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
             Some(sibling) => {
                 message += &format!(
                     "\n  `{}` depends on `{id}` and has not started, which stops `--force` too.\n  \
-                     Unqueue `{}` first.\n",
+                     unqueue `{}` first.\n",
                     sibling.id(),
                     sibling.id()
                 );
             }
             None => {
                 message += &format!(
-                    "\n  To tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n"
+                    "\n  to tear the checkout down and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n"
                 );
             }
         }
-        message += "\nNothing was changed.";
+        message += "\nnothing was changed.";
         bail!(message);
     }
 
@@ -815,7 +815,7 @@ fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) 
     if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
         bail!(
             "`{}` depends on `{id}` and has not started — unqueuing `{id}` would leave it \
-             waiting on a task that no longer exists. Unqueue `{}` first.",
+             waiting on a task that no longer exists. unqueue `{}` first.",
             sibling.id(),
             sibling.id(),
         );
@@ -857,7 +857,7 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
         Unqueued::Untouched => {
             bail!(
                 "did not unqueue `{id}`: it is no longer a queued task that has not started — \
-                 `spoolway queue list` shows where it is now. Nothing was changed."
+                 `spoolway queue list` shows where it is now. nothing was changed."
             );
         }
     }
@@ -896,7 +896,7 @@ fn queue_unqueue_forced(
     if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())? {
         bail!(
             "a dispatcher is already running for this repo (pid {pid}) — it re-reads the \
-             queue every pass and could be mid-turn on `{id}` right now. Stop it first, then \
+             queue every pass and could be mid-turn on `{id}` right now. stop it first, then \
              run this again."
         );
     }
@@ -925,7 +925,7 @@ fn queue_unqueue_forced(
     if routine_file.is_none() && pending_dest.exists() {
         bail!(
             "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
-             then run this again. Nothing was torn down.",
+             then run this again. nothing was torn down.",
             pending_dest.display()
         );
     }
@@ -946,8 +946,8 @@ fn queue_unqueue_forced(
     {
         bail!(
             "did not unqueue `{id}`: {} ({}) — committing and removing it would lose the \
-             work. Put it back on the task's branch, or finish or abort the operation, \
-             then run this again. Nothing was interrupted, committed or torn down.",
+             work. put it back on the task's branch, or finish or abort the operation, \
+             then run this again. nothing was interrupted, committed or torn down.",
             off.found,
             worktree.display()
         );
@@ -998,7 +998,7 @@ fn queue_unqueue_forced(
         if outcome.is_unrecorded() {
             bail!(
                 "`{id}`'s worktree at {} has work `auto_commit` could not record ({note}) — \
-                 nothing was torn down or unqueued. Commit or discard it by hand, then run \
+                 nothing was torn down or unqueued. commit or discard it by hand, then run \
                  this again.",
                 worktree.display()
             );
@@ -1054,7 +1054,7 @@ fn queue_unqueue_forced(
         if !torn_down {
             bail!(
                 "`{id}`'s checkout could not be removed (see above) — the copy of the routine \
-                 in {} is still queued. Remove the worktree by hand, then run this again.",
+                 in {} is still queued. remove the worktree by hand, then run this again.",
                 routine_file.display()
             );
         }
@@ -1300,13 +1300,13 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         match super::task::misspelt_key(key) {
             Some((known, true)) => bail!(
                 "{name} sets `{key}:`, which spoolway does not read — it means `{known}:`. \
-                 Rename it to `{known}:`."
+                 rename it to `{known}:`."
             ),
             // Renaming would only walk into the refusal or the silent drop
             // of the key itself, so the advice is to take it out.
             Some((known, false)) => bail!(
                 "{name} sets `{key}:`, which is `{known}:` spelt another way — a key \
-                 spoolway sets itself or throws away. Remove it from the task."
+                 spoolway sets itself or throws away. remove it from the task."
             ),
             None => {}
         }
@@ -1320,7 +1320,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // ever refuse it again once it did.
     if mapping.contains_key("parallel") {
         bail!(
-            "{name} sets `parallel:`, which is gone — a group is one chain. Give it a \
+            "{name} sets `parallel:`, which is gone — a group is one chain. give it a \
              `depends_on`, or move it to a group of its own."
         );
     }
@@ -1392,7 +1392,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
         let shown = serde_norway::to_string(value).unwrap_or_default();
         bail!(
             "{name} sets `complexity: {}`, which is not a whole number from {} to {}. \
-             Set it to a whole number in that range, 100 being extremely complex, or \
+             set it to a whole number in that range, 100 being extremely complex, or \
              remove the key.",
             shown.trim(),
             crate::task::COMPLEXITY_RANGE.start(),
@@ -1415,7 +1415,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
             bail!(
                 "{name}: label `{label}` may not hold whitespace or a comma — a hook reads \
                  every label comma-joined in SPOOLWAY_LABELS, and Jira's own labels cannot \
-                 hold a space at all. Join the words with a hyphen instead, for example \
+                 hold a space at all. join the words with a hyphen instead, for example \
                  `needs-triage`."
             );
         }
@@ -1456,8 +1456,8 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
                 .filter(|flag| !flag.trim().is_empty())
                 .with_context(|| {
                     format!(
-                        "`{name}` sets no `base:` and no --base was given.\n\n  Set `base:` in \
-                     the task, or pass --base <branch>.\n\nNothing was queued."
+                        "`{name}` sets no `base:` and no --base was given.\n\n  set `base:` in \
+                     the task, or pass --base <branch>.\n\nnothing was queued."
                     )
                 })?
                 .to_string(),
@@ -1673,7 +1673,7 @@ fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<(
         .map_or("the top of the task", str::trim);
     bail!(
         "{name}: the section `{heading}` still holds the skeleton's `[[…]]` \
-         placeholder text. Replace it with the task's own words, or delete the \
+         placeholder text. replace it with the task's own words, or delete the \
          section if the task has nothing to say there, then add it again."
     );
 }
@@ -1693,7 +1693,7 @@ fn refuse_unfilled_skeleton(name: &str, task: &Task, own: &[String]) -> Result<(
 fn check_gate_at(task: &Task, pipeline: &crate::pipeline::Pipeline) -> Result<()> {
     if let Some(gate_at) = crate::commands::command_gate_at(task, pipeline) {
         bail!(
-            "{} Change `gate_at:` to an agent step, or delete it.",
+            "{} change `gate_at:` to an agent step, or delete it.",
             crate::commands::command_gate_at_reason(&task.front.id, gate_at, &pipeline.name)
         );
     }
@@ -1788,7 +1788,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
             match above {
                 None => bail!(
                     "task `{}` has `gate_at: {gate_at}`, but it will never run `{gate_at}`: {}, \
-                     so the gate would never fire. Name a step it does run \
+                     so the gate would never fire. name a step it does run \
                      ({runs}), or drop `gate_at:`.",
                     task.front.id,
                     why.refusal(),
@@ -1796,7 +1796,7 @@ fn check_gate_at_runs(repo: &Repo, pipelines: &Pipelines, batch: &[Task]) -> Res
                 Some(above) => bail!(
                     "task `{}`, already queued, has `gate_at: {gate_at}`, and adding `{}` above \
                      it would mean it never runs `{gate_at}`: {}, so the gate would never fire. \
-                     Change `gate_at:` on `{}` to a step it does run ({runs}), or leave `{}` out.",
+                     change `gate_at:` on `{}` to a step it does run ({runs}), or leave `{}` out.",
                     task.front.id,
                     above.front.id,
                     why.refusal(),
@@ -1904,7 +1904,7 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
             bail!(
                 "group `{group}` sets no `group_description:` on any of its tasks, and \
                  `issue_tracking.hook` names `{}` — the group's issue would have nothing to \
-                 say. Set it on one task of the group.",
+                 say. set it on one task of the group.",
                 repo.config.issue_tracking.hook
             );
         }
@@ -1978,7 +1978,7 @@ fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
     routine_names(repo).contains(id).then(|| {
         format!(
             "task id `{id}` is the name of routine `{id}`, whose copies' lanes are named \
-             `{id}{}<step>`. Give this task another id; nothing was queued.",
+             `{id}{}<step>`. give this task another id; nothing was queued.",
             crate::mux::LANE_NAME_SEPARATOR
         )
     })
@@ -2024,8 +2024,8 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
     };
     Some(format!(
         "task id `{id}` cannot be queued: {} from an earlier task with that id is still \
-         there, {why}. To drop it, run {}. To keep the work, rename the branch with `git \
-         branch -m {branch} <name>` and set `starts_from: <name>` in the task. Nothing was \
+         there, {why}. to drop it, run {}. to keep the work, rename the branch with `git \
+         branch -m {branch} <name>` and set `starts_from: <name>` in the task. nothing was \
          queued.",
         what.join(" and "),
         remove.join(", then "),
@@ -2323,7 +2323,7 @@ fn carry_group_descriptions(tasks: &mut [Task], not_queued: &[NotQueued]) {
 /// the queue tab's queued summary and `queue add`'s refusal say the same.
 fn missing_start_sentence(id: &str, branch: &str) -> String {
     format!(
-        "{id} starts from {branch}, which doesn't exist. Set starts_from: in the task front \
+        "{id} starts from {branch}, which doesn't exist. set starts_from: in the task front \
          matter and requeue."
     )
 }
@@ -2347,7 +2347,7 @@ fn missing_start_sentences(not_queued: &[NotQueued]) -> Vec<String> {
 pub(crate) fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
     let sentences = missing_start_sentences(&not_queued(repo, tasks));
     if !sentences.is_empty() {
-        bail!("{}\n\nNothing was queued.", sentences.join("\n"));
+        bail!("{}\n\nnothing was queued.", sentences.join("\n"));
     }
     Ok(())
 }
@@ -2513,7 +2513,7 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
                 .collect();
             format!(
                 "could not lock group {} to queue into it — another `queue add` into the \
-                 same group is holding it. Run this again in a moment.",
+                 same group is holding it. run this again in a moment.",
                 busy.join(" or ")
             )
         })?);
@@ -2526,7 +2526,7 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
             crate::lock::TaskLock::acquire(&repo.task_lock_file(id)).with_context(|| {
                 format!(
                     "could not lock task `{id}` to queue it — another `queue add` or \
-                     dispatch pass is holding it. Run this again in a moment."
+                     dispatch pass is holding it. run this again in a moment."
                 )
             })?,
         );
@@ -4209,7 +4209,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                 bail!(
                     "`{id}` is based on `{mine}` but depends on `{dep}`, which is based on \
                          `{theirs}` — work only merges into its own base, so that wait would never \
-                         put it in reach. Queue both from the same worktree."
+                         put it in reach. queue both from the same worktree."
                 );
             }
         }
@@ -4226,7 +4226,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                 bail!(
                     "`{id}` depends on `{}`, in another group, but also depends on a task in \
                      its own group `{}` — only a group's first task may stack onto another \
-                     group. Move the cross-group `depends_on` onto the first task, or drop it.",
+                     group. move the cross-group `depends_on` onto the first task, or drop it.",
                     cross[0].0,
                     mine.as_deref().unwrap_or("")
                 );
@@ -4337,8 +4337,8 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
                     bail!(
                         "`{id}` depends on `{parents}`, in its own group{group}, but none of \
                          them reaches all the others — a group is one chain, and a task \
-                         joining two of it is not one. Its worktree would be cut from \
-                         `{first}`, and `{missing}` would not be in it. A depends_on must \
+                         joining two of it is not one. its worktree would be cut from \
+                         `{first}`, and `{missing}` would not be in it. a depends_on must \
                          start with the id that contains the rest, or drop one.",
                         group = mine
                             .as_deref()
@@ -4382,7 +4382,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
         if roots.len() > 1 {
             bail!(
                 "group `{group}` has {} tasks with no dependency in it: {} — a group is one \
-                 chain. Give one a `depends_on`, or move it to a group of its own.",
+                 chain. give one a `depends_on`, or move it to a group of its own.",
                 count_word(roots.len()),
                 roots.join(" and ")
             );
@@ -4411,7 +4411,7 @@ fn check_dependencies_set(repo: &Repo, batch: &mut [Task]) -> Result<()> {
             if dependents.len() > 1 {
                 bail!(
                     "group `{group}` has {} tasks depending on `{dep}`: {} — a group is one \
-                     chain. Give one a `depends_on` on the other, or move it to a group of \
+                     chain. give one a `depends_on` on the other, or move it to a group of \
                      its own.",
                     count_word(dependents.len()),
                     dependents.join(" and ")
@@ -4675,7 +4675,7 @@ enum Mode {
         then: Resume,
     },
     /// What a screen submit queued — [`queued_panel`]'s popup, opening on
-    /// `Hook executed successfully` when the hook ran. `enter` closes it, the
+    /// `hook executed successfully` when the hook ran. `enter` closes it, the
     /// same as [`Mode::Outcome`].
     ///
     /// `routines` is the routines pane the submit came from, when it did:
@@ -4734,33 +4734,34 @@ enum Mode {
     /// the file and what to fix. Unlike [`Mode::Outcome`] it is closed by
     /// `esc` and nothing else, which its own key row says.
     PlanNotDeleted(Notice),
-    /// The options menu's new job or edit job schedule and pipeline popups
-    /// over the routines pane `nav` describes: new job writing a job for
-    /// the routine highlighted when it was picked, edit job rewriting that
-    /// routine's job, opened on its own values. The popups, their keys and
-    /// the save live in [`super::jobs::NewJobWalk`], and `esc` on either
-    /// comes back here having written nothing.
+    /// The options menu's edit schedule popups, the schedule then the
+    /// pipeline, over the routines pane `nav` describes: writing a new job
+    /// for the routine highlighted when it was picked when it has none, or
+    /// rewriting that routine's job, opened on its own values. The popups,
+    /// their keys and the save live in [`super::jobs::NewJobWalk`], and `esc`
+    /// on either comes back here having written nothing.
     NewJob {
         nav: RoutineNav,
         walk: super::jobs::NewJobWalk,
     },
-    /// Edit job on a job whose routine is not a listed one: the routine
-    /// picker over the routines pane `nav` describes, one answer per
+    /// Edit schedule on a job whose routine is not a listed one: the
+    /// routine picker over the routines pane `nav` describes, one answer per
     /// routine folder and nothing else, so a job is never pointed at a task
     /// file or a subfolder again. `enter` opens the schedule and pipeline
     /// popups of [`Mode::NewJob`] with `job` moved onto the folder under
     /// `cursor`; `esc` goes back to the pane having written nothing.
     ///
-    /// `folders` is the routines as they were when edit job was picked, by
-    /// name and path, held for the same reason [`Mode::DeletePending`] holds
-    /// its set: the popup is drawn with no routines list to read.
+    /// `folders` is the routines as they were when edit schedule was
+    /// picked, by name and path, held for the same reason
+    /// [`Mode::DeletePending`] holds its set: the popup is drawn with no
+    /// routines list to read.
     PickRoutine {
         nav: RoutineNav,
         job: JobRef,
         folders: Vec<(String, std::path::PathBuf)>,
         cursor: usize,
     },
-    /// What new job or edit job saved, over the routines pane —
+    /// What edit schedule saved, over the routines pane —
     /// [`super::jobs::saved_notice`].
     /// Apart from [`Mode::Outcome`] only in its key line, which names the one
     /// key the popup reads rather than the pane's under it. `enter` closes it
@@ -4819,9 +4820,10 @@ impl OptionsMenu {
 
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open task, `g`
-/// gate, `t` trial, `s` save as routine, and the routines tab's `n` new job
-/// and `x` delete routine. Delete on the pending screen and open plan never
-/// had a key of their own, and neither did the routines tab's job items.
+/// gate, `t` trial, `s` save as routine, and the routines tab's `n`, now
+/// edit schedule, and `x` delete routine. Delete on the pending screen and
+/// open plan never had a key of their own, and neither did the routines
+/// tab's job items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
@@ -4835,7 +4837,7 @@ enum RowOption {
     NewJob,
     /// The routine's job, through the schedule and pipeline popups.
     EditJob(JobRef),
-    /// Edit job on a job whose routine is not listed: the routine picker
+    /// Edit schedule on a job whose routine is not listed: the routine picker
     /// first, then the same popups as [`RowOption::EditJob`].
     PickRoutine(JobRef),
     /// `named` when the routine has more than one job, so the item has to
@@ -4867,8 +4869,12 @@ impl RowOption {
             RowOption::Gate => "gate".to_string(),
             RowOption::Trial => "trial".to_string(),
             RowOption::SaveRoutine => "save as routine".to_string(),
-            RowOption::NewJob => "new job".to_string(),
-            RowOption::EditJob(_) | RowOption::PickRoutine(_) => "edit job".to_string(),
+            // Both open the same walk, the schedule popup then the pipeline
+            // popup, so the menu gives that path one name whether or not
+            // the routine has a job yet.
+            RowOption::NewJob | RowOption::EditJob(_) | RowOption::PickRoutine(_) => {
+                "edit schedule".to_string()
+            }
             RowOption::DeactivateJob { job, named: true } => {
                 format!("deactivate job {}", job.name)
             }
@@ -5003,8 +5009,8 @@ fn untrack_named_groups(tasks: &mut [Task], named: &[String]) -> Result<()> {
     if named.iter().any(String::is_empty) {
         bail!(
             "--no-tracking was given an empty group name.\n\
-             Name a group, or drop the value to cover every group in the batch. \
-             Nothing was queued."
+             name a group, or drop the value to cover every group in the batch. \
+             nothing was queued."
         );
     }
     let groups: BTreeSet<&str> = tasks.iter().map(checklist_group).collect();
@@ -5015,9 +5021,9 @@ fn untrack_named_groups(tasks: &mut [Task], named: &[String]) -> Result<()> {
         let groups = groups.iter().copied().collect::<Vec<_>>().join(", ");
         bail!(
             "--no-tracking names `{unknown}`, but no task in this batch belongs to that group.\n\
-             The batch's groups are {groups}.\n\
-             Fix the group name, or drop the flag to open every group's tickets. \
-             Nothing was queued."
+             the batch's groups are {groups}.\n\
+             fix the group name, or drop the flag to open every group's tickets. \
+             nothing was queued."
         );
     }
     let everything = named
@@ -5105,7 +5111,7 @@ fn issue_question_panel(
     let mut body = vec![
         String::new(),
         clip(
-            "Deactivate issue tracking for selected groups:".to_string(),
+            "deactivate issue tracking for selected groups:".to_string(),
             width,
         ),
         String::new(),
@@ -5220,7 +5226,7 @@ struct PopupHook<'a> {
     redraw: &'a mut dyn FnMut(&[String]),
 }
 
-/// Cells in the progress bar. With the `Progress: ` label, it fills the
+/// Cells in the progress bar. With the `progress: ` label, it fills the
 /// [`ISSUE_BODY_WIDTH`] row exactly, so the box keeps the width of the
 /// popups it is swapped with.
 const PROGRESS_BAR_CELLS: usize = 44;
@@ -5259,7 +5265,7 @@ impl<'a> PopupHook<'a> {
         crate::screen::boxed(
             "issue tracking",
             &issue_body([format!(
-                "Progress: {}{}",
+                "progress: {}{}",
                 "█".repeat(filled),
                 "░".repeat(PROGRESS_BAR_CELLS - filled)
             )]),
@@ -5300,7 +5306,7 @@ impl TicketLog for PopupHook<'_> {
 }
 
 /// [`Mode::Queued`] for a batch that queued `names`, one per task, each its
-/// [`Task::display_name`]: `Hook executed successfully` when `hook_ran`,
+/// [`Task::display_name`]: `hook executed successfully` when `hook_ran`,
 /// then the count queued over every task it queued. Then the tasks it left
 /// out, `not_queued`, when there are any — see [`not_queued_lines`]. It
 /// ends on `dispatcher` — [`dispatcher_line`] — a blank row below the list,
@@ -5323,7 +5329,7 @@ fn queued_panel(
     let mut lines = Vec::new();
     if !names.is_empty() {
         if hook_ran {
-            lines.extend(["Hook executed successfully".to_string(), String::new()]);
+            lines.extend(["hook executed successfully".to_string(), String::new()]);
         }
         lines.push(format!("queued {}", plural(names.len(), "task")));
         lines.extend(names.iter().map(|name| format!("  {name}")));
@@ -5393,8 +5399,8 @@ fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
     }
     lines.push(String::new());
     lines.extend(crate::screen::wrap(
-        "A routine runs one copy at a time. Let it finish, resume or restart it from the \
-         board if it has stopped, or unqueue it if it has not started. Then queue the routine \
+        "a routine runs one copy at a time. let it finish, resume or restart it from the \
+         board if it has stopped, or unqueue it if it has not started. then queue the routine \
          again.",
         STILL_QUEUED_WRAP,
     ));
@@ -5413,8 +5419,8 @@ fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
 /// the popup leaves the line off rather than claim a state it never read.
 fn dispatcher_line(repo: &Repo) -> Option<&'static str> {
     match crate::lock::Lock::holder(&repo.lock_file()) {
-        Ok(Some(_)) => Some("Dispatcher is running"),
-        Ok(None) => Some("Start the dispatcher to begin working"),
+        Ok(Some(_)) => Some("dispatcher is running"),
+        Ok(None) => Some("start the dispatcher to begin working"),
         Err(_) => None,
     }
 }
@@ -5648,7 +5654,7 @@ pub(crate) struct ScreenState {
     gates: std::collections::BTreeMap<TaskKey, String>,
     /// The branch the board's own checkout has out — what `enter` hands a
     /// task that names no `base:` of its own, and so what the tasks pane's
-    /// `Lands in:` row shows for one. `None` on a detached checkout, where
+    /// `lands in:` row shows for one. `None` on a detached checkout, where
     /// `enter` refuses rather than guess, and in the tests that open the
     /// screen with no checkout behind it.
     board_branch: Option<String>,
@@ -5840,13 +5846,13 @@ fn opening_message(
     };
     let lead = match queueable_group_listed(groups) {
         true => format!(
-            "Not listed under {}: {} there {has} no `group:` and `id:` this could read, so \
+            "not listed under {}: {} there {has} no `group:` and `id:` this could read, so \
              a group beside {them} may be missing tasks:",
             dir.display(),
             plural(skipped.len(), "task"),
         ),
         false => format!(
-            "Nothing to list under {} — {} there {has} no `group:` and `id:` this could read:",
+            "nothing to list under {} — {} there {has} no `group:` and `id:` this could read:",
             dir.display(),
             plural(skipped.len(), "task"),
         ),
@@ -5854,8 +5860,8 @@ fn opening_message(
     Some(format!(
         "{lead}\n\n\
          {}\n\n\
-         A row on this screen is a `group:` value, so a task without one has no row \
-         to be. Run `spoolway task contract --from {}` for the real reason on each.",
+         a row on this screen is a `group:` value, so a task without one has no row \
+         to be. run `spoolway task contract --from {}` for the real reason on each.",
         files.join("\n"),
         dir.display()
     ))
@@ -6064,7 +6070,7 @@ fn run_screen_from(
         // has been handled, so this is also what wakes the reader for the
         // next one, the same cadence the inline `branch_at` call this
         // replaces always ran at: the board can be left open while its
-        // checkout moves to another branch, and the `Lands in:` row must
+        // checkout moves to another branch, and the `lands in:` row must
         // eventually name the branch `enter` would read right now, just
         // from whatever the reader last landed rather than a read of its
         // own.
@@ -6316,8 +6322,8 @@ fn run_screen_from(
                 // `o`: the menu for whichever row the focused pane
                 // highlights — see `routine_options`. Read here rather than
                 // in `handle_routine_key`, which is never handed the
-                // pipelines and the routines directory `new job` is checked
-                // against.
+                // pipelines and the routines directory edit schedule is
+                // checked against.
                 Key::Char('o') => {
                     if let Some(menu) =
                         routine_options(repo, pipelines, &routines, &state.jobs, nav)
@@ -6926,8 +6932,8 @@ fn plans_notice(err: &str) -> Mode {
     outcome(
         "plans not listed",
         format!(
-            "Plan pages are missing from this list, because {err}.\n\n\
-             Make that path one this user can read, or repair it if it will \
+            "plan pages are missing from this list, because {err}.\n\n\
+             make that path one this user can read, or repair it if it will \
              not parse, and the next read lists them."
         ),
     )
@@ -7043,9 +7049,9 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 /// jobs [`jobs_on`] finds for it in `jobs`, the stores as the pane last
 /// read them, and always end on delete routine:
 ///
-/// - No job: new job, only where [`super::jobs::NewJobWalk::for_routine`]
+/// - No job: edit schedule, only where [`super::jobs::NewJobWalk::for_routine`]
 ///   can point a job at the folder, the same check `n` made.
-/// - One job: edit job, then deactivate job for an enabled job or activate
+/// - One job: edit schedule, then deactivate job for an enabled job or activate
 ///   job for an inactive one.
 /// - Two or more: deactivate job or activate job with each job's name,
 ///   sorted by name as the details pane lists them. They clash, and
@@ -7056,8 +7062,8 @@ fn pending_row(groups: &[Group], state: &ScreenState) -> Option<String> {
 ///   jobs the routine has cannot be told. Delete routine refuses for the
 ///   same reason, and says so.
 ///
-/// A job's row under the routines, an [`Orphan`], offers edit job alone,
-/// through the routine picker, titled with the row's name. No menu deletes
+/// A job's row under the routines, an [`Orphan`], offers edit schedule
+/// alone, through the routine picker, titled with the row's name. No menu deletes
 /// a job: deactivating keeps its schedule, and delete routine removes the
 /// jobs on the routine it deletes.
 ///
@@ -7255,7 +7261,7 @@ fn find_job(repo: &Repo, job: &JobRef) -> std::result::Result<crate::jobs::Job, 
         .find(|found| found.name == job.name && found.scope == job.scope)
         .ok_or_else(|| {
             format!(
-                "the job {} is no longer in the {} store, so there is nothing to change. Press \
+                "the job {} is no longer in the {} store, so there is nothing to change. press \
                  o on the routine again to see the jobs it has now.",
                 job.name,
                 job.scope.label()
@@ -7350,7 +7356,7 @@ fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
         _ => ("run", "are", "them"),
     };
     Some(format!(
-        "{} also {run} {routine} and {are} active. Deactivate {them} first, then activate this \
+        "{} also {run} {routine} and {are} active. deactivate {them} first, then activate this \
          one.",
         others.join(", "),
     ))
@@ -8092,9 +8098,9 @@ fn layout_for(width: usize, height: usize) -> Layout {
 
 /// The column every row's value starts at in [`labeled_row`]'s wide layout:
 /// four columns of indent, then the widest labels this pane ever draws —
-/// `Description:` and `Starts from:`, at 13 characters padded — so
-/// `Pipeline:`, `Depends on:`, `Starts from:`, `Lands in:`, `Gate:` and
-/// `Description:` all line up under each other regardless of which one owns
+/// `description:` and `starts from:`, at 13 characters padded — so
+/// `pipeline:`, `depends on:`, `starts from:`, `lands in:`, `gate:` and
+/// `description:` all line up under each other regardless of which one owns
 /// a given row. A constant rather than something measured off
 /// the label set at draw time — see the non-goal this is: the labels are
 /// fixed, so the column never has anything to measure.
@@ -8329,7 +8335,7 @@ fn groups_pane_lines(
 
 /// What the tasks pane says beside a plan row: the skill that cuts a plan
 /// page into tasks.
-const PLAN_HINT: &str = "Use /spoolway-tasks";
+const PLAN_HINT: &str = "use /spoolway-tasks";
 
 /// The characters a tasks-pane row spends before its own name even starts:
 /// the cursor marker and the space after it — half of [`ROW_PREFIX_COLUMNS`],
@@ -8442,17 +8448,17 @@ pub(crate) fn tasks_pane_lines(
             .pipeline
             .clone()
             .unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
-        lines.extend(labeled_row("Pipeline:", &pipeline, width));
+        lines.extend(labeled_row("pipeline:", &pipeline, width));
 
         let depends_value = if task.depends_on.is_empty() {
             "-".to_string()
         } else {
             task.depends_on.join(", ")
         };
-        lines.extend(labeled_row("Depends on:", &depends_value, width));
+        lines.extend(labeled_row("depends on:", &depends_value, width));
 
         // Where the task starts and where it lands, on every task. `base:`
-        // names only where the work lands, so it is `Lands in:`; a task
+        // names only where the work lands, so it is `lands in:`; a task
         // naming none is sent on the board checkout's branch — see
         // `board_branch` — and `-` shows only when the checkout is detached
         // and `enter` would refuse it. A task starts from its own
@@ -8470,16 +8476,16 @@ pub(crate) fn tasks_pane_lines(
             .clone()
             .or_else(|| task.depends_on.first().cloned())
             .unwrap_or_else(|| lands_in.clone());
-        lines.extend(labeled_row("Starts from:", &starts_from, width));
-        lines.extend(labeled_row("Lands in:", &lands_in, width));
+        lines.extend(labeled_row("starts from:", &starts_from, width));
+        lines.extend(labeled_row("lands in:", &lands_in, width));
 
         if let Some(step) = state.gates.get(&task_key(task)) {
-            lines.extend(labeled_row("Gate:", step, width));
+            lines.extend(labeled_row("gate:", step, width));
         }
         // A task with no `title:` draws no row at all rather than an
         // empty one — `parse_submission` is what refuses it, at submit time.
         if let Some(description) = &task.description {
-            lines.extend(labeled_row("Description:", description, width));
+            lines.extend(labeled_row("description:", description, width));
         }
 
         if i == state.task_cursor {
@@ -8556,9 +8562,9 @@ fn routine_folder_lines(
 /// [`routine_details_lines`] draws under the job config: the highlighted
 /// folder's own tasks — every one at or below it, the same set `enter`
 /// would queue — each drawn the same `labeled_row` way [`tasks_pane_lines`]
-/// draws a pending task, minus the `Gate:` row a routine has no gate picker to set
-/// and the `Starts from:` and `Lands in:` rows, which this pane has never
-/// drawn, plus a `Problem:` row under any task whose id another routine
+/// draws a pending task, minus the `gate:` row a routine has no gate picker to set
+/// and the `starts from:` and `lands in:` rows, which this pane has never
+/// drawn, plus a `problem:` row under any task whose id another routine
 /// file also holds. That row is why this takes every folder and
 /// `routines_dir`, not only the highlighted one. Comes back with
 /// each task's start and the highlighted one's range, the same as
@@ -8598,7 +8604,7 @@ fn routine_task_lines(
         lines.push(task_row(marker, &task.id, "", width));
 
         let pipeline = doc_pipeline_name(&task.doc).unwrap_or_else(|| TRIAL_UNASSIGNED.to_string());
-        lines.extend(labeled_row("Pipeline:", &pipeline, width));
+        lines.extend(labeled_row("pipeline:", &pipeline, width));
 
         let depends_on = super::pending::depends_on(&task.doc);
         let depends_value = if depends_on.is_empty() {
@@ -8606,16 +8612,16 @@ fn routine_task_lines(
         } else {
             depends_on.join(", ")
         };
-        lines.extend(labeled_row("Depends on:", &depends_value, width));
+        lines.extend(labeled_row("depends on:", &depends_value, width));
 
         if let Some(description) = &task.description {
-            lines.extend(labeled_row("Description:", description, width));
+            lines.extend(labeled_row("description:", description, width));
         }
 
         // A shared id makes these files one routine, so the pane says so
         // beside the task rather than leaving it to `doctor`.
         if let Some(clash) = clashes.iter().find(|clash| clash.id == task.id) {
-            lines.extend(labeled_row("Problem:", &clash.refusal(routines_dir), width));
+            lines.extend(labeled_row("problem:", &clash.refusal(routines_dir), width));
         }
 
         if i == nav.task_cursor {
@@ -8628,12 +8634,12 @@ fn routine_task_lines(
 /// The routines pane's job config for `folder`, the top of the details pane:
 /// a blank row, then the rows below, then a blank row before the tasks.
 ///
-/// - No job on the routine: `Schedule:` reads `none`.
-/// - One job: its `Schedule:`, `Pipeline:`, `Scope:`, `Next:`, `Last:` and
-///   `Job:` rows, the values `spoolway jobs list` gives each.
+/// - No job on the routine: `schedule:` reads `none`.
+/// - One job: its `schedule:`, `pipeline:`, `scope:`, `next:`, `last:` and
+///   `job:` rows, the values `spoolway jobs list` gives each.
 /// - Two or more jobs on it, active or not: every one of them, listed by
 ///   [`routine_jobs_lines`].
-/// - Stores that will not load: one `Jobs:` row naming the error.
+/// - Stores that will not load: one `jobs:` row naming the error.
 ///
 /// Which jobs are on the routine is [`jobs_on`]'s to say.
 fn routine_job_lines(
@@ -8646,24 +8652,24 @@ fn routine_job_lines(
     let jobs = match jobs {
         Ok(jobs) => jobs,
         Err(err) => {
-            lines.extend(config_row("Jobs:", &format!("will not load: {err}"), width));
+            lines.extend(config_row("jobs:", &format!("will not load: {err}"), width));
             lines.push(String::new());
             return lines;
         }
     };
     match jobs_on(repo, jobs, folder).as_slice() {
-        [] => lines.extend(config_row("Schedule:", "none", width)),
+        [] => lines.extend(config_row("schedule:", "none", width)),
         [job] => {
-            lines.extend(config_row("Schedule:", &job.spec.schedule, width));
-            lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
-            lines.extend(config_row("Scope:", job.scope.label(), width));
-            lines.extend(config_row("Next:", &super::jobs::detail_next(job), width));
+            lines.extend(config_row("schedule:", &job.spec.schedule, width));
+            lines.extend(config_row("pipeline:", &job.spec.pipeline, width));
+            lines.extend(config_row("scope:", job.scope.label(), width));
+            lines.extend(config_row("next:", &super::jobs::detail_next(job), width));
             lines.extend(config_row(
-                "Last:",
+                "last:",
                 &super::jobs::detail_last(repo, &job.name),
                 width,
             ));
-            lines.extend(config_row("Job:", &job.name, width));
+            lines.extend(config_row("job:", &job.name, width));
         }
         several => lines.extend(routine_jobs_lines(several, width)),
     }
@@ -8689,8 +8695,8 @@ fn jobs_on<'a>(
 /// A job whose `routine` is not one of the routines the tab lists: missing,
 /// a task file, a folder inside a routine, or nothing a routine can be. It
 /// fires nowhere, and with no routine row to hang it on it gets a row of
-/// its own under the routines, where its menu's edit job can point it at a
-/// routine. Without that row it could be mended only by editing a store by
+/// its own under the routines, where its menu's edit schedule can point it at
+/// a routine. Without that row it could be mended only by editing a store by
 /// hand.
 struct Orphan<'a> {
     job: &'a crate::jobs::Job,
@@ -8748,7 +8754,7 @@ fn orphan_jobs<'a>(
             let missing = fault.as_ref().is_some_and(|fault| fault.missing);
             let reason = match fault {
                 Some(fault) if fault.missing => {
-                    format!("No routine {} under {routines_dir}.", job.spec.routine)
+                    format!("no routine {} under {routines_dir}.", job.spec.routine)
                 }
                 Some(fault) => format!("{}.", fault.reason),
                 // `routine_fault` has nothing to say about a `routine` that
@@ -8779,7 +8785,7 @@ fn highlighted_orphan<'a, 'b>(
     orphans.get(nav.folder_cursor.checked_sub(routines.len())?)
 }
 
-/// The `Jobs:` block for a routine two or more jobs run: a headline saying
+/// The `jobs:` block for a routine two or more jobs run: a headline saying
 /// which of them fires, one row per job sorted by name with its scope and,
 /// when inactive, `inactive`, and the fix under them.
 ///
@@ -8796,11 +8802,11 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
     let (headline, fix) = match live.as_slice() {
         [] => (
             format!("{} run this routine, all inactive", on.len()),
-            "Activate one with o to fire it.",
+            "activate one with o to fire it.",
         ),
         [job] => (
             format!("{} run this routine; only {} fires", on.len(), job.name),
-            "Deactivate the active one with o before activating another.",
+            "deactivate the active one with o before activating another.",
         ),
         _ => (
             format!(
@@ -8809,14 +8815,14 @@ fn routine_jobs_lines(on: &[&crate::jobs::Job], width: usize) -> Vec<String> {
                 if two { "neither" } else { "none" }
             ),
             if two {
-                "Deactivate one with o to fire the other."
+                "deactivate one with o to fire the other."
             } else {
-                "Deactivate all but one with o to fire it."
+                "deactivate all but one with o to fire it."
             },
         ),
     };
 
-    let mut lines = config_row("Jobs:", &headline, width);
+    let mut lines = config_row("jobs:", &headline, width);
     // The names sit two columns in under the headline's text, and the
     // scopes line up three columns past the longest name. A row too wide
     // for the pane puts its scope on a line of its own, further in, rather
@@ -8916,7 +8922,7 @@ fn routine_details_lines(
 }
 
 /// The details of a job row, an [`Orphan`]: the job's own config rows, the
-/// ones [`routine_job_lines`] draws for a routine's one job, with `Next:`
+/// ones [`routine_job_lines`] draws for a routine's one job, with `next:`
 /// saying it never fires, then why and what to do about it. There are no
 /// tasks under it, since it runs no routine.
 fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<String> {
@@ -8926,21 +8932,21 @@ fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<Strin
         false => "never, it runs no routine",
     };
     let mut lines = vec![String::new()];
-    lines.extend(config_row("Schedule:", &job.spec.schedule, width));
-    lines.extend(config_row("Pipeline:", &job.spec.pipeline, width));
-    lines.extend(config_row("Scope:", job.scope.label(), width));
-    lines.extend(config_row("Next:", next, width));
+    lines.extend(config_row("schedule:", &job.spec.schedule, width));
+    lines.extend(config_row("pipeline:", &job.spec.pipeline, width));
+    lines.extend(config_row("scope:", job.scope.label(), width));
+    lines.extend(config_row("next:", next, width));
     lines.extend(config_row(
-        "Last:",
+        "last:",
         &super::jobs::detail_last(repo, &job.name),
         width,
     ));
-    lines.extend(config_row("Job:", &job.name, width));
+    lines.extend(config_row("job:", &job.name, width));
     lines.push(String::new());
     lines.extend(wrapped(CONFIG_INDENT, &orphan.reason, width));
     lines.extend(wrapped(
         CONFIG_INDENT,
-        "Press o to point this job at a routine.",
+        "press o to point this job at a routine.",
         width,
     ));
     lines
@@ -9213,7 +9219,7 @@ fn screen_footer(panes: &Panes, state: &ScreenState) -> String {
 /// every other function in this module is held to, rather than each
 /// threading `routines`, `routines_dir` and `pipelines` through as three
 /// separate parameters. `repo` is for [`reload_jobs`] while the screen sits
-/// idle, and for the routines pane's `Last:` row.
+/// idle, and for the routines pane's `last:` row.
 struct Panes<'a> {
     repo: &'a Repo,
     routines: &'a [RoutineFolder],
@@ -9259,8 +9265,8 @@ fn fit_keys(row: String, width: usize) -> String {
 
 /// The routines pane a mode is drawn over, when it is: the pane itself, a
 /// notice opened from it, the options menu opened on it, delete routine's
-/// popup, the routine picker, new job's and edit job's popups and the
-/// notice they end on, or the tool-requirements gate or the issue question
+/// popup, the routine picker, edit schedule's popups and the notice they
+/// end on, or the tool-requirements gate or the issue question
 /// a routine submit stopped at. `None` for everything drawn over the
 /// pending screen.
 fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
@@ -10396,7 +10402,7 @@ fn build_trial_arm(
     if let Some(gate_at) = crate::commands::command_gate_at(&arm, pipeline) {
         bail!(
             "{name} has `gate_at: {gate_at}`, which runs a command in pipeline `{}` — only an \
-             agent step can be held for a person. Untick `{}` in the trial, or change or drop \
+             agent step can be held for a person. untick `{}` in the trial, or change or drop \
              `gate_at:` in {name} so it names an agent step every ticked pipeline has.",
             pipeline.name,
             pipeline.name
@@ -10405,7 +10411,7 @@ fn build_trial_arm(
     if let Some(gate_at) = unmatched_gate_at(&arm, pipeline) {
         bail!(
             "{name} has `gate_at: {gate_at}`, which is no step of pipeline `{}`. \
-             Untick `{}` in the trial, or change or drop `gate_at:` in {name} so it \
+             untick `{}` in the trial, or change or drop `gate_at:` in {name} so it \
              names a step every ticked pipeline has.",
             pipeline.name,
             pipeline.name
@@ -10649,14 +10655,14 @@ fn check_trial_gates(
             // carries, so the remedy is the tick, not the file.
             Some(crate::dispatch::Hidden::Skip) => bail!(
                 "{name} has `gate_at: {gate_at}`, but the trial skips `{gate_at}` on pipeline \
-                 `{}`, so the gate would never fire. Untick `{gate_at}` in the trial's skips \
+                 `{}`, so the gate would never fire. untick `{gate_at}` in the trial's skips \
                  for `{}`, or change or drop `gate_at:` in {name}.",
                 pipeline.name,
                 pipeline.name
             ),
             Some(why) => bail!(
                 "{name} has `gate_at: {gate_at}`, but the copy on pipeline `{}` will never run \
-                 `{gate_at}`: {}, so the gate would never fire. Untick `{}` in the trial, or \
+                 `{gate_at}`: {}, so the gate would never fire. untick `{}` in the trial, or \
                  change or drop `gate_at:` in {name}.",
                 pipeline.name,
                 why.refusal(),
@@ -11068,7 +11074,7 @@ fn delete_pending_panel(
     let noun = if count == 1 { "task" } else { "tasks" };
     let mut body = vec![
         String::new(),
-        clip(format!("Delete {count} pending {noun}:"), width),
+        clip(format!("delete {count} pending {noun}:"), width),
         String::new(),
     ];
     let note = |task: &super::pending_delete::DeleteEntry| {
@@ -11111,9 +11117,9 @@ fn delete_pending_panel(
 
 /// The text of the notice a delete opens when the pending directory no
 /// longer gives the list its popup showed.
-const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
-                               Nothing was deleted.\n\
-                               Pick delete again to see the current list.";
+const PENDING_CHANGED: &str = "pending tasks changed after the popup opened.\n\
+                               nothing was deleted.\n\
+                               pick delete again to see the current list.";
 
 /// The last line of a notice for a delete that failed: what to fix before
 /// picking delete again, chosen by the kind of error removing a file gave.
@@ -11122,9 +11128,9 @@ const PENDING_CHANGED: &str = "Pending tasks changed after the popup opened.\n\
 fn delete_remedy(kind: Option<std::io::ErrorKind>) -> &'static str {
     match kind {
         Some(std::io::ErrorKind::PermissionDenied) => {
-            "Fix the file's permissions, then pick delete again."
+            "fix the file's permissions, then pick delete again."
         }
-        _ => "Fix the error above, then pick delete again.",
+        _ => "fix the error above, then pick delete again.",
     }
 }
 
@@ -11162,7 +11168,7 @@ fn after_pending_delete(
             .flat_map(|group| &group.tasks)
             .any(|task| task_key(task) == *key)
     });
-    let reread = |err: &str| format!("The pending task list would not read again: {err}");
+    let reread = |err: &str| format!("the pending task list would not read again: {err}");
     match answer {
         DeleteOutcome::Removed => match reread_err {
             Some(err) => outcome("tasks deleted", reread(&err)),
@@ -11255,7 +11261,7 @@ fn begin_plan_delete(groups: &[Group], state: &ScreenState) -> Option<Mode> {
 fn delete_plan_panel(title: &str, page: &Path) -> Vec<String> {
     let body = [
         String::new(),
-        "Delete 1 plan page:".to_string(),
+        "delete 1 plan page:".to_string(),
         String::new(),
         format!("  {}", plan_file(page)),
     ];
@@ -11287,7 +11293,7 @@ fn after_plan_delete(
         }
     };
     adopt_groups(fresh, groups, state);
-    let reread = |err: &str| format!("The pending task list would not read again: {err}");
+    let reread = |err: &str| format!("the pending task list would not read again: {err}");
     let file = plan_file(page);
     match answer {
         PlanDeleteOutcome::Removed => match reread_err {
@@ -11295,7 +11301,7 @@ fn after_plan_delete(
             None => Mode::Browsing,
         },
         PlanDeleteOutcome::Named => {
-            let mut text = format!("A task names {file} in plan: now.\nNothing was deleted.");
+            let mut text = format!("a task names {file} in plan: now.\nnothing was deleted.");
             if let Some(err) = reread_err {
                 text.push_str(&format!("\n\n{}", reread(&err)));
             }
@@ -11549,7 +11555,7 @@ fn unreadable_refusal(
         "the queue holds {them} that will not parse, so whether the routine being queued \
          still has a live copy cannot be told:\n\n\
          {}\n\n\
-         A routine runs one copy at a time. Fix {it}; the routine can then be queued.",
+         a routine runs one copy at a time. fix {it}; the routine can then be queued.",
         files.join("\n")
     )
 }
@@ -11604,7 +11610,7 @@ impl std::fmt::Display for RoutineBusy {
         write!(
             f,
             "could not lock routine `{}` to queue it — another submission of it is being \
-             queued. Run this again in a moment.",
+             queued. run this again in a moment.",
             self.0
         )
     }
@@ -11682,8 +11688,8 @@ fn validate_routine_batch(
         let text = format!("{err:#}");
         match text.split_once("sets no `base:` and no --base was given") {
             Some((name, _)) => anyhow::Error::msg(format!(
-                "{name}sets no `base:`, and the job has no `base` key.\n\n  Set `base:` in the \
-                 task, or `base = \"<branch>\"` on the job.\n\nNothing was queued."
+                "{name}sets no `base:`, and the job has no `base` key.\n\n  set `base:` in the \
+                 task, or `base = \"<branch>\"` on the job.\n\nnothing was queued."
             )),
             None => err,
         }
@@ -12816,7 +12822,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "group `cart` has two tasks with no dependency in it: cart-totals and cart-empty \
-             — a group is one chain. Give one a `depends_on`, or move it to a group of its \
+             — a group is one chain. give one a `depends_on`, or move it to a group of its \
              own."
         );
     }
@@ -13833,7 +13839,7 @@ mod tests {
         let err = queue_unqueue(&repo, &pipelines, &unqueue_args("parent")).unwrap_err();
         let said = format!("{err:#}");
         assert!(!said.contains("--force\n"), "{said}");
-        assert!(said.contains("Unqueue `child` first"), "{said}");
+        assert!(said.contains("unqueue `child` first"), "{said}");
     }
 
     /// A forced unqueue sweeps the worktree's leftovers into a commit before it
@@ -13867,7 +13873,7 @@ mod tests {
 
         let said = format!("{err:#}");
         assert!(said.contains("detached HEAD, not `task/solo`"), "{said}");
-        assert!(said.contains("Nothing was interrupted, committed or torn down"));
+        assert!(said.contains("nothing was interrupted, committed or torn down"));
         assert!(worktree.join("left.txt").exists());
         assert_eq!(
             git(&["rev-parse", "HEAD"]),
@@ -14508,7 +14514,7 @@ mod tests {
         assert_eq!(
             err,
             "task `demo` has `gate_at: handover`, which runs a command in pipeline `default` — \
-             only an agent step can be held for a person. Change `gate_at:` to an agent step, \
+             only an agent step can be held for a person. change `gate_at:` to an agent step, \
              or delete it."
         );
 
@@ -14999,8 +15005,8 @@ mod tests {
             let err = parse_submission("a.md", &raw, Some("main")).unwrap_err();
             let message = format!("{err:#}");
             assert!(message.contains(&format!("`{known}:`")), "{message}");
-            assert!(message.contains("Remove it"), "{message}");
-            assert!(!message.contains("Rename"), "{message}");
+            assert!(message.contains("remove it"), "{message}");
+            assert!(!message.contains("rename"), "{message}");
         }
         let raw = task_text("a", "group: demo\nTracking: off\n", BODY);
         assert!(parse_submission("a.md", &raw, Some("main")).is_err());
@@ -16226,7 +16232,7 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ delete group cart ")),
             "{last}"
         );
-        assert!(last.contains("Delete 4 pending tasks:"), "{last}");
+        assert!(last.contains("delete 4 pending tasks:"), "{last}");
         assert!(last.contains("(depends on cart-totals)"), "{last}");
         assert_eq!(
             last.matches("[enter] confirm   [esc] close").count(),
@@ -16292,7 +16298,7 @@ mod tests {
             [
                 "╭─ delete group cart ─────────────────────────────╮",
                 "│                                                 │",
-                "│  Delete 4 pending tasks:                        │",
+                "│  delete 4 pending tasks:                        │",
                 "│                                                 │",
                 "│  cart                                           │",
                 "│    cart-empty-state                             │",
@@ -16314,7 +16320,7 @@ mod tests {
             [
                 "╭─ delete cart-empty-state ───────╮",
                 "│                                 │",
-                "│  Delete 1 pending task:         │",
+                "│  delete 1 pending task:         │",
                 "│                                 │",
                 "│  cart                           │",
                 "│    cart-empty-state             │",
@@ -16341,7 +16347,7 @@ mod tests {
             [
                 "╭─ delete cart-totals ──────────────────────────╮",
                 "│                                               │",
-                "│  Delete 3 pending tasks:                      │",
+                "│  delete 3 pending tasks:                      │",
                 "│                                               │",
                 "│  cart                                         │",
                 "│    cart-totals                                │",
@@ -16463,7 +16469,7 @@ mod tests {
         assert!(panel[16].contains("> delete"), "{panel:#?}");
         // 11 rows of listing: the group, nine tasks and the marker.
         assert!(panel[14].contains("↓ 16 more"), "{panel:#?}");
-        assert!(panel[2].contains("Delete 25 pending tasks:"), "{panel:#?}");
+        assert!(panel[2].contains("delete 25 pending tasks:"), "{panel:#?}");
     }
 
     /// `esc` closes the popup with every file still there, and any other
@@ -16622,7 +16628,7 @@ mod tests {
         assert!(
             notice
                 .text
-                .starts_with("The pending task list would not read again: "),
+                .starts_with("the pending task list would not read again: "),
             "{}",
             notice.text
         );
@@ -16631,7 +16637,7 @@ mod tests {
         };
         assert!(
             notice.text.starts_with(&format!(
-                "{PENDING_CHANGED}\n\nThe pending task list would not read again: "
+                "{PENDING_CHANGED}\n\nthe pending task list would not read again: "
             )),
             "{}",
             notice.text
@@ -16705,9 +16711,9 @@ mod tests {
             [
                 "╭─ not deleted ───────────────────────────────────╮",
                 "│                                                 │",
-                "│  Pending tasks changed after the popup opened.  │",
-                "│  Nothing was deleted.                           │",
-                "│  Pick delete again to see the current list.     │",
+                "│  pending tasks changed after the popup opened.  │",
+                "│  nothing was deleted.                           │",
+                "│  pick delete again to see the current list.     │",
                 "│                                                 │",
                 "│  [enter] confirm                                │",
                 "╰─────────────────────────────────────────────────╯",
@@ -16758,7 +16764,7 @@ mod tests {
                 "│  left:                                                │",
                 "│    cart-totals.md                                     │",
                 "│                                                       │",
-                "│  Fix the file's permissions, then pick delete again.  │",
+                "│  fix the file's permissions, then pick delete again.  │",
                 "│                                                       │",
                 "│  [enter] confirm                                      │",
                 "╰───────────────────────────────────────────────────────╯",
@@ -16784,7 +16790,7 @@ mod tests {
             "/q/cart-totals.md is not in the pending directory, so nothing was removed\n\n\
              removed:\n  nothing\n\n\
              left:\n  cart-totals.md\n\n\
-             Fix the error above, then pick delete again."
+             fix the error above, then pick delete again."
         );
     }
 
@@ -16821,7 +16827,7 @@ mod tests {
         assert!(
             notice
                 .text
-                .ends_with("\n\nFix the file's permissions, then pick delete again."),
+                .ends_with("\n\nfix the file's permissions, then pick delete again."),
             "{}",
             notice.text
         );
@@ -16829,10 +16835,10 @@ mod tests {
         assert_eq!(groups.len(), 1, "the group is still listed");
     }
 
-    /// On the routines tab, `o` over the list offers new job then delete
-    /// routine for a routine with no job, titled with the routine; over the details pane it offers open task,
-    /// titled with the task, and never open plan, even for a task with a
-    /// `plan:`.
+    /// On the routines tab, `o` over the list offers edit schedule then
+    /// delete routine for a routine with no job, titled with the routine;
+    /// over the details pane it offers open task, titled with the task, and
+    /// never open plan, even for a task with a `plan:`.
     #[test]
     fn the_routine_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("routine-options-lists");
@@ -16866,7 +16872,7 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ maintenance ")),
             "{last}"
         );
-        assert!(last.contains("│  > new job  "), "{last}");
+        assert!(last.contains("│  > edit schedule  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
         assert!(last.contains("[o] options   [tab] details"), "{last}");
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
@@ -17091,7 +17097,7 @@ mod tests {
         assert!(out.contains("id: in-a-sample"), "{out}");
     }
 
-    /// The task pane's `Depends on:` row reads `depends_on` straight off a
+    /// The task pane's `depends on:` row reads `depends_on` straight off a
     /// task, without validating it — and reads nothing else. The
     /// task here carries a `touches` too, to hold the pane to not
     /// showing it.
@@ -17106,7 +17112,7 @@ mod tests {
     }
 
     /// A task naming no `depends_on` — or carrying no fence at all — reads as
-    /// an empty list rather than an error: the pane shows `Depends on:  -`
+    /// an empty list rather than an error: the pane shows `depends on:  -`
     /// for the first case and never panics on either.
     #[test]
     fn depends_on_defaults_to_an_empty_list() {
@@ -17170,7 +17176,7 @@ mod tests {
             assert!(!left.is_empty(), "expected the one group to have a row");
             assert!(
                 right.len() >= 3,
-                "expected a blank line, the task row and its Pipeline: row, got {right:?}"
+                "expected a blank line, the task row and its pipeline: row, got {right:?}"
             );
 
             let rendered = two_pane_frame(&left, &right, "pending", "one", layout).join("\n");
@@ -17845,7 +17851,7 @@ mod tests {
         let said = format!("{err:#}");
         assert!(
             said.contains(
-                "index-file starts from task/reader, which doesn't exist. Set starts_from: in \
+                "index-file starts from task/reader, which doesn't exist. set starts_from: in \
                  the task front matter and requeue."
             ),
             "{said}"
@@ -17900,7 +17906,7 @@ mod tests {
         .expect_err("bugfix has no `implement` step");
         let said = format!("{err:#}");
         assert!(said.contains("gated.md has `gate_at: implement`"), "{said}");
-        assert!(said.contains("Untick `bugfix`"), "{said}");
+        assert!(said.contains("untick `bugfix`"), "{said}");
         assert!(!said.contains("gated-1"), "{said}");
 
         let default = pipelines.get("default").unwrap();
@@ -17959,7 +17965,7 @@ mod tests {
         assert!(said.contains("a.md has `gate_at: work`"), "{said}");
         assert!(said.contains("the trial skips `work`"), "{said}");
         assert!(said.contains("the gate would never fire"), "{said}");
-        assert!(said.contains("Untick `work`"), "{said}");
+        assert!(said.contains("untick `work`"), "{said}");
         assert!(!said.contains("its own skip:"), "{said}");
 
         let said = judge(vec![
@@ -18458,7 +18464,7 @@ mod tests {
             "the task is named by its own id, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line.contains("Depends on:")),
+            lines.iter().any(|line| line.contains("depends on:")),
             "the task still says what it depends on, got {lines:?}"
         );
 
@@ -18508,7 +18514,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("Pipeline:") && line.contains("default")),
+                .any(|line| line.contains("pipeline:") && line.contains("default")),
             "tasks_pane_lines must still draw the task's own pipeline off the \
              field list_groups already filled in, got {lines:?}"
         );
@@ -18527,7 +18533,7 @@ mod tests {
     }
 
     /// A task's own `title:` reaches the tasks pane under its own
-    /// `Description:` label — the one sentence a person picks by.
+    /// `description:` label — the one sentence a person picks by.
     #[test]
     fn a_tasks_title_reaches_the_tasks_pane() {
         let (repo, _root_guard) = fixture("screen-description");
@@ -18548,7 +18554,7 @@ mod tests {
         );
     }
 
-    /// A task with no `title:` at all draws no `Description:` row,
+    /// A task with no `title:` at all draws no `description:` row,
     /// rather than an empty one. `parse_submission` is what refuses it, at
     /// submit time — the pane just has nothing to draw.
     #[test]
@@ -18565,9 +18571,9 @@ mod tests {
 
         let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 46);
         // Only the blank separator the loop always opens a task with, the
-        // task row, its Pipeline:, Depends on:, Starts from: and Lands in:
+        // task row, its pipeline:, depends on:, starts from: and lands in:
         // rows — nothing
-        // past it, since this task has no title to draw a Description:
+        // past it, since this task has no title to draw a description:
         // row from. The task names no `pipeline:` either, and there is
         // no project default to show in its place any more.
         assert_eq!(
@@ -18575,10 +18581,10 @@ mod tests {
             vec![
                 String::new(),
                 "  wire".to_string(),
-                format!("    {:<LABEL_FIELD$}{}", "Pipeline:", TRIAL_UNASSIGNED),
-                "    Depends on:  -".to_string(),
-                "    Starts from: -".to_string(),
-                "    Lands in:    -".to_string(),
+                format!("    {:<LABEL_FIELD$}{}", "pipeline:", TRIAL_UNASSIGNED),
+                "    depends on:  -".to_string(),
+                "    starts from: -".to_string(),
+                "    lands in:    -".to_string(),
             ],
             "{lines:?}"
         );
@@ -18697,12 +18703,12 @@ mod tests {
             vec![
                 String::new(),
                 "  tracking-open".to_string(),
-                "    Pipeline:    default".to_string(),
-                "    Depends on:  -".to_string(),
-                "    Starts from: task/gh-412-checkout".to_string(),
-                "    Lands in:    task/gh-412-checkout".to_string(),
-                "    Gate:        review".to_string(),
-                "    Description: tracking-open, done".to_string(),
+                "    pipeline:    default".to_string(),
+                "    depends on:  -".to_string(),
+                "    starts from: task/gh-412-checkout".to_string(),
+                "    lands in:    task/gh-412-checkout".to_string(),
+                "    gate:        review".to_string(),
+                "    description: tracking-open, done".to_string(),
             ],
             "{lines:?}"
         );
@@ -18734,11 +18740,11 @@ mod tests {
             vec![
                 String::new(),
                 "  cart-discounts".to_string(),
-                "    Pipeline:    default".to_string(),
-                "    Depends on:  cart-totals".to_string(),
-                "    Starts from: cart-totals".to_string(),
-                "    Lands in:    plan/other".to_string(),
-                "    Description: cart-discounts, done".to_string(),
+                "    pipeline:    default".to_string(),
+                "    depends on:  cart-totals".to_string(),
+                "    starts from: cart-totals".to_string(),
+                "    lands in:    plan/other".to_string(),
+                "    description: cart-discounts, done".to_string(),
             ],
             "{lines:?}"
         );
@@ -18766,8 +18772,8 @@ mod tests {
 
         let (lines, _, _) = tasks_pane_lines(&groups, &pipelines, &state, 60);
         assert!(
-            lines.contains(&"    Starts from: main".to_string())
-                && lines.contains(&"    Lands in:    plan/other".to_string()),
+            lines.contains(&"    starts from: main".to_string())
+                && lines.contains(&"    lands in:    plan/other".to_string()),
             "{lines:?}"
         );
     }
@@ -18802,13 +18808,13 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            rows("Lands in:"),
-            vec!["    Lands in:    feat/checkout"; 2],
+            rows("lands in:"),
+            vec!["    lands in:    feat/checkout"; 2],
             "{lines:?}"
         );
         assert_eq!(
-            rows("Starts from:"),
-            vec!["    Starts from: feat/checkout"; 2],
+            rows("starts from:"),
+            vec!["    starts from: feat/checkout"; 2],
             "{lines:?}"
         );
     }
@@ -18834,15 +18840,15 @@ mod tests {
             vec![
                 String::new(),
                 "  wire".to_string(),
-                "    Pipeline:".to_string(),
+                "    pipeline:".to_string(),
                 "      default".to_string(),
-                "    Depends on:".to_string(),
+                "    depends on:".to_string(),
                 "      -".to_string(),
-                "    Starts from:".to_string(),
+                "    starts from:".to_string(),
                 "      -".to_string(),
-                "    Lands in:".to_string(),
+                "    lands in:".to_string(),
                 "      -".to_string(),
-                "    Description:".to_string(),
+                "    description:".to_string(),
                 "      wire, done".to_string(),
             ],
             "{lines:?}"
@@ -18904,7 +18910,7 @@ mod tests {
         let state = ScreenState::new();
 
         let (lines, starts, _) = tasks_pane_lines(&groups, &Pipelines::builtin(), &state, 52);
-        assert_eq!(lines, ["", "  Use /spoolway-tasks"]);
+        assert_eq!(lines, ["", "  use /spoolway-tasks"]);
         assert!(starts.is_empty(), "a plan row has no task rows: {starts:?}");
     }
 
@@ -19213,7 +19219,7 @@ mod tests {
                     "─".repeat(13)
                 ),
                 "│                                  │".to_string(),
-                "│  Delete 1 plan page:             │".to_string(),
+                "│  delete 1 plan page:             │".to_string(),
                 "│                                  │".to_string(),
                 "│    plans/2026-10-21-search.html  │".to_string(),
                 "│                                  │".to_string(),
@@ -19263,7 +19269,7 @@ mod tests {
         assert_eq!(notice.title, "not deleted");
         assert_eq!(
             notice.text,
-            "A task names plans/2026-10-21-search.html in plan: now.\nNothing was deleted."
+            "a task names plans/2026-10-21-search.html in plan: now.\nnothing was deleted."
         );
         assert!(groups.iter().all(|g| g.state != GroupState::Plan));
     }
@@ -19322,7 +19328,7 @@ mod tests {
                 "│  Permission denied (os error 13)                      │",
                 "│    plans/2026-10-21-search.html                       │",
                 "│                                                       │",
-                "│  Fix the file's permissions, then pick delete again.  │",
+                "│  fix the file's permissions, then pick delete again.  │",
                 "│                                                       │",
                 "│  [esc] close                                          │",
                 "╰───────────────────────────────────────────────────────╯",
@@ -19341,7 +19347,7 @@ mod tests {
         assert_eq!(
             notice.text,
             "Is a directory (os error 21)\n  plans/2026-10-21-search.html\n\n\
-             Fix the error above, then pick delete again."
+             fix the error above, then pick delete again."
         );
     }
 
@@ -19367,7 +19373,7 @@ mod tests {
         std::fs::set_permissions(&dir, perms).unwrap();
         assert!(page.exists());
         assert!(held.contains("plan not deleted"), "enter closed it: {held}");
-        assert!(held.contains("Fix the file's permissions"), "{held}");
+        assert!(held.contains("fix the file's permissions"), "{held}");
         assert!(
             !closed.contains("plan not deleted"),
             "esc kept it: {closed}"
@@ -20779,7 +20785,7 @@ mod tests {
         };
         let said = format!("{mode:?}");
         assert!(said.contains("the trial skips `implement`"), "{said}");
-        assert!(said.contains("Untick `implement`"), "{said}");
+        assert!(said.contains("untick `implement`"), "{said}");
         assert_eq!(
             repo.queue_dir().read_dir().unwrap().count(),
             0,
@@ -20937,7 +20943,7 @@ mod tests {
         assert!(
             format!("{err:#}").contains(
                 "task id `nite` is the name of routine `nite`, whose copies' lanes are \
-                 named `nite · <step>`. Give this task another id; nothing was queued."
+                 named `nite · <step>`. give this task another id; nothing was queued."
             ),
             "{err:#}"
         );
@@ -21194,10 +21200,10 @@ mod tests {
         // No dispatcher holds this fixture's lock, so the popup ends by
         // saying one has to be started.
         assert!(
-            frame.contains("│  Start the dispatcher to begin working "),
+            frame.contains("│  start the dispatcher to begin working "),
             "{frame}"
         );
-        assert!(!frame.contains("Dispatcher is running"), "{frame}");
+        assert!(!frame.contains("dispatcher is running"), "{frame}");
     }
 
     /// The queued popup as the plan's mockup draws it: the task list, a
@@ -21217,7 +21223,7 @@ mod tests {
             &ids,
             false,
             &[],
-            Some("Start the dispatcher to begin working"),
+            Some("start the dispatcher to begin working"),
             None,
         ) else {
             panic!("a landed batch is Mode::Queued");
@@ -21233,7 +21239,7 @@ mod tests {
                 "│    task-labels                                           │",
                 "│    jira-story-subtasks                                   │",
                 "│                                                          │",
-                "│  Start the dispatcher to begin working                   │",
+                "│  start the dispatcher to begin working                   │",
                 "│                                                          │",
                 "│  [enter] confirm                                         │",
                 format!("{BOTTOM_LEFT}──────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
@@ -21268,7 +21274,7 @@ mod tests {
             &ids,
             false,
             &not_queued,
-            Some("Dispatcher is running"),
+            Some("dispatcher is running"),
             None,
         ) else {
             panic!("a landed batch is Mode::Queued");
@@ -21299,10 +21305,10 @@ mod tests {
                 "  retention-and-logs      (depends on archive-index-readers)",
                 "",
                 "archive-index-file starts from task/queue-tab-reader-thread, which",
-                "doesn't exist. Set starts_from: in the task front matter and",
+                "doesn't exist. set starts_from: in the task front matter and",
                 "requeue.",
                 "",
-                "Dispatcher is running",
+                "dispatcher is running",
                 "",
                 "[enter] confirm",
             ],
@@ -21336,7 +21342,7 @@ mod tests {
     fn a_batch_the_hook_ran_for_says_so_above_the_queued_list() {
         let ids = vec!["cart-01".to_string(), "search-01".to_string()];
         let Mode::Queued { panel, .. } =
-            queued_panel(&ids, true, &[], Some("Dispatcher is running"), None)
+            queued_panel(&ids, true, &[], Some("dispatcher is running"), None)
         else {
             panic!("a landed batch is Mode::Queued");
         };
@@ -21352,13 +21358,13 @@ mod tests {
             body[1..panel.len() - 1],
             [
                 "",
-                "Hook executed successfully",
+                "hook executed successfully",
                 "",
                 "queued 2 tasks",
                 "cart-01",
                 "search-01",
                 "",
-                "Dispatcher is running",
+                "dispatcher is running",
                 "",
                 "[enter] confirm",
             ],
@@ -21366,14 +21372,14 @@ mod tests {
         );
     }
 
-    /// A live dispatcher's lock turns the line into `Dispatcher is running`.
+    /// A live dispatcher's lock turns the line into `dispatcher is running`.
     /// This process takes the dispatcher's own lock, the one a real
     /// `spoolway dispatch` holds for as long as it runs.
     #[test]
     fn a_held_dispatcher_lock_says_the_dispatcher_is_running() {
         let (repo, _root_guard) = fixture("queued-popup-dispatcher-running");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-        assert_eq!(dispatcher_line(&repo), Some("Dispatcher is running"));
+        assert_eq!(dispatcher_line(&repo), Some("dispatcher is running"));
     }
 
     /// Only the dispatcher's lock decides the line: the screen's own lock,
@@ -21385,7 +21391,7 @@ mod tests {
         let _screen = crate::lock::Lock::acquire(&repo.screen_lock_file(), false, None).unwrap();
         assert_eq!(
             dispatcher_line(&repo),
-            Some("Start the dispatcher to begin working")
+            Some("start the dispatcher to begin working")
         );
     }
 
@@ -21407,8 +21413,8 @@ mod tests {
             panic!("a landed batch is Mode::Queued");
         };
         let flat = panel.join("\n");
-        assert!(!flat.contains("Dispatcher is running"), "{flat}");
-        assert!(!flat.contains("Start the dispatcher"), "{flat}");
+        assert!(!flat.contains("dispatcher is running"), "{flat}");
+        assert!(!flat.contains("start the dispatcher"), "{flat}");
         assert!(flat.contains("[enter] confirm"), "{flat}");
     }
 
@@ -21574,7 +21580,7 @@ mod tests {
         )
         .expect("a stray task beside a queueable group must still be named");
         assert!(msg.contains("no-group.md"), "{msg}");
-        assert!(!msg.contains("Nothing to list"), "{msg}");
+        assert!(!msg.contains("nothing to list"), "{msg}");
         assert_eq!(opening_title(&groups), "tasks not listed");
     }
 
@@ -21872,7 +21878,7 @@ mod tests {
         assert!(!last.contains("[esc] back"), "{last}");
         assert!(
             !last.contains("[n] new job") && !last.contains("[x] delete"),
-            "new job and delete are in the menu, not on the line: {last}"
+            "edit schedule and delete are in the menu, not on the line: {last}"
         );
         assert!(!last.contains("r pending"), "{last}");
     }
@@ -21897,7 +21903,7 @@ mod tests {
             "`o` with the folders pane focused must never reach `Mode::Outcome`:\n{drawn}"
         );
         assert!(!drawn.contains("> open"), "{drawn}");
-        assert!(drawn.contains("> new job"), "{drawn}");
+        assert!(drawn.contains("> edit schedule"), "{drawn}");
     }
 
     /// Opening a terminal editor on a headless run finds no pane to open it
@@ -22427,7 +22433,7 @@ mod tests {
         assert!(job_names(&repo).is_empty());
     }
 
-    /// New job over the list opens the schedule popup, titled for
+    /// Edit schedule over the list opens the schedule popup, titled for
     /// the highlighted routine, with its keys on the line under the frame —
     /// and writes nothing yet.
     #[test]
@@ -22455,15 +22461,15 @@ mod tests {
 
         let saved = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r")).to_string();
         assert!(saved.contains("─ job saved "), "{saved}");
-        assert!(saved.contains("Schedule:    0 3 * * 1-5"), "{saved}");
-        assert!(!saved.contains("Schedule:    none"), "{saved}");
+        assert!(saved.contains("schedule:    0 3 * * 1-5"), "{saved}");
+        assert!(!saved.contains("schedule:    none"), "{saved}");
     }
 
-    /// New job is offered only over the routine list: the details pane's menu
-    /// does not list it, and `down` then `enter` there still picks open task,
-    /// its one item, rather than a schedule popup. Headless, so open task
-    /// surfaces its refusal instead of opening an editor pane in a real
-    /// multiplexer.
+    /// Edit schedule is offered only over the routine list: the details
+    /// pane's menu does not list it, and `down` then `enter` there still picks
+    /// open task, its one item, rather than a schedule popup. Headless, so
+    /// open task surfaces its refusal instead of opening an editor pane in a
+    /// real multiplexer.
     #[test]
     fn the_tasks_panes_menu_offers_no_new_job() {
         let (repo, _root_guard) = fixture("routine-new-job-tasks-pane");
@@ -22472,7 +22478,7 @@ mod tests {
         seed_two_routines(&repo);
 
         let last = last_frame(&routines_screen(&repo, "\to")).to_string();
-        assert!(!last.contains("new job"), "{last}");
+        assert!(!last.contains("edit schedule"), "{last}");
 
         let last = last_frame(&routines_screen(&repo, "\to\x1b[B\r")).to_string();
         assert!(!last.contains("when does"), "{last}");
@@ -22528,9 +22534,9 @@ mod tests {
             saved.contains("maintenance runs at 03:00, Monday to Friday, on bugfix."),
             "{saved}"
         );
-        assert!(saved.contains("Next: "), "{saved}");
+        assert!(saved.contains("next: "), "{saved}");
         assert!(
-            saved.contains("Edit or deactivate it with o on its routine."),
+            saved.contains("edit or deactivate it with o on its routine."),
             "{saved}"
         );
         // The key line under the frame is the popup's own `[enter]
@@ -22561,7 +22567,7 @@ mod tests {
 
         assert!(last.contains("─ not saved "), "{last}");
         assert!(
-            last.contains("A job named `nightly` already exists, in"),
+            last.contains("a job named `nightly` already exists, in"),
             "{last}"
         );
         let jobs = crate::jobs::load(&repo).unwrap();
@@ -22571,7 +22577,7 @@ mod tests {
         assert!(!repo.user_jobs_file().exists(), "nothing written");
     }
 
-    /// The routine's job as edit job's test writes it: in the project
+    /// The routine's job as edit schedule's test writes it: in the project
     /// store, on the `default` pipeline, which sorts after `bugfix`, so a
     /// pipeline popup that opened on the first pipeline would save the
     /// wrong one.
@@ -22590,9 +22596,9 @@ mod tests {
         .unwrap();
     }
 
-    /// A routine with one job offers edit job, deactivate job and delete
-    /// routine, and neither new job nor delete job; an inactive job offers
-    /// activate job in place of deactivate job.
+    /// A routine with one job offers edit schedule, deactivate job and
+    /// delete routine, and neither new job, edit job nor delete job; an
+    /// inactive job offers activate job in place of deactivate job.
     #[test]
     fn a_routine_with_one_job_offers_its_job_items_then_delete_routine() {
         use crate::jobs::Scope;
@@ -22603,7 +22609,7 @@ mod tests {
         let last = last_frame(&routines_screen(&repo, "jo")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ nightly ")), "{last}");
         let items = [
-            "│  > edit job  ",
+            "│  > edit schedule  ",
             "│    deactivate job  ",
             "│    delete routine  ",
         ];
@@ -22613,6 +22619,7 @@ mod tests {
             .collect();
         assert!(at.is_sorted(), "in the mockup's order: {last}");
         assert!(!last.contains("new job"), "{last}");
+        assert!(!last.contains("edit job"), "{last}");
         assert!(!last.contains("delete job"), "{last}");
         assert!(!last.contains("│    activate job"), "{last}");
 
@@ -22627,7 +22634,7 @@ mod tests {
     /// A routine two jobs run offers to switch either one by name —
     /// activate job for the inactive one, deactivate job for the active
     /// one — sorted as the details pane lists them, then delete routine,
-    /// and neither edit job nor delete job.
+    /// and neither edit schedule nor delete job.
     #[test]
     fn a_routine_with_two_jobs_offers_to_switch_either_by_name() {
         use crate::jobs::Scope;
@@ -22655,7 +22662,7 @@ mod tests {
         assert!(last.contains("│  > activate job nightly-a  "), "{last}");
         assert!(last.contains("│    deactivate job nightly-b  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
-        assert!(!last.contains("edit job"), "{last}");
+        assert!(!last.contains("edit schedule"), "{last}");
         assert!(!last.contains("delete job"), "{last}");
     }
 
@@ -22717,7 +22724,7 @@ mod tests {
         assert!(last.contains("─ routines ─"), "{last}");
         assert!(!last.contains("deactivate job"), "the menu closed: {last}");
         assert!(
-            last.contains("Next:        inactive"),
+            last.contains("next:        inactive"),
             "the details pane says so: {last}"
         );
 
@@ -22732,7 +22739,7 @@ mod tests {
         );
     }
 
-    /// Edit job opens the schedule popup on the job's own schedule and then
+    /// Edit schedule opens the schedule popup on the job's own schedule and then
     /// the pipeline popup on its own pipeline, and saves under the job's
     /// own name to its own store, keeping its routine.
     #[test]
@@ -22795,7 +22802,7 @@ mod tests {
             last.contains("nightly-b also runs nightly and is active."),
             "{last}"
         );
-        assert!(last.contains("Deactivate it first,"), "{last}");
+        assert!(last.contains("deactivate it first,"), "{last}");
         assert!(last.contains("then activate this one."), "{last}");
         let after = (
             std::fs::read_to_string(repo.user_jobs_file()).unwrap(),
@@ -22830,7 +22837,7 @@ mod tests {
         assert_eq!(notice.title, "activate job");
         assert_eq!(
             notice.text,
-            "nightly-b, nightly-c also run nightly and are active. Deactivate them first, \
+            "nightly-b, nightly-c also run nightly and are active. deactivate them first, \
              then activate this one."
         );
         let enabled: Vec<bool> = crate::jobs::load(&repo)
@@ -22903,8 +22910,8 @@ mod tests {
     }
 
     /// A job gone from its store between `o` and the pick is not written
-    /// back: edit job and deactivate job both open a popup saying so, and the
-    /// store stays without it.
+    /// back: edit schedule and deactivate job both open a popup saying so,
+    /// and the store stays without it.
     #[test]
     fn a_job_item_whose_job_is_gone_changes_nothing_and_says_so() {
         use crate::jobs::Scope;
@@ -23252,7 +23259,7 @@ mod tests {
         assert_eq!(starts, [0, 1]);
     }
 
-    /// A job row's details are the job's config, `Next:` saying it never
+    /// A job row's details are the job's config, `next:` saying it never
     /// fires, then why and what to do, with no tasks, for a job whose
     /// routine is missing. A job on a task file says that instead.
     #[test]
@@ -23282,20 +23289,20 @@ mod tests {
             details(2),
             [
                 "",
-                "  Schedule:    0 3 * * 1-5",
-                "  Pipeline:    impl_fast",
-                "  Scope:       user",
-                "  Next:        never, its routine is missing",
-                "  Last:        never",
-                "  Job:         nightly-old",
+                "  schedule:    0 3 * * 1-5",
+                "  pipeline:    impl_fast",
+                "  scope:       user",
+                "  next:        never, its routine is missing",
+                "  last:        never",
+                "  job:         nightly-old",
                 "",
-                "  No routine nightly-old under .spoolway/routines/.",
-                "  Press o to point this job at a routine.",
+                "  no routine nightly-old under .spoolway/routines/.",
+                "  press o to point this job at a routine.",
             ]
         );
         let task_file = details(3);
-        assert_eq!(task_file[4], "  Next:        never, it runs no routine");
-        assert_eq!(task_file[6], "  Job:         deps-only");
+        assert_eq!(task_file[4], "  next:        never, it runs no routine");
+        assert_eq!(task_file[6], "  job:         deps-only");
         assert_eq!(
             task_file[8],
             "  nightly/audit-deps.md is a task, not a routine."
@@ -23355,7 +23362,8 @@ mod tests {
         assert!(!last.contains("[x] nightly-old"), "{last}");
     }
 
-    /// `o` on a job row offers edit job alone, titled with the row's name.
+    /// `o` on a job row offers edit schedule alone, titled with the row's
+    /// name.
     #[test]
     fn o_on_a_job_row_offers_edit_job_alone() {
         let (repo, _root_guard) = fixture("routines-orphan-menu");
@@ -23366,13 +23374,14 @@ mod tests {
             last.contains(&format!("{TOP_LEFT}─ nightly-old ")),
             "{last}"
         );
-        assert!(last.contains("│  > edit job  "), "{last}");
+        assert!(last.contains("│  > edit schedule  "), "{last}");
+        assert!(!last.contains("edit job"), "{last}");
         assert!(!last.contains("delete job"), "{last}");
         assert!(!last.contains("deactivate job"), "{last}");
         assert!(!last.contains("delete routine"), "{last}");
     }
 
-    /// Edit job on a job row opens the routine picker, which lists the
+    /// Edit schedule on a job row opens the routine picker, which lists the
     /// routine folders and none of their tasks. `enter` moves on to the
     /// schedule and pipeline popups, and the save points the job at the
     /// picked folder, under its own name in its own store. `esc` on the
@@ -23430,10 +23439,10 @@ mod tests {
         );
         let job = &crate::jobs::load(&repo).unwrap()[0];
 
-        // `Next:` is read off the clock, which can cross a firing between
+        // `next:` is read off the clock, which can cross a firing between
         // drawing the pane and working out the value here, so either side of
         // the draw is accepted, and the row is then compared as the earlier.
-        let next = |when: String| format!("  Next:        {when}");
+        let next = |when: String| format!("  next:        {when}");
         let before = next(super::super::jobs::detail_next(job));
         let mut pane = details_at(&repo, MOCKUP_DETAILS_WIDTH);
         let after = next(super::super::jobs::detail_next(job));
@@ -23443,18 +23452,18 @@ mod tests {
             pane,
             [
                 "",
-                "  Schedule:    0 */2 * * *",
-                "  Pipeline:    dependabot",
-                "  Scope:       project",
+                "  schedule:    0 */2 * * *",
+                "  pipeline:    dependabot",
+                "  scope:       project",
                 &before,
-                "  Last:        never",
-                "  Job:         dependabot-review",
+                "  last:        never",
+                "  job:         dependabot-review",
                 "",
                 "  tasks",
                 "    review-dependabot-prs",
-                "      Pipeline:    dependabot",
-                "      Depends on:  -",
-                "      Description: chore(deps): review and merge open Dependabot pull",
+                "      pipeline:    dependabot",
+                "      depends on:  -",
+                "      description: chore(deps): review and merge open Dependabot pull",
                 "                   requests",
             ],
             "{pane:#?}"
@@ -23472,7 +23481,7 @@ mod tests {
             pane[..5],
             [
                 "",
-                "  Schedule:    none",
+                "  schedule:    none",
                 "",
                 "  tasks",
                 "    review-dependabot-prs"
@@ -23505,10 +23514,10 @@ mod tests {
             pane[..8],
             [
                 "",
-                "  Jobs:        2 run this routine, so neither fires",
+                "  jobs:        2 run this routine, so neither fires",
                 "                 dependabot-review   project",
                 "                 dependabot-weekly   user",
-                "               Deactivate one with o to fire the other.",
+                "               deactivate one with o to fire the other.",
                 "",
                 "  tasks",
                 "    review-dependabot-prs",
@@ -23542,10 +23551,10 @@ mod tests {
             pane[..7],
             [
                 "",
-                "  Jobs:        2 run this routine; only b-live fires",
+                "  jobs:        2 run this routine; only b-live fires",
                 "                 a-paused   user, inactive",
                 "                 b-live     project",
-                "               Deactivate the active one with o before activating",
+                "               deactivate the active one with o before activating",
                 "               another.",
                 "",
             ],
@@ -23578,12 +23587,12 @@ mod tests {
             pane[..9],
             [
                 "",
-                "  Jobs:",
+                "  jobs:",
                 "    2 run this routine, so neither",
                 "    fires",
                 "      dependabot-review   project",
                 "      dependabot-weekly   user",
-                "    Deactivate one with o to fire",
+                "    deactivate one with o to fire",
                 "    the other.",
                 "",
             ],
@@ -23623,14 +23632,14 @@ mod tests {
             pane[..10],
             [
                 "",
-                "  Jobs:",
+                "  jobs:",
                 "    2 run this routine, all",
                 "    inactive",
                 "      dependabot-review",
                 "        project, inactive",
                 "      dependabot-weekly",
                 "        user, inactive",
-                "    Activate one with o to fire it.",
+                "    activate one with o to fire it.",
                 "",
             ],
             "{pane:#?}"
@@ -23648,7 +23657,7 @@ mod tests {
 
         let pane = details_pane(&repo);
         assert!(
-            pane[1].starts_with("  Jobs:        will not load: "),
+            pane[1].starts_with("  jobs:        will not load: "),
             "{pane:#?}"
         );
         let tasks = pane
@@ -24029,9 +24038,9 @@ mod tests {
                 "",
                 "release-spoolway is still in the queue, at step ship.",
                 "",
-                "A routine runs one copy at a time. Let it finish, resume or",
+                "a routine runs one copy at a time. let it finish, resume or",
                 "restart it from the board if it has stopped, or unqueue it",
-                "if it has not started. Then queue the routine again.",
+                "if it has not started. then queue the routine again.",
                 "",
                 "[enter] close",
             ],
@@ -24189,7 +24198,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.ends_with("Fix them; the routine can then be queued."),
+            err.ends_with("fix them; the routine can then be queued."),
             "{err}"
         );
         assert_eq!(queue_files(&repo), ["audit-deps-1.md", "audit-deps.md"]);
@@ -24715,7 +24724,7 @@ mod tests {
 
             assert!(err.contains("names `chekout`"), "{err}");
             assert!(err.contains("cart, checkout, search"), "{err}");
-            assert!(err.contains("Nothing was queued."), "{err}");
+            assert!(err.contains("nothing was queued."), "{err}");
             assert!(!calls.exists(), "the hook ran before the refusal");
             assert!(repo.task("cart-01").is_err(), "something was queued");
         }
@@ -24784,7 +24793,7 @@ mod tests {
                 .to_string();
 
             assert!(err.contains("empty group name"), "{err}");
-            assert!(err.contains("Nothing was queued."), "{err}");
+            assert!(err.contains("nothing was queued."), "{err}");
             assert!(!calls.exists(), "the hook ran before the refusal");
             assert!(repo.task("cart-01").is_err(), "something was queued");
         }
@@ -26432,7 +26441,7 @@ group_description: search
             /// 44 cells full.
             fn bar(filled: usize) -> String {
                 format!(
-                    "Progress: {}{}",
+                    "progress: {}{}",
                     "█".repeat(filled),
                     "░".repeat(44 - filled)
                 )
@@ -26449,13 +26458,13 @@ group_description: search
             /// The `issue tracking` progress popups in `drawn`, in the order
             /// they were drawn, each cut down to its rows by [`popup_rows`].
             /// The question carries the same title, so a frame counts only
-            /// when it holds the bar's `Progress: ` label.
+            /// when it holds the bar's `progress: ` label.
             fn running_popups(drawn: &str) -> Vec<Vec<String>> {
                 drawn
                     .split("\x1b[?2026h\x1b[H")
                     .filter(|frame| {
                         frame.contains(&format!("{TOP_LEFT}─ issue tracking "))
-                            && frame.contains("Progress: ")
+                            && frame.contains("progress: ")
                     })
                     .map(|frame| popup_rows(frame, "issue tracking"))
                     .collect()
@@ -26472,7 +26481,7 @@ group_description: search
                 let first = shop_order(&repo)[0].clone();
                 let mut expected = vec![
                     String::new(),
-                    "Deactivate issue tracking for selected groups:".to_string(),
+                    "deactivate issue tracking for selected groups:".to_string(),
                     String::new(),
                 ];
                 expected.extend(shop_rows(&repo, &first, &[]));
@@ -26507,7 +26516,7 @@ group_description: search
                     [
                         "╭─ issue tracking ─────────────────────────────────────────────────╮",
                         "│                                                                  │",
-                        "│  Deactivate issue tracking for selected groups:                  │",
+                        "│  deactivate issue tracking for selected groups:                  │",
                         "│                                                                  │",
                         rows[0],
                         rows[1],
@@ -26748,7 +26757,7 @@ depends_on: [search-old]
                         "  cart-empty-state",
                         "  cart-totals",
                         "",
-                        "Start the dispatcher to begin working",
+                        "start the dispatcher to begin working",
                         "",
                         "[enter] confirm",
                     ],
@@ -26800,13 +26809,13 @@ depends_on: [search-old]
                     rows,
                     [
                         "",
-                        "Hook executed successfully",
+                        "hook executed successfully",
                         "",
                         "queued 2 tasks",
                         "  cart-empty-state",
                         "  cart-totals",
                         "",
-                        "Start the dispatcher to begin working",
+                        "start the dispatcher to begin working",
                         "",
                         "[enter] confirm",
                     ],
@@ -26839,7 +26848,7 @@ depends_on: [search-old]
                 assert_eq!(hook_calls(&repo).len(), 2);
                 let frame = last_frame(&drawn);
                 let rows = popup_rows(frame, "queued");
-                assert_eq!(rows[1], "Hook executed successfully", "{frame}");
+                assert_eq!(rows[1], "hook executed successfully", "{frame}");
                 assert!(!frame.contains("created"), "{frame}");
             }
 
@@ -26911,7 +26920,7 @@ ticket: \"#9\"
                 assert!(!frame.contains("names prefixed"), "{frame}");
                 assert_eq!(
                     popup_rows(frame, "queued")[..4],
-                    ["", "Hook executed successfully", "", "queued 2 tasks"],
+                    ["", "hook executed successfully", "", "queued 2 tasks"],
                     "{frame}"
                 );
                 let top = frame
@@ -26951,7 +26960,7 @@ group_description: audit
                 assert_eq!(
                     rows[1..5],
                     [
-                        "Deactivate issue tracking for selected groups:",
+                        "deactivate issue tracking for selected groups:",
                         "",
                         "> [ ] nightly   1 task",
                         "",
@@ -27046,7 +27055,7 @@ group_description: audit
                 let frame = last_frame(&drawn);
                 assert_eq!(
                     popup_rows(frame, "queued")[..4],
-                    ["", "Hook executed successfully", "", "queued 1 task"],
+                    ["", "hook executed successfully", "", "queued 1 task"],
                     "{frame}"
                 );
             }
@@ -28054,7 +28063,7 @@ body\n";
         let err = queue_unqueue(&repo, &pipelines, &unqueue_forced_args("solo")).unwrap_err();
         let said = format!("{err:#}");
         assert!(
-            said.contains("did not unqueue") && said.contains("Nothing was torn down"),
+            said.contains("did not unqueue") && said.contains("nothing was torn down"),
             "{said}"
         );
         assert!(

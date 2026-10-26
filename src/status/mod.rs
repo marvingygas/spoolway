@@ -2024,12 +2024,12 @@ fn picker_gone_stale(repo: &Repo, pipelines: &Pipelines, picker: &ResumePicker) 
     let id = &picker.id;
     let Ok(task) = repo.task(id) else {
         return Some(format!(
-            "`{id}` is no longer in the queue, so nothing was resumed. Press esc to close this."
+            "`{id}` is no longer in the queue, so nothing was resumed. press esc to close this."
         ));
     };
     if Hold::of(&task) != picker.hold {
         return Some(format!(
-            "`{id}` has moved on to `{}` since this opened, so nothing was resumed. Press esc \
+            "`{id}` has moved on to `{}` since this opened, so nothing was resumed. press esc \
              and press r again to see where it stands now.",
             task.stage()
         ));
@@ -2042,7 +2042,7 @@ fn picker_gone_stale(repo: &Repo, pipelines: &Pipelines, picker: &ResumePicker) 
         true => None,
         false => Some(format!(
             "`{id}` cannot be resumed right now: a task it depends on has not finished, or its \
-             own lane is still working. Nothing was resumed."
+             own lane is still working. nothing was resumed."
         )),
     }
 }
@@ -3964,7 +3964,7 @@ fn paint_at(
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
-    // The `Config changed:` line, while a reload has something to load: the
+    // The `config changed:` line, while a reload has something to load: the
     // box's last row inside the dispatch tab, and the row above the key line
     // anywhere else, under the blank row either way.
     let notice = config_notice(&snapshot.waiting);
@@ -4146,7 +4146,7 @@ fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
 /// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
 /// the lock, and none is what a project with no enabled job has anyway.
 ///
-/// While a reload has something to load, the busy board's `Config changed:`
+/// While a reload has something to load, the busy board's `config changed:`
 /// line is drawn by the same rule, under a blank row: the box's last row
 /// inside the dispatch tab, the row above the key line anywhere else — see
 /// [`config_notice`]. Its two rows come out of the greeting's, so the frame
@@ -7822,8 +7822,10 @@ mod tests {
                 )
                 .unwrap(),
         );
-        assert!(frame.contains("Nothing queued"), "{frame}");
-        assert!(!frame.contains("nothing queued"), "{frame}");
+        // Once: the board's own line under the greeting. The plain run's
+        // `nothing queued` line, which a job keeps resident, is the same
+        // words, and drawing it as well would double the line.
+        assert_eq!(frame.matches("nothing queued").count(), 1, "{frame}");
         assert!(frame.contains("dispatcher stopped"), "{frame}");
         // The fixture's own `user.name` is `spoolway t`.
         assert!(frame.contains(", spoolway."), "{frame}");
@@ -7858,11 +7860,11 @@ mod tests {
         ));
         assert!(!frame.contains("broken.md"), "{frame}");
         assert!(!frame.contains("default"), "{frame}");
-        assert!(frame.contains("Nothing queued"), "{frame}");
+        assert!(frame.contains("nothing queued"), "{frame}");
     }
 
     /// An empty board draws no RECENT, whether a dispatcher holds the lock or
-    /// not, even with events remembered: the greeting and `Nothing queued`
+    /// not, even with events remembered: the greeting and `nothing queued`
     /// stand alone under the header.
     #[test]
     fn an_empty_board_draws_no_recent_with_or_without_a_dispatcher() {
@@ -7897,7 +7899,7 @@ mod tests {
             ));
             assert!(frame.contains(header), "{frame}");
             assert!(frame.contains(enter), "{frame}");
-            assert!(frame.contains("Nothing queued"), "{frame}");
+            assert!(frame.contains("nothing queued"), "{frame}");
             assert!(!frame.contains("RECENT"), "{frame}");
             assert!(!frame.contains("task-"), "{frame}");
         }
@@ -7923,7 +7925,7 @@ mod tests {
     }
 
     /// An empty board under a dispatcher holding the lock draws the jobs
-    /// ledger under `Nothing queued`, in the busy board's own words and
+    /// ledger under `nothing queued`, in the busy board's own words and
     /// order for the same jobs — and none at all once nothing holds the lock.
     #[test]
     fn an_idle_dispatcher_draws_the_busy_boards_ledger() {
@@ -7967,13 +7969,13 @@ mod tests {
         let rows: Vec<&str> = idle.lines().map(str::trim).collect();
         let queued = rows
             .iter()
-            .position(|row| *row == "Nothing queued")
+            .position(|row| *row == "nothing queued")
             .unwrap();
         assert_eq!(rows[queued + 1], "", "{idle}");
         assert!(rows[queued + 2].starts_with("jobs "), "{idle}");
 
         let stopped = empty(None);
-        assert!(stopped.contains("Nothing queued"), "{stopped}");
+        assert!(stopped.contains("nothing queued"), "{stopped}");
         assert!(!stopped.contains("active"), "{stopped}");
         assert!(!stopped.contains("nightly-audit"), "{stopped}");
     }
@@ -8002,7 +8004,7 @@ mod tests {
             active_jobs: full_board().active_jobs,
             ..Snapshot::empty()
         });
-        assert!(idle.contains("Nothing queued"), "{idle}");
+        assert!(idle.contains("nothing queued"), "{idle}");
         assert!(idle.contains("2 active"), "{idle}");
         assert!(!idle.contains("TASK"), "{idle}");
 
@@ -8010,7 +8012,7 @@ mod tests {
             holder: Some(4242),
             ..full_board()
         });
-        assert!(!busy.contains("Nothing queued"), "{busy}");
+        assert!(!busy.contains("nothing queued"), "{busy}");
         assert!(busy.contains("TASK"), "{busy}");
         assert!(busy.contains("cart-empty-state"), "{busy}");
         assert!(busy.contains("slots"), "{busy}");
@@ -8233,7 +8235,7 @@ mod tests {
     }
 
     /// While a reload has something to load, both boards draw the
-    /// `Config changed:` line under a blank row: inside the dispatch tab as
+    /// `config changed:` line under a blank row: inside the dispatch tab as
     /// the box's last row, however few rows the table above it takes, and
     /// on its own as the row above the key line. With the line up the frame
     /// keeps the row count it had without it, so the tab strip never
@@ -8286,7 +8288,7 @@ mod tests {
             for (board, snapshot) in boards {
                 let quiet = draw(&snapshot(Waiting::default()));
                 let changed = draw(&snapshot(waiting()));
-                assert!(!quiet.contains("Config changed"), "{board}:\n{quiet}");
+                assert!(!quiet.contains("config changed"), "{board}:\n{quiet}");
                 assert!(!changed.contains("t.yml"), "{board}:\n{changed}");
                 // Outside the tab a short busy board is not padded to the
                 // pane, so the line adds its row there; it still fits.
@@ -8309,7 +8311,7 @@ mod tests {
                     .collect();
                 let at = rows
                     .iter()
-                    .position(|row| *row == "Config changed: pipelines updated")
+                    .position(|row| *row == "config changed: pipelines updated")
                     .unwrap_or_else(|| panic!("{board}, hosted {hosted}:\n{changed}"));
                 assert_eq!(rows[at - 1], "", "{board}, hosted {hosted}:\n{changed}");
                 let under = match hosted {
@@ -13177,10 +13179,10 @@ mod tests {
         assert!(frame.contains("handover"), "{frame}");
         assert!(frame.contains("command"), "{frame}");
         assert!(
-            frame.contains("Pausing terminates the command's process."),
+            frame.contains("pausing terminates the command's process."),
             "{frame}"
         );
-        assert!(frame.contains("Resuming restarts the command."), "{frame}");
+        assert!(frame.contains("resuming restarts the command."), "{frame}");
         assert!(frame.contains("> pause now"), "{frame}");
         assert!(
             !frame.contains("pause when"),
@@ -13335,7 +13337,7 @@ mod tests {
             "{frame}"
         );
         assert!(
-            frame.contains(&format!("Ticket {ticket} stays as it is.")),
+            frame.contains(&format!("ticket {ticket} stays as it is.")),
             "{frame}"
         );
         assert!(frame.contains("> skip and archive"), "{frame}");
@@ -14116,7 +14118,7 @@ mod tests {
         // ~4m20s, off `launched_at` set 260 seconds ago.
         assert!(frame.contains("4m"), "{frame}");
         assert!(!frame.contains("The turn is interrupted"), "{frame}");
-        assert!(!frame.contains("Resuming"), "{frame}");
+        assert!(!frame.contains("resuming"), "{frame}");
         assert!(frame.contains("> pause now"), "{frame}");
         assert!(frame.contains("  pause when implement finishes"), "{frame}");
         assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
@@ -14547,7 +14549,7 @@ mod tests {
         assert!(!frame.contains("lane      "), "{frame}");
         assert!(!frame.contains("session   "), "{frame}");
         assert!(
-            frame.contains("The command's process is ended and `handover` runs"),
+            frame.contains("the command's process is ended and `handover` runs"),
             "{frame}"
         );
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
@@ -15114,7 +15116,7 @@ mod tests {
         let rows = rows_of(&repo, &pipelines, &repo.tasks().unwrap()).unwrap();
         assert!(
             rows[0].next.contains("`gate_at: review-renamed`")
-                && rows[0].next.contains("Change `gate_at:` in the task"),
+                && rows[0].next.contains("change `gate_at:` in the task"),
             "{}",
             rows[0].next
         );
@@ -15138,7 +15140,7 @@ mod tests {
         assert!(rows[0].resumable);
         assert!(
             rows[0].next.contains("`gate_at: review-renamed`")
-                && rows[0].next.contains("Change `gate_at:` in the task"),
+                && rows[0].next.contains("change `gate_at:` in the task"),
             "{}",
             rows[0].next
         );
@@ -16547,6 +16549,10 @@ mod tests {
         assert_eq!(picker.rows[picker.cursor].step, "handover");
         let error = picker.error.as_deref().unwrap();
         assert!(error.contains("cannot be resumed right now"), "{error}");
+        assert!(
+            error.ends_with("still working. nothing was resumed."),
+            "{error}"
+        );
         let panel = resume_picker_panel(picker, None).join("\n");
         assert!(panel.contains("cannot be resumed right now"), "{panel}");
         assert_eq!(
@@ -16681,6 +16687,7 @@ mod tests {
             let picker = open_picker(&board);
             let error = picker.error.as_deref().unwrap();
             assert!(error.contains("has moved on to `review`"), "{error}");
+            assert!(error.contains("nothing was resumed. press esc"), "{error}");
             let after = repo.task("wall").unwrap();
             assert_eq!(after.stage(), "review");
             assert_eq!(after.front.resume, before.front.resume);

@@ -64,7 +64,7 @@ running, printing the one line and exiting without drawing anything:
 
 ```
 $ spoolway
-Dispatcher already running
+dispatcher already running
 ```
 
 A project is `-C <DIR>` or the current directory's repository. A screen open in one project
@@ -87,6 +87,22 @@ above the strip and one below it.
 
 Inside the eval tab's filter panel and any popup drawn over a tab, `←` and `→` keep their own
 meaning instead.
+
+All text the screen draws is lowercase. That covers tab-body labels, key lines, popup titles
+and sentences, and the details panes. These capitals are allowed:
+
+- Words written in capitals, such as `DISPATCH`, `PIPELINE`, `PR` and `YAML`.
+- Month and weekday names and their short forms, such as `August`, `Aug`, `Monday`, `Mon` and
+  `Mo`.
+- Proper nouns, such as `Windows`, `Unix` and `Jira`.
+- The greeting: `Good morning`, `Good afternoon`, `Good evening` and `Working late`, and the
+  name that follows it.
+- Values read from tasks, routines, jobs and pipelines, shown as the author wrote them.
+
+The test `tui_text_is_lowercase` renders every tab, the details panes and the popups, and
+fails on any other word that starts with a capital. Its failure names the screen, the line
+and the word, and says what to write instead. Fix the word at its source. Add it to the
+test's allowed list only when it falls under one of the cases above.
 
 Every tab keeps column 0 and the last column empty, and leaves two blank rows under its key
 line. The tab strip stays centred, and every popup stays centred on its tab. A key line wider
@@ -115,7 +131,7 @@ whatever that pass did, or earlier when the dispatcher starts a lane or a comman
 says so by writing its pid to a `first-pass` file in the project's home. The popup does not open again on
 a later pass. `enter` again, over a running child, stops it at once when no agent lane or
 command step is running and no task is on `queued`.
-When a step is running, it opens a popup asking how to stop it, in place of `Starting dispatcher` if that is
+When a step is running, it opens a popup asking how to stop it, in place of `starting dispatcher` if that is
 still up:
 
 ```
@@ -144,10 +160,10 @@ with `enter`. The key line offers `[u] update config` only while a dispatcher ho
 [Updating the config](dispatcher.md#updating-the-config). `q` or `ctrl-c` quits the whole screen
 and stops dispatching too.
 
-A child the tab started stays up on an empty queue and the board shows its greeting and `Nothing queued`; only
+A child the tab started stays up on an empty queue and the board shows its greeting and `nothing queued`; only
 `spoolway dispatch` run from a terminal exits on an empty queue. A child that exits on its own —
 a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`. Ending before
-its first pass, including under the `Starting dispatcher` popup, shows that reason there instead.
+its first pass, including under the `starting dispatcher` popup, shows that reason there instead.
 
 <img src="screenshots/dispatch.png" alt="the dispatcher board">
 
@@ -168,9 +184,9 @@ that still has a task to queue or has every task archived. A group with every ta
 queued never appears. Below the groups that can be queued, the pane also lists one row per plan
 page that no task names yet. See [Queueing a plan](planning.md#queueing-a-plan). The left pane
 is titled `groups`. The right pane is titled `tasks` and lists the highlighted group's tasks.
-Beside a plan row it says `Use /spoolway-tasks`. Each task shows its `Pipeline:`, `Depends on:`,
-`Starts from:` and `Lands in:`. `Starts from:` is the task's own `starts_from:`, else its first
-dependency's id, else the same branch as `Lands in:`. `Lands in:` is the task's `base:`, else the
+Beside a plan row it says `use /spoolway-tasks`. Each task shows its `pipeline:`, `depends on:`,
+`starts from:` and `lands in:`. `starts from:` is the task's own `starts_from:`, else its first
+dependency's id, else the same branch as `lands in:`. `lands in:` is the task's `base:`, else the
 board's branch.
 
 <img src="screenshots/queue.png" alt="the queue screen">
@@ -231,11 +247,11 @@ Queueing a group or a routine ends on a popup naming what queued. A copy of a ro
 is missing:
 
 ```
-cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+cart-totals starts from task/gh-412-checkout, which doesn't exist. set starts_from: in the task front matter and requeue.
 ```
 
-Below the list, a line says whether a dispatcher will pick the work up: `Dispatcher is running`
-or `Start the dispatcher to begin working`. `enter` closes the popup back to the screen.
+Below the list, a line says whether a dispatcher will pick the work up: `dispatcher is running`
+or `start the dispatcher to begin working`. `enter` closes the popup back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements and runs its `# spoolway-login:` command. A requirement this machine does not meet,
@@ -252,7 +268,7 @@ this run:
 ```
 ╭─ issue tracking ─────────────────────────────────────────────────╮
 │                                                                  │
-│  Deactivate issue tracking for selected groups:                  │
+│  deactivate issue tracking for selected groups:                  │
 │                                                                  │
 │  > [ ] cart       3 tasks                                        │
 │    [ ] checkout   2 tasks                                        │
@@ -273,10 +289,10 @@ group's tasks the batch queues. Nothing starts ticked.
 | `esc` | Returns to the queue screen with nothing queued. |
 
 When no group has a task without a `ticket:`, no popup opens. While the hook runs, an `issue
-tracking` popup shows one line, `Progress: ` followed by a 44-cell bar. A `█` marks a finished
+tracking` popup shows one line, `progress: ` followed by a 44-cell bar. A `█` marks a finished
 call and a `░` a cell still to fill. The bar starts empty and fills by one call's share each time
 a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
-not in it. The `queued` popup then opens on `Hook executed successfully`, followed by
+not in it. The `queued` popup then opens on `hook executed successfully`, followed by
 `queued <n> tasks`, every queued id and the dispatcher line. When every group was ticked, the hook is never called and the popup has no success line.
 Queueing a routine from the routines tab asks the same question and shows the same popups. A
 trial never asks and opens no ticket. See
@@ -319,7 +335,7 @@ A task whose id is the name of a routine is refused too, because the lanes of th
 copies take the routine's name. Nothing is queued:
 
 ```
-task id `nite` is the name of routine `nite`, whose copies' lanes are named `nite · <step>`. Give this task another id; nothing was queued.
+task id `nite` is the name of routine `nite`, whose copies' lanes are named `nite · <step>`. give this task another id; nothing was queued.
 ```
 
 When several adds of one id run at the same moment, exactly one is queued and the others are
@@ -340,10 +356,10 @@ A task body that still holds its skeleton's `[[…]]` placeholder text refuses t
 message names the section. See [One constraint no key can express](tasks.md#one-constraint-no-key-can-express).
 
 A task whose start branch exists neither locally nor on `origin` refuses the whole batch. The
-command prints one line for each such task and then `Nothing was queued.`:
+command prints one line for each such task and then `nothing was queued.`:
 
 ```
-cart-totals starts from task/gh-412-checkout, which doesn't exist. Set starts_from: in the task front matter and requeue.
+cart-totals starts from task/gh-412-checkout, which doesn't exist. set starts_from: in the task front matter and requeue.
 ```
 
 See [A start branch that does not exist](tasks.md#a-start-branch-that-does-not-exist).
@@ -393,8 +409,8 @@ queued:
 
 ```
 spoolway: --no-tracking names `chekout`, but no task in this batch belongs to that group.
-The batch's groups are cart, checkout, search.
-Fix the group name, or drop the flag to open every group's tickets. Nothing was queued.
+the batch's groups are cart, checkout, search.
+fix the group name, or drop the flag to open every group's tickets. nothing was queued.
 ```
 
 The command prints one row for each issue the hook answers. A group's issue reads `group issue`
@@ -651,9 +667,9 @@ refuses the whole start and dispatches nothing:
 
 ```
 refusing to start: task `auth-refresh` has no `pipeline:`
-  Set `pipeline:` to one of: bugfix, impl, impl_fast, impl_lite, impl_tdd, impl_ui, release.
+  set `pipeline:` to one of: bugfix, impl, impl_fast, impl_lite, impl_tdd, impl_ui, release.
 
-Nothing was dispatched.
+nothing was dispatched.
 ```
 
 It checks every live task's `base:` too. A task not yet cut whose base exists neither locally nor
@@ -662,9 +678,9 @@ on `origin` refuses the whole start:
 ```
 refusing to start: task `cart-totals` is based on `task/gh-412-checkout`, which
 exists neither locally nor on `origin`
-  Set `base:` in cart-totals to a branch that exists.
+  set `base:` in cart-totals to a branch that exists.
 
-Nothing was dispatched.
+nothing was dispatched.
 ```
 
 Each question to `origin` about a base is given up after 10 seconds. An `origin` that cannot be
@@ -677,7 +693,7 @@ refuse the start. The dispatcher starts and runs the other tasks. Every pass hol
 and prints the reason, which is also written to the problem log:
 
 ```
-! task `cart-discounts` is based on `main` but depends on `cart-totals`, which is based on `plan/demo` — A chain has one base. Set `base:` in cart-discounts to `plan/demo`.
+! task `cart-discounts` is based on `main` but depends on `cart-totals`, which is based on `plan/demo` — a chain has one base. set `base:` in cart-discounts to `plan/demo`.
 ```
 
 See [Tasks and the queue](tasks.md#what-only-holds-across-a-set) for the other two shapes and for
@@ -687,7 +703,7 @@ If another dispatcher, or a screen opened with bare `spoolway`, already holds th
 prints the same line and exits:
 
 ```
-Dispatcher already running
+dispatcher already running
 ```
 
 Queueing a batch while another dispatcher already holds the lock works the same way: the batch
@@ -737,7 +753,7 @@ files
 problems
   prompt `archivist`: missing
   issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is
-    paused. Fix what its log names, then run `spoolway resume compact-ctx-launch`. Its log:
+    paused. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log:
     ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 
 > start dispatching
@@ -812,7 +828,7 @@ A refusal changes nothing, and the run stays on what it had:
 ```
 reload refused — nothing changed, the run is still on what it had:
   fix-login: sitting on `review`, which pipeline `feature` no longer defines
-  Put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
+  put `review` back in feature.yml, or wait until fix-login has left it, then reload again.
 ```
 
 With no dispatcher running it prints this, so it works even when a pipeline file or `config.toml` is broken:
@@ -845,11 +861,11 @@ is configured or the hook has no `fetch` branch, and fails when the hook runs pa
 With no subcommand, prints its usage and exits, the same as `spoolway jobs --help`.
 
 Bare `spoolway`'s routines tab is the only place that writes a cron job. A routine's options
-menu offers `new job`, or `edit job` and `deactivate job` or `activate job` for its one job; a
+menu offers `edit schedule`, and `deactivate job` or `activate job` for its one job; a
 routine with two or more jobs offers `deactivate job <name>` or `activate job <name>` for each.
 `activate job` is refused, writing nothing, while another job on the routine is active. No menu
 deletes a job; `delete routine` deletes the jobs on the routine it removes. A job whose routine
-is not a listed one gets a row of its own under the routines, whose menu offers `edit job`
+is not a listed one gets a row of its own under the routines, whose menu offers `edit schedule`
 alone.
 
 See [Jobs](jobs.md).
@@ -982,7 +998,7 @@ A plain resume of such a task would restart it at the first step or put it back 
 runs. `--stage <step>` resumes it on the step you name. A task that stopped before it ever
 reported has no recorded step and resumes at the first step.
 
-A resume that sends the task to another step lands on the first step the task runs. When that destination is one the task [walks past](pipelines.md#steps-a-task-walks-past), the task lands on the step after it, and its `## Status Log` names the step passed. `--stage` refuses such a step instead: `` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. Nothing was resumed. ``
+A resume that sends the task to another step lands on the first step the task runs. When that destination is one the task [walks past](pipelines.md#steps-a-task-walks-past), the task lands on the step after it, and its `## Status Log` names the step passed. `--stage` refuses such a step instead: `` `suite` does not run for `fix-cart-rounding`: it is not last in its chain. nothing was resumed. ``
 
 While a dispatcher runs, the destination comes from the pipelines it loaded at start. See
 [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
@@ -1029,11 +1045,11 @@ A task on any other stage is refused with exit 2. The message names the task's s
 ```
 $ spoolway resume build --skip-hook
 error: build is on `blocked`, not `hook_failed`, so there is no hook to skip.
-To carry it on from the step it stopped on:
+to carry it on from the step it stopped on:
   spoolway resume build
 ```
 
-A `queued` task is told `It starts on its own when the dispatcher reaches it.` A task on any other stage is told `It is not stopped, so there is nothing to carry on.`
+A `queued` task is told `it starts on its own when the dispatcher reaches it.` A task on any other stage is told `it is not stopped, so there is nothing to carry on.`
 
 ### `spoolway restart <task>`
 
@@ -1198,14 +1214,14 @@ pipeline does not have.
 
 ```
   problem: queued task `t2` has `gate_at: review`, which pipeline `default` does not define.
-    Change `gate_at:` in the task to a step `default` has.
+    change `gate_at:` in the task to a step `default` has.
 ```
 
 For a `gate_at:` that names a command step the line reads:
 
 ```
-  problem: queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. Its exit is not held.
-    Change `gate_at:` in the task to an agent step, or delete it.
+  problem: queued task `t2` has `gate_at: publish`, which runs a command in pipeline `release` — only an agent step can be held for a person. its exit is not held.
+    change `gate_at:` in the task to an agent step, or delete it.
 ```
 
 Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
@@ -2088,7 +2104,7 @@ A `FAIL` row labelled `routines` names each task id that two or more routine fil
 every file and an id to give one of them:
 
 ```
-  FAIL  routines: task id `lint` is in two routines — .spoolway/routines/backend/lint.md and .spoolway/routines/frontend/lint.md. Give one of them another id:, such as backend-lint.
+  FAIL  routines: task id `lint` is in two routines — .spoolway/routines/backend/lint.md and .spoolway/routines/frontend/lint.md. give one of them another id:, such as backend-lint.
 ```
 
 A `FAIL` row labelled `no deleted task left a worktree or branch` names each worktree and
@@ -2222,8 +2238,8 @@ A report a gate holds, with no non-empty `--handoff`, is refused with exit 2. No
 
 ```
 error: this pass is held at `deploy`'s gate for a person, and carries no
-handoff for them. Report again with at least one --handoff: what this step
-did, in plain words, then how to verify it. Nothing was recorded.
+handoff for them. report again with at least one --handoff: what this step
+did, in plain words, then how to verify it. nothing was recorded.
 ```
 
 A report that is held prints the held line, then each `--handoff` of the report indented, and nothing after them:
