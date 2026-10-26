@@ -218,9 +218,9 @@ fn created_time(path: &Path) -> Option<std::time::SystemTime> {
 }
 
 /// The `plan:` of the task file at `path`, read off the disk now rather
-/// than off the listing: whether the queue screen's menu lists `open plan`,
-/// and what picking it opens, so a `plan:` removed since the last reload is
-/// not acted on. `None` for a file that cannot be read or parsed, or whose
+/// than off the listing: whether the queue screen's group menu lists `open
+/// plan`, and what picking it opens, so a `plan:` removed since the last
+/// reload is not acted on. `None` for a file that cannot be read or parsed, or whose
 /// `plan:` is missing or empty.
 pub(crate) fn plan_of(path: &Path) -> Option<String> {
     let doc = std::fs::read_to_string(path).ok()?;

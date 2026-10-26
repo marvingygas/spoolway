@@ -4825,6 +4825,9 @@ impl OptionsMenu {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
+    /// On the pending screen's group menu, every page the group's tasks
+    /// name in `plan:`, and on a plan row, the row's own page. A task's
+    /// menu never offers it.
     OpenPlan,
     Gate,
     Trial,
@@ -6970,14 +6973,16 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 
 /// `o` on the pending screen: the menu for the row the focused pane
 /// highlights, titled with that row's name. Over the tasks pane a task
-/// offers open task, then open plan where [`super::pending::plan_of`]
-/// finds a `plan:` on it, then gate, and then delete while the task is still
-/// a pending file. Over the groups pane a group offers trial and then save as
-/// routine, both only where [`trial_target`] allows them, and then delete
-/// while the group holds at least one pending file. A plan row there offers
-/// open plan and then delete, both on its page. Delete is never offered on a
-/// queued or done task: those files live in the queue or the archive, which
-/// this menu does not touch. `None`, and no menu, when the focused pane
+/// offers open task, then gate, and then delete while the task is still a
+/// pending file. Over the groups pane a group offers open plan where
+/// [`super::pending::plan_of`] finds a `plan:` on any of its tasks, then
+/// trial and save as routine, both only where [`trial_target`] allows them,
+/// and then delete while the group holds at least one pending file. Open
+/// plan sits on the group rather than on each task because a group's tasks
+/// almost always name the same page. A plan row there offers open plan and
+/// then delete, both on its page. Delete is never offered on a queued or
+/// done task: those files live in the queue or the archive, which this menu
+/// does not touch. `None`, and no menu, when the focused pane
 /// highlights no row at all: an empty pending directory, a filter that
 /// matched nothing, or a tasks pane with no tasks.
 fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
@@ -6985,11 +6990,7 @@ fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu>
     let (title, row, items) = match state.focus {
         Focus::Tasks => {
             let task = group.tasks.get(state.task_cursor)?;
-            let plan = super::pending::plan_of(&task.path).map(|_| RowOption::OpenPlan);
-            let mut items: Vec<RowOption> = [Some(RowOption::Open), plan, Some(RowOption::Gate)]
-                .into_iter()
-                .flatten()
-                .collect();
+            let mut items = vec![RowOption::Open, RowOption::Gate];
             if task.state == TaskState::Pending {
                 items.push(RowOption::Delete);
             }
@@ -7001,10 +7002,17 @@ fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu>
             vec![RowOption::OpenPlan, RowOption::Delete],
         ),
         Focus::Groups => {
-            let mut items = match trial_target(groups, state) {
-                Some(_) => vec![RowOption::Trial, RowOption::SaveRoutine],
-                None => Vec::new(),
-            };
+            let mut items = Vec::new();
+            if group
+                .tasks
+                .iter()
+                .any(|t| super::pending::plan_of(&t.path).is_some())
+            {
+                items.push(RowOption::OpenPlan);
+            }
+            if trial_target(groups, state).is_some() {
+                items.extend([RowOption::Trial, RowOption::SaveRoutine]);
+            }
             if group.tasks.iter().any(|t| t.state == TaskState::Pending) {
                 items.push(RowOption::Delete);
             }
@@ -7595,15 +7603,23 @@ fn open_highlighted(repo: &Repo, groups: &[Group], state: &ScreenState) -> Mode 
     }
 }
 
-/// Open plan over the pending screen: open the page the highlighted task's
-/// `plan:` names, or the highlighted plan row's own page, in the default
-/// browser, through [`crate::browser::open_plan`], which starts it in the
-/// background so the screen never waits on it.
+/// Open plan over the pending screen: open every page the highlighted
+/// group's tasks name in `plan:`, or the highlighted plan row's own page, in
+/// the default browser, through [`crate::browser::open_plan`], which starts
+/// each in the background so the screen never waits on it.
 ///
-/// `plan:` is read off the task file again here, not trusted from when the
-/// menu opened: a task that lost it since then gets nothing done. A page
-/// that is gone, or a machine with no opener, comes back as the
-/// [`Mode::Outcome`] popup, for the reason [`open_highlighted`] gives.
+/// `plan:` is read off each task file again here, from the task's own
+/// `path` whatever its state, not trusted from when the menu opened: a
+/// group none of whose tasks names a plan any more gets nothing done. Each
+/// distinct page opens once, in the order the group lists its tasks, since
+/// tasks of one group almost always share a page and a tab per task would
+/// open the same page several times over.
+///
+/// A page that does not open does not stop the others. A page that is gone,
+/// or a machine with no opener, comes back as one [`Mode::Outcome`] popup
+/// titled `open plan`, for the reason [`open_highlighted`] gives: each
+/// failed page's own text, in task order, a blank line between them, so a
+/// single failure reads exactly as [`crate::browser::open_plan`] words it.
 ///
 /// A plan row whose page is gone gets nothing done either: the row leaves
 /// on the next read, and the popup for a gone page tells a person to fix
@@ -7621,20 +7637,32 @@ fn open_highlighted_plan(groups: &[Group], state: &ScreenState) -> Mode {
             },
         };
     }
-    let Some(task) =
-        highlighted_tasks(groups, state).and_then(|tasks| tasks.get(state.task_cursor))
-    else {
+    if state.focus != Focus::Groups {
+        return Mode::Browsing;
+    }
+    let Some(tasks) = highlighted_tasks(groups, state) else {
         return Mode::Browsing;
     };
-    let Some(plan) = super::pending::plan_of(&task.path) else {
+    let mut plans: Vec<String> = Vec::new();
+    for plan in tasks
+        .iter()
+        .filter_map(|task| super::pending::plan_of(&task.path))
+    {
+        if !plans.contains(&plan) {
+            plans.push(plan);
+        }
+    }
+    let refusals: Vec<String> = plans
+        .iter()
+        .filter_map(|plan| crate::browser::open_plan(plan))
+        .map(|notice| notice.text)
+        .collect();
+    if refusals.is_empty() {
         return Mode::Browsing;
-    };
-    match crate::browser::open_plan(&plan) {
-        None => Mode::Browsing,
-        Some(notice) => Mode::Outcome {
-            notice,
-            routines: None,
-        },
+    }
+    Mode::Outcome {
+        notice: crate::screen::Notice::new("open plan", refusals.join("\n\n")),
+        routines: None,
     }
 }
 
@@ -15787,33 +15815,24 @@ mod tests {
         assert!(pending_options(&[], &ScreenState::new()).is_none());
     }
 
-    /// Over the tasks pane, `open plan` is listed straight under `open task`
-    /// exactly when the task's `plan:` is set and not empty, and the file it
-    /// names is not looked for.
+    /// Over the groups pane, `open plan` is listed first exactly when one of
+    /// the group's tasks sets `plan:` to a value that is not empty, the first
+    /// task or a later one, and the file it names is not looked for. Over the tasks
+    /// pane a task's menu never lists it, `plan:` or not.
     #[test]
-    fn the_tasks_menu_lists_open_plan_only_with_a_plan_key() {
+    fn the_group_menu_lists_open_plan_only_with_a_plan_key() {
         let (repo, _root_guard) = fixture("screen-options-open-plan");
+        let plain = [RowOption::Trial, RowOption::SaveRoutine, RowOption::Delete];
+        let planned = [
+            RowOption::OpenPlan,
+            RowOption::Trial,
+            RowOption::SaveRoutine,
+            RowOption::Delete,
+        ];
         for (id, plan, expected) in [
-            (
-                "planned",
-                "plan: /nowhere/plan.html\n",
-                &[
-                    RowOption::Open,
-                    RowOption::OpenPlan,
-                    RowOption::Gate,
-                    RowOption::Delete,
-                ][..],
-            ),
-            (
-                "blank",
-                "plan: \"\"\n",
-                &[RowOption::Open, RowOption::Gate, RowOption::Delete][..],
-            ),
-            (
-                "bare",
-                "",
-                &[RowOption::Open, RowOption::Gate, RowOption::Delete][..],
-            ),
+            ("planned", "plan: /nowhere/plan.html\n", &planned[..]),
+            ("blank", "plan: \"\"\n", &plain[..]),
+            ("bare", "", &plain[..]),
         ] {
             write_pending(
                 &repo,
@@ -15821,18 +15840,41 @@ mod tests {
                 &task_text(id, &format!("group: {id}\n{plan}"), BODY),
             );
             let groups = listed(&repo);
-            let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
+            let menu = pending_options(&groups, &on_pending_group(&groups, id)).unwrap();
             assert_eq!(menu.items, expected, "{id}");
+            let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
+            assert_eq!(
+                menu.items,
+                [RowOption::Open, RowOption::Gate, RowOption::Delete],
+                "{id}"
+            );
         }
+
+        // One task of two naming a plan is enough, even when it is not the
+        // first one the group lists.
+        write_pending(&repo, "first", &task_text("first", "group: mixed\n", BODY));
+        write_pending(
+            &repo,
+            "second",
+            &task_text(
+                "second",
+                "group: mixed\ndepends_on: [first]\nplan: /nowhere/mixed.html\n",
+                BODY,
+            ),
+        );
+        let groups = listed(&repo);
+        let menu = pending_options(&groups, &on_pending_group(&groups, "first")).unwrap();
+        assert_eq!(menu.items, planned);
         assert_eq!(RowOption::Open.label(), "open task");
         assert_eq!(RowOption::OpenPlan.label(), "open plan");
     }
 
-    /// The tasks pane's menu on a pending task with a `plan:` draws `open
-    /// task`, `open plan`, `gate` and `delete`, in that order, the cursor on
-    /// the first.
+    /// The groups pane's menu on a group whose task has a `plan:` draws
+    /// `open plan`, `trial`, `save as routine` and `delete`, in that order,
+    /// the cursor on the first, and that task's own menu draws `open task`,
+    /// `gate` and `delete` with no `open plan` among them.
     #[test]
-    fn the_tasks_menu_draws_open_plan_under_open_task() {
+    fn the_group_menu_draws_open_plan_first_and_the_task_menu_drops_it() {
         let (repo, _root_guard) = fixture("screen-options-draws-plan");
         write_pending(
             &repo,
@@ -15844,6 +15886,23 @@ mod tests {
             ),
         );
         let groups = listed(&repo);
+        let mut state = on_pending_group(&groups, "cart-totals");
+        state.mode = Mode::Options(pending_options(&groups, &state).unwrap());
+        let panel = popup(&groups, &Pipelines::builtin(), &state, layout("")).unwrap();
+        assert_eq!(
+            panel,
+            [
+                format!("{TOP_LEFT}─ cart {}{TOP_RIGHT}", "─".repeat(26)),
+                "│  > open plan                    │".to_string(),
+                "│    trial                        │".to_string(),
+                "│    save as routine              │".to_string(),
+                "│    delete                       │".to_string(),
+                "│                                 │".to_string(),
+                "│  [enter] confirm   [esc] close  │".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(33)),
+            ]
+        );
+
         let mut state = on_pending_task(&groups, "cart-totals");
         state.mode = Mode::Options(pending_options(&groups, &state).unwrap());
         let panel = popup(&groups, &Pipelines::builtin(), &state, layout("")).unwrap();
@@ -15852,7 +15911,6 @@ mod tests {
             [
                 format!("{TOP_LEFT}─ cart-totals {}{TOP_RIGHT}", "─".repeat(19)),
                 "│  > open task                    │".to_string(),
-                "│    open plan                    │".to_string(),
                 "│    gate                         │".to_string(),
                 "│    delete                       │".to_string(),
                 "│                                 │".to_string(),
@@ -15862,9 +15920,9 @@ mod tests {
         );
     }
 
-    /// Picking `open plan` opens a page that exists and goes back to the
-    /// screen, shows the `open plan` popup for one that is gone, and does
-    /// nothing for a task whose `plan:` was taken off after `o`.
+    /// Picking `open plan` on a group opens a page that exists and goes back
+    /// to the screen, shows the `open plan` popup for one that is gone, and
+    /// does nothing for a group whose only `plan:` was taken off after `o`.
     #[test]
     fn picking_open_plan_opens_the_page_or_says_why_not() {
         let (repo, _root_guard) = fixture("screen-open-plan");
@@ -15881,7 +15939,7 @@ mod tests {
         };
         let pick = || {
             let groups = listed(&repo);
-            let state = on_pending_task(&groups, "cart-totals");
+            let state = on_pending_group(&groups, "cart-totals");
             let menu = pending_options(&groups, &state).unwrap();
             picked.run(&groups, &[], &state, &menu, RowOption::OpenPlan)
         };
@@ -15896,18 +15954,18 @@ mod tests {
             panic!("a missing page shows no popup");
         };
         assert_eq!(notice.title, "open plan");
-        assert!(
-            notice
-                .text
-                .starts_with("o: the plan page is gone.\n/nowhere/plan.html\n"),
-            "{}",
-            notice.text
+        assert_eq!(
+            notice.text,
+            crate::browser::open_plan("/nowhere/plan.html")
+                .unwrap()
+                .text,
+            "one failure reads exactly as the one page's own popup"
         );
         assert!(routines.is_none());
 
         write_pending(&repo, "cart-totals", &with_plan(page.to_str().unwrap()));
         let groups = listed(&repo);
-        let state = on_pending_task(&groups, "cart-totals");
+        let state = on_pending_group(&groups, "cart-totals");
         let menu = pending_options(&groups, &state).unwrap();
         write_pending(
             &repo,
@@ -15917,6 +15975,79 @@ mod tests {
         let mode = picked.run(&groups, &[], &state, &menu, RowOption::OpenPlan);
         assert!(matches!(mode, Mode::Browsing), "{mode:?}");
         assert_eq!(crate::browser::opened().len(), 1, "nothing more opened");
+    }
+
+    /// A group whose tasks name two pages opens each distinct page once, in
+    /// the order the group lists its tasks, however many tasks name it. When
+    /// pages are gone the ones that exist still open, and one `open plan`
+    /// popup carries each gone page's own text in task order, a blank line
+    /// between them.
+    #[test]
+    fn picking_open_plan_on_a_group_opens_every_page_its_tasks_name() {
+        let (repo, _root_guard) = fixture("screen-open-plan-group");
+        let tab = repo.root.join("2026-10-20-overrides-tab.html");
+        let table = repo.root.join("2026-10-21-config-table.html");
+        let pipelines = Pipelines::builtin();
+        let routines_dir = repo.routines_dir();
+        let picked = Picked {
+            repo: &repo,
+            pipelines: &pipelines,
+            routines_dir: &routines_dir,
+        };
+        let write = || {
+            for (id, extra, page) in [
+                ("cli-writes", "", &tab),
+                ("tab-config", "depends_on: [cli-writes]\n", &table),
+                ("tab-polish", "depends_on: [tab-config]\n", &tab),
+            ] {
+                let front = format!("group: overrides\n{extra}plan: {}\n", page.display());
+                write_pending(&repo, id, &task_text(id, &front, BODY));
+            }
+        };
+        let pick = || {
+            let groups = listed(&repo);
+            let state = on_pending_group(&groups, "cli-writes");
+            let menu = pending_options(&groups, &state).unwrap();
+            assert_eq!(menu.items[0], RowOption::OpenPlan);
+            picked.run(&groups, &[], &state, &menu, RowOption::OpenPlan)
+        };
+        write();
+        let groups = listed(&repo);
+        let state = on_pending_group(&groups, "cli-writes");
+        let order: Vec<&str> = shown(&groups, &state)[state.group_cursor]
+            .tasks
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect();
+        assert_eq!(order, ["cli-writes", "tab-config", "tab-polish"]);
+
+        // Both pages gone: one popup, each page once, in task order.
+        let Mode::Outcome { notice, routines } = pick() else {
+            panic!("two missing pages show no popup");
+        };
+        let gone = |page: &Path| {
+            crate::browser::open_plan(&page.to_string_lossy())
+                .unwrap()
+                .text
+        };
+        assert_eq!(notice.title, "open plan");
+        assert_eq!(notice.text, format!("{}\n\n{}", gone(&tab), gone(&table)));
+        assert!(routines.is_none());
+        assert!(crate::browser::opened().is_empty());
+
+        // One page there: it opens, and the popup is the other one's alone.
+        std::fs::write(&tab, "<html>").unwrap();
+        let Mode::Outcome { notice, .. } = pick() else {
+            panic!("a missing page shows no popup");
+        };
+        assert_eq!(notice.text, gone(&table));
+        assert_eq!(crate::browser::opened(), std::slice::from_ref(&tab));
+
+        // Both there: each opens once, in task order, and no popup.
+        std::fs::write(&table, "<html>").unwrap();
+        let mode = pick();
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert_eq!(crate::browser::opened(), [tab.clone(), tab, table]);
     }
 
     /// The menu draws over the screen titled with the focused row, the
@@ -28702,6 +28833,14 @@ body\n";
             }
             _ => {}
         }
+    }
+
+    /// The state with the groups pane focused on the group that holds task
+    /// `id`.
+    fn on_pending_group(groups: &[Group], id: &str) -> ScreenState {
+        let mut state = on_pending_task(groups, id);
+        state.focus = Focus::Groups;
+        state
     }
 
     /// The screen state with the tasks pane on pending `id`.
