@@ -508,9 +508,10 @@ pub(crate) fn promote_override(
 }
 
 fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<Vec<String>> {
-    // Held from the read of the patch to its removal: a `pipeline override
-    // --set` that lands in between is deleted with the patch, after this
-    // promote has printed that it wrote the file.
+    // Held from the read of the patch to the write of the tracked file: a
+    // `pipeline override --set` that lands in between would change the patch
+    // after the values were read, and this promote would print values the
+    // file does not hold.
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let overrides_dir = repo.overrides_dir();
     let patch = crate::overrides::read_pipeline_patch(&overrides_dir, name)?

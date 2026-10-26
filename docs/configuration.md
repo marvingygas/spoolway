@@ -151,7 +151,7 @@ dropped on load, so it draws no note.
 $ spoolway config set dispatch.lane_quiet 20m
 dispatch.lane_quiet = 20m
 note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quiet`, so the value in effect is 5m.
-  Remove `dispatch.lane_quiet` from that file to let the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
+  `spoolway override drop config.toml dispatch.lane_quiet` removes just that key and lets the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
 ```
 
 When the value in effect differs from the one just set and no layer key sets it, the note says

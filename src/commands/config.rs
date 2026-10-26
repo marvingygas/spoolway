@@ -150,10 +150,11 @@ fn follow_up_lines(
 /// value that fails to apply (a cross-field pair it breaks, for one) is
 /// dropped on load, so a key the file names can still take the value just
 /// set. The file's keys only choose the wording. The advice starts with the
-/// one-key route because `override drop` and `override promote` act on the
-/// whole config layer: `drop` deletes every key in a file that lives outside
-/// git, and `promote` writes all of them into the tracked file, overwriting
-/// the value just set with the layer's.
+/// one-key route, `override drop config.toml <key>`, spelled as the layer
+/// file holds it. The whole-layer forms come after it because they act on
+/// every key: `drop` deletes every key in a file that lives outside git, and
+/// `promote` writes all of them into the tracked file, overwriting the value
+/// just set with the layer's.
 fn shadow_note(
     root: &Path,
     key: &str,
@@ -169,12 +170,11 @@ fn shadow_note(
     // this one and replaced it. Naming a layer file that is not there, or
     // does not hold the key, sends the person to fix the wrong place.
     let layer_file = match overrides {
-        Some(dir) if crate::overrides::config_patch_sets(&dir, key)? => {
-            Some(crate::overrides::config_patch_path(&dir))
-        }
-        _ => None,
+        Some(dir) => crate::overrides::config_patch_leaf_for(&dir, key)?
+            .map(|leaf| (crate::overrides::config_patch_path(&dir), leaf)),
+        None => None,
     };
-    let Some(path) = layer_file else {
+    let Some((path, leaf)) = layer_file else {
         return Ok(Some(format!(
             "note: the value in effect for `{key}` is {effective}, not the value just set, \
              and no override sets it. another change to the config landed after this one; \
@@ -184,8 +184,9 @@ fn shadow_note(
     };
     Ok(Some(format!(
         "note: {} still sets `{key}`, so the value in effect is {effective}.\n  \
-         remove `{key}` from that file to let the value just set apply. \
-         `spoolway override drop config.toml` clears the whole config layer, and \
+         `spoolway override drop config.toml {leaf}` removes just that key and lets the \
+         value just set apply. `spoolway override drop config.toml` clears the whole \
+         config layer, and \
          `spoolway override promote config.toml` writes all of its keys, this one \
          included, into the tracked file.",
         path.display()
@@ -1234,6 +1235,10 @@ mod tests {
                     .unwrap()
                     .expect("the layer's 5m outranks the 20m just set");
                 assert!(note.contains("value in effect is 5m"), "{note}");
+                assert!(
+                    note.contains("`spoolway override drop config.toml dispatch.lane_quiet`"),
+                    "{note}"
+                );
             },
         );
     }
@@ -1312,6 +1317,12 @@ mod tests {
                 assert!(
                     note.contains("still sets `dispatch.visible_lanes`"),
                     "{note}"
+                );
+                assert!(
+                    note.contains(
+                        "`spoolway override drop config.toml dispatch.keep_finished_lanes`"
+                    ),
+                    "the note must name the one-key removal, spelled as the file holds it: {note}"
                 );
             },
         );
