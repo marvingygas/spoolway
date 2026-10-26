@@ -907,15 +907,13 @@ fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
                         .map(|()| step_value(&probe, field))
                 });
                 let same = applied.is_some_and(|applied| applied == old);
-                keys.push(key_row(
-                    &reasons,
-                    &target,
-                    &key,
-                    &key,
-                    old,
-                    raw_yaml(value),
-                    same,
-                ));
+                // Spelled as the pipeline section spells the setup's value.
+                // A nested value does not render on one line, so it reads
+                // `not set` rather than putting several lines into one row
+                // and into `enter`'s field. The merge ignores it, and the
+                // row says why whenever `override list` reads the layer.
+                let new = crate::overrides::render_scalar(value).unwrap_or_default();
+                keys.push(key_row(&reasons, &target, &key, &key, old, new, same));
             }
         }
         let note = reasons.files.get(&target).map(|r| format!("ignored — {r}"));
@@ -1031,13 +1029,6 @@ fn unreadable(target: String, kind: Kind, err: &anyhow::Error) -> FileRow {
 /// list gives each key one value.
 fn one_line_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// `value` as the patch spells it after `key: `.
-fn raw_yaml(value: &serde_norway::Value) -> String {
-    serde_norway::to_string(value)
-        .map(|text| text.trim_end().to_string())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1332,6 +1323,32 @@ mod tests {
             "{drawn:#?}"
         );
         assert!(!drawn.iter().any(|l| l.contains("ignored")), "{drawn:#?}");
+    }
+
+    // A patch value is spelled as the pipeline section spells one. A
+    // hand-written list does not render on one line, so when the layer's
+    // reasons do not load, and the merge's refusal of it is not shown, no
+    // row and no `enter` field gets several lines from it.
+    #[test]
+    fn a_nested_patch_value_stays_off_the_row() {
+        let (repo, _guard) = layered("nested");
+        patch(
+            &repo,
+            "impl",
+            "steps:\n  implement:\n    skills:\n      - a\n      - b\n",
+        );
+        patch(&repo, "impl_fast", "steps: [\n");
+        let state = on_active(&repo);
+        assert!(state.layer.stale.is_some());
+        let key = state
+            .layer
+            .files
+            .iter()
+            .flat_map(|file| &file.keys)
+            .find(|key| key.key == "implement.skills")
+            .expect("the skills key is listed");
+        assert!(!key.in_use.contains('\n'), "{key:?}");
+        assert!(!rows_of(&state).iter().any(|l| l.trim() == "- b"));
     }
 
     // `space` on a file selects its keys, and again clears them; `a`

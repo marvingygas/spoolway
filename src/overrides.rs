@@ -1228,10 +1228,11 @@ pub(crate) fn remove_pipeline_patch_keys(
 /// `value`, rendered the way it would sit after a YAML `key: `, trimmed of
 /// the trailing newline `serde_norway` always writes — for the display of a
 /// step field's current value, and for the line [`promote_pipeline_patch`]
-/// writes into the tracked file. Refuses a nested value outright: a patch's
+/// writes into the tracked file, and for the OVERRIDES tab's active section
+/// to show a patch's value. Refuses a nested value outright: a patch's
 /// values are scalars, by the same rule [`apply_step_patch`] leans on, so
 /// there is never a mapping or a sequence here to render as one line.
-fn render_scalar(value: &serde_norway::Value) -> Result<String> {
+pub(crate) fn render_scalar(value: &serde_norway::Value) -> Result<String> {
     if matches!(
         value,
         serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_)
