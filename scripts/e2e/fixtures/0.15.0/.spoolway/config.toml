@@ -1,0 +1,90 @@
+# Full reference: docs/configuration.md
+#
+# Key                                     Values                 Meaning
+# dispatch.lane_quiet                     time, e.g. 15m         How long an agent may stay silent before spoolway asks it for an update.
+# dispatch.auto_commit                    true, false            Commit any work an agent left uncommitted when its step ends.
+# dispatch.priority                       group, any, reserve    Who gets a free slot: group = finish started groups first, any = no preference, reserve = also hold a slot for a started group.
+# dispatch.lane_child_ceiling             time, e.g. 1h          How long an agent may wait on a program it started before spoolway stops it and asks for help.
+# dispatch.visible_lanes                  number, all            How many of a task's panes stay open. Older finished ones are closed.
+# dispatch.hide_commands                  true, false            Run command steps without opening a pane.
+# dispatch.lane_layout                    panes, tabs            Show a task's steps as panes in one tab, or give each step its own tab.
+# unattended.enabled                      true, false            Run without a person: a blocked task goes to an agent (the unblocker) instead of waiting for you.
+# unattended.max_output_tokens            number                 Stop starting new work once an unattended run has used this many output tokens. 0 = no limit.
+# unattended.max_cost_usd                 dollars                Stop starting new work once an unattended run has spent this much. 0 = no limit.
+# unattended.blocked_agent                profile name           Which agent fixes blocked tasks in an unattended run.
+# unattended.blocked_model                model name             Which model it uses. Must be set for an unattended run.
+# unattended.blocked_effort               level, or blank        How much effort that model puts in.
+# unattended.blocked_session              true, false            Let it continue its earlier conversation instead of starting fresh.
+# unattended.blocked_prompt               prompt name            Which prompt it is given.
+# housekeeping.update_check               true, false            Tell you when a newer spoolway release is out.
+# housekeeping.calibrate_window           time, e.g. 14d         How far back spoolway-calibrate looks at finished tasks.
+# housekeeping.retention_days             days                   Delete old logs and temporary files after this many days. 0 = keep forever.
+# housekeeping.archive_retention_days     days                   Delete finished tasks from the archive after this many days. 0 = keep forever.
+# watch.dirs                              folders                Extra folders whose agent sessions count toward this project's cost. The project folder always counts.
+# issue_tracking.hook                     file name, or blank    Script in the hooks folder that updates your issue tracker as tasks move. Blank = none.
+# issue_tracking.project_key              text                   Your project in the tracker, e.g. owner/repo on GitHub. Passed to the hook.
+# issue_tracking.key_in_names             true, false            Put the issue key in branch and worktree names.
+# agents.<profile>.kind                   claude, codex, pi      Which agent program this profile starts.
+# agents.<profile>.concurrency            number                 Most agents of this profile running at once. 0 = no limit.
+# agents.<profile>.session_reuse_ctx      0 to 100               Continue an earlier conversation only while it fills less than this % of the context window. 0 = always.
+# agents.<profile>.session_blocked_ctx    0 to 100               Stop an agent once its conversation fills this % of the context window. 0 = never.
+# agents.<profile>.permission_mode        mode name              Which permission mode the agent starts in.
+# models.<glob>.context_window            tokens                 How many tokens the model can hold. 0 = use the built-in value.
+# models.<glob>.compact_ctx               1 to 100               At what % full the agent shortens its conversation to make room. Claude and codex only.
+# models.<glob>.input                     dollars per 1M tokens  Price of input tokens. 0 = use the built-in price.
+# models.<glob>.output                    dollars per 1M tokens  Price of output tokens. 0 = use the built-in price.
+# models.<glob>.cache_read                dollars per 1M tokens  Price of reading cached tokens. 0 = use the built-in price.
+# models.<glob>.cache_write_5m            dollars per 1M tokens  Price of writing tokens to a 5-minute cache. 0 = use the built-in price.
+# models.<glob>.cache_write_1h            dollars per 1M tokens  Price of writing tokens to a 1-hour cache. 0 = use the built-in price.
+# models.<glob>.above_<N>k_tokens.<rate>  dollars per 1M tokens  Higher prices that apply once a prompt is longer than N thousand tokens.
+# models.<glob>.prompt_cache_ttl          time, e.g. 1h          Start a fresh conversation if the last reply is older than this. 0 = no limit.
+# models.<glob>.slots                     number                 Most agents using this model at once. Replaces the profile's concurrency. 0 = use concurrency.
+# models.<glob>.local                     true, false            Mark a model that runs on your own machine. It only turns off doctor's warnings about it.
+
+[dispatch]
+lane_quiet = "15m"
+auto_commit = true
+priority = "group"
+lane_child_ceiling = "1h"
+visible_lanes = 3
+hide_commands = false
+lane_layout = "panes"
+
+[unattended]
+enabled = false
+max_output_tokens = 0
+max_cost_usd = 0.0
+blocked_agent = "claude"
+blocked_model = ""
+blocked_effort = ""
+blocked_session = true
+blocked_prompt = "unblocker"
+
+[housekeeping]
+update_check = true
+calibrate_window = "14d"
+retention_days = 45
+archive_retention_days = 0
+
+[watch]
+# Extra folders whose agent sessions count toward this project's cost. The
+# project folder always counts.
+dirs = []
+
+[issue_tracking]
+hook = ""
+project_key = ""
+key_in_names = true
+
+[agents.claude]
+kind = "claude"
+session_reuse_ctx = 20
+session_blocked_ctx = 40
+permission_mode = "auto"
+
+[models]
+
+# Start a fresh conversation when the last reply is older than this.
+# Remove the # from a line below to turn it on.
+# [models."claude-*"]
+# prompt_cache_ttl = "1h"
