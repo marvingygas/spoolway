@@ -56,6 +56,34 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
+    let write = write_prompt_override(repo, name)?;
+
+    println!("  wrote {}", write.path.display());
+    println!();
+    if write.private {
+        println!(
+            "  waiting on a promote — prompt `{name}` is private; this fork only starts applying \
+             once it is tracked. `spoolway override drop prompts/{name}` to clear it."
+        );
+    } else {
+        println!("  active on the next lane. `spoolway override drop prompts/{name}` to clear it.");
+    }
+    Ok(())
+}
+
+/// What [`write_prompt_override`] wrote, for the caller to print.
+pub(crate) struct PromptOverrideWrite {
+    pub(crate) path: std::path::PathBuf,
+    /// Whether the copy came from a private prompt, which it only starts
+    /// replacing once that prompt is tracked.
+    pub(crate) private: bool,
+}
+
+/// Copy prompt `name` into the layer, replacing any copy already there, and
+/// print nothing. `prompt override` prints around it; the OVERRIDES tab
+/// calls it directly, and checks for an existing copy first.
+pub(crate) fn write_prompt_override(repo: &Repo, name: &str) -> Result<PromptOverrideWrite> {
+    repo.refuse_in_lane("the overrides layer")?;
     let tracked = crate::prompt::path_for_tracked(repo, name);
     // A private prompt is never tracked, so forking from it reads
     // `local/prompts/` instead — but the layer this writes into only ever
@@ -73,21 +101,9 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
     let body = std::fs::read_to_string(&source)
         .with_context(|| format!("no prompt named `{name}` at {}", tracked.display()))?;
 
-    let overrides_dir = repo.overrides_dir();
-    let target = crate::overrides::prompt_patch_path(&overrides_dir, name);
-    write_atomic(&target, &body)?;
-
-    println!("  wrote {}", target.display());
-    println!();
-    if private {
-        println!(
-            "  waiting on a promote — prompt `{name}` is private; this fork only starts applying \
-             once it is tracked. `spoolway override drop prompts/{name}` to clear it."
-        );
-    } else {
-        println!("  active on the next lane. `spoolway override drop prompts/{name}` to clear it.");
-    }
-    Ok(())
+    let path = crate::overrides::prompt_patch_path(&repo.overrides_dir(), name);
+    write_atomic(&path, &body)?;
+    Ok(PromptOverrideWrite { path, private })
 }
 
 /// `spoolway config override`: open (creating if absent) `overrides/

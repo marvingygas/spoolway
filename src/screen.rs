@@ -1538,7 +1538,8 @@ mod tests {
             format!("{right} \r\r"),
             // Overrides tab: each section, the search row, both config
             // popups with something typed into them, and the pipeline
-            // section's step selection, searched, and its value field.
+            // section's step selection, searched, and its value field. The
+            // prompts section's own walks are below.
             format!("{right}{right}"),
             format!("{right}{right}\t"),
             format!("{right}{right}\t\t\t"),
@@ -1564,6 +1565,25 @@ mod tests {
         ];
         for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
+            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            screens.extend(walk_screens("queue", &frames));
+        }
+        // The overrides tab's prompts section with a prompt to list: its
+        // search, both popups `enter` opens, and the `open workspace` popup
+        // `w` opens when the folder cannot be opened.
+        let prompt_walks = [
+            format!("{right}{right}\t\t"),
+            format!("{right}{right}\t\tfimpl"),
+            format!("{right}{right}\t\t\r"),
+            format!("{right}{right}\t\t\r\r\r"),
+            format!("{right}{right}w"),
+        ];
+        crate::browser::refuse_opens("could not open the overrides folder: no display is set");
+        for (i, keys) in prompt_walks.iter().enumerate() {
+            let (repo, _guard) = full_project(&format!("capitals-prompts-{i}"));
+            let path = crate::prompt::directory_form(&repo, "implementer");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "implementer\n").unwrap();
             let frames = crate::screen::shell::drive_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }

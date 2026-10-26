@@ -12,7 +12,11 @@
 //! `+ new key` takes any dotted key the list does not show, such as a
 //! `[models]` glob the config has no entry for yet. The pipeline section
 //! sets one step field on many pipeline steps at once — see [`pipeline`].
-//! The prompts and active sections have no list yet.
+//! The prompts section copies a prompt into the layer — see [`prompts`].
+//! The active section has no list yet.
+//!
+//! `w` on the config, pipeline and prompts sections opens the overrides
+//! folder, where those files are edited by hand — see [`workspace`].
 //!
 //! A value is written exactly as typed, through the same unchecked write
 //! `config override --set` makes after its own checks — see
@@ -21,6 +25,8 @@
 //! ignored. Checking it here would add rules a person has to learn.
 
 mod pipeline;
+mod prompts;
+mod workspace;
 
 use std::io::Write;
 
@@ -106,6 +112,9 @@ enum Mode {
     },
     /// A write that failed, until `enter` closes it.
     Notice(Notice),
+    /// `w` could open the overrides folder neither in a file manager nor in
+    /// a herdr pane: the `open workspace` popup's text, until `enter`.
+    Workspace(String),
 }
 
 /// Everything the tab holds while it is open. Built fresh on every visit.
@@ -128,6 +137,8 @@ struct State {
     stale: Option<String>,
     /// The pipeline section, which keeps its own list and popups.
     pipeline: pipeline::PipelineSection,
+    /// The prompts section, which keeps its own list and popups.
+    prompts: prompts::PromptsSection,
 }
 
 impl State {
@@ -141,18 +152,20 @@ impl State {
             active: 0,
             stale: None,
             pipeline: pipeline::PipelineSection::new(),
+            prompts: prompts::PromptsSection::new(),
         };
         state.reload(repo);
         state
     }
 
-    /// Read the config, the pipelines and the layer again, after a write or
-    /// on a visit.
+    /// Read the config, the pipelines, the prompts and the layer again,
+    /// after a write or on a visit.
     fn reload(&mut self, repo: &Repo) {
         let (config, stale) = in_use(repo);
         self.settings = settings(&config);
         self.stale = stale;
         self.pipeline.reload(repo, &config);
+        self.prompts.reload(repo);
         self.active = layer_key_count(&repo.overrides_dir());
         self.clamp();
     }
@@ -188,7 +201,25 @@ impl State {
     /// it: the only time `tab`, `q` and `←`/`→` reach past the section.
     fn at_rest(&self) -> bool {
         matches!(self.mode, Mode::Browsing)
-            && (self.section != Section::Pipeline || self.pipeline.at_rest())
+            && match self.section {
+                Section::Pipeline => self.pipeline.at_rest(),
+                Section::Prompts => self.prompts.at_rest(),
+                Section::Config | Section::Active => true,
+            }
+    }
+
+    /// Whether `w` opens the overrides folder now: on the config, pipeline
+    /// and prompts sections with nothing open over their list, and in the
+    /// prompts section's popups, which it closes first. Anywhere a field or
+    /// a search row has the keys, `w` is a letter typed into it.
+    fn take_w(&mut self) -> bool {
+        matches!(self.mode, Mode::Browsing)
+            && match self.section {
+                Section::Config => true,
+                Section::Pipeline => self.pipeline.at_rest(),
+                Section::Prompts => self.prompts.take_w(),
+                Section::Active => false,
+            }
     }
 }
 
@@ -328,13 +359,27 @@ pub(crate) fn tab(
 }
 
 /// One key, read by whatever is open: the list, the search row, a popup or
-/// a notice. The pipeline section reads its own keys, all but the `tab` that
-/// leaves it.
+/// a notice. The pipeline and prompts sections read their own keys, all but
+/// the `tab` that leaves them and the `w` that opens the overrides folder.
 fn handle_key(repo: &Repo, state: &mut State, key: Key) {
+    if key == Key::Char('w') && state.take_w() {
+        if let Some(text) = workspace::open(repo) {
+            state.mode = Mode::Workspace(text);
+        }
+        return;
+    }
     if state.section == Section::Pipeline && matches!(state.mode, Mode::Browsing) {
         if key == Key::Tab && state.pipeline.at_rest() {
             state.section = state.section.next();
         } else if state.pipeline.handle_key(repo, key) {
+            state.reload(repo);
+        }
+        return;
+    }
+    if state.section == Section::Prompts && matches!(state.mode, Mode::Browsing) {
+        if key == Key::Tab && state.prompts.at_rest() {
+            state.section = state.section.next();
+        } else if state.prompts.handle_key(repo, key) {
             state.reload(repo);
         }
         return;
@@ -395,6 +440,11 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
                 state.mode = Mode::Notice(notice);
             }
         }
+        Mode::Workspace(text) => {
+            if key != Key::Enter {
+                state.mode = Mode::Workspace(text);
+            }
+        }
     }
 }
 
@@ -402,7 +452,7 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
 fn browse(state: &mut State, key: Key) {
     match key {
         Key::Tab => state.section = state.section.next(),
-        // Prompts and active have no list yet: only `tab` reaches past them.
+        // Active has no list yet: only `tab` reaches past it.
         _ if state.section != Section::Config => {}
         Key::Up | Key::Down => move_cursor(state, key),
         Key::Char('f') => state.mode = Mode::Search,
@@ -484,6 +534,11 @@ const NAME_FIELD: usize = 28;
 /// The text inside a popup, so both popups are 50 columns wide inside their
 /// border whatever is typed into them, as the mockups draw them.
 const POPUP_TEXT: usize = 46;
+
+/// The text inside the `open workspace` popup: wide enough for the reason
+/// and the overrides folder's path on rows of their own, as the mockup
+/// draws it, and wrapped there.
+const WORKSPACE_TEXT: usize = 54;
 
 /// The whole frame: the strip, the list box, any popup over it, and the key
 /// line under it.
@@ -581,7 +636,8 @@ fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let stale = match state.section {
         Section::Config => &state.stale,
         Section::Pipeline => &state.pipeline.stale,
-        Section::Prompts | Section::Active => &None,
+        Section::Prompts => &state.prompts.stale,
+        Section::Active => &None,
     };
     let mut head: Vec<String> = Vec::new();
     if let Some(stale) = stale {
@@ -596,15 +652,16 @@ fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let rows = rows.map(|rows| rows.saturating_sub(head.len()).max(1));
     match state.section {
         Section::Pipeline => head.extend(state.pipeline.lines(rows, width)),
-        _ => head.extend(keys_list(state, rows, width)),
+        Section::Prompts => head.extend(state.prompts.lines(rows, width)),
+        Section::Config | Section::Active => head.extend(keys_list(state, rows, width)),
     }
     head
 }
 
 /// [`list`]'s lines below the note on a stale config: the search row while
 /// a query is typed, a blank row, then `+ new key` and every key under its
-/// table, the last row saying how many keys are out of sight. Prompts and
-/// active, with no list yet, draw the blank row alone.
+/// table, the last row saying how many keys are out of sight. Active, with
+/// no list yet, draws the blank row alone.
 fn keys_list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if matches!(state.mode, Mode::Search) {
@@ -661,6 +718,9 @@ fn popup(state: &State, rows: Option<usize>) -> Option<Vec<String>> {
     if state.section == Section::Pipeline && matches!(state.mode, Mode::Browsing) {
         return state.pipeline.popup(rows);
     }
+    if state.section == Section::Prompts && matches!(state.mode, Mode::Browsing) {
+        return state.prompts.popup();
+    }
     match &state.mode {
         Mode::Set { key, value } => {
             let body = vec![
@@ -686,8 +746,23 @@ fn popup(state: &State, rows: Option<usize>) -> Option<Vec<String>> {
             Some(super::panel("new key", &body, &keys(NEW_KEY_KEYS)))
         }
         Mode::Notice(notice) => Some(notice.panel(super::NOTICE_WRAP)),
+        Mode::Workspace(text) => Some(workspace_popup(text)),
         Mode::Browsing | Mode::Search => None,
     }
+}
+
+/// The `open workspace` popup: `text` wrapped to [`WORKSPACE_TEXT`], each of
+/// its own lines on rows of its own, and the one key that closes it.
+fn workspace_popup(text: &str) -> Vec<String> {
+    let mut body = vec![String::new()];
+    for line in text.lines() {
+        body.extend(
+            super::wrap(line, WORKSPACE_TEXT)
+                .iter()
+                .map(|line| pad_to(line, WORKSPACE_TEXT)),
+        );
+    }
+    super::panel("open workspace", &body, &keys(&[("enter", "close")]))
 }
 
 /// One field's row: `label`, then `text` with the typing cursor after it
@@ -727,6 +802,10 @@ const NEW_KEY_KEYS: &[(&str, &str)] = &[("tab", "next field"), ("enter", "save")
 /// The search row's keys, the same the queue tab's search names.
 const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "leave search"), ("esc", "cancel")];
 
+/// `w`, as the key line of every section it opens the overrides folder on
+/// names it.
+const OPEN_WORKSPACE: (&str, &str) = ("w", "open workspace");
+
 /// The key line under the frame: whatever is open names its own keys, and
 /// the list names what `enter` does on the row under the cursor.
 fn footer(state: &State) -> String {
@@ -735,7 +814,9 @@ fn footer(state: &State) -> String {
         Mode::Set { .. } => SET_KEYS.to_vec(),
         Mode::NewKey { .. } => NEW_KEY_KEYS.to_vec(),
         Mode::Notice(_) => vec![("enter", "confirm")],
+        Mode::Workspace(_) => vec![("enter", "close")],
         Mode::Browsing if state.section == Section::Pipeline => state.pipeline.footer(),
+        Mode::Browsing if state.section == Section::Prompts => state.prompts.footer(),
         Mode::Browsing if state.section != Section::Config => {
             [[("tab", "section")].as_slice(), shell::quit_hint()].concat()
         }
@@ -745,7 +826,7 @@ fn footer(state: &State) -> String {
                 None => ("enter", "new key"),
             };
             [
-                [enter, ("f", "search"), ("tab", "section")].as_slice(),
+                [enter, ("f", "search"), OPEN_WORKSPACE, ("tab", "section")].as_slice(),
                 shell::quit_hint(),
             ]
             .concat()
@@ -833,16 +914,119 @@ mod tests {
         );
     }
 
-    // The sections with no list yet draw an empty box, and name only the
-    // key that leaves them.
+    // The section with no list yet draws an empty box, and names only the
+    // key that leaves it.
     #[test]
     fn a_section_with_no_list_yet_draws_an_empty_box() {
         let (repo, _guard) = project("empty-sections");
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t\t");
+        type_keys(&repo, &mut state, "\t\t\t");
         let drawn = lines(&state);
         assert!(!drawn.iter().any(|l| l.contains("new key")), "{drawn:?}");
         assert_eq!(drawn.last().unwrap(), " [tab] section");
+    }
+
+    // `w` opens the overrides folder from the config, pipeline and prompts
+    // sections and from both prompt popups, which it closes, creating the
+    // folder first. Typed into a search row it is a letter, and on the
+    // active section it does nothing.
+    #[test]
+    fn w_opens_the_overrides_folder_from_every_section_and_popup() {
+        let (repo, _guard) = project("w-everywhere");
+        let path = crate::prompt::directory_form(&repo, "implementer");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "implementer\n").unwrap();
+        let dir = repo.overrides_dir();
+        assert!(!dir.exists());
+        let mut state = State::new(&repo);
+
+        // Config, then pipeline, then prompts.
+        type_keys(&repo, &mut state, "w");
+        assert!(dir.is_dir(), "created before it is opened");
+        type_keys(&repo, &mut state, "\tw\tw");
+        assert_eq!(
+            crate::browser::opened(),
+            [dir.clone(), dir.clone(), dir.clone()]
+        );
+
+        // The written popup, then the one for a copy already there.
+        type_keys(&repo, &mut state, "\rw");
+        assert!(state.prompts.popup().is_none(), "w closes the popup");
+        type_keys(&repo, &mut state, "\rw");
+        assert!(state.prompts.popup().is_none());
+        assert_eq!(crate::browser::opened().len(), 5);
+
+        // A search row and the active section keep it.
+        type_keys(&repo, &mut state, "fw");
+        assert!(lines(&state)[1].starts_with("│ search: w▏"));
+        type_keys(&repo, &mut state, "\x1b");
+        type_keys(&repo, &mut state, "\tw");
+        assert_eq!(state.section, Section::Active);
+        assert_eq!(crate::browser::opened().len(), 5);
+        assert!(matches!(state.mode, Mode::Browsing));
+    }
+
+    // The folder `w` creates empty leaves a project that has overridden
+    // nothing reading that way: `override list` finds no rows, and the
+    // dispatch tab's overrides popup does not open.
+    #[test]
+    fn the_empty_folder_w_creates_reads_as_no_overrides() {
+        let (repo, _guard) = project("w-empty");
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "w");
+        assert!(repo.overrides_dir().is_dir());
+        assert!(
+            crate::commands::collect_override_rows(&repo)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(crate::commands::overrides_popup(&repo).unwrap().is_none());
+        assert_eq!(state.active, 0);
+    }
+
+    // When the opener cannot start, outside herdr, the `open workspace`
+    // popup gives the reason and the path as the mockup draws it, and only
+    // `enter` closes it.
+    #[test]
+    fn w_with_no_opener_outside_herdr_shows_the_path() {
+        let (repo, _guard) = project("w-popup");
+        crate::browser::refuse_opens("could not open the overrides folder: no display is set");
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "w");
+        let dir = repo.overrides_dir().display().to_string();
+        let text = 54;
+        let row = |line: &str| format!("│  {line:<text$}  │");
+        let mut expected = vec![
+            format!("╭─ open workspace {}╮", "─".repeat(text + 4 - 17)),
+            row(""),
+            row("w: could not open the overrides folder: no display is"),
+            row("set, and the board is not running inside herdr."),
+            row("open this folder yourself:"),
+        ];
+        expected.extend(
+            dir.chars()
+                .collect::<Vec<_>>()
+                .chunks(text)
+                .map(|chunk| row(&chunk.iter().collect::<String>())),
+        );
+        expected.extend([
+            row(""),
+            row("[enter] close"),
+            format!("╰{}╯", "─".repeat(text + 4)),
+        ]);
+        let drawn: Vec<String> = popup(&state, None)
+            .unwrap()
+            .iter()
+            .map(|l| shell::plain(l))
+            .collect();
+        assert_eq!(drawn, expected);
+        assert_eq!(drawn[0].chars().count(), 60, "the mockup's width");
+        assert_eq!(lines(&state).last().unwrap(), " [enter] close");
+
+        type_keys(&repo, &mut state, "w\x1b");
+        assert!(matches!(state.mode, Mode::Workspace(_)));
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.mode, Mode::Browsing));
     }
 
     // Every config key, every pipeline step field and a pipeline's
@@ -905,7 +1089,7 @@ mod tests {
         );
         assert_eq!(
             drawn.last().unwrap(),
-            " [enter] set value   [f] search   [tab] section"
+            " [enter] set value   [f] search   [w] open workspace   [tab] section"
         );
     }
 
@@ -1041,7 +1225,7 @@ mod tests {
         let mut state = State::new(&repo);
         assert_eq!(
             lines(&state).last().unwrap(),
-            " [enter] new key   [f] search   [tab] section"
+            " [enter] new key   [f] search   [w] open workspace   [tab] section"
         );
         type_keys(&repo, &mut state, "\rmodels.qwen3-coder.input\t0.4");
         let drawn = lines(&state);
@@ -1158,7 +1342,9 @@ mod tests {
         let drawn = shell::plain(&String::from_utf8(out).unwrap());
         assert!(drawn.contains("[OVERRIDES]"), "{drawn}");
         assert!(drawn.contains("╭─ [config]   pipeline   prompts   active (0) ─"));
-        assert!(drawn.contains("[enter] new key   [f] search   [tab] section   [q] quit"));
+        assert!(drawn.contains(
+            "[enter] new key   [f] search   [w] open workspace   [tab] section   [q] quit"
+        ));
     }
 
     // A popup taller than the list a short terminal leaves room for is

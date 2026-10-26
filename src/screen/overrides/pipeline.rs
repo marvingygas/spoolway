@@ -908,6 +908,7 @@ impl PipelineSection {
                 [
                     ("enter", "select steps"),
                     ("f", "search"),
+                    super::OPEN_WORKSPACE,
                     ("tab", "section"),
                 ]
                 .as_slice(),
@@ -1308,7 +1309,7 @@ mod tests {
         );
         assert_eq!(
             lines(&state).last().unwrap(),
-            " [enter] select steps   [f] search   [tab] section"
+            " [enter] select steps   [f] search   [w] open workspace   [tab] section"
         );
     }
 
