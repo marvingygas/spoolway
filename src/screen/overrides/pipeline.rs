@@ -1174,7 +1174,7 @@ fn unwritten_notice(field: &str, failure: &Unwritten) -> Notice {
 #[cfg(test)]
 mod tests {
     use super::super::State;
-    use super::super::tests::{lines, project, type_keys};
+    use super::super::tests::{key_line, lines, project, type_keys};
     use super::*;
 
     /// Two agent steps on sonnet with an effort, one step that sets no
@@ -1326,8 +1326,8 @@ mod tests {
             lines(&state)[0]
         );
         assert_eq!(
-            lines(&state).last().unwrap(),
-            " [enter] select steps   [f] search   [w] open workspace   [tab] section"
+            key_line(&state),
+            " [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section"
         );
     }
 

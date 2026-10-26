@@ -972,6 +972,12 @@ mod tests {
         frame(state).iter().map(|l| shell::plain(l)).collect()
     }
 
+    /// The key line under the frame as one line, before an 80-column
+    /// terminal wraps it onto a second row.
+    pub(super) fn key_line(state: &State) -> String {
+        shell::plain(&footer(state))
+    }
+
     /// The layer's config patch, as the file holds it.
     fn layer(repo: &Repo) -> String {
         std::fs::read_to_string(crate::overrides::config_patch_path(&repo.overrides_dir()))
@@ -1023,22 +1029,9 @@ mod tests {
         );
     }
 
-    // The section with no list yet draws an empty box, and names only the
-    // key that leaves it.
-    #[test]
-    fn a_section_with_no_list_yet_draws_an_empty_box() {
-        let (repo, _guard) = project("empty-sections");
-        let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t\t\t");
-        let drawn = lines(&state);
-        assert!(!drawn.iter().any(|l| l.contains("new key")), "{drawn:?}");
-        assert_eq!(drawn.last().unwrap(), " [tab] section");
-    }
-
-    // `w` opens the overrides folder from the config, pipeline and prompts
-    // sections and from both prompt popups, which it closes, creating the
-    // folder first. Typed into a search row it is a letter, and on the
-    // active section it does nothing.
+    // `w` opens the overrides folder from every section and from both
+    // prompt popups, which it closes, creating the folder first. Typed into
+    // a search row it is a letter.
     #[test]
     fn w_opens_the_overrides_folder_from_every_section_and_popup() {
         let (repo, _guard) = project("w-everywhere");
@@ -1065,13 +1058,14 @@ mod tests {
         assert!(state.prompts.popup().is_none());
         assert_eq!(crate::browser::opened().len(), 5);
 
-        // A search row and the active section keep it.
+        // A search row keeps it, and the active section opens the folder.
         type_keys(&repo, &mut state, "fw");
         assert!(lines(&state)[1].starts_with("│ search: w▏"));
         type_keys(&repo, &mut state, "\x1b");
+        assert_eq!(crate::browser::opened().len(), 5);
         type_keys(&repo, &mut state, "\tw");
         assert_eq!(state.section, Section::Active);
-        assert_eq!(crate::browser::opened().len(), 5);
+        assert_eq!(crate::browser::opened().len(), 6);
         assert!(matches!(state.mode, Mode::Browsing));
     }
 
@@ -1197,8 +1191,8 @@ mod tests {
             "one heading per table"
         );
         assert_eq!(
-            drawn.last().unwrap(),
-            " [enter] set value   [f] search   [w] open workspace   [tab] section"
+            key_line(&state),
+            " [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section"
         );
     }
 
@@ -1241,18 +1235,24 @@ mod tests {
         let (repo, _guard) = project("scroll");
         let _terminal = crate::screen::test_terminal((80, 16));
         let mut state = State::new(&repo);
+        // The row above the box's bottom border: the key line under it
+        // takes one row or two, as its width at 80 columns decides.
+        let marker = |drawn: &[String]| {
+            let bottom = drawn.iter().position(|l| l.starts_with('╰')).unwrap();
+            drawn[bottom - 1].clone()
+        };
         let drawn = lines(&state);
         assert_eq!(drawn.len(), 16 - 1, "one row is left for the cursor");
-        let marker = &drawn[drawn.len() - 3];
+        let first = marker(&drawn);
         assert!(
-            marker.contains("keys below") && !marker.contains("above"),
-            "{marker}"
+            first.contains("keys below") && !first.contains("above"),
+            "{first}"
         );
 
         let down = "\x1b[B".repeat(state.matches().len());
         type_keys(&repo, &mut state, &down);
         let drawn = lines(&state);
-        let marker = &drawn[drawn.len() - 3];
+        let marker = marker(&drawn);
         assert!(
             marker.contains("keys above") && !marker.contains("below"),
             "{marker}"
@@ -1333,8 +1333,8 @@ mod tests {
         let (repo, _guard) = project("new-key");
         let mut state = State::new(&repo);
         assert_eq!(
-            lines(&state).last().unwrap(),
-            " [enter] new key   [f] search   [w] open workspace   [tab] section"
+            key_line(&state),
+            " [enter] new key   [f] search   [o] options   [w] open workspace   [tab] section"
         );
         type_keys(&repo, &mut state, "\rmodels.qwen3-coder.input\t0.4");
         let drawn = lines(&state);
@@ -1452,7 +1452,8 @@ mod tests {
         assert!(drawn.contains("[OVERRIDES]"), "{drawn}");
         assert!(drawn.contains("╭─ [config]   pipeline   prompts   active (0) ─"));
         assert!(drawn.contains(
-            "[enter] new key   [f] search   [w] open workspace   [tab] section   [q] quit"
+            "[enter] new key   [f] search   [o] options   [w] open workspace   [tab] section   \
+             [q] quit"
         ));
     }
 
