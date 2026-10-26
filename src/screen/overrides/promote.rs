@@ -413,9 +413,10 @@ impl Promotion {
     /// the checkout. Answers the notice to show either way.
     ///
     /// Nothing is written unless the worktree was made, nothing is written
-    /// into a checkout that no longer has the branch out, and nothing is
-    /// written anywhere [`Repo::tracked_write_root`] refuses: a checkout
-    /// of a lane, on a detached HEAD, or of a branch with no `.spoolway/`.
+    /// into a checkout that no longer has the branch out or sits inside the
+    /// main checkout's folder, and nothing is written anywhere
+    /// [`Repo::tracked_write_root`] refuses: a checkout of a lane, on a
+    /// detached HEAD, or of a branch with no `.spoolway/`.
     pub(super) fn run(&self, repo: &Repo) -> Notice {
         match self.write(repo) {
             Ok(notice) | Err(notice) => notice,
@@ -460,6 +461,31 @@ impl Promotion {
         let write = target
             .tracked_write_root("tracked files", &typed)
             .map_err(refused)?;
+        // `Repo::discover` takes a worktree nested inside the main
+        // checkout's folder for the main checkout, so the write would land
+        // there, on whatever branch the main checkout has out, under a
+        // notice naming the picked one. Refused unless the write goes into
+        // the very checkout the popup named.
+        let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => a == b,
+        };
+        if !same(write.root, checkout) {
+            return Err(Notice::new(
+                "not promoted",
+                format!(
+                    "{} sits inside the main checkout {}, and spoolway reads a worktree \
+                     there as the main checkout, so this would write the main checkout's \
+                     files instead of {}'s. nothing was written. move the worktree out with \
+                     git worktree move {} {}, and promote again.",
+                    checkout.display(),
+                    write.root.display(),
+                    self.branch.name,
+                    checkout.display(),
+                    worktree_path(&repo.root, &self.branch.name).display()
+                ),
+            ));
+        }
         for (at, file) in self.files.iter().enumerate() {
             let Err(err) = crate::commands::promote_override(repo, write.root, &file.target) else {
                 continue;
@@ -1299,6 +1325,54 @@ mod tests {
         assert!(said.contains(&gone.display().to_string()), "{said}");
         assert!(!gone.exists());
         assert!(!scratch.join("proj-feature-config-update").exists());
+    }
+
+    // A worktree nested inside the main checkout's folder is read as the
+    // main checkout, so a write there would land on the main checkout's
+    // branch. It is refused, naming `git worktree move`, and nothing is
+    // written in either checkout.
+    #[test]
+    fn a_worktree_nested_in_the_main_checkout_is_refused() {
+        let (repo, scratch) = branched("nested");
+        let nested = repo.root.join(".worktrees").join("feature");
+        git(
+            &repo.root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                nested.to_str().unwrap(),
+                "feature/config-update",
+            ],
+        );
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+        assert!(text(&state).contains("feature/config-update is checked out at"));
+        type_keys(&repo, &mut state, "\r");
+
+        assert!(
+            popup(&state)[0].starts_with("╭─ not promoted ─"),
+            "{:#?}",
+            popup(&state)
+        );
+        let said = text(&state).replace(' ', "");
+        assert!(said.contains("gitworktreemove"), "{said}");
+        let moved = scratch.join("proj-feature-config-update");
+        assert!(said.contains(&moved.display().to_string()), "{said}");
+        assert_eq!(tracked(&repo.root), IMPL);
+        assert_eq!(tracked(&nested), IMPL);
+
+        // The advice works: moved out, the worktree is written.
+        type_keys(&repo, &mut state, "\r");
+        let (from, to) = (nested.to_str().unwrap(), moved.to_str().unwrap());
+        git(&repo.root, &["worktree", "move", from, to]);
+        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, &down_enter(1));
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ promoted ─"));
+        assert!(tracked(&moved).contains("claude-opus-5-5"));
+        assert_eq!(tracked(&repo.root), IMPL);
     }
 
     // In home mode the setup is the workspace's, on no branch, so `promote

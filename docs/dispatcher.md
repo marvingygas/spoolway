@@ -1349,7 +1349,9 @@ refused before any worktree is made.
 Nothing is written, either, when the checkout no longer has the branch out by the time you press
 `enter`, such as after a `git switch` there. The popup names the branch it has out now. A
 worktree whose folder was deleted is still listed by git until it is pruned. Picking its branch
-says so and asks you to run `git worktree prune` and promote again.
+says so and asks you to run `git worktree prune` and promote again. A worktree inside the main
+checkout's folder is refused too, since spoolway reads it as the main checkout. The popup names
+the `git worktree move` that puts it beside the main checkout instead.
 
 A project in home mode keeps its setup in its workspace, which no branch carries. `promote
 selected` refuses there before the picker opens, and names the `spoolway override promote`
