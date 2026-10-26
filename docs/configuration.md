@@ -333,6 +333,9 @@ checkout's files stay as they were until the branch merges. A worktree with no `
 its own, a dispatcher lane's worktree and a worktree on a detached HEAD refuse, as `config set`
 does.
 
+The overrides tab's active section promotes whole files onto a branch you pick, in the checkout
+that holds it. See [Promoting from the tab](dispatcher.md#promoting-from-the-tab).
+
 ### When an override takes effect
 
 | Override | When a running dispatcher uses it |
