@@ -20,7 +20,7 @@
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
 # menu removes its page after one popup. On the overrides tab a listed config
 # key and a new one are each set through their popup, and both land in the
-# overrides layer.
+# overrides layer, and one step field is set on steps in two pipelines.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -583,6 +583,28 @@ has "with its value written as a number" "input = 0.4" "$CONFIG_LAYER"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$OVERRIDES_TAB" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "active counts both keys" "active (2)" "$LAST"
+
+# The overrides tab's pipeline section sets one step field on steps in two
+# pipelines. bugfix's steps leave `effort` out, with its lines deleted here,
+# and default's carry it blank. `tab` moves onto the section, `↓` onto
+# effort, and `enter` lists both pipelines, where `a` selects every step.
+# `enter` opens the value field, `low` is typed and saved, and `enter`
+# closes the popup the save opened.
+sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
+lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
+PIPELINE_TAB="$LIVE/overrides-pipeline.txt"
+on_screen '\x1b[C\x1b[C\t\x1b[B\ra\rlow\r\r' "$PIPELINE_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$PIPELINE_TAB" >"$PIPELINE_TAB.plain"
+has "tab moves onto the pipeline section" \
+  "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
+has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
+has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
+has "a step that leaves effort out reads not set" "[x] reproduce            not set" \
+  "$PIPELINE_TAB.plain"
+has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE_TAB.plain"
+PATCHES="$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
+has "bugfix's patch sets the effort its steps left out" "effort: low" "$PATCHES/bugfix.yml"
+has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

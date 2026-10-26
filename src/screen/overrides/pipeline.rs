@@ -1053,8 +1053,8 @@ fn write(repo: &Repo, field: Field, value: &str, targets: &[(String, Vec<String>
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{lines, project, type_keys};
     use super::super::State;
+    use super::super::tests::{lines, project, type_keys};
     use super::*;
 
     /// Two agent steps on sonnet with an effort, one step that sets no
@@ -1593,6 +1593,46 @@ mod tests {
             rows.iter().any(|r| r == "[enter] save   [esc] back"),
             "{rows:#?}"
         );
+    }
+
+    // A patch that stops reading while the screen is open is named above
+    // the list with the command that drops it, and leaves only its own
+    // pipeline on the tracked values.
+    #[test]
+    fn a_patch_that_no_longer_merges_is_said_above_the_list() {
+        let (repo, _guard) = pipelines_project("stale-patch");
+        write_patch(&repo, "alpha", "steps: [\n");
+        write_patch(
+            &repo,
+            "beta",
+            "steps:\n  fix:\n    model: claude-opus-5-5\n",
+        );
+        let state = on_pipeline(&repo);
+        let stale = state.pipeline.stale.as_deref().unwrap_or_default();
+        assert!(
+            stale.starts_with("the patch on alpha no longer merges"),
+            "{stale}"
+        );
+        assert!(stale.contains("`spoolway override drop alpha`"), "{stale}");
+        let beta = &state.pipeline.pipelines[1];
+        assert_eq!(beta.steps[0].value(FIELDS[0]), "claude-opus-5-5");
+        assert!(lines(&state).join(" ").contains("no longer merges"));
+    }
+
+    // Tracked pipelines that no longer load leave the list with no
+    // pipelines, and say why.
+    #[test]
+    fn tracked_pipelines_that_no_longer_load_are_said_above_the_list() {
+        let (repo, _guard) = pipelines_project("stale-tracked");
+        std::fs::write(Pipelines::file_in(&repo.checkout, "alpha"), "steps: [\n").unwrap();
+        let state = on_pipeline(&repo);
+        let stale = state.pipeline.stale.as_deref().unwrap_or_default();
+        assert!(
+            stale.starts_with("the tracked pipelines no longer load"),
+            "{stale}"
+        );
+        assert!(stale.contains("`spoolway pipeline check`"), "{stale}");
+        assert!(state.pipeline.pipelines.is_empty());
     }
 
     // A picking list taller than the screen keeps the cursor's row in view
