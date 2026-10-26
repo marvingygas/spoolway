@@ -20,8 +20,9 @@
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
 # menu removes its page after one popup. On the overrides tab a listed config
 # key and a new one are each set through their popup, and both land in the
-# overrides layer, one step field is set on steps in two pipelines, and one
-# prompt is copied into the layer.
+# overrides layer, one step field is set on steps in two pipelines, one
+# prompt is copied into the layer, and the active section deletes one config
+# key from it.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -624,6 +625,30 @@ has "enter says where the copy is" "wrote overrides/prompts/implementer/PROMPT.m
 PROMPT_COPY="$SPOOLWAY_PROJECT_HOME/overrides/prompts/implementer/PROMPT.md"
 works "the copy is in the layer" test -f "$PROMPT_COPY"
 works "and holds the tracked prompt" cmp -s .spoolway/prompts/implementer/PROMPT.md "$PROMPT_COPY"
+
+# The overrides tab's active section deletes one key from the layer. `tab`
+# three times moves onto the section, which lists config.toml first with its
+# keys sorted under it, so `↓` lands on dispatch.lane_quiet. `o` opens its
+# menu, `enter` on `delete selected` opens the confirm popup naming the file
+# and the key, and `enter` deletes it.
+ACTIVE_TAB="$LIVE/overrides-active.txt"
+on_screen '\x1b[C\x1b[C\t\t\t\x1b[Bo\r\r' "$ACTIVE_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$ACTIVE_TAB" >"$ACTIVE_TAB.plain"
+has "tab three times moves onto the active section" \
+  "╭─ config   pipeline   prompts   [active (" "$ACTIVE_TAB.plain"
+has "it lists the layer's config.toml" "[ ] config.toml" "$ACTIVE_TAB.plain"
+has "with the key set earlier under it" "[ ] dispatch.lane_quiet" "$ACTIVE_TAB.plain"
+has "a prompt reads whole file" "[ ] prompts/implementer            whole file" \
+  "$ACTIVE_TAB.plain"
+has "its key line names space, a, o and w" \
+  "[space] select   [a] all   [o] options   [w] open workspace" "$ACTIVE_TAB.plain"
+has "o opens the key's menu" "╭─ dispatch.lane_quiet ─" "$ACTIVE_TAB.plain"
+has "delete selected opens one confirm popup" "╭─ delete this override ─" \
+  "$ACTIVE_TAB.plain"
+has "which names the file and the key" "config.toml   dispatch.lane_quiet" \
+  "$ACTIVE_TAB.plain"
+lacks "enter deletes the key from the layer" "lane_quiet" "$CONFIG_LAYER"
+has "and keeps the other key" "input = 0.4" "$CONFIG_LAYER"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"
