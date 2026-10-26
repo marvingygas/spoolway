@@ -648,14 +648,25 @@ pub fn config_override_set(repo: &Repo, set: &str) -> Result<()> {
 /// Remove one key from a target's patch; returns the file as `override list`
 /// prints it. A file left with no key is removed from the layer.
 ///
-/// `override drop <target> <key>` calls this, and so does the OVERRIDES tab.
+/// `override drop <target> <key>` calls this.
 pub(crate) fn drop_override_key(repo: &Repo, target: &str, key: &str) -> Result<String> {
+    drop_override_keys(repo, target, &[key.to_string()])
+}
+
+/// Remove `keys` from a target's patch in one write; returns the file as
+/// `override list` prints it. A key the patch does not set refuses the call
+/// with the file left as it was, and a file left with no key is removed from
+/// the layer.
+///
+/// The OVERRIDES tab calls this once per file, so a delete across several
+/// files that stops partway has changed whole files only.
+pub(crate) fn drop_override_keys(repo: &Repo, target: &str, keys: &[String]) -> Result<String> {
     repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     match parse_target(target)? {
         Target::Pipeline(name) => {
-            crate::overrides::remove_pipeline_patch_key(&dir, &name, key)?;
+            crate::overrides::remove_pipeline_patch_keys(&dir, &name, keys)?;
             Ok(format!("pipelines/{name}.yml"))
         }
         Target::Prompt(name) => bail!(
@@ -663,7 +674,30 @@ pub(crate) fn drop_override_key(repo: &Repo, target: &str, key: &str) -> Result<
              `spoolway override drop prompts/{name}` removes it"
         ),
         Target::Config => {
-            crate::overrides::remove_config_patch_key(&dir, key)?;
+            crate::overrides::remove_config_patch_keys(&dir, keys)?;
+            Ok(crate::config::CONFIG_FILE.to_string())
+        }
+    }
+}
+
+/// Remove one whole entry from the layer; returns the file as `override
+/// list` prints it.
+///
+/// `override drop <target>` calls this, and so does the OVERRIDES tab.
+pub(crate) fn drop_override_target(repo: &Repo, target: &str) -> Result<String> {
+    repo.refuse_in_lane("the overrides layer")?;
+    let dir = repo.overrides_dir();
+    match parse_target(target)? {
+        Target::Pipeline(name) => {
+            crate::overrides::remove_pipeline_patch(&dir, &name)?;
+            Ok(format!("pipelines/{name}.yml"))
+        }
+        Target::Prompt(name) => {
+            crate::overrides::remove_prompt_override(&dir, &name)?;
+            Ok(format!("prompts/{name}"))
+        }
+        Target::Config => {
+            crate::overrides::remove_config_patch(&dir)?;
             Ok(crate::config::CONFIG_FILE.to_string())
         }
     }
@@ -676,32 +710,19 @@ pub fn override_drop(repo: &Repo, target: Option<&str>, key: Option<&str>) -> Re
         println!("cleared {key} from {file}");
         return Ok(());
     }
+    if let Some(target) = target {
+        let file = drop_override_target(repo, target)?;
+        println!("cleared {file} from the layer");
+        return Ok(());
+    }
     repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
-    let Some(target) = target else {
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", dir.display())),
-        }
-        println!("cleared the whole layer");
-        return Ok(());
-    };
-
-    match parse_target(target)? {
-        Target::Pipeline(name) => {
-            crate::overrides::remove_pipeline_patch(&dir, &name)?;
-            println!("cleared pipelines/{name}.yml from the layer");
-        }
-        Target::Prompt(name) => {
-            crate::overrides::remove_prompt_override(&dir, &name)?;
-            println!("cleared prompts/{name} from the layer");
-        }
-        Target::Config => {
-            crate::overrides::remove_config_patch(&dir)?;
-            println!("cleared config.toml from the layer");
-        }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing {}", dir.display())),
     }
+    println!("cleared the whole layer");
     Ok(())
 }
 

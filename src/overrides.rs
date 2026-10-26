@@ -1091,23 +1091,33 @@ pub(crate) fn set_config_patch_key(
 pub(crate) const CONFIG_PATCH_HEADER: &str = "# Every key here overrides the same key in .spoolway/config.toml.\n\
      # `spoolway override promote config.toml` writes these into the tracked file.\n";
 
-/// Remove one key from `overrides/config.toml`, leaving the others. The file
-/// goes too when no key is left, with the empty folders above it, because a
-/// file holding only comments would still list as an override.
-pub(crate) fn remove_config_patch_key(overrides: &Path, key: &str) -> Result<()> {
+/// Remove every one of `keys` from `overrides/config.toml` in one write,
+/// leaving the others, so a process stopped partway leaves either every key
+/// or none. A key the file does not set refuses the whole call before
+/// anything is written. The file goes too when no key is left, with the
+/// empty folders above it, because a file holding only comments would still
+/// list as an override.
+pub(crate) fn remove_config_patch_keys(overrides: &Path, keys: &[String]) -> Result<()> {
     // Held against the leaves exactly as `override list` prints them, which is
     // the spelling the file holds. `config_patch_leaves_for` takes the spelling a
     // leaf is applied as, and would refuse a retired key the list shows.
-    let parts = crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
-    let listed = parts.join(".");
-    if !config_patch_keys(overrides)?.is_some_and(|keys| keys.contains(&listed)) {
-        bail!("`config.toml` in the layer does not set `{key}`");
+    let held = config_patch_keys(overrides)?.unwrap_or_default();
+    let mut paths = Vec::new();
+    for key in keys {
+        let parts =
+            crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
+        if !held.contains(&parts.join(".")) {
+            bail!("`config.toml` in the layer does not set `{key}`");
+        }
+        paths.push(parts);
     }
     let path = config_patch_path(overrides);
-    let text =
+    let mut text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let edited = crate::confdoc::remove(&text, &parts)?;
-    crate::task::write_atomic(&path, &edited)
+    for parts in &paths {
+        text = crate::confdoc::remove(&text, parts)?;
+    }
+    crate::task::write_atomic(&path, &text)
         .with_context(|| format!("writing {}", path.display()))?;
     if config_patch_keys(overrides)?.is_some_and(|keys| keys.is_empty()) {
         remove_config_patch(overrides)?;
@@ -1115,26 +1125,86 @@ pub(crate) fn remove_config_patch_key(overrides: &Path, key: &str) -> Result<()>
     Ok(())
 }
 
-/// Remove `<step>.<key>` from a pipeline's patch, the form `override list`
-/// prints. A step left with no key goes, and the file goes when nothing is
-/// left in it.
-pub(crate) fn remove_pipeline_patch_key(
+/// Each leaf of `overrides/config.toml`, spelled as the file and `override
+/// list` hold it, with the key it is applied as and the text
+/// [`crate::confkv::set`] is given for it — `None` when there is no patch.
+/// A leaf whose value cannot be set as text is left out: the merge ignores
+/// it, and `override list` says why.
+///
+/// For the OVERRIDES tab, which shows each key's value beside the setup's
+/// and says when the two are the same.
+pub(crate) fn config_patch_inputs(overrides: &Path) -> Result<Option<Vec<ConfigLeaf>>> {
+    let path = config_patch_path(overrides);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let toml::Value::Table(table) = parsed else {
+        bail!("{} must be a table of settings", path.display());
+    };
+    let mut leaves = Vec::new();
+    collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
+        if let Ok(input) = input {
+            let (applies_as, input) = current_spelling(leaf, input);
+            leaves.push(ConfigLeaf {
+                key: leaf.to_string(),
+                applies_as,
+                input,
+            });
+        }
+    });
+    Ok(Some(leaves))
+}
+
+/// One leaf of `overrides/config.toml` — see [`config_patch_inputs`].
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigLeaf {
+    /// The dotted key as the file spells it.
+    pub(crate) key: String,
+    /// The key the merge applies it as: `key` itself, but for a retired
+    /// spelling the merge still reads.
+    pub(crate) applies_as: String,
+    /// The value as the text `config set` would be given.
+    pub(crate) input: String,
+}
+
+/// Remove every one of `keys` from a pipeline's patch in one write, so a
+/// process stopped partway leaves either every key or none. Each is
+/// `<step>.<key>`, or `description` or `task_template`, the forms `override
+/// list` prints. A key the patch does not set refuses the whole call before
+/// anything is written. A step left with no key goes, and the file goes when
+/// nothing is left in it.
+pub(crate) fn remove_pipeline_patch_keys(
     overrides: &Path,
     name: &str,
-    step_key: &str,
+    keys: &[String],
 ) -> Result<()> {
-    let (step_id, key) = step_key
-        .split_once('.')
-        .with_context(|| format!("`{step_key}` — expected `<step>.<key>`"))?;
     let mut patch = read_pipeline_patch(overrides, name)?
         .with_context(|| format!("no override for pipeline `{name}`"))?;
-    let fields = patch.steps.get_mut(step_id);
-    let removed = fields.is_some_and(|f| f.remove(key).is_some());
-    if !removed {
-        bail!("the override for pipeline `{name}` does not set `{step_key}`");
-    }
-    if patch.steps.get(step_id).is_some_and(|f| f.is_empty()) {
-        patch.steps.remove(step_id);
+    for step_key in keys {
+        let removed = match step_key.split_once('.') {
+            Some((step_id, key)) => {
+                let removed = patch
+                    .steps
+                    .get_mut(step_id)
+                    .is_some_and(|f| f.remove(key).is_some());
+                if patch.steps.get(step_id).is_some_and(|f| f.is_empty()) {
+                    patch.steps.remove(step_id);
+                }
+                removed
+            }
+            None if step_key == "description" => patch.description.take().is_some(),
+            None if step_key == "task_template" => patch.task_template.take().is_some(),
+            None => bail!(
+                "`{step_key}` — expected `<step>.<key>`, `description` or `task_template`"
+            ),
+        };
+        if !removed {
+            bail!("the override for pipeline `{name}` does not set `{step_key}`");
+        }
     }
     if patch.steps.is_empty() && patch.description.is_none() && patch.task_template.is_none() {
         return remove_pipeline_patch(overrides, name);
@@ -1956,7 +2026,7 @@ agent: pi
     /// `dispatch.keep_finished_lanes` is dropped by that key, and the key it
     /// is applied as is refused because the file does not hold it.
     #[test]
-    fn remove_config_patch_key_takes_the_key_as_the_file_spells_it() {
+    fn remove_config_patch_keys_takes_the_key_as_the_file_spells_it() {
         let overrides = crate::scratch::root("overrides-remove-config-key-retired");
         let _ = std::fs::remove_dir_all(&overrides);
         let path = config_patch_path(&overrides);
@@ -1966,9 +2036,11 @@ agent: pi
         )
         .unwrap();
 
-        let err = remove_config_patch_key(&overrides, "dispatch.visible_lanes").unwrap_err();
+        let err = remove_config_patch_keys(&overrides, &["dispatch.visible_lanes".to_string()])
+            .unwrap_err();
         assert!(format!("{err:#}").contains("does not set"), "{err:#}");
-        remove_config_patch_key(&overrides, "dispatch.keep_finished_lanes").unwrap();
+        remove_config_patch_keys(&overrides, &["dispatch.keep_finished_lanes".to_string()])
+            .unwrap();
         assert_eq!(
             config_patch_keys(&overrides).unwrap(),
             Some(vec!["dispatch.lane_quiet".to_string()])

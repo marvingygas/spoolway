@@ -226,8 +226,9 @@ fn stale_note(stale: &[(String, String)]) -> Option<String> {
 /// `step`'s value for the field `name`, as the list shows it: empty for a
 /// field it leaves out. A blank string reads as left out too. The shipped
 /// pipelines carry `model: ""` and `effort: ""` on every agent step, which
-/// send nothing, and YAML would spell them `''`.
-fn step_value(step: &crate::pipeline::Step, name: &str) -> String {
+/// send nothing, and YAML would spell them `''`. The active section reads
+/// values the same way, so the two sections never show one value two ways.
+pub(super) fn step_value(step: &crate::pipeline::Step, name: &str) -> String {
     match crate::overrides::field_display(step, name) {
         Ok(value) if value != "''" => value,
         _ => String::new(),
@@ -513,6 +514,16 @@ impl PipelineSection {
 
     fn move_cursor(&mut self, key: Key) {
         self.cursor = crate::screen::move_cursor(self.cursor, self.fields().len(), key);
+    }
+
+    /// The field under the cursor while the field list has the keys, for
+    /// `o`'s `delete override`. `None` anywhere else, where `o` is a letter
+    /// of a search or does nothing.
+    pub(super) fn field_under_cursor(&self) -> Option<&'static str> {
+        match self.view {
+            View::Fields => self.fields().get(self.cursor).map(|field| field.name),
+            _ => None,
+        }
     }
 
     /// One key over the picking list, answering what the section shows next.
@@ -892,6 +903,7 @@ impl PipelineSection {
             blocks,
             room.map(|room| room.saturating_sub(body.len())),
             label,
+            "pipeline",
         ));
         crate::screen::panel(
             &format!("set {} on {}", selection.field.name, plural(steps, "step")),
@@ -908,6 +920,7 @@ impl PipelineSection {
                 [
                     ("enter", "select steps"),
                     ("f", "search"),
+                    super::OPTIONS,
                     super::OPEN_WORKSPACE,
                     ("tab", "section"),
                 ]
@@ -959,7 +972,7 @@ const CURRENT_LABEL: usize = 10;
 /// that long or longer. [`pad_to`] would cut a long pipeline name or step
 /// id to the width instead, and glue what is left of it to the count or
 /// value after it.
-fn column(s: &str, width: usize) -> String {
+pub(super) fn column(s: &str, width: usize) -> String {
     pad_to(s, width.max(s.chars().count() + 1))
 }
 
@@ -972,7 +985,7 @@ fn noun(n: usize, noun: &str) -> String {
 }
 
 /// A row's checkbox.
-fn tick(on: bool) -> &'static str {
+pub(super) fn tick(on: bool) -> &'static str {
     if on { "[x]" } else { "[ ]" }
 }
 
@@ -1000,10 +1013,15 @@ fn window(
     shown
 }
 
-/// Each pipeline's block of rows, dropped from the end until they fit in
-/// `room` rows, with one row saying how many pipelines were left out. All of
-/// them when `room` is `None`, with no terminal to measure.
-fn fit_blocks(mut blocks: Vec<Vec<String>>, room: Option<usize>, label: usize) -> Vec<String> {
+/// Each block of rows, one per pipeline or file, dropped from the end until
+/// they fit in `room` rows, with one row saying how many of `what` were left
+/// out. All of them when `room` is `None`, with no terminal to measure.
+pub(super) fn fit_blocks(
+    mut blocks: Vec<Vec<String>>,
+    room: Option<usize>,
+    label: usize,
+    what: &str,
+) -> Vec<String> {
     let total = blocks.len();
     if let Some(room) = room {
         let len = |blocks: &[Vec<String>]| blocks.iter().map(Vec::len).sum::<usize>();
@@ -1019,7 +1037,7 @@ fn fit_blocks(mut blocks: Vec<Vec<String>>, room: Option<usize>, label: usize) -
         lines.push(format!(
             "{:label$}and {left_out} more {}",
             "",
-            noun(left_out, "pipeline")
+            noun(left_out, what)
         ));
     }
     lines

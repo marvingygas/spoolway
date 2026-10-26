@@ -13,10 +13,13 @@
 //! `[models]` glob the config has no entry for yet. The pipeline section
 //! sets one step field on many pipeline steps at once — see [`pipeline`].
 //! The prompts section copies a prompt into the layer — see [`prompts`].
-//! The active section has no list yet.
+//! The active section lists everything the layer holds and deletes any of it
+//! — see [`active`]. `o` on a config key or a pipeline field offers `delete
+//! override`, which removes that key from every file in the layer that sets
+//! it, after the same confirm popup.
 //!
-//! `w` on the config, pipeline and prompts sections opens the overrides
-//! folder, where those files are edited by hand — see [`workspace`].
+//! `w` on every section opens the overrides folder, where those files are
+//! edited by hand — see [`workspace`].
 //!
 //! A value is written exactly as typed, through the same unchecked write
 //! `config override --set` makes after its own checks — see
@@ -24,6 +27,7 @@
 //! cannot use is left in the layer, where `override list` reports it as
 //! ignored. Checking it here would add rules a person has to learn.
 
+mod active;
 mod pipeline;
 mod prompts;
 mod workspace;
@@ -115,6 +119,15 @@ enum Mode {
     /// `w` could open the overrides folder neither in a file manager nor in
     /// a herdr pane: the `open workspace` popup's text, until `enter`.
     Workspace(String),
+    /// `o` on a config key or a pipeline field: its menu, titled with the
+    /// key, offering `delete override` when the layer sets it.
+    Options {
+        title: String,
+        deletion: Option<active::Deletion>,
+    },
+    /// `delete override`'s confirm popup, until `enter` deletes or `esc`
+    /// closes it.
+    Delete(active::Deletion),
 }
 
 /// Everything the tab holds while it is open. Built fresh on every visit.
@@ -139,6 +152,8 @@ struct State {
     pipeline: pipeline::PipelineSection,
     /// The prompts section, which keeps its own list and popups.
     prompts: prompts::PromptsSection,
+    /// The active section, which keeps its own list and popups.
+    layer: active::ActiveSection,
 }
 
 impl State {
@@ -153,6 +168,7 @@ impl State {
             stale: None,
             pipeline: pipeline::PipelineSection::new(),
             prompts: prompts::PromptsSection::new(),
+            layer: active::ActiveSection::new(),
         };
         state.reload(repo);
         state
@@ -166,6 +182,7 @@ impl State {
         self.stale = stale;
         self.pipeline.reload(repo, &config);
         self.prompts.reload(repo);
+        self.layer.reload(repo, &config);
         self.active = layer_key_count(&repo.overrides_dir());
         self.clamp();
     }
@@ -204,22 +221,52 @@ impl State {
             && match self.section {
                 Section::Pipeline => self.pipeline.at_rest(),
                 Section::Prompts => self.prompts.at_rest(),
-                Section::Config | Section::Active => true,
+                Section::Active => self.layer.at_rest(),
+                Section::Config => true,
             }
     }
 
-    /// Whether `w` opens the overrides folder now: on the config, pipeline
-    /// and prompts sections with nothing open over their list, and in the
-    /// prompts section's popups, which it closes first. Anywhere a field or
-    /// a search row has the keys, `w` is a letter typed into it.
+    /// Whether `w` opens the overrides folder now: on every section with
+    /// nothing open over its list, and in the prompts section's popups,
+    /// which it closes first. Anywhere a field or a search row has the keys,
+    /// `w` is a letter typed into it.
     fn take_w(&mut self) -> bool {
         matches!(self.mode, Mode::Browsing)
             && match self.section {
                 Section::Config => true,
                 Section::Pipeline => self.pipeline.at_rest(),
                 Section::Prompts => self.prompts.take_w(),
-                Section::Active => false,
+                Section::Active => self.layer.at_rest(),
             }
+    }
+
+    /// `o` over the config list or the pipeline section's field list: the
+    /// menu for the key under the cursor. `None` anywhere else, where the
+    /// section reads `o` itself or it is a letter typed into a field.
+    fn options(&self, repo: &Repo) -> Option<Mode> {
+        if !matches!(self.mode, Mode::Browsing) {
+            return None;
+        }
+        match self.section {
+            Section::Config => Some(match self.under_cursor() {
+                Some(setting) => Mode::Options {
+                    title: setting.key(),
+                    deletion: active::Deletion::config_key(repo, &setting.key()),
+                },
+                None => Mode::Options {
+                    title: "new key".to_string(),
+                    deletion: None,
+                },
+            }),
+            Section::Pipeline => {
+                let name = self.pipeline.field_under_cursor()?;
+                Some(Mode::Options {
+                    title: name.to_string(),
+                    deletion: active::Deletion::pipeline_field(repo, name),
+                })
+            }
+            Section::Prompts | Section::Active => None,
+        }
     }
 }
 
@@ -368,6 +415,12 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
         }
         return;
     }
+    if key == Key::Char('o')
+        && let Some(mode) = state.options(repo)
+    {
+        state.mode = mode;
+        return;
+    }
     if state.section == Section::Pipeline && matches!(state.mode, Mode::Browsing) {
         if key == Key::Tab && state.pipeline.at_rest() {
             state.section = state.section.next();
@@ -381,6 +434,27 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
             state.section = state.section.next();
         } else if state.prompts.handle_key(repo, key) {
             state.reload(repo);
+        }
+        return;
+    }
+    if state.section == Section::Active && matches!(state.mode, Mode::Browsing) {
+        if key == Key::Tab && state.layer.at_rest() {
+            state.section = state.section.next();
+            return;
+        }
+        match state.layer.handle_key(repo, key) {
+            active::Outcome::Nothing => {}
+            active::Outcome::Changed => state.reload(repo),
+            // The config section's own popup, so a key set again from here
+            // is written and drawn the same way as from there.
+            active::Outcome::SetConfig(name) => {
+                let value = state
+                    .settings
+                    .iter()
+                    .find(|s| s.key() == name)
+                    .map_or(String::new(), |s| s.value.clone());
+                state.mode = Mode::Set { key: name, value };
+            }
         }
         return;
     }
@@ -445,15 +519,32 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
                 state.mode = Mode::Workspace(text);
             }
         }
+        Mode::Options { title, deletion } => match (key, deletion) {
+            (Key::Esc, _) | (Key::Enter, None) => {}
+            (Key::Enter, Some(deletion)) => state.mode = Mode::Delete(deletion),
+            (_, deletion) => state.mode = Mode::Options { title, deletion },
+        },
+        Mode::Delete(deletion) => match key {
+            Key::Esc => {}
+            Key::Enter => {
+                let result = deletion.run(repo);
+                // Read again whatever happened: a delete that stopped
+                // partway has still changed the files before the failure.
+                state.reload(repo);
+                if let Err(notice) = result {
+                    state.mode = Mode::Notice(notice);
+                }
+            }
+            _ => state.mode = Mode::Delete(deletion),
+        },
     }
 }
 
-/// One key over the list, with nothing open on it.
+/// One key over the config list, with nothing open on it. The other
+/// sections read their own keys.
 fn browse(state: &mut State, key: Key) {
     match key {
         Key::Tab => state.section = state.section.next(),
-        // Active has no list yet: only `tab` reaches past it.
-        _ if state.section != Section::Config => {}
         Key::Up | Key::Down => move_cursor(state, key),
         Key::Char('f') => state.mode = Mode::Search,
         Key::Enter => {
@@ -637,7 +728,7 @@ fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
         Section::Config => &state.stale,
         Section::Pipeline => &state.pipeline.stale,
         Section::Prompts => &state.prompts.stale,
-        Section::Active => &None,
+        Section::Active => &state.layer.stale,
     };
     let mut head: Vec<String> = Vec::new();
     if let Some(stale) = stale {
@@ -653,24 +744,21 @@ fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     match state.section {
         Section::Pipeline => head.extend(state.pipeline.lines(rows, width)),
         Section::Prompts => head.extend(state.prompts.lines(rows, width)),
-        Section::Config | Section::Active => head.extend(keys_list(state, rows, width)),
+        Section::Active => head.extend(state.layer.lines(rows, width)),
+        Section::Config => head.extend(keys_list(state, rows, width)),
     }
     head
 }
 
 /// [`list`]'s lines below the note on a stale config: the search row while
 /// a query is typed, a blank row, then `+ new key` and every key under its
-/// table, the last row saying how many keys are out of sight. Active, with
-/// no list yet, draws the blank row alone.
+/// table, the last row saying how many keys are out of sight.
 fn keys_list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if matches!(state.mode, Mode::Search) {
         lines.push(format!("search: {}▏", state.filter));
     }
     lines.push(String::new());
-    if state.section != Section::Config {
-        return lines;
-    }
 
     let matches = state.matches();
     let name_field = matches
@@ -721,6 +809,9 @@ fn popup(state: &State, rows: Option<usize>) -> Option<Vec<String>> {
     if state.section == Section::Prompts && matches!(state.mode, Mode::Browsing) {
         return state.prompts.popup();
     }
+    if state.section == Section::Active && matches!(state.mode, Mode::Browsing) {
+        return state.layer.popup(rows);
+    }
     match &state.mode {
         Mode::Set { key, value } => {
             let body = vec![
@@ -747,6 +838,14 @@ fn popup(state: &State, rows: Option<usize>) -> Option<Vec<String>> {
         }
         Mode::Notice(notice) => Some(notice.panel(super::NOTICE_WRAP)),
         Mode::Workspace(text) => Some(workspace_popup(text)),
+        Mode::Options { title, deletion } => {
+            let items: &[&str] = match deletion {
+                Some(_) => &["delete override"],
+                None => &[],
+            };
+            Some(active::menu(title, items, 0))
+        }
+        Mode::Delete(deletion) => Some(deletion.popup(rows)),
         Mode::Browsing | Mode::Search => None,
     }
 }
@@ -806,6 +905,9 @@ const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "leave search"), ("esc", "cance
 /// names it.
 const OPEN_WORKSPACE: (&str, &str) = ("w", "open workspace");
 
+/// `o`, as the key line of every section it opens a menu on names it.
+const OPTIONS: (&str, &str) = ("o", "options");
+
 /// The key line under the frame: whatever is open names its own keys, and
 /// the list names what `enter` does on the row under the cursor.
 fn footer(state: &State) -> String {
@@ -815,18 +917,25 @@ fn footer(state: &State) -> String {
         Mode::NewKey { .. } => NEW_KEY_KEYS.to_vec(),
         Mode::Notice(_) => vec![("enter", "confirm")],
         Mode::Workspace(_) => vec![("enter", "close")],
+        Mode::Options { deletion: None, .. } => vec![("esc", "close")],
+        Mode::Options { .. } | Mode::Delete(_) => vec![("enter", "confirm"), ("esc", "close")],
         Mode::Browsing if state.section == Section::Pipeline => state.pipeline.footer(),
         Mode::Browsing if state.section == Section::Prompts => state.prompts.footer(),
-        Mode::Browsing if state.section != Section::Config => {
-            [[("tab", "section")].as_slice(), shell::quit_hint()].concat()
-        }
+        Mode::Browsing if state.section == Section::Active => state.layer.footer(),
         Mode::Browsing => {
             let enter = match state.under_cursor() {
                 Some(_) => ("enter", "set value"),
                 None => ("enter", "new key"),
             };
             [
-                [enter, ("f", "search"), OPEN_WORKSPACE, ("tab", "section")].as_slice(),
+                [
+                    enter,
+                    ("f", "search"),
+                    OPTIONS,
+                    OPEN_WORKSPACE,
+                    ("tab", "section"),
+                ]
+                .as_slice(),
                 shell::quit_hint(),
             ]
             .concat()

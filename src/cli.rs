@@ -1909,7 +1909,8 @@ pub struct OverrideDropArgs {
     pub target: Option<String>,
 
     /// One key to remove from the target's patch, as `override list` prints
-    /// it: `<step>.<key>` for a pipeline, a dotted key for `config.toml`.
+    /// it: `<step>.<key>`, `description` or `task_template` for a pipeline,
+    /// a dotted key for `config.toml`.
     /// Refused on a prompt, whose override has no keys.
     #[arg(requires = "target")]
     pub key: Option<String>,
