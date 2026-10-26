@@ -16,6 +16,7 @@
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
+pub(crate) mod overrides;
 pub(crate) mod pane;
 pub(crate) mod shell;
 
@@ -1063,7 +1064,7 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 /// sits inside the tab's own `│` border, which a pane's title never does.
 #[cfg(test)]
 pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
-    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "EVAL"]
+    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "OVERRIDES", "EVAL"]
         .into_iter()
         .find(|tab| {
             lines
@@ -1466,10 +1467,10 @@ mod tests {
     ///
     /// Renders every tab with something on it and with nothing on it, the
     /// details panes and the popups the keys below open, then reads each
-    /// line: the dispatch, queue and routines tabs through the shell on a
-    /// scripted terminal, the eval tab and its trials table through its own
-    /// synchronous loader, the popups no key reaches from where they are
-    /// built, and every list of asking popups. Every name in the fixtures
+    /// line: the dispatch, queue, routines and overrides tabs through the
+    /// shell on a scripted terminal, the eval tab and its trials table
+    /// through its own synchronous loader, the popups no key reaches from
+    /// where they are built, and every list of asking popups. Every name in the fixtures
     /// is lowercase, so a capital found is a word a screen brought itself.
     /// A screen is named by what it shows, since a walk's early frames are
     /// not where its keys end.
@@ -1535,6 +1536,15 @@ mod tests {
             format!("{right}{down}{down}o\r"),
             format!("{right} \r"),
             format!("{right} \r\r"),
+            // Overrides tab: each section, the search row, and both
+            // popups with something typed into them.
+            format!("{right}{right}"),
+            format!("{right}{right}\t"),
+            format!("{right}{right}\t\t\t"),
+            format!("{right}{right}fdispatch"),
+            format!("{right}{right}fzzz"),
+            format!("{right}{right}\rdispatch.x\t5"),
+            format!("{right}{right}{down}\r"),
             // Dispatch tab: the board's rows, their options and the
             // resume and skip-a-hook questions. Never `enter` outside a
             // popup, and never an option that opens a file.

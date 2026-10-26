@@ -1,11 +1,15 @@
-//! Bare `spoolway`: one screen holding four tabs — dispatch, queue, routines
-//! and eval, in that order — with one terminal guard, one key reader and one
-//! quit.
+//! Bare `spoolway`: one screen holding five tabs — dispatch, queue, routines,
+//! overrides and eval, in that order — with one terminal guard, one key
+//! reader and one quit. A home-mode project has no overrides tab: its whole
+//! setup lives privately in its workspace, so there is no checked-in file
+//! for an override to stand in front of.
 //!
 //! A tab carries no logic of its own. Each one calls the code its CLI command
 //! already draws with — `commands::queue_tab`, `commands::routines_tab`,
 //! `eval::tab` and the board's own [`crate::status::Board`] — and this module
 //! adds only the strip across the top and the keys that move between tabs.
+//! The overrides tab has no CLI screen to borrow, and lives in
+//! [`super::overrides`].
 //! The one exception is the dispatch tab's `enter`, which starts a
 //! `spoolway dispatch` child ([`super::dispatcher`]) behind the gates that
 //! command asks, and stops it behind a popup asking whether running steps
@@ -58,12 +62,32 @@ pub(crate) enum Tab {
     Dispatch,
     Queue,
     Routines,
+    Overrides,
     Eval,
 }
 
 /// Every tab, left to right — the order the strip draws them and `←`/`→`
 /// walk them in. Routines sit beside queue, the tab `s` saves them from.
-const TABS: [Tab; 4] = [Tab::Dispatch, Tab::Queue, Tab::Routines, Tab::Eval];
+const TABS: [Tab; 5] = [
+    Tab::Dispatch,
+    Tab::Queue,
+    Tab::Routines,
+    Tab::Overrides,
+    Tab::Eval,
+];
+
+/// [`TABS`] for a home-mode project, which has no overrides tab — see the
+/// module doc.
+const HOME_TABS: [Tab; 4] = [Tab::Dispatch, Tab::Queue, Tab::Routines, Tab::Eval];
+
+/// The tabs `repo`'s strip draws: every one in repo mode, and all but
+/// overrides in home mode, where [`Repo::workspace_dir`] is `Some`.
+fn tabs_for(repo: &Repo) -> &'static [Tab] {
+    match repo.workspace_dir() {
+        Some(_) => &HOME_TABS,
+        None => &TABS,
+    }
+}
 
 impl Tab {
     /// The tab's name on the strip, in capitals so the strip reads as the
@@ -73,18 +97,20 @@ impl Tab {
             Tab::Dispatch => "DISPATCH",
             Tab::Queue => "QUEUE",
             Tab::Routines => "ROUTINES",
+            Tab::Overrides => "OVERRIDES",
             Tab::Eval => "EVAL",
         }
     }
 
-    /// The tab beside this one, or this one again at either end: `←` on
-    /// dispatch and `→` on eval have no neighbour to reach, and wrapping
-    /// round would put the two furthest tabs one key apart.
-    fn toward(self, way: Toward) -> Tab {
-        let at = TABS.iter().position(|tab| *tab == self).unwrap_or(0);
+    /// The tab beside this one on a strip of `tabs`, or this one again at
+    /// either end: `←` on dispatch and `→` on eval have no neighbour to
+    /// reach, and wrapping round would put the two furthest tabs one key
+    /// apart.
+    fn toward(self, way: Toward, tabs: &[Tab]) -> Tab {
+        let at = tabs.iter().position(|tab| *tab == self).unwrap_or(0);
         match way {
-            Toward::Left => TABS[at.saturating_sub(1)],
-            Toward::Right => TABS[(at + 1).min(TABS.len() - 1)],
+            Toward::Left => tabs[at.saturating_sub(1)],
+            Toward::Right => tabs[(at + 1).min(tabs.len() - 1)],
         }
     }
 }
@@ -105,9 +131,12 @@ pub(crate) enum Leave {
 }
 
 thread_local! {
-    /// The tab the shell has open on this thread, or `None` wherever a
-    /// screen is drawn on its own — see the module doc.
-    static HOSTED: Cell<Option<Tab>> = const { Cell::new(None) };
+    /// The tab the shell has open on this thread and the tabs its strip
+    /// draws, or `None` wherever a screen is drawn on its own — see the
+    /// module doc. The strip's tabs travel with the open one because the
+    /// strip is drawn from deep inside each screen, which has no `Repo` to
+    /// tell a home-mode project by.
+    static HOSTED: Cell<Option<(Tab, &'static [Tab])>> = const { Cell::new(None) };
 }
 
 /// Marks `tab` as the one open for as long as this lives, and clears it on
@@ -116,8 +145,17 @@ thread_local! {
 pub(crate) struct Hosting;
 
 impl Hosting {
+    /// `tab` open on a strip of every tab, the repo-mode strip — for a test
+    /// that draws one screen under the strip with no project to read a mode
+    /// from. [`host`] opens each tab on the strip its project draws.
+    #[cfg(test)]
     pub(crate) fn open(tab: Tab) -> Hosting {
-        HOSTED.with(|cell| cell.set(Some(tab)));
+        Hosting::open_in(tab, &TABS)
+    }
+
+    /// `tab` open on a strip of `tabs` — see [`tabs_for`].
+    fn open_in(tab: Tab, tabs: &'static [Tab]) -> Hosting {
+        HOSTED.with(|cell| cell.set(Some((tab, tabs))));
         Hosting
     }
 }
@@ -130,7 +168,7 @@ impl Drop for Hosting {
 
 /// The tab open on this thread, if a shell is hosting one.
 pub(crate) fn hosted() -> Option<Tab> {
-    HOSTED.with(Cell::get)
+    HOSTED.with(Cell::get).map(|(tab, _)| tab)
 }
 
 /// The rows the strip takes off the top of the terminal: one blank row above
@@ -187,12 +225,12 @@ const SLOT_GAP: &str = "      ";
 /// added or dropped here without it pushes each tab's frame past the
 /// terminal's last row, or leaves a row unused under it.
 pub(crate) fn strip() -> Vec<String> {
-    match hosted() {
-        Some(open) => {
+    match HOSTED.with(Cell::get) {
+        Some((open, tabs)) => {
             let width = super::drawing_area()
                 .map(|(width, _)| width)
                 .unwrap_or(FALLBACK_WIDTH);
-            vec![String::new(), strip_line(open, width), String::new()]
+            vec![String::new(), strip_line(open, tabs, width), String::new()]
         }
         None => Vec::new(),
     }
@@ -205,7 +243,7 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: the four tabs centred, each in a
+/// The strip itself, `width` columns wide: `tabs` centred, each in a
 /// slot one column wider than its label on either side, and `←` and `→`
 /// one space outside the first and last slot. The open tab fills its slot's
 /// spare columns with `[` and `]`, the same mark the key line gives a key;
@@ -224,10 +262,10 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
 /// wrapped for, and the frame under it comes out one row lower than it was
 /// measured for. The bold and reset codes take no column, so they are left
 /// out of every width measured here.
-fn strip_line(open: Tab, width: usize) -> String {
+fn strip_line(open: Tab, tabs: &[Tab], width: usize) -> String {
     use crate::status::{BOLD, RESET};
 
-    let slots: Vec<String> = TABS
+    let slots: Vec<String> = tabs
         .iter()
         .map(|tab| match *tab == open {
             true => format!("[{}]", tab.label()),
@@ -298,6 +336,7 @@ fn host(
     let mut board = crate::status::Board::hosted();
     let mut dispatch = DispatchTab::default();
     let mut tab = Tab::Queue;
+    let tabs = tabs_for(repo);
     // One writer for the whole hosted session, not one per tab, so the idle
     // skip it gives every screen (see `frame_writer`'s own doc) also covers
     // the moment of switching between them: whichever tab is about to
@@ -309,7 +348,7 @@ fn host(
 
     loop {
         let leave = {
-            let _hosting = Hosting::open(tab);
+            let _hosting = Hosting::open_in(tab, tabs);
             writer.forget();
             match tab {
                 Tab::Dispatch => dispatch_tab(
@@ -331,6 +370,9 @@ fn host(
                 Tab::Routines => {
                     crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)?
                 }
+                // Read again on every visit, so a key set from the CLI while
+                // another tab was open is already listed with its value.
+                Tab::Overrides => super::overrides::tab(repo, &mut writer, input, out)?,
                 Tab::Eval => crate::eval::tab(repo, pipelines, &mut writer, input, out)?,
             }
         };
@@ -343,7 +385,7 @@ fn host(
         }
         match leave {
             Leave::Quit => return Ok(()),
-            Leave::Switch(way) => tab = tab.toward(way),
+            Leave::Switch(way) => tab = tab.toward(way, tabs),
         }
     }
 }
@@ -1358,12 +1400,29 @@ mod tests {
     }
 
     // The strip for each open tab, drawn to 80 columns: every label in the
-    // column it holds before the brackets, routines between queue and eval.
-    // The bold takes no column, so it is taken out before the columns
+    // column it holds before the brackets, overrides between routines and
+    // eval. The bold takes no column, so it is taken out before the columns
     // are read.
     #[test]
     fn the_strip_lands_every_label_where_the_mockup_draws_it() {
-        let lines = TABS.map(|tab| plain(&strip_line(tab, 80)));
+        let lines = TABS.map(|tab| plain(&strip_line(tab, &TABS, 80)));
+        assert_eq!(
+            lines,
+            [
+                "    ← [DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL  →",
+                "    ←  DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL  →",
+                "    ←  DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL  →",
+                "    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →",
+                "    ←  DISPATCH        QUEUE        ROUTINES        OVERRIDES       [EVAL] →",
+            ]
+        );
+    }
+
+    // A home-mode project's strip has no overrides tab, and its four labels
+    // land where they did before there was one.
+    #[test]
+    fn the_home_mode_strip_draws_four_tabs_where_they_always_were() {
+        let lines = HOME_TABS.map(|tab| plain(&strip_line(tab, &HOME_TABS, 80)));
         assert_eq!(
             lines,
             [
@@ -1381,7 +1440,7 @@ mod tests {
     #[test]
     fn the_strip_is_bold_from_its_first_column_to_its_last_and_nothing_else() {
         for tab in TABS {
-            let line = strip_line(tab, 100);
+            let line = strip_line(tab, &TABS, 100);
             let inner = line
                 .strip_prefix("\x1b[1m")
                 .and_then(|l| l.strip_suffix("\x1b[0m"))
@@ -1390,22 +1449,66 @@ mod tests {
         }
     }
 
+    // Five tabs are wider than a narrow terminal, and the strip still keeps
+    // its margin and both arrows rather than wrapping or losing one.
     #[test]
     fn a_narrow_terminal_still_keeps_a_space_between_each_arrow_and_the_labels() {
-        let line = plain(&strip_line(Tab::Queue, 20));
-        assert!(line.starts_with("  ←  DISPATCH"), "{line:?}");
-        assert!(line.ends_with("EVAL  →"), "{line:?}");
+        for tabs in [&TABS[..], &HOME_TABS[..]] {
+            let line = plain(&strip_line(Tab::Queue, tabs, 20));
+            assert!(line.starts_with("  ←  DISPATCH"), "{line:?}");
+            assert!(line.ends_with("EVAL  →"), "{line:?}");
+        }
     }
 
     #[test]
     fn left_and_right_walk_the_tabs_in_strip_order_and_stop_at_either_end() {
-        assert_eq!(Tab::Queue.toward(Toward::Left), Tab::Dispatch);
-        assert_eq!(Tab::Queue.toward(Toward::Right), Tab::Routines);
-        assert_eq!(Tab::Routines.toward(Toward::Left), Tab::Queue);
-        assert_eq!(Tab::Routines.toward(Toward::Right), Tab::Eval);
-        assert_eq!(Tab::Eval.toward(Toward::Left), Tab::Routines);
-        assert_eq!(Tab::Dispatch.toward(Toward::Left), Tab::Dispatch);
-        assert_eq!(Tab::Eval.toward(Toward::Right), Tab::Eval);
+        let walk = |tab: Tab, way| tab.toward(way, &TABS);
+        assert_eq!(walk(Tab::Queue, Toward::Left), Tab::Dispatch);
+        assert_eq!(walk(Tab::Queue, Toward::Right), Tab::Routines);
+        assert_eq!(walk(Tab::Routines, Toward::Left), Tab::Queue);
+        assert_eq!(walk(Tab::Routines, Toward::Right), Tab::Overrides);
+        assert_eq!(walk(Tab::Overrides, Toward::Left), Tab::Routines);
+        assert_eq!(walk(Tab::Overrides, Toward::Right), Tab::Eval);
+        assert_eq!(walk(Tab::Eval, Toward::Left), Tab::Overrides);
+        assert_eq!(walk(Tab::Dispatch, Toward::Left), Tab::Dispatch);
+        assert_eq!(walk(Tab::Eval, Toward::Right), Tab::Eval);
+    }
+
+    // On a home-mode strip `→` from routines lands on eval, and `←` from
+    // eval on routines: no key reaches a tab the strip does not draw.
+    #[test]
+    fn the_home_mode_strip_walks_from_routines_straight_to_eval() {
+        let walk = |tab: Tab, way| tab.toward(way, &HOME_TABS);
+        assert_eq!(walk(Tab::Routines, Toward::Right), Tab::Eval);
+        assert_eq!(walk(Tab::Eval, Toward::Left), Tab::Routines);
+        assert_eq!(walk(Tab::Eval, Toward::Right), Tab::Eval);
+    }
+
+    // A project is in home mode when its home sits in a workspace's
+    // `dispatchers` folder, and only then is overrides left off its strip.
+    #[test]
+    fn only_a_home_mode_project_leaves_overrides_off_its_strip() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-tabs-for");
+        assert_eq!(tabs_for(&repo), &TABS[..]);
+        repo.home = repo.root.join("workspace/dispatchers/shop");
+        assert_eq!(tabs_for(&repo), &HOME_TABS[..]);
+    }
+
+    // The whole walk on a home-mode project: the strip draws four tabs, and
+    // `→` twice from queue reaches eval with no overrides tab between.
+    #[test]
+    fn host_on_a_home_mode_project_draws_no_overrides_tab() {
+        let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-host-home-mode");
+        repo.home = repo.root.join("workspace/dispatchers/shop");
+        let frames = drive_host(&repo, "\x1b[C\x1b[C");
+        for frame in &frames {
+            assert!(!frame.contains("OVERRIDES"), "{frame}");
+        }
+        let last = frames.last().unwrap();
+        assert!(
+            last.contains("DISPATCH        QUEUE        ROUTINES       [EVAL]"),
+            "{last}"
+        );
     }
 
     /// Drive [`host`] over `input`, handing back every frame it drew, colour
@@ -1428,7 +1531,7 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[D");
         let first = &frames[0];
         assert!(
-            first.contains("DISPATCH       [QUEUE]       ROUTINES        EVAL"),
+            first.contains("DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL"),
             "{first}"
         );
         assert!(first.contains("─ groups"), "{first}");
@@ -1486,17 +1589,24 @@ mod tests {
     #[test]
     fn every_tab_forgets_the_last_one_going_round_and_back() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-tab-cycle");
-        // Queue (open) → Dispatch → Queue → Routines → Eval → Routines →
-        // Queue → Dispatch → Queue: forward through all four, then back
-        // through all four, both with a real switch behind every arrow.
-        let frames =
-            drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[C");
+        // Queue (open) → Dispatch → Queue → Routines → Overrides → Eval →
+        // Overrides → Routines → Queue → Dispatch → Queue: forward through
+        // all five, then back through all five, both with a real switch
+        // behind every arrow.
+        let frames = drive_host_raw_frames(
+            &repo,
+            "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[D\x1b[C",
+        );
         const DISPATCH: &str = "dispatcher stopped";
         const QUEUE: &str = "─ groups";
         const ROUTINES: &str = "[ROUTINES]";
+        // Its key line rather than its title: with no terminal to measure
+        // the whole config list is drawn, and its top runs off the screen.
+        const OVERRIDES: &str = "[tab] section";
         let eval: &str = &format!("{TOP_LEFT}─ eval ·");
         let visited = [
-            QUEUE, DISPATCH, QUEUE, ROUTINES, eval, ROUTINES, QUEUE, DISPATCH, QUEUE,
+            QUEUE, DISPATCH, QUEUE, ROUTINES, OVERRIDES, eval, OVERRIDES, ROUTINES, QUEUE,
+            DISPATCH, QUEUE,
         ];
         assert_eq!(frames.len(), visited.len(), "{frames:?}");
 
@@ -1534,9 +1644,16 @@ mod tests {
         crate::status::testutil::add(&repo, "wire", &[], None);
         let (width, height) = (100, 24);
         let _terminal = crate::screen::test_terminal((width, height));
-        // Queue (open) → Dispatch → Queue → Routines → Eval.
-        let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C");
-        let names = ["queue", "dispatch", "queue", "routines", "eval"];
+        // Queue (open) → Dispatch → Queue → Routines → Overrides → Eval.
+        let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C");
+        let names = [
+            "queue",
+            "dispatch",
+            "queue",
+            "routines",
+            "overrides",
+            "eval",
+        ];
         assert_eq!(frames.len(), names.len(), "{frames:?}");
 
         for (frame, name) in frames.iter().zip(names) {
@@ -1756,7 +1873,7 @@ mod tests {
     // the queue tab is already listed. `→` again moves on to eval, the tab
     // beside it now that routines hold their own jobs.
     #[test]
-    fn right_from_queue_opens_routines_with_a_routine_just_saved_then_eval() {
+    fn right_from_queue_opens_routines_with_a_routine_just_saved_then_overrides() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
         std::fs::write(
             repo.pending_dir().join("audit-deps.md"),
@@ -1770,7 +1887,7 @@ mod tests {
         let frames = drive_host(&repo, "o\x1b[B\r\r\r\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("DISPATCH        QUEUE       [ROUTINES]       EVAL"),
+            last.contains("DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL"),
             "{last}"
         );
         assert!(last.contains("─ routines ─"), "{last}");
@@ -1785,7 +1902,11 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[C\x1b[C");
         let last = frames.last().unwrap();
         assert!(
-            last.contains("DISPATCH        QUEUE        ROUTINES       [EVAL]"),
+            last.contains("DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL"),
+            "{last}"
+        );
+        assert!(
+            last.contains("─ [config]   pipeline   prompts   active (0) ─"),
             "{last}"
         );
     }
