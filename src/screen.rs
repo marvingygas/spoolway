@@ -786,8 +786,9 @@ pub(crate) mod corner {
 /// row loses the one they had the cursor on.
 ///
 /// Shared by [`panel`], which appends its own key line as one more row after
-/// a blank spacer, by [`ask`], which appends a popup's answers and their key
-/// row, and by callers whose body needs no key row after it at all.
+/// a blank spacer, by [`ask`] and [`pick`], which append a popup's answers
+/// and their key row, and by callers whose body needs no key row after it at
+/// all.
 pub(crate) fn boxed(title: &str, body: &[String]) -> Vec<String> {
     use corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     let head = format!("─ {title} ");
@@ -847,7 +848,7 @@ pub(crate) fn answer_keys() -> String {
 /// part of the answer rather than as answers of their own. A `cursor` past
 /// the last answer marks no row.
 ///
-/// Apart from [`ask`] for a caller that prints its answers under a notice
+/// Apart from [`pick`] for a caller that prints its answers under a notice
 /// of its own rather than in a box — `spoolway dispatch`'s gates in a
 /// terminal — so the printed answers and the boxed ones are the same rows.
 pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
@@ -865,13 +866,37 @@ pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
 }
 
 /// A framed popup that asks something: its `body`, then its `answers` as
-/// [`answer_rows`] draws them, the cursor on the `cursor`th.
+/// [`answer_rows`] draws them, the cursor on the `cursor`th, when there are
+/// two or more.
 ///
 /// Every popup that asks a question is drawn through this, so each one
 /// reads and answers alike: the arrows move the cursor, `enter` runs the
 /// answer under it, and `esc` closes. A popup that only says something is
 /// a [`notice`] instead, closed by [`confirm`].
+///
+/// A popup with exactly one answer is a confirmation, and draws no answer
+/// row: it ends on its body, a blank row and [`answer_keys`]. A lone
+/// `> delete` under a body that already says what deleting does repeats
+/// the title, and reads like the first of a list of choices. `enter` still
+/// runs that answer and `esc` still closes, so nothing is lost but the row.
+/// A list built from data, which may come down to one entry and still
+/// needs that entry named, is drawn by [`pick`] instead.
 pub(crate) fn ask(title: &str, body: &[String], answers: &[String], cursor: usize) -> Vec<String> {
+    if answers.len() == 1 {
+        return panel(title, body, &answer_keys());
+    }
+    pick(title, body, answers, cursor)
+}
+
+/// A framed popup that picks one of `answers`: its `body`, then every
+/// answer as [`answer_rows`] draws them, the cursor on the `cursor`th —
+/// a single answer included.
+///
+/// For a popup whose answers are what it lists — a routine, a pipeline, a
+/// step — rather than a fixed confirmation. Through [`ask`], such a list
+/// narrowed to one entry would lose the one row that says what `enter`
+/// picks.
+pub(crate) fn pick(title: &str, body: &[String], answers: &[String], cursor: usize) -> Vec<String> {
     let mut full = body.to_vec();
     full.extend(answer_rows(answers, cursor));
     boxed(title, &full)
@@ -1569,6 +1594,10 @@ mod tests {
     /// drawn once; a listed popup that stops drawing through [`ask`], or
     /// grows a key row of its own, fails here. A new popup has to be added
     /// to its module's list to be walked.
+    ///
+    /// The popups named in `confirmations` have one answer, so [`ask`]
+    /// draws no `>` row on them; every other one has its cursor on exactly
+    /// one answer.
     #[test]
     fn every_popup_that_asks_closes_on_confirm_and_close() {
         let popups = [
@@ -1586,6 +1615,20 @@ mod tests {
         ]
         .concat();
         assert_eq!(popups.len(), 22, "every popup is walked");
+        let confirmations = [
+            "issue tracking",
+            "delete routine",
+            "delete pending",
+            "pause, command step",
+            "restart",
+            "restart, command step",
+            "unqueue",
+            "unqueue, with a dependent",
+            "unqueue, a routine copy",
+            "unqueue, a chain with a routine copy",
+            "skip hook, done",
+            "skip hook, queued",
+        ];
         let row = |line: &str| line.trim_matches(['│', ' ']).to_string();
         for (name, panel) in popups {
             let drawn = panel.join("\n");
@@ -1604,13 +1647,14 @@ mod tests {
                 .filter(|line| line.starts_with('['))
                 .collect();
             assert_eq!(keyed, [answer_keys()], "{name}: one key row: {drawn}");
+            let cursors = usize::from(!confirmations.contains(&name));
             assert_eq!(
                 panel
                     .iter()
                     .filter(|line| row(line).starts_with("> "))
                     .count(),
-                1,
-                "{name}: the cursor on one answer: {drawn}"
+                cursors,
+                "{name}: {cursors} answer rows under the cursor: {drawn}"
             );
         }
     }

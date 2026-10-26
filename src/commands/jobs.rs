@@ -917,7 +917,7 @@ fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<Stri
         })
         .collect();
 
-    crate::screen::ask("which pipeline", &body, &answers, cursor)
+    crate::screen::pick("which pipeline", &body, &answers, cursor)
 }
 
 /// Every popup here that asks something, drawn once each with

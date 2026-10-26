@@ -13183,7 +13183,10 @@ mod tests {
             "{frame}"
         );
         assert!(frame.contains("resuming restarts the command."), "{frame}");
-        assert!(frame.contains("> pause now"), "{frame}");
+        assert!(
+            !frame.contains("> pause now"),
+            "one answer, so no row: {frame}"
+        );
         assert!(
             !frame.contains("pause when"),
             "a command step is never offered a scheduled pause: {frame}"
@@ -13340,7 +13343,10 @@ mod tests {
             frame.contains(&format!("ticket {ticket} stays as it is.")),
             "{frame}"
         );
-        assert!(frame.contains("> skip and archive"), "{frame}");
+        assert!(
+            !frame.contains("> skip and archive"),
+            "one answer, so no row: {frame}"
+        );
         assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         let after = std::fs::read_to_string(&repo.task("release").unwrap().path).unwrap();
         assert_eq!(before, after);
@@ -13366,7 +13372,10 @@ mod tests {
             frame.contains("retry-flag starts on implement, without its queued hook."),
             "{frame}"
         );
-        assert!(frame.contains("> skip and start implement"), "{frame}");
+        assert!(
+            !frame.contains("> skip and start implement"),
+            "one answer, so no row: {frame}"
+        );
         assert!(!frame.contains("Ticket"), "{frame}");
     }
 
@@ -13565,7 +13574,10 @@ mod tests {
         );
         let frame = watching_frame(&mut board, &repo, &pipelines);
         assert!(frame.contains(refused), "{frame}");
-        assert!(frame.contains("> skip and start implement"), "{frame}");
+        assert!(
+            !frame.contains("> skip and start implement"),
+            "one answer, so no row: {frame}"
+        );
     }
 
     /// When neither the running dispatcher's copy nor the board's own
@@ -14376,7 +14388,10 @@ mod tests {
         );
         assert!(frame.contains("step      implement"), "{frame}");
         assert!(frame.contains("lane      login · implement"), "{frame}");
-        assert!(frame.contains("> restart"), "{frame}");
+        assert!(
+            !frame.contains("> restart"),
+            "one answer, so no row: {frame}"
+        );
         assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         let after = std::fs::read_to_string(&repo.task("login").unwrap().path).unwrap();
         assert_eq!(before, after);
@@ -15548,7 +15563,10 @@ mod tests {
         );
         assert!(frame.contains("unqueue chain-refusals"), "{frame}");
         assert!(frame.contains("chain-refusals.md"), "{frame}");
-        assert!(frame.contains("> unqueue it"), "{frame}");
+        assert!(
+            !frame.contains("> unqueue it"),
+            "one answer, so no row: {frame}"
+        );
         assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         // Still sitting in the queue — nothing moves until the panel is
         // answered.
@@ -15700,7 +15718,10 @@ mod tests {
             frame.contains("chain-refusals   (depends on drop-walk)"),
             "{frame}"
         );
-        assert!(frame.contains("> unqueue them"), "{frame}");
+        assert!(
+            !frame.contains("> unqueue them"),
+            "one answer, so no row: {frame}"
+        );
         assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
         // Still sitting in the queue — nothing moves until the panel is
         // answered.
