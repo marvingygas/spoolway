@@ -16,7 +16,7 @@
 //! `config override --set` makes after its own checks — see
 //! [`crate::commands::write_config_override`]. A value or key the merge
 //! cannot use is left in the layer, where `override list` reports it as
-//! ignored. Checking it here would add rules a person has to learn twice.
+//! ignored. Checking it here would add rules a person has to learn.
 
 use std::io::Write;
 
@@ -97,6 +97,7 @@ enum Mode {
     NewKey {
         key: String,
         value: String,
+        /// Whether the value field has the keys, rather than the key field.
         on_value: bool,
     },
     /// A write that failed, until `enter` closes it.
@@ -170,8 +171,8 @@ impl State {
 
 /// The config in use now: the tracked file with `overrides/config.toml`
 /// merged onto it, read fresh so a key the tab just wrote shows its new
-/// value. A tracked file that no longer loads falls back to the config the
-/// screen started with rather than emptying the list.
+/// value. A tracked file or a layer that no longer loads falls back to the
+/// config the screen started with rather than emptying the list.
 fn in_use(repo: &Repo) -> Config {
     Config::load_tracked(&repo.checkout)
         .and_then(|tracked| {
@@ -184,9 +185,9 @@ fn in_use(repo: &Repo) -> Config {
 /// Every key [`crate::confkv::all_settings`] lists, grouped by table.
 ///
 /// That list is sorted by the whole key, which splits a table around a
-/// nested one — `dispatch.lane_quiet`, then `dispatch.limits.x`, then
-/// `dispatch.visible_lanes` — and would draw the `dispatch` heading twice.
-/// Sorting by table first keeps each table's keys under one heading.
+/// nested one: a `[models]` glob's own fields sort on both sides of its
+/// tier's table, and its heading would be drawn twice. Sorting by table
+/// first keeps each table's keys under one heading.
 fn settings(config: &Config) -> Vec<Setting> {
     let mut out: Vec<Setting> = crate::confkv::all_settings(config)
         .unwrap_or_default()
@@ -262,6 +263,8 @@ pub(crate) fn tab(
     }
 }
 
+/// One key, read by whatever is open: the list, the search row, a popup or
+/// a notice.
 fn handle_key(repo: &Repo, state: &mut State, key: Key) {
     match std::mem::replace(&mut state.mode, Mode::Browsing) {
         Mode::Browsing => browse(state, key),
@@ -347,6 +350,8 @@ fn browse(state: &mut State, key: Key) {
     }
 }
 
+/// The cursor moved by `↑` or `↓` over `+ new key` and the keys the search
+/// leaves, held at either end.
 fn move_cursor(state: &mut State, key: Key) {
     state.cursor = super::move_cursor(state.cursor, state.matches().len() + 1, key);
 }
@@ -365,11 +370,10 @@ fn edit(text: &mut String, key: Key) {
     }
 }
 
-/// Write `key` as `value` into the layer, as typed. A field left empty, or
-/// holding only spaces, writes nothing: there is no value to set, and an
-/// empty string would turn a key off rather than leave it as it was. A
-/// write that fails is held as a notice, since the popup it came from has
-/// already closed.
+/// Write `key` as `value` into the layer, as typed. An empty key, or a
+/// value left empty or holding only spaces, writes nothing: `enter` on an
+/// empty field is how a popup is left without a write. A write that fails
+/// is held as a notice, since the popup it came from has already closed.
 fn save(repo: &Repo, state: &mut State, key: &str, value: &str) {
     if key.is_empty() || value.trim().is_empty() {
         return;
@@ -400,12 +404,12 @@ const FRAME_CHROME: usize = 4;
 
 /// The column a key's value starts at, counted from the key's own name: wide
 /// enough for every name the default config carries with room between, as
-/// the mockup lines them up. A longer name pushes its own value out rather
-/// than every value.
+/// the mockup lines them up. A longer name widens the column for every key,
+/// so the values still line up under each other.
 const NAME_FIELD: usize = 28;
 
-/// The text inside a popup, so both popups draw 50 columns wide whatever is
-/// typed into them, as the mockups draw them.
+/// The text inside a popup, so both popups are 50 columns wide inside their
+/// border whatever is typed into them, as the mockups draw them.
 const POPUP_TEXT: usize = 46;
 
 /// The whole frame: the strip, the list box, any popup over it, and the key
@@ -979,6 +983,40 @@ mod tests {
         ] {
             assert!(text.contains(line), "{line}: {text}");
         }
+    }
+
+    // A write the layer refuses, such as into a patch that does not parse,
+    // is held as a notice naming the key, and `enter` closes it with the
+    // file left as it was.
+    #[test]
+    fn a_write_that_fails_says_so_until_enter() {
+        let (repo, _guard) = project("write-fails");
+        let path = crate::overrides::config_patch_path(&repo.overrides_dir());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[dispatch\n").unwrap();
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.lane_quiet");
+        type_keys(&repo, &mut state, "\r\x7f\x7f\x7f5m\r");
+        let drawn = lines(&state);
+        assert!(
+            drawn.iter().any(|l| l.contains("╭─ not written ─")),
+            "{drawn:#?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|l| l.contains("dispatch.lane_quiet was not written")),
+            "{drawn:#?}"
+        );
+        assert_eq!(drawn.last().unwrap(), " [enter] confirm");
+        type_keys(&repo, &mut state, "x\x1b");
+        assert!(
+            matches!(state.mode, Mode::Notice(_)),
+            "only enter closes it"
+        );
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[dispatch\n");
     }
 
     // The tab under the shell's strip, as the mockup draws it opened: the

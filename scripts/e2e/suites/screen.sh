@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bare `spoolway`: the one screen with its dispatch, queue, routines and
-# eval tabs, driven end to end as the whole binary. It opens only with stdout on a
+# Bare `spoolway`: the one screen with its dispatch, queue, routines,
+# overrides and eval tabs, driven end to end as the whole binary. It opens only with stdout on a
 # terminal, so the run is wrapped in `script`, which gives it a pty for stdout
 # while the keys still arrive on an ordinary pipe — the same way every other
 # screen suite scripts its keystrokes.
@@ -18,7 +18,9 @@
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
-# menu removes its page after one popup.
+# menu removes its page after one popup. On the overrides tab a listed config
+# key and a new one are each set through their popup, and both land in the
+# overrides layer.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -101,8 +103,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" 
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
-has "the strip names all four tabs in order" \
-  "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$FIRST"
+has "the strip names all five tabs in order" \
+  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$FIRST"
 has "it opens on the queue tab" "─ groups ─" "$FIRST"
 has "with the pending group listed" "cart" "$FIRST"
 lacks "not on the dispatch tab" "dispatcher" "$FIRST"
@@ -301,7 +303,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$SECOND.plain"
+lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -315,7 +317,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$AFTER.plain"
+has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -333,7 +335,7 @@ has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
-has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$LAST"
+has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # A clean submission lands on the queued popup, which ends by saying whether a
@@ -393,14 +395,15 @@ rm -f "$TRACKING/billing-export · started.exit" "$TRACKING/billing-export · st
 
 # Every tab, both directions, on a real pty — the acceptance criterion the
 # task `frames-onto-writer` exists for: no redrawing screen erases the whole
-# terminal any more, all four of them painting through the shared frame
+# terminal any more, all five of them painting through the shared frame
 # writer instead (`src/screen/frame_writer.rs`). `←` from the queue tab
-# reaches dispatch, `→` three times walks back through queue and routines to
-# eval, and `←` three times walks all the way back — every tab this screen
-# has, both ways, with no `enter` anywhere so nothing is started or queued.
+# reaches dispatch, `→` four times walks back through queue, routines and
+# overrides to eval, and `←` four times walks all the way back — every tab
+# this screen has, both ways, with no `enter` anywhere so nothing is started
+# or queued.
 ALL_TABS="$LIVE/all-tabs.txt"
 works "cycling every tab does not crash the screen" \
-  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
 if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
   bad "no frame drawn while cycling every tab still erases the whole screen"
   tail -30 "$ALL_TABS" | cat -v
@@ -409,18 +412,19 @@ else
 fi
 sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
 # The check above passes on an empty capture too — a screen that crashed or
-# quit before drawing a single tab has no `ESC[2J` in it either. These four
+# quit before drawing a single tab has no `ESC[2J` in it either. These five
 # require every tab this walk visits actually drew, so the check above is
 # proof about frames that were really there.
 has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS.plain"
 has "and the queue tab" "─ groups" "$ALL_TABS.plain"
-has "and the routines tab" "QUEUE       [ROUTINES]       EVAL" "$ALL_TABS.plain"
-has "and the eval tab, → from routines" "ROUTINES       [EVAL]" "$ALL_TABS.plain"
+has "and the routines tab" "QUEUE       [ROUTINES]       OVERRIDES" "$ALL_TABS.plain"
+has "and the overrides tab" "ROUTINES       [OVERRIDES]       EVAL" "$ALL_TABS.plain"
+has "and the eval tab, → from overrides" "OVERRIDES       [EVAL]" "$ALL_TABS.plain"
 lacks "with no JOBS label left on the strip" "JOBS" "$ALL_TABS.plain"
 has "and the eval tab" "╭─ eval ·" "$ALL_TABS.plain"
 
 # `→` from the queue tab, where the screen opens, reaches the routines tab
-# between queue and eval, listing the one routine under `.spoolway/routines/`.
+# between queue and overrides, listing the one routine under `.spoolway/routines/`.
 # Written last, so no check above runs with a routine in the checkout.
 mkdir -p .spoolway/routines/nightly
 task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nightly"
@@ -430,7 +434,7 @@ works "→ from the queue tab ends when its keys run out" \
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "→ reaches the routines tab" \
-  "DISPATCH        QUEUE       [ROUTINES]       EVAL" "$LAST"
+  "DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL" "$LAST"
 has "titled routines" "─ routines ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
@@ -553,6 +557,32 @@ works "its body is followed by a blank row and the key row" bash -c \
   'grep -B2 -F "[enter] confirm   [esc] close" "$1" | head -1 |
      grep -qF "and only git can bring it back."' _ "$LAST"
 works "enter deletes the routine" test ! -e .spoolway/routines/nightly
+
+# The overrides tab (`→` twice from the queue tab) opens on its config
+# section. A listed key is set through its field: `f` searches the list down
+# to `lane_quiet`, `enter` leaves the search, `↓` moves onto the key, and
+# `enter` opens its field filled with the value in use, which the
+# backspaces clear before `5m` is typed and saved. A new key is set through
+# `+ new key`'s popup: `↑` back onto that row, `enter`, the key, `tab`, the
+# value, and `enter` saves both. Run after every other screen check, since
+# the layer it leaves would open the overrides gate on the dispatch tab.
+OVERRIDES_TAB="$LIVE/overrides-tab.txt"
+on_screen '\x1b[C\x1b[Cflane_quiet\r\x1b[B\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f5m\r\x1b[A\rmodels.qwen3-coder.input\t0.4\r' \
+  "$OVERRIDES_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$OVERRIDES_TAB" >"$OVERRIDES_TAB.plain"
+has "→ twice reaches the overrides tab" \
+  "DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL" "$OVERRIDES_TAB.plain"
+has "it opens on config, its sections named in the box title" \
+  "╭─ [config]   pipeline   prompts   active (0) ─" "$OVERRIDES_TAB.plain"
+has "enter on a key opens its field" "╭─ set dispatch.lane_quiet ─" "$OVERRIDES_TAB.plain"
+has "enter on + new key opens the new key popup" "╭─ new key ─" "$OVERRIDES_TAB.plain"
+CONFIG_LAYER="$SPOOLWAY_PROJECT_HOME/overrides/config.toml"
+has "the listed key is in the layer as typed" 'lane_quiet = "5m"' "$CONFIG_LAYER"
+has "and so is the new key's table" "[models.qwen3-coder]" "$CONFIG_LAYER"
+has "with its value written as a number" "input = 0.4" "$CONFIG_LAYER"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$OVERRIDES_TAB" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "active counts both keys" "active (2)" "$LAST"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

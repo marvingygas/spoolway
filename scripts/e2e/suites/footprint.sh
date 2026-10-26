@@ -327,7 +327,7 @@ measure large
 eval_back_mb=""
 eval_stuck=""
 screen_press $'\x1b[C'   # routines
-screen_press $'\x1b[C'   # jobs
+screen_press $'\x1b[C'   # overrides
 screen_press $'\x1b[C'   # eval
 # Left only once the load is over, which is not what is measured: a load left
 # early holds its memory until it ends, and on a slow runner that is after the
@@ -356,7 +356,7 @@ fi
 # A load that never ends is an Eval that holds its memory for good, so it fails
 # the Eval check below rather than ending the suite before any verdict prints.
 if [ -z "$eval_stuck" ]; then
-  screen_press $'\x1b[D'   # back to jobs
+  screen_press $'\x1b[D'   # back to overrides
   for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
     kb=$(now_kb "$E2E_SCREEN_PID")
     eval_back_mb=$(mb "${kb:-0}")

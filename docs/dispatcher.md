@@ -893,6 +893,112 @@ The line names no file or key. Press `u` to load them; see
 because each lane reads its `PROMPT.md` when it starts. With nothing to load, neither board draws
 the line, and `[u] update config` is off the key line.
 
+## The overrides tab
+
+Bare `spoolway`'s tab strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES`, `EVAL`. The
+overrides tab sets keys in the private [overrides layer](configuration.md#the-overrides-layer)
+from the screen, so a change needs no `override` command per key. A home-mode project has no
+overrides tab: its whole setup already lives privately in its workspace, so there is no
+checked-in file to override. Its strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `EVAL`, and `→`
+from routines reaches eval.
+
+The tab has four sections, named in its list box's title. The open one is bracketed, the way the
+strip brackets the open tab. The tab always opens on config, and `tab` moves the brackets one
+section right, wrapping from active back to config. `←` and `→` still change tabs.
+
+```
+╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
+╭─ config   [pipeline]   prompts   active (2) ─────────────────────────────────╮
+╭─ config   pipeline   [prompts]   active (2) ─────────────────────────────────╮
+╭─ config   pipeline   prompts   [active (2)] ─────────────────────────────────╮
+```
+
+The count on active is the number of keys in the layer: every config key, every field of every
+patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
+The pipeline, prompts and active sections list nothing yet, and `tab` is the only key they read.
+
+### The config section
+
+The config section lists every key `spoolway config list` prints, grouped under its table. Each
+key shows the value in use now, which is the tracked `config.toml` with the layer merged onto it.
+A key with no value, such as `watch.dirs`, reads `not set`. `+ new key` at the top takes any
+dotted key the list does not show, such as a `[models]` glob the config has no entry for yet.
+
+```
+    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+
+╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
+│                                                                              │
+│   + new key                                                                  │
+│   agents.claude                                                              │
+│     concurrency                 5                                            │
+│     permission_mode             auto                                         │
+│   dispatch                                                                   │
+│ >   lane_quiet                  15m                                          │
+│     visible_lanes               3                                            │
+│   watch                                                                      │
+│     dirs                        not set                                      │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [enter] set value   [f] search   [tab] section   [q] quit
+```
+
+On `+ new key` the key line reads `[enter] new key` instead.
+
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Move the cursor over `+ new key` and the keys. Table headings are skipped. |
+| `enter` | Open the value field of the key under the cursor, or the `new key` popup on `+ new key`. |
+| `f` | Open the `search:` row at the top of the list. |
+| `tab` | Move to the next section. |
+
+While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
+typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
+every key with no value. `enter` keeps the results, and `esc` clears the search. A list taller than
+the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,
+such as `↑ 3 keys above · ↓ 6 keys below`.
+
+`enter` on a key opens its one-line field, filled with the value in use now. The `current` row shows
+that value, any override already in the layer included, or `not set`.
+
+```
+╭─ set dispatch.lane_quiet ────────────────────────╮
+│                                                  │
+│  value: 5m▏                                      │
+│                                                  │
+│  current   15m                                   │
+│                                                  │
+│  [enter] save   [esc] back                       │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` on `+ new key` opens the `new key` popup, with a key field and a value field. `tab` moves
+between the two, and the `▏` marks the field that takes what is typed. Its `current` row reads
+the typed key's value in the list, or `not set` for a key the list does not show.
+
+```
+╭─ new key ────────────────────────────────────────╮
+│                                                  │
+│  key:     models.qwen3-coder.input               │
+│  value:   0.4▏                                   │
+│                                                  │
+│  current   not set                               │
+│                                                  │
+│  [tab] next field   [enter] save   [esc] back    │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` in either popup writes the key to the layer's `config.toml`, exactly as typed, and the
+list shows the new value. Text that reads as a TOML number, boolean or array is written as one,
+and anything else is written as a string: `5`, `true` and `["a", "b"]` keep their type, and
+`5m`, `010` and `group first` are written as strings. `enter` on an empty field, or a popup with
+an empty key, writes nothing. `esc` closes either popup with nothing written.
+
+The tab does not check the key or the value. A value the config cannot hold, or a key this
+spoolway does not know, is still written, and `spoolway override list` reports it as ignored
+with the reason. A write that fails, such as on a layer file that does not parse, opens a
+`not written` popup naming the key and the error, closed by `enter`.
+
 ## Editing a pipeline while it runs
 
 The dispatcher reads the pipelines when it starts and when a [reload](#reloading) is requested.
