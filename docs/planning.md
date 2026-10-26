@@ -362,7 +362,7 @@ Nothing creates the directory for you. `spoolway task contract` prints this shap
 project's own routines directory, for a producer writing a routine by hand. A routine is
 never a task template: it holds finished tasks, not a skeleton with a placeholder in it.
 
-Bare `spoolway` has a routines tab, between the queue and eval tabs. Its left pane,
+Bare `spoolway` has a routines tab, between the queue and overrides tabs. Its left pane,
 titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
 pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
 

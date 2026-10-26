@@ -915,7 +915,7 @@ section right, wrapping from active back to config. `←` and `→` still change
 
 The count on active is the number of keys in the layer: every config key, every field of every
 patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
-The pipeline, prompts and active sections list nothing yet, and `tab` is the only key they read.
+The pipeline, prompts and active sections show an empty list, and `tab` is the only key they read.
 
 ### The config section
 
@@ -993,6 +993,12 @@ list shows the new value. Text that reads as a TOML number, boolean or array is 
 and anything else is written as a string: `5`, `true` and `["a", "b"]` keep their type, and
 `5m`, `010` and `group first` are written as strings. `enter` on an empty field, or a popup with
 an empty key, writes nothing. `esc` closes either popup with nothing written.
+
+When the tracked `config.toml` or `overrides/config.toml` stops loading while the screen is open,
+the list keeps the config the screen started with. A note at the top of the box names the file
+that failed and the first line of its error, and gives the command to fix it: `spoolway config
+edit` for the tracked file, `spoolway config override` for the layer. The note stays in view
+while the list scrolls and goes once the file loads again.
 
 The tab does not check the key or the value. A value the config cannot hold, or a key this
 spoolway does not know, is still written, and `spoolway override list` reports it as ignored
