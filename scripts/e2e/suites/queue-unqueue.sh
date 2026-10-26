@@ -413,7 +413,9 @@ has "the gate draws over an unmet gh version" \
   "issue tracking is not supported." "$GATE_ESC_OUT"
 has "naming the declared floor" "gh >= 2.97.0" "$GATE_ESC_OUT"
 has "in a popup over the queue screen" "╭─ issue tracking " "$GATE_ESC_OUT"
-has "whose keys read as drawn" \
+has "whose body says what enter does" \
+  "enter queues it without issue tracking." "$GATE_ESC_OUT"
+lacks "with no answer row" \
   "> queue anyway, without issue tracking" "$GATE_ESC_OUT"
 has "under the shared key row" "[enter] confirm   [esc] close" "$GATE_ESC_OUT"
 works "esc leaves the task in pending, unqueued" \

@@ -796,7 +796,8 @@ pick_item unqueue
 draws "unqueue on the chain's head opens a panel naming both" "unqueue chain-head"
 draws "the dependent, marked with what it depends on" \
   "chain-tail   (depends on chain-head)"
-draws "and offers one answer for both" "> unqueue them"
+if _now_says "> unqueue them"; then bad "and draws no answer row for its one answer"
+else ok "and draws no answer row for its one answer"; fi
 draws "under the shared key row" "[enter] confirm   [esc] close"
 stage_stays "nothing moves while the panel is open" chain-head queued
 stage_stays "not even the dependent" chain-tail queued
@@ -998,7 +999,7 @@ if cursor_to stuck && pick_item restart \
   && RESTART_FRAME=$(frame_showing "╭─ restart stuck ─" 10); then
   SAW_RESTART=stuck
   for want in "╭─ restart stuck ─" "step      implement" "lane      stuck · implement" \
-    "is briefed from" "> restart" "[enter] confirm   [esc] close"; do
+    "is briefed from" "[enter] confirm   [esc] close"; do
     if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the restart panel says: $want"
     else bad "the restart panel says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi
   done
@@ -1062,12 +1063,12 @@ if cursor_to build-cmd && pick_item restart \
   SAW_RESTART=build-cmd
   for want in "╭─ restart build-cmd ─" "step      build" "run       command · " \
     "the command's process is ended and \`build\` runs again" \
-    "from the start. its log is kept as the previous log." "> restart" \
+    "from the start. its log is kept as the previous log." \
     "[enter] confirm   [esc] close"; do
     if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the command form says: $want"
     else bad "the command form says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi
   done
-  for unwanted in "lane      build-cmd" "session   "; do
+  for unwanted in "lane      build-cmd" "session   " "> restart"; do
     if grep -qF -- "$unwanted" <<<"$RESTART_FRAME"; then
       bad "the command form names no $unwanted"; sed 's/^/        /' <<<"$RESTART_FRAME"
     else ok "the command form names no $unwanted"; fi
@@ -1369,7 +1370,7 @@ fi
 
 if cursor_to skip-held; then
   press k
-  if shows "> skip and archive" 10; then press $'\r'; fi
+  if shows "$SKIP_PANEL" 10; then press $'\r'; fi
 fi
 _skip_archived() { [ -f "$SPOOLWAY_PROJECT_HOME/archive/skip-held.md" ]; }
 if poll_until 30 _skip_archived; then ok "\`k\` then \`enter\` skips the hook and archives the task"
