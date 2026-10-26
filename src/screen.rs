@@ -851,6 +851,8 @@ pub(crate) fn answer_keys() -> String {
 /// Apart from [`pick`] for a caller that prints its answers under a notice
 /// of its own rather than in a box — `spoolway dispatch`'s gates in a
 /// terminal — so the printed answers and the boxed ones are the same rows.
+/// A popup with one answer drawn through [`ask`] draws none of these rows,
+/// though its printed twin still lists that answer.
 pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     for (i, answer) in answers.iter().enumerate() {
@@ -869,10 +871,11 @@ pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
 /// [`answer_rows`] draws them, the cursor on the `cursor`th, when there are
 /// two or more.
 ///
-/// Every popup that asks a question is drawn through this, so each one
-/// reads and answers alike: the arrows move the cursor, `enter` runs the
-/// answer under it, and `esc` closes. A popup that only says something is
-/// a [`notice`] instead, closed by [`confirm`].
+/// Every popup that asks a question is drawn through this or [`pick`], so
+/// each one reads and answers alike: `enter` runs the answer, and `esc`
+/// closes. With two or more answers the arrows move the cursor and `enter`
+/// runs the answer under it. A popup that only says something is a
+/// [`notice`] instead, closed by [`confirm`].
 ///
 /// A popup with exactly one answer is a confirmation, and draws no answer
 /// row: it ends on its body, a blank row and [`answer_keys`]. A lone
@@ -1591,9 +1594,9 @@ mod tests {
     /// Every popup in the project that asks a person something closes on
     /// `[enter] confirm   [esc] close` and nothing else: no letter answers,
     /// no key row of its own. Each module hands over its own asking popups,
-    /// drawn once; a listed popup that stops drawing through [`ask`], or
-    /// grows a key row of its own, fails here. A new popup has to be added
-    /// to its module's list to be walked.
+    /// drawn once; a listed popup that stops drawing through [`ask`] or
+    /// [`pick`], or grows a key row of its own, fails here. A new popup has
+    /// to be added to its module's list to be walked.
     ///
     /// The popups named in `confirmations` have one answer, so [`ask`]
     /// draws no `>` row on them; every other one has its cursor on exactly

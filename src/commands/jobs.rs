@@ -890,7 +890,7 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
 fn pipeline_panel(pipelines: &Pipelines, query: &str, cursor: usize) -> Vec<String> {
     let matches = pipeline_matches(pipelines, query);
     let cursor = cursor.min(matches.len().saturating_sub(1));
-    let mut body = vec![String::new(), clip(&format!("  find: {query}_"))];
+    let mut body = vec![String::new(), clip(&format!("  search: {query}_"))];
 
     if matches.is_empty() {
         body.push(String::new());
@@ -933,6 +933,18 @@ pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// The pipeline picker's query row says `search:`, the word the queue
+    /// tab's search box uses, so the board names it one way on every tab.
+    #[test]
+    fn the_pipeline_picker_names_its_query_search() {
+        let panel = pipeline_panel(&Pipelines::builtin(), "bug", 0);
+        assert!(
+            panel.iter().any(|row| row.contains("  search: bug_")),
+            "{panel:#?}"
+        );
+        assert!(!panel.iter().any(|row| row.contains("find:")), "{panel:#?}");
+    }
 
     /// The `routine` key's `{routines_dir}` placeholder is filled with this
     /// project's own routines path, through [`store_label`] — the same

@@ -3059,9 +3059,14 @@ fn failed_login_detail(command: &[String]) -> Option<String> {
 /// printed by [`print_tool_gate_notice`] and in the queue screen's popup.
 const TOOL_GATE_VERDICT: &str = "issue tracking is not supported.";
 
-/// The gate's one answer, printed and in the popup alike. `esc` is the
-/// other way out, queueing nothing.
+/// The gate's one answer. The terminal prints it under the notice; the
+/// popup draws no row for a lone answer and runs it on `enter`, saying so
+/// in [`TOOL_GATE_ENTER`]. `esc` is the other way out, queueing nothing.
 const TOOL_GATE_ANSWER: &str = "queue anyway, without issue tracking";
+
+/// The popup's line saying what `enter` does, since its one answer draws no
+/// row of its own — see [`crate::screen::ask`].
+const TOOL_GATE_ENTER: &str = "enter queues it without issue tracking.";
 
 /// The gate's own box, drawn once per unmet requirement pair — the
 /// declaration line and what this machine actually has — followed by the
@@ -3090,12 +3095,14 @@ pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
 }
 
 /// The screens' own popup for the gate: the same rows and the same line
-/// under them as [`print_tool_gate_notice`], in a box over the tab.
+/// under them as [`print_tool_gate_notice`], in a box over the tab, then
+/// [`TOOL_GATE_ENTER`] in place of the answer row the terminal prints.
 fn tool_gate_panel(unmet: &[UnmetRequirement]) -> Vec<String> {
     let mut body = vec![String::new()];
     body.extend(tool_gate_rows(unmet));
     body.push(String::new());
     body.push(TOOL_GATE_VERDICT.to_string());
+    body.push(TOOL_GATE_ENTER.to_string());
     crate::screen::ask("issue tracking", &body, &[TOOL_GATE_ANSWER.to_string()], 0)
 }
 
@@ -17290,7 +17297,7 @@ mod tests {
     /// The groups pane counts groups: the blank row between two states and
     /// the filter's own `search:` row are lines, never groups out of sight.
     #[test]
-    fn the_groups_pane_marker_never_counts_separators_or_the_find_row() {
+    fn the_groups_pane_marker_never_counts_separators_or_the_search_row() {
         let (repo, _root_guard) = fixture("scroll-counts-groups");
         for i in 0..4 {
             let id = format!("g{i}");
@@ -21745,7 +21752,7 @@ mod tests {
             last.contains("[enter] leave search   [esc] cancel"),
             "{last}"
         );
-        assert!(!last.contains("f search"), "{last}");
+        assert!(!last.contains("[f] search"), "{last}");
         assert!(!last.contains("esc back"), "{last}");
         assert!(!last.contains("type to narrow"), "{last}");
         assert!(!last.contains("q is a letter here"), "{last}");
@@ -27305,6 +27312,10 @@ group_description: audit
             assert!(
                 !frame.contains("queue anyway, without issue tracking"),
                 "one answer, so no row: {frame}"
+            );
+            assert!(
+                frame.contains("enter queues it without issue tracking."),
+                "the body says what enter does: {frame}"
             );
             assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
             assert!(frame.contains("─ groups"), "the tab under it: {frame}");
