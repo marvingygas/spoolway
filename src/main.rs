@@ -86,6 +86,7 @@ use repo::Repo;
 fn main() {
     // First, before any thread exists: an arena already created stays.
     memory::cap_arenas();
+    memory::fix_thresholds();
     if let Err(err) = run() {
         // A refusal the caller corrects by typing something else, not a
         // failure: exit 2, and no `spoolway:` prefix on the text.

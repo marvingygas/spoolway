@@ -6,9 +6,10 @@
 //! one large read leaves the whole UI resident at its highest point until the
 //! session ends.
 //!
-//! Two calls fix that: [`cap_arenas`] limits how many pools there can be, and
-//! [`trim`] returns freed memory after a large read. Both are glibc-only. On
-//! macOS and on the musl Linux build (which has no `mallopt`), both are
+//! Three calls fix that: [`cap_arenas`] limits how many pools there can be,
+//! [`fix_thresholds`] keeps glibc from raising the size it hands back at, and
+//! [`trim`] returns freed memory after a large read. All are glibc-only. On
+//! macOS and on the musl Linux build (which has no `mallopt`), all are
 //! empty functions, so callers never need a `cfg` of their own and those
 //! targets keep the behaviour they had.
 
@@ -34,6 +35,32 @@ pub fn cap_arenas() {
     }
 }
 
+/// The size, in bytes, glibc's mmap and trim thresholds are held at: its own
+/// starting value for both.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const THRESHOLD: libc::c_int = 128 * 1024;
+
+/// Hold glibc's mmap and trim thresholds at their starting value.
+///
+/// Left alone, glibc raises both each time a large block is freed: the mmap
+/// threshold up to 32 MB, the trim threshold to twice that. After the eval
+/// tab's load frees one large buffer, the next ones come out of the load
+/// thread's own arena instead of a mapping of their own, and that arena keeps
+/// up to 64 MB free at its top. [`trim`] does not shrink the top of an arena
+/// other than the main one, so on glibc 2.39 about 30 MB stayed resident
+/// after every load that landed that way: `footprint`'s check that the UI is
+/// back under budget after leaving Eval failed in about half its runs on CI.
+/// Setting either value also turns the raising off.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub fn fix_thresholds() {
+    // SAFETY: as in `cap_arenas`, `mallopt` only sets an allocator parameter
+    // under glibc's own lock. A refusal leaves glibc's default and is ignored.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, THRESHOLD);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, THRESHOLD);
+    }
+}
+
 /// Give freed memory back to the system, across every arena.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn trim() {
@@ -47,15 +74,19 @@ pub fn trim() {
 pub fn cap_arenas() {}
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub fn fix_thresholds() {}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn trim() {}
 
 #[cfg(test)]
 mod tests {
-    /// Both calls are plain function calls on every target, and the process
+    /// Every call is a plain function call on every target, and the process
     /// keeps allocating normally after them.
     #[test]
-    fn trim_and_cap_leave_the_allocator_usable() {
+    fn trim_cap_and_thresholds_leave_the_allocator_usable() {
         super::cap_arenas();
+        super::fix_thresholds();
         let big = vec![7u8; 8 << 20];
         drop(big);
         super::trim();
