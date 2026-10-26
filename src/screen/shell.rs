@@ -1501,7 +1501,7 @@ mod tests {
         assert_eq!(frames.len(), visited.len(), "{frames:?}");
 
         let (width, height) = crate::screen::pane_size();
-        let mut parser = vt100::Parser::new(height as u16, width as u16, 0);
+        let mut parser = crate::screen::frame_writer::test_parser((width, height));
         for (i, marker) in visited.iter().enumerate() {
             parser.process(&crate::screen::frame_writer::as_terminal_would_receive(
                 frames[i].as_bytes(),
@@ -1540,7 +1540,7 @@ mod tests {
         assert_eq!(frames.len(), names.len(), "{frames:?}");
 
         for (frame, name) in frames.iter().zip(names) {
-            let mut parser = vt100::Parser::new(height as u16, width as u16, 0);
+            let mut parser = crate::screen::frame_writer::test_parser((width, height));
             parser.process(&crate::screen::frame_writer::as_terminal_would_receive(
                 frame.as_bytes(),
             ));
