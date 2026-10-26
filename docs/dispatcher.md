@@ -915,8 +915,8 @@ section right, wrapping from active back to config. `←` and `→` still change
 
 The count on active is the number of keys in the layer: every config key, every field of every
 patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
-The active section shows an empty list, and `tab` is the only key it reads. On the other three
-sections `w` opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
+The [active section](#the-active-section) lists those keys and deletes them. On every section `w`
+opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
 
 ### The config section
 
@@ -1175,12 +1175,114 @@ you have edited is kept, and the popup says so.
 the copy is edited by hand. A copy that cannot be written opens a `not written` popup naming the
 prompt and the error, closed by `enter`.
 
+### The active section
+
+The active section lists every file in the layer, `config.toml` first, then the pipeline patches,
+then the prompt copies. Each file's keys are listed under it. A key shows the setup's value, then
+the layer's, as the layer spells it. The setup is the tracked files in the main checkout, the
+ones the dispatcher reads. A worktree's own copy of them never changes what a row says. A prompt
+copy replaces the whole file, so its row reads `whole file`.
+
+```
+    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+
+╭─ config   pipeline   prompts   [active (7)] ─────────────────────────────────╮
+│                                                                              │
+│   [ ] config.toml                                                            │
+│         [ ] dispatch.lane_quiet      15m → 5m                                │
+│   [ ] pipelines/bugfix.yml                                                   │
+│         [ ] fix.model                claude-sonnet-5-5 → claude-opus-5-5     │
+│         [ ] reproduce.model          claude-sonnet-5-5 → claude-opus-5-5     │
+│   [x] pipelines/impl.yml                                                     │
+│         [x] document.model           claude-sonnet-5-5 → claude-opus-5-5     │
+│         [x] implement.model          claude-sonnet-5-5 → claude-opus-5-5     │
+│ > [x] pipelines/impl_fast.yml                                                │
+│         [x] test.timeout             45m → 90m                               │
+│   [ ] prompts/code-reviewer          whole file                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [space] select   [a] all   [o] options   [w] open workspace   [tab] section   [q] quit
+```
+
+A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints, and
+the row under it says what to do. A whole file the merge leaves out, such as a patch on a
+pipeline the checkout no longer has, carries the reason on its own row. A file that does not read
+says so on its row, lists no keys, and can still be deleted as a whole.
+
+```
+│   [ ] config.toml                                                            │
+│         [ ] dispatch.visible_lanes   ignored — setting                       │
+│                                      `dispatch.visible_lanes` to `three`     │
+│                                      produces an invalid config: …           │
+│                                      [enter] to set it again, or o to delete │
+```
+
+A key whose value the setup already holds reads `matches the setup — o to delete`. It does
+nothing, and this is how a [promoted](configuration.md#the-overrides-layer) entry shows that its
+branch has merged: a promote keeps its entries in the layer until you delete them.
+
+```
+│   [ ] pipelines/bugfix.yml                                                   │
+│         [ ] fix.model                matches the setup — o to delete         │
+│         [ ] reproduce.model          matches the setup — o to delete         │
+```
+
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Move the cursor over the files and keys. |
+| `space` | Select the row under the cursor, or clear it. A file selects every key under it. |
+| `a` | Select every file and key. A second `a` clears the selection. |
+| `o` | Open the menu: `delete selected` and `delete all overrides`. |
+| `enter` | On a key, open its value field to set it again. |
+| `w` | Open the overrides folder. |
+| `tab` | Move to the next section. |
+
+The menu's title says how many keys are selected. With nothing selected, `delete selected` acts
+on the row under the cursor, and the menu is titled with that row's name.
+
+```
+╭─ 3 selected ─────────────────────────╮
+│                                      │
+│  > delete selected                   │
+│    delete all overrides              │
+│                                      │
+│  [enter] confirm   [esc] close       │
+╰──────────────────────────────────────╯
+```
+
+Either answer opens one confirm popup that names every file and key it deletes. `enter` deletes
+them and `esc` closes the popup with nothing deleted.
+
+```
+╭─ delete these overrides ─────────────────────────╮
+│                                                  │
+│  3 keys in 2 files                               │
+│                                                  │
+│  pipelines/impl.yml        document.model        │
+│                            implement.model       │
+│  pipelines/impl_fast.yml   test.timeout          │
+│                                                  │
+│  [enter] confirm   [esc] close                   │
+╰──────────────────────────────────────────────────╯
+```
+
+`delete selected` removes the selected keys from each file with one write, and a file left with
+no keys leaves the layer. A selected prompt copy goes as a whole. `delete all overrides` removes
+every file the list shows. A delete that fails on one file stops there. The files before it are
+already changed, so a `deleted in part` popup names them and the files left as they were. A
+delete that fails on its first file opens a `not deleted` popup instead. `enter` closes either.
+
+`enter` on a config key opens the same value field the config section opens. `enter` on a
+pipeline key opens a `set <key> in <pipeline>` field, filled with the value in use now, and
+writes what is typed into that one key, read as YAML the way `spoolway pipeline override --set`
+reads it. `enter` on an empty field writes nothing, and `esc` closes the field.
+
 ### Opening the overrides folder
 
-`w` on the config, pipeline and prompts sections, and in both prompt popups, opens the overrides
-folder: the one on the `overrides:` line of `spoolway config path`. A project that has overridden
-nothing has no such folder, so `w` creates it empty first. An empty folder still reads as no
-overrides, to `spoolway override list` and to the dispatch tab alike.
+`w` on every section, and in both prompt popups, opens the overrides folder: the one on the
+`overrides:` line of `spoolway config path`. A project that has overridden nothing has no such
+folder, so `w` creates it empty first. An empty folder still reads as no overrides, to `spoolway
+override list` and to the dispatch tab alike.
 
 The folder opens in the file manager. macOS runs `open`, which opens it in Finder. WSL runs
 `explorer.exe`. Other Linux runs `xdg-open`, and only when `DISPLAY` or `WAYLAND_DISPLAY` is set,
