@@ -713,7 +713,7 @@ non-zero, takes longer than 15 seconds or cannot be started. The gate shows it a
 the tool rows, the hook with `login` and the command, then the command's program with `failed`
 and the first line of its stderr. The command is not run when its program is already unmet, and
 not for a batch where every task sets `tracking: off`. The answer and `esc` are the same as for a
-tool. On a screen it shows what is unmet as a popup: `enter` on `queue anyway, without issue tracking` queues with `tracking: off` written
+tool. On a screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written
 onto every task, `esc` backs out. `spoolway queue add --from` at a terminal prints the notice and
 asks for the same two keys. Anywhere else it prints the same notice and proceeds the same way.
 A job the dispatcher fires never asks, even when the dispatcher runs in a terminal. It prints the

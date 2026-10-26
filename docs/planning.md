@@ -160,7 +160,7 @@ no tail. With a plan row highlighted, the tasks pane says only `use /spoolway-ta
 ╰────────────────────────┴────────────────────────────────────────────────────╯
 ```
 
-`space` and `enter` do nothing on a plan row. `h` never hides one, and `f` finds one by its
+`space` and `enter` do nothing on a plan row. `h` never hides one, and `f` searches for one by its
 name. Once `/spoolway-tasks` cuts the plan, the next reload shows it as a queueable group
 instead. Only pages written after the time kept in the `plans-since` file beside `plans/` are
 shown. In home mode that file is the workspace's, so every clone uses the same cutoff. Older
@@ -179,7 +179,7 @@ after the path reads again.
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
 | `o` | Open the options menu of the row the focused pane highlights. See [Options menu](#options-menu). |
-| `f` | Filter the group list. `enter` keeps the filter, `esc` clears it. |
+| `f` | Search the group list. `enter` keeps the search, `esc` clears it. |
 | `h` | Show or hide done groups. A queued group never appears. |
 | `ctrl-c` | Leave the screen. |
 
@@ -266,8 +266,6 @@ another group. One popup lists them all, titled `delete group <name>` for a grou
 │  checkout                                       │
 │    checkout-total     (depends on cart-totals)  │
 │                                                 │
-│  > delete                                       │
-│                                                 │
 │  [enter] confirm   [esc] close                  │
 ╰─────────────────────────────────────────────────╯
 ```
@@ -297,8 +295,6 @@ clone cannot delete a page that a task in another clone names. The popup is titl
 │  delete 1 plan page:             │
 │                                  │
 │    plans/2026-10-21-search.html  │
-│                                  │
-│  > delete                        │
 │                                  │
 │  [enter] confirm   [esc] close   │
 ╰──────────────────────────────────╯
@@ -491,7 +487,7 @@ run are removed on the way. A folder that already holds tasks is refused.
 
 Pick `delete routine` from a routine's options menu to delete it. The popup names the routine, its task count, and every
 job whose routine path is that folder or a task inside it. Each job is listed beside its
-store, `user` or `project`. Its one answer is `delete`: `enter` deletes those jobs first, then
+store, `user` or `project`. `enter` deletes those jobs first, then
 the folder. `esc` keeps everything. The folder leaves disk without touching git, so only git can bring it back. A job
 store that will not read refuses the delete before anything is removed, naming the store and
 `spoolway doctor`.

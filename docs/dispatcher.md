@@ -541,8 +541,8 @@ text, and every other pair on the line is dim.
 | `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while `[u] update config` is not on the key line, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
 | `ctrl-c` | Stop the run. |
 
-Every menu and panel these keys open lists its answers under its text, with `>` on the
-cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
+Every menu and every panel with two or more answers lists its answers under its text, with `>` on
+the cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
 with nothing changed. No letter answers a menu or a panel. The cursor opens on the first answer,
 such as `open task` or `pause now`, and on the `(next)` step in the resume picker.
 

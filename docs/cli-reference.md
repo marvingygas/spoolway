@@ -199,7 +199,7 @@ board's branch.
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
 | `o` | Open the options menu of the row the focused pane highlights, titled with its name |
-| `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
+| `f` | Search groups by name, task id and title. The footer reads `[enter] leave search   [esc] cancel` while you type. `enter` keeps the search, `esc` clears it |
 | `h` | Show or hide done groups. A queued group never appears |
 
 The options menu follows focus. Over the tasks pane it offers these items for the highlighted
@@ -255,8 +255,8 @@ or `start the dispatcher to begin working`. `enter` closes the popup back to the
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements and runs its `# spoolway-login:` command. A requirement this machine does not meet,
-or a login command that fails, draws a gate naming what is unmet, with
-one answer: `enter` on `queue anyway, without issue tracking` queues the group with `tracking:
+or a login command that fails, draws a gate naming what is unmet. It ends on
+`enter queues it without issue tracking.` and `[enter] confirm   [esc] close`. `enter` queues the group with `tracking:
 off` written onto every task, and `esc` returns to the queue screen with nothing queued. A task queued with `tracking: off` fires no
 `[issue_tracking]` hook event and is never held waiting on one. See [the shipped hook
 scripts](configuration.md#the-shipped-hook-scripts).
