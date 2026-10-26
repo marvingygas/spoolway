@@ -27,6 +27,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Two pass intervals (the dispatcher waits ten seconds between idle passes)
@@ -44,8 +45,12 @@ impl Project {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock is after the epoch")
             .as_nanos();
+        // macOS reads the clock to the microsecond, so two tests starting
+        // together can share a nonce. The sequence keeps them apart.
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
-            "spoolway-live-reload-{}-{nonce}",
+            "spoolway-live-reload-{}-{nonce}-{seq}",
             std::process::id()
         ));
         let root = base.join("proj");
