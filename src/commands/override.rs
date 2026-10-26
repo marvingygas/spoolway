@@ -687,6 +687,9 @@ pub(crate) fn drop_override_keys(repo: &Repo, target: &str, keys: &[String]) -> 
 pub(crate) fn drop_override_target(repo: &Repo, target: &str) -> Result<String> {
     repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
+    // Held across the removal, so a parallel `pipeline override --set` that
+    // read the patch first does not write it back after it is gone.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     match parse_target(target)? {
         Target::Pipeline(name) => {
             crate::overrides::remove_pipeline_patch(&dir, &name)?;
@@ -717,6 +720,9 @@ pub fn override_drop(repo: &Repo, target: Option<&str>, key: Option<&str>) -> Re
     }
     repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
+    // Held for the same reason as in `drop_override_target`: a parallel
+    // write would otherwise bring back the file it read.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1514,6 +1520,35 @@ mod tests {
                 started.elapsed() >= std::time::Duration::from_millis(250),
                 "the promote ran while the edit lock was held"
             );
+        });
+    }
+
+    /// A drop of a whole file, and of the whole layer, waits for the edit
+    /// lock a `pipeline override --set` holds. Without it the file went at
+    /// once, and that `--set` wrote back the patch it had read.
+    #[test]
+    fn override_drop_of_a_file_or_the_layer_waits_for_the_edit_lock() {
+        with_repo("drop-lock", |repo| {
+            for target in [Some("demo"), None] {
+                pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+                let held = crate::lock::EditLock::acquire(&repo.edit_lock_path()).unwrap();
+                let started = std::time::Instant::now();
+                // Timed inside the scope: leaving it waits for the thread
+                // that releases the lock, so a time taken after it would
+                // pass whether or not the drop waited.
+                let waited = std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        drop(held);
+                    });
+                    override_drop(repo, target, None).unwrap();
+                    started.elapsed()
+                });
+                assert!(
+                    waited >= std::time::Duration::from_millis(250),
+                    "the drop of {target:?} ran while the edit lock was held"
+                );
+            }
         });
     }
 
