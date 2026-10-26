@@ -366,7 +366,7 @@ at all. The frame is then cut from the bottom so it never scrolls the terminal.
 
 ### The empty board
 
-With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`.
+With no task on the queue, the board clears to a calm screen. The header stays in the top-right corner. The wordmark sits in the middle of the pane, with a bold greeting under it and a dim `Nothing queued` under that. The pane's key line shows only `[enter]` and, inside bare `spoolway`'s dispatch tab, `[q] quit`. `[u] update config` joins it under the rule in [Keys](#keys).
 
 ```
 Good afternoon, Marvin.
@@ -395,7 +395,7 @@ jobs   2 active
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines, the `update` notice and the parse warning. The keys that act on a row are left off the key line. The wordmark turns while a dispatcher is running, and holds still otherwise.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`Config changed` line](#the-config-changed-line) still shows while a reload has something to load. The wordmark turns while a dispatcher is running, and holds still otherwise.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
@@ -529,8 +529,8 @@ The key line under the board reads `[enter] start dispatching   [o] options   [q
 reads `stop dispatching` while the dispatcher is running, and `q` shows only inside the dispatch
 tab. `[r] resume` joins it, between the `enter` pair and `[o] options`, only while the `▸`
 cursor sits on a row it can resume. `[u] update config` joins it, between `[o] options` and
-`[q] quit`, while any dispatcher holds the lock. On an empty board it sits between `enter` and
-`q`.
+`[q] quit`, only while a dispatcher holds the lock and the `Config changed` line is up. On an empty board it sits between `enter` and `q`. It is drawn in normal
+text, and every other pair on the line is dim.
 
 | Key | What it does |
 |---|---|
@@ -538,7 +538,7 @@ cursor sits on a row it can resume. `[u] update config` joins it, between `[o] o
 | `o` | Open the options menu of the row under the cursor. See [Options menu](#options-menu). |
 | `r` | Open the resume picker for a paused or blocked row whose dependencies have finished. The picker lists every step the task runs, preselects the natural next step, and `enter` resumes the task there. A row parked before it ever started resumes at once with no picker. A `hook_failed` row also resumes at once and runs its hook again. See [Resume picker](#resume-picker). |
 | `k` | Open the skip panel for a `hook_failed` row. Does nothing on any other row. See [Skip panel](#skip-panel). |
-| `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while no dispatcher holds the lock, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
+| `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while `[u] update config` is not on the key line, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
 | `ctrl-c` | Stop the run. |
 
 Every menu and panel these keys open lists its answers under its text, with `>` on the
@@ -600,7 +600,7 @@ When the dispatcher stops before it answers, the popup reads `The dispatcher sto
 answering, so nothing was reloaded. A new run loads every file as it is now.` When the dispatch
 tab's own dispatcher stops, that sentence follows the reason it stopped in the exit popup. When
 the answer cannot be read, the popup says the board cannot tell whether the reload loaded, and to
-press `u` again if the footer still shows its `update` line.
+press `u` again if the board still shows its `Config changed` line.
 
 ### Options menu
 
@@ -863,11 +863,7 @@ pi   slots 1/∞   small-local   0/1 · 1 held
 
 The count is the number of slots started groups hold on that cap. The NEXT column names the group. Under `group` and `any`, no footer line shows `held`.
 
-A line `update     <names> changed since this run started — press u to update config` appears
-while a pipeline file differs from the copy the dispatcher loaded, or while `config.toml` holds a
-different value than the run is using for `unattended.enabled` or an `unattended.blocked_*` key.
-The line names each pipeline file and each such key. See
-[Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). Then the job ledger lists every enabled job with its next firing:
+The job ledger lists every enabled job with its next firing:
 
 ```
 jobs    2 active
@@ -877,6 +873,26 @@ jobs    2 active
 
 `spoolway queue list` prints the same table from another terminal, and `spoolway lane <lane>`
 shows what one lane is doing.
+
+### The Config changed line
+
+The busy board and the empty board draw one line above the key line while a reload has something
+to load. Inside the dispatch tab it is the last row of the box, with a blank row above it. It
+starts with a bold `Config changed:` and names the kinds of change, joined by `, `.
+
+| Kind | Shown while |
+|---|---|
+| `pipelines updated` | A pipeline file differs from the copy the dispatcher loaded. |
+| `config.toml updated` | `config.toml` holds a different value than the run is using for `unattended.enabled` or an `unattended.blocked_*` key. |
+
+```
+Config changed: pipelines updated, config.toml updated
+```
+
+The line names no file or key. Press `u` to load them; see
+[Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). A prompt edit adds no kind,
+because each lane reads its `PROMPT.md` when it starts. With nothing to load, neither board draws
+the line, and `[u] update config` is off the key line.
 
 ## Editing a pipeline while it runs
 
@@ -906,9 +922,10 @@ pipeline files.
 
 An edit to a pipeline file changes nothing until the dispatcher restarts or reloads. A pipeline
 override follows the same rule: `spoolway pipeline override` writes a patch file, and the running
-dispatcher uses it only after a restart or a reload. The footer and `spoolway pipeline check` name each
-pipeline file or override patch that differs from the loaded copy. The footer also names the
-config keys that differ, and its `u` key reloads them. `spoolway pipeline check` prints:
+dispatcher uses it only after a restart or a reload. `spoolway pipeline check` names each
+pipeline file or override patch that differs from the loaded copy. The board's
+[`Config changed` line](#the-config-changed-line) says when pipelines or config keys differ, and
+its `u` key reloads them. `spoolway pipeline check` prints:
 
 ```
 $ spoolway pipeline check
@@ -930,8 +947,8 @@ dispatcher wakes when the file appears. On every system it answers at the top of
 
 On a good reload, the dispatcher writes the new pipelines to `dispatch-pipelines.json` before it
 starts any lane on them. From then on `spoolway report`, `spoolway queue route` and the board route
-on the new pipelines, and `spoolway pipeline check` and the footer stop naming the reloaded
-files and keys. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
+on the new pipelines, and `spoolway pipeline check` stops naming the reloaded
+files and keys. The `Config changed` line goes. Edited steps, the private layer, pipeline override patches and the `unattended.blocked_*`
 keys all take effect.
 
 A good reload also sets the run to attended or unattended, as `unattended.enabled` says. This

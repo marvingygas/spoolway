@@ -217,16 +217,37 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" "$SPOOLWAY_PROJECT_HOME/queue/
 # `u` on the dispatch tab reaches the dispatcher the tab started through a
 # reload request in the project home, and its answer comes back the same way:
 # a real child serving a real request, which no unit test runs. The key line
-# offers `u` once the lock is held. `updating config…` stays up until the
-# answer lands; `successfully loaded` then shows and closes itself, with no
-# key pressed. Looked for in the whole log since `u`, not in the last frame:
-# it is up for a second, and a poll can land either side of it.
+# offers `u` only once the lock is held and a pipeline file has changed since
+# the run started: with nothing to load, a held lock alone draws no pair.
+# The board names the kind of change on a `Config changed:` line above the
+# key line while the edit waits, and drops it once the reload has loaded it.
+# `updating config…` stays up until the answer lands; `successfully loaded`
+# then shows and closes itself, with no key pressed. Looked for in the whole
+# log since `u`, not in the last frame: it is up for a second, and a poll can
+# land either side of it. The edit is a comment, so the reload loads the same
+# pipeline, and the file is put back once the screen is down.
 UPDATE="$LIVE/update.txt"
+cp .spoolway/pipelines/default.yml "$LIVE/default.yml.update"
 screen_start "$UPDATE"
 screen_dispatch
+if poll_until 10 now_says "dispatcher running · pid "
+then ok "the dispatcher the tab started holds the lock"
+else bad "the dispatcher the tab started holds the lock"; fi
+# Two readings' worth, so a pair the board would draw has had time to land.
+sleep 2
+if now_lacks "[u] update config"
+then ok "the key line leaves u off while nothing changed"
+else bad "the key line leaves u off while nothing changed"; fi
+if now_lacks "Config changed"
+then ok "the board draws no Config changed line while nothing changed"
+else bad "the board draws no Config changed line while nothing changed"; fi
+printf '# edited while the dispatcher runs\n' >> .spoolway/pipelines/default.yml
 if poll_until 10 now_says "[u] update config"
-then ok "the key line offers u while the dispatcher holds the lock"
-else bad "the key line offers u while the dispatcher holds the lock"; fi
+then ok "the key line offers u once a pipeline file changed"
+else bad "the key line offers u once a pipeline file changed"; fi
+if now_says "Config changed: pipelines updated"
+then ok "the board names the change on its Config changed line"
+else bad "the board names the change on its Config changed line"; fi
 UPDATE_MARK=$(wc -l < "$UPDATE")
 screen_press u
 if poll_until 15 screen_drew_since "$UPDATE_MARK" "successfully loaded"
@@ -238,7 +259,14 @@ then ok "and the popup closes itself"
 else bad "and the popup closes itself"; fi
 screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "leaving the dispatcher running" "dispatcher running · pid " "$LAST"
+if poll_until 10 now_lacks "[u] update config"
+then ok "and u goes once the edit is loaded"
+else bad "and u goes once the edit is loaded"; fi
+if now_lacks "Config changed"
+then ok "and so does the Config changed line"
+else bad "and so does the Config changed line"; fi
 screen_stop
+cp "$LIVE/default.yml.update" .spoolway/pipelines/default.yml
 
 # The warnings gate checks the pipelines on disk when `enter` is pressed, not
 # the copy the screen opened with. A pipeline written while the screen is up,
