@@ -169,11 +169,7 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
                     let values = FIELDS
                         .iter()
                         .filter(|field| field.kind == kind)
-                        .map(|field| {
-                            let value = crate::overrides::field_display(step, field.name)
-                                .unwrap_or_default();
-                            (field.name, value)
-                        })
+                        .map(|field| (field.name, step_value(step, field.name)))
                         .collect();
                     let overridden = patch
                         .steps
@@ -200,6 +196,17 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
         })
         .collect();
     (pipelines, stale)
+}
+
+/// `step`'s value for the field `name`, as the list shows it: empty for a
+/// field it leaves out. A blank string reads as left out too. The shipped
+/// pipelines carry `model: ""` and `effort: ""` on every agent step, which
+/// send nothing, and YAML would spell them `''`.
+fn step_value(step: &crate::pipeline::Step, name: &str) -> String {
+    match crate::overrides::field_display(step, name) {
+        Ok(value) if value != "''" => value,
+        _ => String::new(),
+    }
 }
 
 /// The steps picked for one field, and how the picking list is drawn.
@@ -1047,7 +1054,7 @@ fn write(repo: &Repo, field: Field, value: &str, targets: &[(String, Vec<String>
 #[cfg(test)]
 mod tests {
     use super::super::tests::{lines, project, type_keys};
-    use super::super::{State, handle_key};
+    use super::super::State;
     use super::*;
 
     /// Two agent steps on sonnet with an effort, one step that sets no
@@ -1072,7 +1079,8 @@ mod tests {
     on_pass: done
 ";
 
-    /// One agent step on sonnet with an effort, and one with no effort.
+    /// One agent step on sonnet with an effort, and one with a blank
+    /// effort, the way the shipped pipelines leave it.
     const BETA: &str = "steps:
   - id: fix
     agent: claude
@@ -1082,6 +1090,7 @@ mod tests {
   - id: create-pr
     agent: claude
     model: claude-haiku-5-5
+    effort: \"\"
     on_pass: done
 ";
 
@@ -1242,9 +1251,9 @@ mod tests {
         assert_eq!(state.section, super::super::Section::Prompts);
     }
 
-    // A step that leaves the field out reads `not set`, and a pipeline whose
-    // steps the layer already sets the field on starts open, with those
-    // steps selected.
+    // A step that leaves the field out, or leaves it blank, reads `not set`,
+    // and a pipeline whose steps the layer already sets the field on starts
+    // open, with those steps selected.
     #[test]
     fn overridden_steps_start_selected_and_a_missing_field_reads_not_set() {
         let (repo, _guard) = pipelines_project("preselected");
