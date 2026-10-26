@@ -118,6 +118,9 @@ struct State {
     settings: Vec<Setting>,
     /// The count `active` carries in the box title.
     active: usize,
+    /// Why [`State::settings`] holds the config the screen started with
+    /// rather than the one in use now, drawn at the top of the box.
+    stale: Option<String>,
 }
 
 impl State {
@@ -129,6 +132,7 @@ impl State {
             cursor: 0,
             settings: Vec::new(),
             active: 0,
+            stale: None,
         };
         state.reload(repo);
         state
@@ -136,7 +140,9 @@ impl State {
 
     /// Read the config and the layer again, after a write or on a visit.
     fn reload(&mut self, repo: &Repo) {
-        self.settings = settings(&in_use(repo));
+        let (config, stale) = in_use(repo);
+        self.settings = settings(&config);
+        self.stale = stale;
         self.active = layer_key_count(&repo.overrides_dir());
         self.clamp();
     }
@@ -171,15 +177,50 @@ impl State {
 
 /// The config in use now: the tracked file with `overrides/config.toml`
 /// merged onto it, read fresh so a key the tab just wrote shows its new
-/// value. A tracked file or a layer that no longer loads falls back to the
-/// config the screen started with rather than emptying the list.
-fn in_use(repo: &Repo) -> Config {
-    Config::load_tracked(&repo.checkout)
-        .and_then(|tracked| {
-            crate::overrides::apply_config_patch(tracked, &repo.overrides_dir())
-                .map(|(config, _)| config)
-        })
-        .unwrap_or_else(|_| repo.config.clone())
+/// value.
+///
+/// A tracked file or a layer that no longer loads falls back to the config
+/// the screen started with rather than emptying the list, and answers why
+/// beside it. Left unsaid, every value would still read as the one in use,
+/// while every command that loads the config refuses it, and `active` would
+/// drop the broken file to nothing with no reason given.
+fn in_use(repo: &Repo) -> (Config, Option<String>) {
+    let tracked = match Config::load_tracked(&repo.checkout) {
+        Ok(tracked) => tracked,
+        Err(err) => {
+            return (
+                repo.config.clone(),
+                Some(format!(
+                    "the tracked config {} no longer loads: {}. this list shows the config \
+                     the screen started with; fix the file with `spoolway config edit`.",
+                    Config::path_in(&repo.checkout).display(),
+                    one_line(&err)
+                )),
+            );
+        }
+    };
+    match crate::overrides::apply_config_patch(tracked, &repo.overrides_dir()) {
+        Ok((config, _)) => (config, None),
+        Err(err) => (
+            repo.config.clone(),
+            Some(format!(
+                "{} no longer merges: {}. this list shows the config the screen started \
+                 with; reopen the file with `spoolway config override`.",
+                crate::overrides::config_patch_path(&repo.overrides_dir()).display(),
+                one_line(&err)
+            )),
+        ),
+    }
+}
+
+/// `err` and its causes, the first line of each joined the way `{:#}` joins
+/// them. A TOML parse error spends its later lines drawing the bad line with
+/// a caret under it, which reads as noise once wrapped into a box.
+fn one_line(err: &anyhow::Error) -> String {
+    err.chain()
+        .filter_map(|cause| cause.to_string().lines().next().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// Every key [`crate::confkv::all_settings`] lists, grouped by table.
@@ -249,7 +290,13 @@ pub(crate) fn tab(
     let mut state = State::new(repo);
     loop {
         writer.write_frame(&frame(&state), super::pane_size(), out);
-        let Some(key) = shell::wait_key(input, || {}) else {
+        // Drawn again on every idle slice, not only after a key: a pane
+        // resized while nothing is typed would otherwise keep a frame
+        // measured for the old size, wrapped or cut, until the next key.
+        // The writer skips a frame that has not changed.
+        let Some(key) = shell::wait_key(input, || {
+            writer.write_frame(&frame(&state), super::pane_size(), out)
+        }) else {
             return Ok(Leave::Quit);
         };
         // Only while browsing: the search row, the fields and the notice
@@ -429,10 +476,13 @@ fn frame(state: &State) -> Vec<String> {
     let mut body = list(state, rows, inner.saturating_sub(1));
     // A frame with no terminal under it is only as tall as its list, and
     // `overlay` draws nothing past the frame's last row: a popup taller
-    // than the list would lose its key row and bottom border.
-    let tall = rows
-        .unwrap_or(0)
-        .max(popup.as_ref().map_or(0, |p| p.len() + 2));
+    // than the list would lose its key row and bottom border. A measured
+    // terminal keeps its own height instead, popup or not: a body grown
+    // past it would run the frame off the bottom and scroll the strip away.
+    let tall = match rows {
+        Some(rows) => rows,
+        None => popup.as_ref().map_or(0, |p| p.len() + 2),
+    };
     while body.len() < tall {
         body.push(String::new());
     }
@@ -491,7 +541,26 @@ fn top_border(state: &State, width: usize) -> String {
 /// table — cut to `rows` with the cursor's row kept in view and the last
 /// row saying how many keys are out of sight. The sections with no list
 /// yet draw the blank row alone.
+///
+/// Why the list is stale, when it is, heads the box above all of that and
+/// never scrolls: it is about every value shown, not about the rows near it.
 fn list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
+    let mut head: Vec<String> = Vec::new();
+    if let Some(stale) = &state.stale {
+        head.push(String::new());
+        head.extend(super::wrap(&format!("  {stale}"), width));
+    }
+    // Held to the rows the box has, with one left for the list itself.
+    if let Some(rows) = rows {
+        head.truncate(rows.saturating_sub(1));
+    }
+    let rows = rows.map(|rows| rows.saturating_sub(head.len()).max(1));
+    head.extend(keys_list(state, rows, width));
+    head
+}
+
+/// [`list`]'s lines below the note on a stale config.
+fn keys_list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     if matches!(state.mode, Mode::Search) {
         lines.push(format!("search: {}▏", state.filter));
@@ -1039,5 +1108,122 @@ mod tests {
         assert!(drawn.contains("[OVERRIDES]"), "{drawn}");
         assert!(drawn.contains("╭─ [config]   pipeline   prompts   active (0) ─"));
         assert!(drawn.contains("[enter] new key   [f] search   [tab] section   [q] quit"));
+    }
+
+    // A popup taller than the list a short terminal leaves room for is
+    // drawn over the rows there are: the frame stays one row short of the
+    // terminal, so the strip is not scrolled away.
+    #[test]
+    fn a_popup_on_a_short_terminal_keeps_the_frame_inside_it() {
+        let (repo, _guard) = project("short");
+        let _terminal = crate::screen::test_terminal((80, 12));
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.mode, Mode::NewKey { .. }));
+        assert_eq!(lines(&state).len(), 12 - 1, "{:#?}", lines(&state));
+
+        type_keys(&repo, &mut state, "\x1b");
+        cursor_on(&mut state, "dispatch.lane_quiet");
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.mode, Mode::Set { .. }));
+        assert_eq!(lines(&state).len(), 12 - 1, "{:#?}", lines(&state));
+    }
+
+    // A layer that no longer merges is named at the top of the box, and
+    // stays there however far the list scrolls; once it merges again the
+    // note goes.
+    #[test]
+    fn a_layer_that_no_longer_merges_is_said_above_the_list() {
+        let (repo, _guard) = project("stale-layer");
+        let _terminal = crate::screen::test_terminal((80, 16));
+        let path = crate::overrides::config_patch_path(&repo.overrides_dir());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[dispatch\n").unwrap();
+        let mut state = State::new(&repo);
+        let note = |state: &State| {
+            lines(state)
+                .iter()
+                .map(|l| l.trim_matches('│').trim().to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let drawn = note(&state);
+        assert!(drawn.contains("no longer merges"), "{drawn}");
+        assert!(drawn.contains("TOML parse error"), "{drawn}");
+        assert!(drawn.contains("`spoolway config override`"), "{drawn}");
+
+        let down = "\x1b[B".repeat(state.matches().len());
+        type_keys(&repo, &mut state, &down);
+        assert_eq!(lines(&state).len(), 16 - 1);
+        assert!(note(&state).contains("no longer merges"), "scrolled away");
+
+        std::fs::write(&path, "[dispatch]\nlane_quiet = \"5m\"\n").unwrap();
+        state.reload(&repo);
+        assert!(!note(&state).contains("no longer merges"));
+        assert_eq!(state.active, 1);
+    }
+
+    // A tracked config that no longer loads is named the same way, with the
+    // command that edits it.
+    #[test]
+    fn a_tracked_config_that_no_longer_loads_is_said_above_the_list() {
+        let (repo, _guard) = project("stale-tracked");
+        std::fs::write(Config::path_in(&repo.checkout), "[dispatch\n").unwrap();
+        let state = State::new(&repo);
+        let stale = state.stale.as_deref().unwrap_or_default();
+        assert!(stale.starts_with("the tracked config "), "{stale}");
+        assert!(stale.contains("`spoolway config edit`"), "{stale}");
+        assert!(!state.settings.is_empty(), "the list is kept");
+    }
+
+    /// Input that stays quiet for three poll slices, resizing the terminal
+    /// on the second, and then types `→`.
+    struct ResizedWhileIdle {
+        slices: std::cell::Cell<usize>,
+        keys: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Read for ResizedWhileIdle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.keys.read(buf)
+        }
+    }
+
+    impl PollableRead for ResizedWhileIdle {
+        fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
+            let slice = self.slices.get();
+            self.slices.set(slice + 1);
+            if slice == 1 {
+                // Cleared by the test's own guard when it drops.
+                std::mem::forget(crate::screen::test_terminal((100, 24)));
+            }
+            slice >= 3
+        }
+    }
+
+    // A pane resized while nothing is typed is drawn again at its new size
+    // on the next idle slice, and an idle slice with nothing changed writes
+    // nothing.
+    #[test]
+    fn a_pane_resized_while_idle_is_drawn_again() {
+        let (repo, _guard) = project("resize");
+        let _terminal = crate::screen::test_terminal((80, 24));
+        let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+        let mut input = ResizedWhileIdle {
+            slices: std::cell::Cell::new(0),
+            keys: std::io::Cursor::new(b"\x1b[C".to_vec()),
+        };
+        let mut out = Vec::new();
+        tab(
+            &repo,
+            &mut super::super::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        assert_eq!(drawn.matches("\x1b[?2026h").count(), 2, "{drawn:?}");
+        let wide = format!("{}╮", "─".repeat(50));
+        assert!(shell::plain(&drawn).contains(&wide), "{drawn:?}");
     }
 }

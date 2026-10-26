@@ -1870,8 +1870,8 @@ mod tests {
 
     // `→` from the queue tab opens routines, reading the routine folders on
     // that visit: a routine saved with save as routine a moment earlier on
-    // the queue tab is already listed. `→` again moves on to eval, the tab
-    // beside it now that routines hold their own jobs.
+    // the queue tab is already listed. `→` again moves on to overrides, the
+    // tab beside it, which opens on its config section.
     #[test]
     fn right_from_queue_opens_routines_with_a_routine_just_saved_then_overrides() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
