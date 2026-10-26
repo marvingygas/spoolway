@@ -1198,9 +1198,9 @@ pub(crate) fn remove_pipeline_patch_keys(
             }
             None if step_key == "description" => patch.description.take().is_some(),
             None if step_key == "task_template" => patch.task_template.take().is_some(),
-            None => bail!(
-                "`{step_key}` — expected `<step>.<key>`, `description` or `task_template`"
-            ),
+            None => {
+                bail!("`{step_key}` — expected `<step>.<key>`, `description` or `task_template`")
+            }
         };
         if !removed {
             bail!("the override for pipeline `{name}` does not set `{step_key}`");

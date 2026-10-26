@@ -1693,6 +1693,47 @@ mod tests {
         });
     }
 
+    /// Several keys of one file go in one write: a key the file does not
+    /// set refuses them all with the file as it was, and a pipeline's
+    /// `description` goes by its name, the way `override list` prints it.
+    #[test]
+    fn override_drop_keys_removes_every_key_or_none() {
+        with_repo("drop-keys", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            pipeline_override(repo, "demo", "implement.effort=high").unwrap();
+            let path = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "demo");
+            let mut patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                .unwrap()
+                .unwrap();
+            patch.description = Some("mine".to_string());
+            crate::overrides::write_pipeline_patch(&repo.overrides_dir(), "demo", &patch).unwrap();
+            let before = std::fs::read_to_string(&path).unwrap();
+
+            let keys = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+            let err = drop_override_keys(repo, "demo", &keys(&["implement.model", "fix.model"]))
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("does not set `fix.model`"),
+                "{err:#}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+            drop_override_keys(repo, "demo", &keys(&["implement.model", "description"])).unwrap();
+            let rows = collect_override_rows(repo).unwrap();
+            assert_eq!(rows[0].overrides, "implement.effort");
+
+            write_config_override(repo, "dispatch.lane_quiet", "5m").unwrap();
+            write_config_override(repo, "dispatch.visible_lanes", "5").unwrap();
+            drop_override_keys(
+                repo,
+                "config.toml",
+                &keys(&["dispatch.lane_quiet", "dispatch.visible_lanes"]),
+            )
+            .unwrap();
+            assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).exists());
+        });
+    }
+
     /// The last key of a file takes the file with it, and the empty folders
     /// above it, so the layer never reads an empty patch as an override.
     #[test]

@@ -588,7 +588,7 @@ impl ActiveSection {
                 whole: true,
             })
             .collect();
-        (!files.is_empty()).then(|| Deletion {
+        (!files.is_empty()).then_some(Deletion {
             title: "delete all overrides",
             files,
         })
@@ -628,7 +628,11 @@ impl ActiveSection {
                     };
                     lines.extend(beside(&head, &value, width));
                     if matches!(key.state, KeyState::Ignored(_)) {
-                        lines.push(format!("{:indent$}{SET_AGAIN}", "", indent = head_len(&head)));
+                        lines.push(format!(
+                            "{:indent$}{SET_AGAIN}",
+                            "",
+                            indent = head_len(&head)
+                        ));
                     }
                 }
             }
@@ -749,7 +753,8 @@ fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Re
     // Held from the read of the patch to its write, so a parallel
     // `pipeline override --set` starts from what this saved.
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
-    let mut patch = crate::overrides::read_pipeline_patch(&overrides, pipeline)?.unwrap_or_default();
+    let mut patch =
+        crate::overrides::read_pipeline_patch(&overrides, pipeline)?.unwrap_or_default();
     match key.split_once('.') {
         Some((step, field)) => {
             let parsed: serde_norway::Value = serde_norway::from_str(value)
@@ -856,35 +861,41 @@ fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
             if let Some(ours) = ours {
                 let old = one_line_text(&theirs.unwrap_or_default());
                 let new = one_line_text(&ours);
-                keys.push(key_row(&reasons, &target, key, key, old, new, tracked.is_some()));
+                let same = tracked.is_some() && old == new;
+                keys.push(key_row(&reasons, &target, key, key, old, new, same));
             }
         }
         for (step_id, fields) in &patch.steps {
             let step = tracked.and_then(|p| p.steps.iter().find(|s| s.id == *step_id));
             for (field, value) in fields {
-                let Some(field) = field.as_str() else { continue };
+                let Some(field) = field.as_str() else {
+                    continue;
+                };
                 let key = format!("{step_id}.{field}");
                 let old = step.map(|s| step_value(s, field)).unwrap_or_default();
-                // The value as the merge would apply it, read back the way
-                // the setup's is, so `5m` and `"5m"` compare equal. One the
-                // step refuses is shown as the patch spells it.
+                // Compared as the merge would apply it, read back the way the
+                // setup's value is, so `90m` and `1h30m` are the same value.
+                // Shown as the patch spells it.
                 let applied = step.and_then(|step| {
                     let mut probe = step.clone();
                     let mut one = serde_norway::Mapping::new();
-                    one.insert(serde_norway::Value::String(field.to_string()), value.clone());
+                    one.insert(
+                        serde_norway::Value::String(field.to_string()),
+                        value.clone(),
+                    );
                     crate::overrides::apply_step_patch(&mut probe, &one)
                         .ok()
                         .map(|()| step_value(&probe, field))
                 });
-                let new = applied.clone().unwrap_or_else(|| raw_yaml(value));
+                let same = applied.is_some_and(|applied| applied == old);
                 keys.push(key_row(
                     &reasons,
                     &target,
                     &key,
                     &key,
                     old,
-                    new,
-                    applied.is_some(),
+                    raw_yaml(value),
+                    same,
                 ));
             }
         }
@@ -935,26 +946,17 @@ fn config_file(repo: &Repo, overrides: &std::path::Path, reasons: &Reasons) -> O
                 .as_ref()
                 .and_then(|setup| crate::confkv::get(setup, set_as).ok())
                 .unwrap_or_default();
-            // The value as the merge would apply it, read back the way the
-            // setup's is, so `5` and `5.0` or a list's spacing compare equal.
+            // Compared as the merge would apply it, read back the way the
+            // setup's value is, so `5` and `5.0` or a list's spacing are the
+            // same value. Shown as the layer spells it.
             let applied = setup.as_ref().zip(leaf).and_then(|(setup, leaf)| {
                 crate::confkv::set(setup, set_as, &leaf.input)
                     .and_then(|set| crate::confkv::get(&set, set_as))
                     .ok()
             });
-            let new = applied
-                .clone()
-                .or_else(|| leaf.map(|leaf| leaf.input.clone()))
-                .unwrap_or_default();
-            key_row(
-                reasons,
-                &target,
-                key,
-                set_as,
-                old,
-                new,
-                applied.is_some(),
-            )
+            let same = applied.is_some_and(|applied| applied == old);
+            let new = leaf.map(|leaf| leaf.input.clone()).unwrap_or_default();
+            key_row(reasons, &target, key, set_as, old, new, same)
         })
         .collect();
     Some(FileRow {
@@ -966,10 +968,8 @@ fn config_file(repo: &Repo, overrides: &std::path::Path, reasons: &Reasons) -> O
 }
 
 /// One key's row: ignored when `override list` says so, `matches the
-/// setup` when `comparable` and the two values are the same, and the setup's
-/// value then the layer's otherwise. `comparable` is false when either
-/// value could not be read as the merge reads it, where text that happens
-/// to be equal does not mean the setup holds it.
+/// setup` when `same` says the setup already holds the layer's value, and
+/// the setup's value then the layer's otherwise.
 fn key_row(
     reasons: &Reasons,
     target: &str,
@@ -977,11 +977,11 @@ fn key_row(
     set_as: &str,
     old: String,
     new: String,
-    comparable: bool,
+    same: bool,
 ) -> KeyRow {
     let (state, in_use) = match reasons.key(target, key) {
         Some(reason) => (KeyState::Ignored(reason.clone()), old),
-        None if comparable && old == new => (KeyState::Matches, new),
+        None if same => (KeyState::Matches, new),
         None => (
             KeyState::Changed {
                 old,
@@ -1019,4 +1019,572 @@ fn raw_yaml(value: &serde_norway::Value) -> String {
     serde_norway::to_string(value)
         .map(|text| text.trim_end().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{key_line, lines, project, type_keys};
+    use super::super::{Mode, Section, State};
+    use crate::repo::Repo;
+    use crate::screen::shell;
+
+    /// Two pipelines with agent steps on sonnet and a command step, as the
+    /// mockup's rows name them.
+    const IMPL: &str = "steps:
+  - id: implement
+    agent: claude
+    model: claude-sonnet-5-5
+    on_pass: fix-spec-review
+  - id: fix-spec-review
+    agent: claude
+    model: claude-sonnet-5-5
+    on_pass: done
+";
+    const IMPL_FAST: &str = "steps:
+  - id: implement
+    agent: claude
+    model: claude-sonnet-5-5
+    on_pass: test
+  - id: test
+    run: make test
+    timeout: 45m
+    on_pass: done
+";
+
+    /// A project tracking `impl`, `impl_fast` and prompt `code-reviewer`,
+    /// with a layer setting `dispatch.lane_quiet`, two keys of `impl`, one
+    /// of `impl_fast` and a copy of the prompt.
+    fn layered(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (repo, guard) = project(&format!("active-{name}"));
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("impl.yml"), IMPL).unwrap();
+        std::fs::write(dir.join("impl_fast.yml"), IMPL_FAST).unwrap();
+        let prompt = crate::prompt::directory_form(&repo, "code-reviewer");
+        std::fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+        std::fs::write(&prompt, "review\n").unwrap();
+
+        crate::commands::write_config_override(&repo, "dispatch.lane_quiet", "5m").unwrap();
+        patch(
+            &repo,
+            "impl",
+            "steps:\n  implement:\n    model: claude-opus-5-5\n  fix-spec-review:\n    model: \
+             claude-opus-5-5\n",
+        );
+        patch(&repo, "impl_fast", "steps:\n  test:\n    timeout: 90m\n");
+        crate::commands::write_prompt_override(&repo, "code-reviewer").unwrap();
+        (repo, guard)
+    }
+
+    /// Write `body` as pipeline `name`'s patch in the layer.
+    fn patch(repo: &Repo, name: &str, body: &str) {
+        let path = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The tab, opened on its active section.
+    fn on_active(repo: &Repo) -> State {
+        let mut state = State::new(repo);
+        type_keys(repo, &mut state, "\t\t\t");
+        assert_eq!(state.section, Section::Active);
+        state
+    }
+
+    /// The list box's rows, between its borders, with the padding taken off.
+    fn rows_of(state: &State) -> Vec<String> {
+        lines(state)
+            .iter()
+            .skip(1)
+            .take_while(|l| !l.starts_with('╰'))
+            .map(|l| {
+                l.trim_start_matches('│')
+                    .trim_end_matches('│')
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The popup over the list, with the colour of its key row taken out.
+    fn popup(state: &State) -> Vec<String> {
+        super::super::popup(state, None)
+            .unwrap()
+            .iter()
+            .map(|l| shell::plain(l))
+            .collect()
+    }
+
+    /// Put the cursor on the row whose text holds `text`.
+    fn cursor_on(state: &mut State, text: &str) {
+        let rows = state.layer.rows();
+        let at = rows
+            .iter()
+            .position(|row| match *row {
+                super::Row::File(f) => state.layer.files[f].target == text,
+                super::Row::Key(f, k) => state.layer.files[f].keys[k].key == text,
+            })
+            .unwrap();
+        state.layer.cursor = at;
+    }
+
+    // The section lists each file with its keys under it, as the mockup
+    // draws it: config first, the setup's value then the layer's, and a
+    // prompt as `whole file`, with `[w] open workspace` on the key line.
+    #[test]
+    fn the_section_lists_each_file_with_its_keys_as_the_mockup_draws_it() {
+        let (repo, _guard) = layered("list");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "pipelines/impl_fast.yml");
+        assert!(lines(&state)[0].starts_with("╭─ config   pipeline   prompts   [active (5)] ─"));
+        assert_eq!(
+            &rows_of(&state)[..9],
+            [
+                "",
+                "   [ ] config.toml",
+                "         [ ] dispatch.lane_quiet      15m → 5m",
+                "   [ ] pipelines/impl.yml",
+                "         [ ] fix-spec-review.model    claude-sonnet-5-5 → claude-opus-5-5",
+                "         [ ] implement.model          claude-sonnet-5-5 → claude-opus-5-5",
+                " > [ ] pipelines/impl_fast.yml",
+                "         [ ] test.timeout             45m → 90m",
+                "   [ ] prompts/code-reviewer          whole file",
+            ]
+        );
+        assert_eq!(
+            key_line(&state),
+            " [space] select   [a] all   [o] options   [w] open workspace   [tab] section"
+        );
+    }
+
+    // A key the merge ignores reads `ignored —` with the reason `override
+    // list` prints, wrapped in its column, and the row under it says what
+    // to do.
+    #[test]
+    fn an_ignored_key_reads_the_reason_override_list_prints() {
+        let (repo, _guard) = project("active-ignored");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        crate::commands::write_config_override(&repo, "dispatch.visible_lanes", "three").unwrap();
+        let rows = crate::commands::collect_override_rows(&repo).unwrap();
+        let reason = rows[0].ignored[0].short_reason().to_string();
+        let state = on_active(&repo);
+        let drawn = rows_of(&state);
+        let indent = " ".repeat(38);
+        let mut reading = drawn[2].split_at(38).1.to_string();
+        let mut at = 3;
+        while drawn[at].starts_with(&indent) && !drawn[at].contains("[enter]") {
+            reading = format!("{reading} {}", drawn[at].trim());
+            at += 1;
+        }
+        assert!(
+            drawn[2].starts_with(" >       [ ] dispatch.visible_lanes   ignored — ")
+                || drawn[2].starts_with("         [ ] dispatch.visible_lanes   ignored — "),
+            "{drawn:#?}"
+        );
+        // Wrapped into its column, so compared word for word.
+        let words = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(reading, format!("ignored — {words}"));
+        assert_eq!(
+            drawn[at],
+            format!("{indent}[enter] to set it again, or o to delete")
+        );
+        assert!(drawn.iter().all(|l| l.chars().count() <= 78), "{drawn:#?}");
+    }
+
+    // A key whose value the setup already holds reads `matches the setup`,
+    // for a config key and a pipeline key alike.
+    #[test]
+    fn a_key_the_setup_holds_reads_matches_the_setup() {
+        let (repo, _guard) = layered("matches");
+        crate::commands::write_config_override(&repo, "dispatch.lane_quiet", "15m").unwrap();
+        patch(
+            &repo,
+            "impl",
+            "steps:\n  implement:\n    model: claude-sonnet-5-5\n",
+        );
+        let state = on_active(&repo);
+        let drawn = rows_of(&state);
+        for row in [
+            "         [ ] dispatch.lane_quiet      matches the setup — o to delete",
+            "         [ ] implement.model          matches the setup — o to delete",
+        ] {
+            assert!(drawn.iter().any(|l| l == row), "{row}: {drawn:#?}");
+        }
+    }
+
+    // `matches the setup` reads the main checkout's setup, the one the
+    // dispatcher reads: a worktree's own copy holding the layer's value
+    // leaves the row on the main checkout's.
+    #[test]
+    fn matches_the_setup_reads_the_main_checkout_not_a_worktree() {
+        let (repo, _guard) = layered("worktree");
+        let worktree = repo.home.join("worktree-copy");
+        let config = crate::config::Config::path_in(&worktree);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "[dispatch]\nlane_quiet = \"5m\"\n").unwrap();
+        let pipelines = crate::pipeline::Pipelines::dir_in(&worktree);
+        std::fs::create_dir_all(&pipelines).unwrap();
+        std::fs::write(
+            pipelines.join("impl.yml"),
+            IMPL.replace("claude-sonnet-5-5", "claude-opus-5-5"),
+        )
+        .unwrap();
+        std::fs::write(pipelines.join("impl_fast.yml"), IMPL_FAST).unwrap();
+        let mut in_worktree = repo.clone();
+        in_worktree.checkout = worktree;
+
+        let drawn = rows_of(&on_active(&in_worktree));
+        assert!(
+            drawn
+                .iter()
+                .any(|l| l == "         [ ] dispatch.lane_quiet      15m → 5m"),
+            "{drawn:#?}"
+        );
+        assert!(
+            drawn.iter().any(|l| l
+                == "         [ ] implement.model          claude-sonnet-5-5 → claude-opus-5-5"),
+            "{drawn:#?}"
+        );
+        assert!(!drawn.iter().any(|l| l.contains("matches the setup")));
+    }
+
+    // `space` on a file selects its keys, and again clears them; `a`
+    // selects every file and key, and a second `a` clears the selection.
+    #[test]
+    fn space_selects_a_files_keys_and_a_selects_everything() {
+        let (repo, _guard) = layered("select");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "pipelines/impl.yml");
+        type_keys(&repo, &mut state, " ");
+        let drawn = rows_of(&state);
+        assert!(drawn.contains(&" > [x] pipelines/impl.yml".to_string()));
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|l| l.starts_with("         [x] "))
+                .count(),
+            2
+        );
+        assert_eq!(state.layer.selected.len(), 2);
+        type_keys(&repo, &mut state, " ");
+        assert!(state.layer.selected.is_empty());
+
+        type_keys(&repo, &mut state, "a");
+        assert_eq!(state.layer.selected.len(), 5, "four keys and the prompt");
+        assert!(rows_of(&state).iter().all(|l| !l.contains("[ ]")));
+        type_keys(&repo, &mut state, "a");
+        assert!(state.layer.selected.is_empty());
+    }
+
+    // `o` with keys selected opens the menu as the mockup draws it, and
+    // `delete selected` names every file and key in its confirm popup, as
+    // the mockup draws that. `enter` deletes them, and a file left with no
+    // keys leaves the layer.
+    #[test]
+    fn delete_selected_names_every_file_and_key_then_deletes_them() {
+        let (repo, _guard) = layered("delete-selected");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "pipelines/impl.yml");
+        type_keys(&repo, &mut state, " ");
+        cursor_on(&mut state, "pipelines/impl_fast.yml");
+        type_keys(&repo, &mut state, " o");
+        assert_eq!(
+            popup(&state),
+            [
+                "╭─ 3 selected ─────────────────────────╮",
+                "│                                      │",
+                "│  > delete selected                   │",
+                "│    delete all overrides              │",
+                "│                                      │",
+                "│  [enter] confirm   [esc] close       │",
+                "╰──────────────────────────────────────╯",
+            ]
+        );
+        assert_eq!(key_line(&state), " [enter] confirm   [esc] close");
+
+        type_keys(&repo, &mut state, "\r");
+        let drawn = popup(&state);
+        assert!(
+            drawn[0].starts_with("╭─ delete these overrides ─"),
+            "{drawn:#?}"
+        );
+        // Every row's text as the mockup draws it. The popup keeps the two
+        // columns every popup keeps inside its right border, so the longest
+        // row here draws the box one column wider than the mockup does.
+        let inside: Vec<&str> = drawn[1..drawn.len() - 1]
+            .iter()
+            .map(|l| l.trim_start_matches('│').trim_end_matches('│').trim_end())
+            .collect();
+        assert_eq!(
+            inside,
+            [
+                "",
+                "  3 keys in 2 files",
+                "",
+                "  pipelines/impl.yml        fix-spec-review.model",
+                "                            implement.model",
+                "  pipelines/impl_fast.yml   test.timeout",
+                "",
+                "  [enter] confirm   [esc] close",
+            ]
+        );
+        type_keys(&repo, &mut state, "\r");
+        let dir = repo.overrides_dir();
+        assert!(!crate::overrides::pipeline_patch_path(&dir, "impl").exists());
+        assert!(!crate::overrides::pipeline_patch_path(&dir, "impl_fast").exists());
+        assert!(state.layer.popup(None).is_none());
+        assert_eq!(state.active, 2, "the config key and the prompt are left");
+        assert!(state.layer.selected.is_empty());
+    }
+
+    // With nothing selected, `o` acts on the row under the cursor: one key
+    // goes, and the rest of its file stays.
+    #[test]
+    fn with_nothing_selected_o_deletes_the_row_under_the_cursor() {
+        let (repo, _guard) = layered("delete-cursor");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "implement.model");
+        type_keys(&repo, &mut state, "o");
+        assert!(popup(&state)[0].starts_with("╭─ implement.model ─"));
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ delete this override ─"));
+        assert!(popup(&state).contains(&format!(
+            "│  {:48}│",
+            "pipelines/impl.yml   implement.model"
+        )));
+        type_keys(&repo, &mut state, "\r");
+        let left = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "impl")
+            .unwrap()
+            .unwrap();
+        assert_eq!(left.steps.keys().collect::<Vec<_>>(), ["fix-spec-review"]);
+        assert_eq!(state.active, 4);
+
+        // A prompt has no keys, so its row deletes the whole copy.
+        cursor_on(&mut state, "prompts/code-reviewer");
+        type_keys(&repo, &mut state, "o\r");
+        assert!(popup(&state).iter().any(|l| l.contains("whole file")));
+        type_keys(&repo, &mut state, "\r");
+        assert!(
+            !crate::overrides::prompt_patch_path(&repo.overrides_dir(), "code-reviewer").exists()
+        );
+    }
+
+    // `esc` on the menu and on the confirm popup closes it with nothing
+    // deleted.
+    #[test]
+    fn esc_closes_the_menu_and_the_confirm_popup() {
+        let (repo, _guard) = layered("esc");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\x1b");
+        assert!(state.layer.popup(None).is_none());
+        type_keys(&repo, &mut state, "o\r\x1b");
+        assert!(state.layer.popup(None).is_none());
+        assert_eq!(state.active, 5);
+    }
+
+    // `delete all overrides` names every file and key, and empties the
+    // layer.
+    #[test]
+    fn delete_all_overrides_empties_the_layer() {
+        let (repo, _guard) = layered("delete-all");
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, "o\x1b[B\r");
+        let drawn = popup(&state);
+        assert!(
+            drawn[0].starts_with("╭─ delete all overrides ─"),
+            "{drawn:#?}"
+        );
+        assert!(drawn.iter().any(|l| l.contains("5 keys in 4 files")));
+        for text in [
+            "config.toml",
+            "dispatch.lane_quiet",
+            "pipelines/impl.yml",
+            "fix-spec-review.model",
+            "implement.model",
+            "pipelines/impl_fast.yml",
+            "test.timeout",
+            "prompts/code-reviewer",
+            "whole file",
+        ] {
+            assert!(drawn.iter().any(|l| l.contains(text)), "{text}: {drawn:#?}");
+        }
+        type_keys(&repo, &mut state, "\r");
+        assert!(
+            crate::commands::collect_override_rows(&repo)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.active, 0);
+        assert!(
+            rows_of(&state)
+                .iter()
+                .any(|l| l == "   nothing is overridden")
+        );
+    }
+
+    // A delete across two files whose second file fails leaves the first
+    // changed, and the notice names the file already changed and the one
+    // that is not.
+    #[test]
+    fn a_delete_that_fails_on_the_second_file_names_the_first() {
+        let (repo, _guard) = layered("delete-partial");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "pipelines/impl.yml");
+        type_keys(&repo, &mut state, " ");
+        cursor_on(&mut state, "pipelines/impl_fast.yml");
+        type_keys(&repo, &mut state, " o\r");
+        // The second file stops reading after the popup listed it.
+        let second = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl_fast");
+        std::fs::write(&second, "steps: [\n").unwrap();
+        type_keys(&repo, &mut state, "\r");
+
+        let dir = repo.overrides_dir();
+        assert!(!crate::overrides::pipeline_patch_path(&dir, "impl").exists());
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "steps: [\n");
+        let drawn = popup(&state).join("\n");
+        assert!(drawn.contains("╭─ deleted in part ─"), "{drawn}");
+        let text: String = popup(&state)
+            .iter()
+            .map(|l| l.trim_matches('│').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains(
+                "the overrides in pipelines/impl.yml were deleted, but not those in \
+                 pipelines/impl_fast.yml"
+            ),
+            "{text}"
+        );
+        type_keys(&repo, &mut state, "x\x1b");
+        assert!(state.layer.popup(None).is_some(), "only enter closes it");
+        type_keys(&repo, &mut state, "\r");
+        assert!(state.layer.popup(None).is_none());
+    }
+
+    // `o` on a config key the layer sets offers `delete override`, which
+    // removes the key after one confirm popup; on a key it does not set,
+    // the menu has nothing to do.
+    #[test]
+    fn o_on_a_config_key_deletes_its_override() {
+        let (repo, _guard) = layered("config-o");
+        let mut state = State::new(&repo);
+        let at = state
+            .matches()
+            .iter()
+            .position(|s| s.key() == "dispatch.visible_lanes")
+            .unwrap();
+        state.cursor = at + 1;
+        type_keys(&repo, &mut state, "o");
+        assert!(
+            popup(&state)
+                .iter()
+                .any(|l| l.contains("nothing to do here"))
+        );
+        type_keys(&repo, &mut state, "\x1b");
+        assert!(matches!(state.mode, Mode::Browsing));
+
+        let at = state
+            .matches()
+            .iter()
+            .position(|s| s.key() == "dispatch.lane_quiet")
+            .unwrap();
+        state.cursor = at + 1;
+        type_keys(&repo, &mut state, "o");
+        assert_eq!(
+            popup(&state)[..3],
+            [
+                format!("╭─ dispatch.lane_quiet {}╮", "─".repeat(16)),
+                format!("│{:38}│", ""),
+                format!("│{:38}│", "  > delete override"),
+            ]
+        );
+        type_keys(&repo, &mut state, "\r");
+        let drawn = popup(&state);
+        assert!(
+            drawn[0].starts_with("╭─ delete this override ─"),
+            "{drawn:#?}"
+        );
+        assert!(drawn.contains(&format!("│  {:48}│", "config.toml   dispatch.lane_quiet")));
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).exists());
+        assert_eq!(state.active, 4);
+    }
+
+    // `o` on a pipeline field offers `delete override`, which removes the
+    // field from every pipeline patch that sets it, on every step.
+    #[test]
+    fn o_on_a_pipeline_field_deletes_it_from_every_patch() {
+        let (repo, _guard) = layered("pipeline-o");
+        patch(
+            &repo,
+            "impl_fast",
+            "steps:\n  implement:\n    model: claude-opus-5-5\n  test:\n    timeout: 90m\n",
+        );
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\to\r");
+        let drawn = popup(&state);
+        assert!(
+            drawn.iter().any(|l| l.contains("3 keys in 2 files")),
+            "{drawn:#?}"
+        );
+        type_keys(&repo, &mut state, "\r");
+        let dir = repo.overrides_dir();
+        assert!(!crate::overrides::pipeline_patch_path(&dir, "impl").exists());
+        let left = crate::overrides::read_pipeline_patch(&dir, "impl_fast")
+            .unwrap()
+            .unwrap();
+        assert_eq!(left.steps.keys().collect::<Vec<_>>(), ["test"]);
+    }
+
+    // `enter` on an ignored config key opens the config section's set
+    // popup, so it can be set again, and the write lands in the layer.
+    #[test]
+    fn enter_on_a_config_key_sets_it_again() {
+        let (repo, _guard) = project("active-set-config");
+        crate::commands::write_config_override(&repo, "dispatch.visible_lanes", "three").unwrap();
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "dispatch.visible_lanes");
+        type_keys(&repo, &mut state, "\r");
+        assert!(popup(&state)[0].starts_with("╭─ set dispatch.visible_lanes ─"));
+        type_keys(&repo, &mut state, "\x7f\x7f\x7f\x7f\x7f4\r");
+        let text =
+            std::fs::read_to_string(crate::overrides::config_patch_path(&repo.overrides_dir()))
+                .unwrap();
+        assert!(text.contains("visible_lanes = 4"), "{text}");
+        assert_eq!(state.section, Section::Active);
+        assert!(!rows_of(&state).iter().any(|l| l.contains("ignored")));
+    }
+
+    // `enter` on a pipeline key opens a field on the value in use, and
+    // writes what is typed into that one key.
+    #[test]
+    fn enter_on_a_pipeline_key_sets_it_again() {
+        let (repo, _guard) = layered("set-pipeline");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "test.timeout");
+        type_keys(&repo, &mut state, "\r");
+        let drawn = popup(&state);
+        assert!(
+            drawn[0].starts_with("╭─ set test.timeout in impl_fast ─"),
+            "{drawn:#?}"
+        );
+        assert!(drawn.iter().any(|l| l.contains("value: 90m▏")));
+        assert!(drawn.iter().any(|l| l.contains("current   90m")));
+        type_keys(&repo, &mut state, "\x7f\x7f\x7f2h\r");
+        let left = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "impl_fast")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            left.steps["test"]["timeout"],
+            serde_norway::Value::String("2h".to_string())
+        );
+        assert!(state.layer.popup(None).is_none());
+        assert!(
+            rows_of(&state)
+                .iter()
+                .any(|l| l == " >       [ ] test.timeout             45m → 2h")
+        );
+    }
 }
