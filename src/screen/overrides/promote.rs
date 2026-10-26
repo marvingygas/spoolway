@@ -4,16 +4,19 @@
 //! A promote changes the project's setup, and that change usually goes
 //! through a feature branch and a pull request. The board runs in the main
 //! checkout, so a write there would land on whatever branch it has out.
-//! The picker lists every local branch and every branch `origin` had at the
-//! last fetch, and the files go into whichever checkout holds the picked
-//! one. When none does, a worktree is made for it beside the main checkout
-//! first, with a local branch tracking `origin`'s for one only the remote
-//! has. Nothing is committed, and the layer keeps every promoted entry, as
-//! `override promote` keeps them.
+//! The picker lists the local branches and the branches `origin` had at
+//! the last fetch, task branches left out, and the files go into whichever
+//! checkout holds the picked one. When none does, a worktree is made for it
+//! beside the main checkout first, with a local branch tracking `origin`'s
+//! for one only the remote has. Nothing is committed, and the layer keeps
+//! every promoted entry, as `override promote` keeps them.
 //!
 //! The write itself is `override promote`'s, file by file, into the folder
 //! [`Repo::tracked_write_root`] answers for that checkout, so the tab
 //! refuses what the command run there would refuse, in the same words.
+//! Home mode is the one exception: its setup is the workspace's, which no
+//! branch carries, so the tab refuses before the picker opens and points at
+//! `override promote` instead.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +80,30 @@ pub(super) fn branches(repo: &Repo) -> Result<Vec<Branch>> {
         .filter(|(name, _)| !name.starts_with("task/"))
         .map(|(name, remote_only)| Branch { name, remote_only })
         .collect())
+}
+
+/// The notice refusing a promote from the tab in home mode, or `None` in
+/// repo mode.
+///
+/// A home-mode project's setup is its workspace's `config/`, which no branch
+/// carries and every checkout reads. `override promote` run in any checkout
+/// writes that one folder, so a picked branch would change nothing but the
+/// notice's claim of where the files landed.
+pub(super) fn home_mode_refusal(repo: &Repo, files: &[Promoted]) -> Option<Notice> {
+    crate::repo::workspace_clone(&repo.root)?;
+    let commands: Vec<String> = files
+        .iter()
+        .map(|file| format!("  spoolway override promote {}", file.target))
+        .collect();
+    Some(Notice::new(
+        "not promoted",
+        format!(
+            "this project's setup lives in its workspace, not on a branch, so there is no \
+             branch to promote onto. write the workspace's setup instead, which every \
+             checkout reads:\n{}",
+            commands.join("\n")
+        ),
+    ))
 }
 
 /// The text inside both popups, so each is 60 columns wide with its
@@ -273,10 +300,16 @@ pub(super) struct Promotion {
 impl Promotion {
     /// The promote of `files` onto `branch`, written wherever git has it
     /// out, or into a new worktree at [`worktree_path`] when nowhere does.
-    pub(super) fn new(repo: &Repo, files: Vec<Promoted>, branch: Branch) -> Result<Promotion> {
+    /// The notice to show instead when git cannot say, or names a checkout
+    /// that is gone.
+    pub(super) fn new(
+        repo: &Repo,
+        files: Vec<Promoted>,
+        branch: Branch,
+    ) -> std::result::Result<Promotion, Notice> {
         let place = match branch.remote_only {
             true => None,
-            false => repo.worktree_for(&branch.name)?,
+            false => listed_checkout(repo, &branch.name)?,
         };
         let (place, layout) = match place {
             Some(checkout) => (Place::Checkout(checkout.clone()), checkout),
@@ -390,29 +423,36 @@ impl Promotion {
 
     fn write(&self, repo: &Repo) -> std::result::Result<Notice, Notice> {
         let refused = |err: anyhow::Error| Notice::new("not promoted", format!("{err:#}"));
-        let typed = format!("override promote {}", self.files[0].target);
-        if let Place::New(path) = &self.place {
-            // A branch with no `.spoolway/` would make a worktree only for
-            // the write into it to be refused. Asked of the branch itself,
-            // so that refusal comes first and nothing is made.
-            if !carries_setup(repo, &self.branch) {
-                checkout_repo(repo, path)
-                    .tracked_write_root("tracked files", &typed)
-                    .map_err(refused)?;
+        // `tracked_write_root` puts what it is given after `spoolway -C
+        // <root>` on its refusal's last line. `override promote` takes one
+        // file, so each further file gets a line of its own, spelled in full
+        // in the same indent, and pasting the lines promotes every file.
+        let typed = self
+            .files
+            .iter()
+            .map(|file| format!("override promote {}", file.target))
+            .collect::<Vec<_>>()
+            .join(&format!("\n  spoolway -C {} ", repo.root.display()));
+        match &self.place {
+            Place::Checkout(path) => self.still_out(repo, path)?,
+            Place::New(path) => {
+                // A branch with no `.spoolway/` would make a worktree only
+                // for the write into it to be refused. Asked of the branch
+                // itself, so that refusal comes first and nothing is made.
+                // The worktree would borrow the main checkout's setup, as
+                // `Repo::discover` finds a worktree with none of its own.
+                if !carries_setup(repo, &self.branch) {
+                    let borrowed = Repo {
+                        checkout: repo.root.clone(),
+                        borrowed: true,
+                        ..repo.clone()
+                    };
+                    borrowed
+                        .tracked_write_root("tracked files", &typed)
+                        .map_err(refused)?;
+                }
+                self.make(repo, path)?;
             }
-            make_worktree(repo, &self.branch, path).map_err(|err| {
-                Notice::new(
-                    "not promoted",
-                    format!(
-                        "no worktree was made for {} at {}, so nothing was written: {err:#}. \
-                         fix what stopped it, or check {} out somewhere yourself, and promote \
-                         again.",
-                        self.branch.name,
-                        path.display(),
-                        self.branch.name
-                    ),
-                )
-            })?;
         }
         let checkout = self.folder();
         let target = checkout_repo(repo, checkout);
@@ -469,6 +509,79 @@ impl Promotion {
         }
         Ok(Notice::new("promoted", text))
     }
+
+    /// Refuses the write when `checkout` no longer has the picked branch
+    /// out. The popup named the checkout when the branch was picked, and a
+    /// `git switch` there while it was open would otherwise put the files
+    /// on whatever branch it has now, under a notice naming the old one.
+    fn still_out(&self, repo: &Repo, checkout: &Path) -> std::result::Result<(), Notice> {
+        let wanted = self.branch.name.as_str();
+        // Asked through the same listing as the pick, so a checkout whose
+        // folder was deleted since is refused as `Promotion::new` refuses it.
+        let listed = listed_checkout(repo, wanted)?;
+        if listed.as_deref() == Some(checkout) {
+            return Ok(());
+        }
+        let now = match crate::repo::current_branch_at(checkout) {
+            Ok(Some(branch)) => branch,
+            Ok(None) => "a detached HEAD".to_string(),
+            Err(_) => "something git cannot name".to_string(),
+        };
+        Err(Notice::new(
+            "not promoted",
+            format!(
+                "{} has {now} out now, not {wanted}, so nothing was written. pick {wanted} \
+                 again to promote onto it where it is checked out now.",
+                checkout.display()
+            ),
+        ))
+    }
+
+    /// `git worktree add` for the branch at `path`, or the notice saying
+    /// nothing was written because it failed, with git's error and the path.
+    fn make(&self, repo: &Repo, path: &Path) -> std::result::Result<(), Notice> {
+        make_worktree(repo, &self.branch, path).map_err(|err| {
+            Notice::new(
+                "not promoted",
+                format!(
+                    "no worktree was made for {} at {}, so nothing was written: {err:#}. fix \
+                     what stopped it, or check {} out somewhere yourself, and promote again.",
+                    self.branch.name,
+                    path.display(),
+                    self.branch.name
+                ),
+            )
+        })
+    }
+}
+
+/// The checkout git lists with `branch` out, or `None` when no checkout has
+/// it. The notice to show instead when git cannot say, or when the listed
+/// folder is gone: git keeps listing a worktree whose folder was deleted
+/// until it is pruned, and writing there would make the folder afresh with
+/// no checkout in it.
+fn listed_checkout(repo: &Repo, branch: &str) -> std::result::Result<Option<PathBuf>, Notice> {
+    let listed = repo.worktree_for(branch).map_err(|err| {
+        Notice::new(
+            "not promoted",
+            format!(
+                "git could not say which checkout has {branch} out: {err:#}. nothing was \
+                 written; fix what stopped it and promote again."
+            ),
+        )
+    })?;
+    match listed {
+        Some(path) if !path.exists() => Err(Notice::new(
+            "not promoted",
+            format!(
+                "git still lists {branch} as checked out at {}, which no longer exists, so \
+                 nothing was written. run git worktree prune in {} and promote again.",
+                path.display(),
+                repo.root.display()
+            ),
+        )),
+        listed => Ok(listed),
+    }
 }
 
 /// The columns between a key and its value in the confirm popup.
@@ -519,20 +632,19 @@ fn make_worktree(repo: &Repo, branch: &Branch, path: &Path) -> Result<()> {
 
 /// `repo` as a command run in `checkout` would find it, so
 /// [`Repo::tracked_write_root`] decides that checkout's write as it would
-/// there. The main checkout is itself. Another one is a worktree, which
-/// reads its own setup when it has one, and borrows the main checkout's
-/// when it has none, as a worktree not made yet has none.
+/// there: through the rule [`Repo::discover`] uses, which reads a worktree's
+/// own setup when its branch has one and borrows the main checkout's when
+/// it has none. `checkout` exists: it is listed with the branch out, or was
+/// just made.
 fn checkout_repo(repo: &Repo, checkout: &Path) -> Repo {
-    let main = checkout
+    let start = checkout
         .canonicalize()
-        .is_ok_and(|path| repo.root.canonicalize().is_ok_and(|root| root == path));
-    let own_setup = crate::config::tracked_setup_dir_in(checkout).is_dir();
+        .unwrap_or_else(|_| checkout.to_path_buf());
+    let main = crate::repo::main_checkout(&start);
+    let (checkout, borrowed) = crate::repo::checkout_for(&start, &repo.root, main.as_deref());
     Repo {
-        checkout: match main || !own_setup {
-            true => repo.root.clone(),
-            false => checkout.to_path_buf(),
-        },
-        borrowed: !main && !own_setup,
+        checkout,
+        borrowed,
         ..repo.clone()
     }
 }

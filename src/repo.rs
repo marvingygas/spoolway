@@ -4359,7 +4359,10 @@ fn checkout_of(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool
 /// [`workspace_clone`]'s own doc for why `root`, not `start` or the
 /// worktree path `checkout_of` might otherwise answer, is what a clone
 /// entry's own `root` is matched against.
-fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool) {
+///
+/// `pub(crate)` so the OVERRIDES tab's promote decides a checkout's write
+/// as a command run in that checkout would.
+pub(crate) fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool) {
     if workspace_clone(root).is_some() {
         return (root.to_path_buf(), false);
     }

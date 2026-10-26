@@ -446,14 +446,7 @@ impl ActiveSection {
                 Picked::Branch(files, branch) => {
                     self.view = match Promotion::new(repo, files, branch) {
                         Ok(promotion) => View::Promote(promotion),
-                        Err(err) => View::Notice(Notice::new(
-                            "not promoted",
-                            format!(
-                                "git could not say which checkout has the branch out: \
-                                 {err:#}. nothing was written; fix what stopped it and promote \
-                                 again."
-                            ),
-                        )),
+                        Err(notice) => View::Notice(notice),
                     };
                 }
             },
@@ -589,11 +582,15 @@ impl ActiveSection {
     }
 
     /// The branch picker over every branch a promote may go to, or a
-    /// notice saying why git could not list them.
+    /// notice saying why git could not list them, or that home mode has no
+    /// branch to promote onto.
     fn picker(&self, repo: &Repo) -> View {
         let Some(files) = self.promoted() else {
             return View::List;
         };
+        if let Some(notice) = promote::home_mode_refusal(repo, &files) {
+            return View::Notice(notice);
+        }
         match promote::branches(repo) {
             Ok(branches) => View::Pick(Picker::new(files, branches)),
             Err(err) => View::Notice(Notice::new(
