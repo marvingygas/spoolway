@@ -5,8 +5,11 @@
 //! merge ignores it, or `matches the setup` when the two are the same. The
 //! last is how a promoted entry shows that its branch has merged: a promote
 //! keeps its entries in the layer, and once the setup holds the same value
-//! the entry does nothing and can go. The setup is read from the main
-//! checkout, the one the dispatcher reads, never from a worktree's copy.
+//! the entry does nothing and can go. The setup, and so each value, each
+//! `matches the setup` and each reason a key is ignored, is read from the
+//! main checkout, the one the dispatcher reads, never from a worktree's
+//! copy. The config and pipeline sections read the checkout the board runs
+//! in, so in a worktree with its own `.spoolway/` the two can differ.
 //!
 //! A delete names every file and key in one confirm popup first. Each file
 //! is changed in one step, one write or its removal, so a delete that stops
@@ -31,7 +34,8 @@ enum KeyState {
     Changed { old: String, new: String },
     /// The setup already holds the same value, so the key does nothing.
     Matches,
-    /// The merge leaves it out, for the reason `override list` prints.
+    /// The merge leaves it out, for the reason `override list` prints in
+    /// the main checkout.
     Ignored(String),
 }
 
@@ -773,6 +777,19 @@ fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Re
     crate::overrides::write_pipeline_patch(&overrides, pipeline, &patch)
 }
 
+/// `repo` read from its main checkout, so the reasons a row gives come
+/// from the same setup as its values and `matches the setup`. `override
+/// list` run in a worktree with its own `.spoolway/` reads that worktree's
+/// setup; read the same way here, a key on a step only the main checkout
+/// has would read ignored while the dispatcher applies it.
+fn main_checkout(repo: &Repo) -> Repo {
+    Repo {
+        checkout: repo.root.clone(),
+        borrowed: false,
+        ..repo.clone()
+    }
+}
+
 /// Why the merge leaves out each key, and each whole file, as `override
 /// list` prints it. Keyed by (file, key) for a key and by file for a file.
 #[derive(Default)]
@@ -783,7 +800,8 @@ struct Reasons {
 
 impl Reasons {
     /// Read off [`crate::commands::collect_override_rows`], the rows
-    /// `override list` prints, so the two never give different reasons.
+    /// `override list` prints, so the two give the same reasons for the
+    /// same checkout.
     fn read(repo: &Repo) -> Result<Reasons> {
         let mut reasons = Reasons::default();
         for row in crate::commands::collect_override_rows(repo)? {
@@ -816,7 +834,7 @@ impl Reasons {
 /// still be deleted as a whole.
 fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
     let overrides = repo.overrides_dir();
-    let (reasons, stale) = match Reasons::read(repo) {
+    let (reasons, stale) = match Reasons::read(&main_checkout(repo)) {
         Ok(reasons) => (reasons, None),
         Err(err) => (
             Reasons::default(),
@@ -1285,6 +1303,35 @@ mod tests {
             "{drawn:#?}"
         );
         assert!(!drawn.iter().any(|l| l.contains("matches the setup")));
+    }
+
+    // Why a key is ignored reads the main checkout too: a worktree's copy
+    // of `impl` with no step `fix-spec-review` leaves that step's key
+    // applied, as the dispatcher reading the main checkout applies it.
+    #[test]
+    fn an_ignored_key_reads_the_main_checkout_not_a_worktree() {
+        let (repo, _guard) = layered("worktree-ignored");
+        let worktree = repo.home.join("worktree-copy");
+        let pipelines = crate::pipeline::Pipelines::dir_in(&worktree);
+        std::fs::create_dir_all(&pipelines).unwrap();
+        let without = IMPL
+            .replace("on_pass: fix-spec-review", "on_pass: done")
+            .split("  - id: fix-spec-review")
+            .next()
+            .unwrap()
+            .to_string();
+        std::fs::write(pipelines.join("impl.yml"), without).unwrap();
+        std::fs::write(pipelines.join("impl_fast.yml"), IMPL_FAST).unwrap();
+        let mut in_worktree = repo.clone();
+        in_worktree.checkout = worktree;
+
+        let drawn = rows_of(&on_active(&in_worktree));
+        assert!(
+            drawn.iter().any(|l| l
+                == "         [ ] fix-spec-review.model    claude-sonnet-5-5 → claude-opus-5-5"),
+            "{drawn:#?}"
+        );
+        assert!(!drawn.iter().any(|l| l.contains("ignored")), "{drawn:#?}");
     }
 
     // `space` on a file selects its keys, and again clears them; `a`
