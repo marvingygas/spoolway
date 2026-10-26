@@ -78,7 +78,7 @@ impl PromptsSection {
                 self.names = Vec::new();
                 self.stale = Some(format!(
                     "the prompts in .spoolway/prompts/ do not read: {}. fix the folder, then \
-                     tab back to this section.",
+                     leave the overrides tab and open it again.",
                     one_line(&err)
                 ));
             }
@@ -488,6 +488,40 @@ mod tests {
                 "╰──────────────────────────────────────────────────╯",
             ]
         );
+    }
+
+    // A prompts folder that does not read is named above the empty list,
+    // and the note's advice works: once the folder is fixed, opening the
+    // tab again lists the prompts.
+    #[test]
+    fn a_prompts_folder_that_does_not_read_is_said_above_the_list() {
+        let (repo, _guard) = project("prompts-stale");
+        let folder = repo.prompts_dir();
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        std::fs::write(&folder, "").unwrap();
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t\t");
+        let note = lines(&state)
+            .iter()
+            .map(|l| l.trim_matches('│').trim().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            note.contains("the prompts in .spoolway/prompts/ do not read"),
+            "{note}"
+        );
+        assert!(
+            note.contains("leave the overrides tab and open it again"),
+            "{note}"
+        );
+
+        std::fs::remove_file(&folder).unwrap();
+        let path = crate::prompt::directory_form(&repo, "implementer");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "implementer\n").unwrap();
+        let reopened = State::new(&repo);
+        assert_eq!(reopened.prompts.stale, None);
+        assert_eq!(reopened.prompts.matches(), ["implementer"]);
     }
 
     // A copy that cannot be written is held as a notice naming the prompt,

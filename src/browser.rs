@@ -88,11 +88,10 @@ fn refuse_relative(file: &Path, what: &str) -> Result<()> {
 /// The line `sh` runs to open the folder `dir` in the file manager: a
 /// program, then the quoted path.
 ///
-/// Not [`plan`]'s route. `wslview` hands a folder to the default browser
-/// rather than to Explorer, so WSL runs `explorer.exe` itself. And
-/// `xdg-open` with no display to draw on fails long after it has started,
-/// where nobody sees it, so other Linux runs it only when `DISPLAY` or
-/// `WAYLAND_DISPLAY` is set.
+/// Not [`plan`]'s route. WSL runs `explorer.exe` itself, never `wslview`,
+/// which is the browser's opener. And `xdg-open` with no display to draw on
+/// fails after it has started, detached where nobody sees it, so other
+/// Linux runs it only when `DISPLAY` or `WAYLAND_DISPLAY` is set.
 ///
 /// An `Err` means no file manager can be started. Its text is one clause,
 /// `could not open <what>: <reason>`, with no advice and no path: the caller

@@ -8,8 +8,9 @@
 //! workspace` popup names why and gives the path to open by hand.
 //!
 //! A project that has overridden nothing has no overrides folder, so `w`
-//! creates it empty first. Every reader of the layer reads an empty folder
-//! as no overrides at all, so the project still reads as having none.
+//! creates it empty first. `override list` and the dispatch tab's overrides
+//! popup read an empty folder as no overrides at all, the same as a missing
+//! one, so the project still reads as having none.
 
 use std::path::Path;
 
