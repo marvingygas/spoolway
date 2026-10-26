@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.14.1 to the next release | `dispatch.backend` is retired; every run uses herdr, and only the test harness picks the headless backend, with `SPOOLWAY_TEST_BACKEND=headless`. A step's `gate:` is `on_pass`, `on_fail` or `always`, and older binaries refuse those values. A `gate:` on a `run:` step and a `gate_at:` that names a command step are refused. | Run `spoolway sync` and commit what it writes, export `SPOOLWAY_TEST_BACKEND=headless` in any script that ran `spoolway config set dispatch.backend headless`, and move each `gate:` on a `run:` step to the agent step after it or delete it. |
+| 0.14.1 to 0.15.0 | `dispatch.backend` is retired; `gate:` is `on_pass`, `on_fail` or `always`, allowed only on an agent step, and older binaries refuse those values; a `gate_at:` that names a command step is refused; JSON prints `gate` as a string; a report a gate holds needs a `--handoff`; `~/.spoolway/editor.toml` is no longer read; a job runs one whole routine and a routine holds one active job; the jobs tab is gone; home-mode plan pages live in the workspace; a resume onto a step without `session: true` opens a fresh conversation; TUI text and shared messages are lowercase; releases carry bare executables in place of archives; a binary npm did not install never checks for updates. | Run `spoolway sync` in each project and home-mode clone and commit what it writes, upgrade CI and teammates to the same release, move each `gate:` off a command step, set `VISUAL` or `EDITOR`, clear what `spoolway doctor` fails for your jobs, set `session: true` where a resume should continue, and update scripts that set `dispatch.backend`, read `gate` in JSON, report on a gated step, drive the jobs tab, match messages by case or fetch release archives. |
 | 0.13.0 to 0.14.0 | A step's `headless:` key is now `hide:` and older binaries refuse `hide:`; a new project keeps three lanes and shows command steps; `housekeeping.price_max_age_days` is retired; tasks are cut from `origin/<base>`; a lane never runs in the main checkout; matching `[models]` rows merge value by value; `eval` adds TURNS and COMPLEXITY; `queue list --json` lists `opening ticket` rows; `pipeline check` and `doctor` fail a stale `gate_at:` and a routine id held twice; `spoolway stack` runs only in its task's worktree; lanes cannot write the private overrides layer. | Run `spoolway sync` and commit what it writes, upgrade CI and teammates to the same release, set `visible_lanes` and `hide_commands` for the new defaults, push a task's base before queueing it, read `spoolway models` for merged rows, update scripts that read `eval` exports or `queue list --json`, and clear what `spoolway doctor` fails. |
 | 0.12.0 to 0.13.0 | The shipped pipelines end at a `create-pr` agent step and `spoolway stack` is deprecated; the shipped tracker hooks close a ticket with no pull request; a failing issue hook stops its task on `hook_failed` instead of `paused`; `eval --per-run` is `--per-task` and its export keys and columns change; unqueuing a routine copy deletes it; `sync` writes every `[dispatch]` key. | Run `spoolway sync` and `spoolway sync --replace` on your tracker hook, replace each `spoolway stack` step with a `create-pr` agent step, and update scripts that read `eval` exports, `--per-run`, held tasks' `state` or unqueued routine drafts. |
 | 0.11.0 to 0.12.0 | A model with no `prompt_cache_ttl` has no age limit; a task keeps its five newest lanes and `keep_finished_lanes` is retired; command steps run without a pane; herdr lanes are named `<step>-<tag>`; step ids are limited to 26 characters; resuming a caught `--fail` goes down `on_fail`; issue and git hooks have fixed time limits; `queue add` refuses misspelt keys, placeholders, ids in use and unreachable `gate_at:`; four commands refuse `--json`; `queue list --json` `stage` names the stopped step; deleting `dispatch.pid` stops the dispatcher; `doctor` fails more settings. | Run `spoolway sync`, set `prompt_cache_ttl`, rename long step ids and quoted `[models]` tables, set `visible_lanes` or `hide_commands` to taste, add `# spoolway-login:` to tracker hooks, update scripts that read lane names, `--json` or `stage`, and clear what `spoolway doctor` fails. |
@@ -56,11 +56,12 @@ package. On Windows, install the Linux package under WSL:
 wsl npm install -g spoolway
 ```
 
-## 0.14.1 to the next release
+## 0.14.1 to 0.15.0
 
 Run `spoolway sync` in each project and commit what it writes. It drops the retired
 `dispatch.backend` line and rewrites `gate: true` to `gate: on_pass`. It refuses a pipeline file
-that puts `gate:` on a `run:` step.
+that puts `gate:` on a `run:` step. In a home-mode clone it also moves the clone's plan pages into
+the workspace. Then run `spoolway doctor`, work through the list, and restart the dispatcher.
 
 - `dispatch.backend` is retired. Every run uses herdr, and only the end-to-end harness picks the
   headless backend, by exporting `SPOOLWAY_TEST_BACKEND=headless`. A config that still holds
@@ -91,6 +92,69 @@ that puts `gate:` on a `run:` step.
 - `spoolway queue route --json` and `spoolway pipeline show --json` print a step's `gate` as
   `"on_pass"`, `"on_fail"`, `"always"` or `null`. A script that tests it for `true` or `false`
   reads the string or `null` instead.
+- A report a gate would hold needs at least one non-empty `--handoff`. Without one it is refused
+  with exit 2, and nothing is committed, logged or moved. The held pane prints the handoffs under
+  the held line for the person who answers the gate. Lanes read this in their report contract. A
+  script or stand-in agent that reports on a gated step must pass `--handoff "<text>"`. See
+  [`spoolway report`](cli-reference.md#spoolway-report-task).
+- spoolway no longer reads `~/.spoolway/editor.toml`, and a leftover file is ignored without a
+  note. Every item that opens a task file in the terminal screens, `spoolway config edit` and
+  `spoolway config override` run `$VISUAL`, else `$EDITOR`, else `vim`. `config edit` and
+  `config override` fell back to `vi` before. A program whose first word ends in `.exe` opens in
+  its own window with Windows paths on WSL, which replaces the file's `window` key. Name your
+  editor once in your shell profile, for example `export VISUAL=notepad.exe`, and delete
+  `editor.toml`. See [Editor](dispatcher.md#editor).
+- A job names one whole top-level routine folder, and a routine holds at most one active job. A
+  job whose `routine` names a single `.md` task, a subfolder or a missing folder never fires. Two
+  active jobs on one routine both stop firing. The dispatcher names each such job once per
+  matching minute, and `spoolway doctor` fails `routine is a whole routine folder` or
+  `is the only job on its routine` with the fix. `spoolway jobs list` still shows such a job
+  with its next firing time, so read `spoolway doctor` after upgrading. Point a job at its
+  routine folder, and deactivate one of two jobs that share a routine. See
+  [Jobs](jobs.md).
+- The jobs tab is gone. The tab strip is `DISPATCH`, `QUEUE`, `ROUTINES`, `EVAL`, and a routine's
+  options menu acts on its job. A job whose routine is gone gets its own row at the bottom of the
+  routines list. Update any pty or tmux script that drives the jobs tab.
+
+  | 0.14.1 | 0.15.0 |
+  |---|---|
+  | The `JOBS` tab | A routine's options menu on the `ROUTINES` tab |
+  | `new job` or `edit job` | `edit schedule` |
+  | `pause job` and `resume job` | `deactivate job` and `activate job` |
+  | `delete job` | `delete routine`, or remove the table from `jobs.toml` |
+  | `paused` in `spoolway jobs list` | `inactive` |
+  | `<n> jobs, <m> enabled.` | `<n> jobs, <m> active.` |
+
+  `activate job` is refused while another job on the routine is active. See
+  [Routines](planning.md#routines).
+- In home mode, plan pages live in the workspace's `plans/` folder, and the `plans-since` file
+  sits beside it. `spoolway config path` prints the folder on a new `plans:` line, and `--json`
+  carries it under `plans`. A page left in a clone's `dispatchers/<name>/plans/` shows on no
+  screen. Run `spoolway sync` in each home-mode clone: it moves each page, rewrites `plan:` in the
+  clone's pending and queued tasks, and never overwrites a page already in the workspace. A page it
+  refuses is listed with both paths. See
+  [Plan pages in a home-mode clone](cli-reference.md#plan-pages-in-a-home-mode-clone).
+- A resume onto a step that does not declare `session: true` opens a fresh conversation with the
+  step's opening prompt, and tells the lane the worktree is not clean. This covers a resume past a
+  gate, from `blocked` and from a park. A step that declares `session: true` still continues its
+  conversation. Set `session: true` on a step whose conversation should carry on across a resume.
+- The terminal screens write their own text in lowercase, and so do the messages they share with
+  CLI commands. This covers `queue add` validation, routine and resume refusals, lock errors,
+  reload answers, the dispatcher's warnings, and the `doctor` and `pipeline check` rows.
+  `spoolway eval` ends its table on `total` or `average`, where it printed `Total` or `Average`.
+  CLI-only output such as `jobs list` columns and `queue route` is unchanged. Update scripts that
+  match spoolway's messages by case.
+- Each GitHub release carries four bare executables, `spoolway-linux-x64`,
+  `spoolway-linux-arm64`, `spoolway-macos-arm64` and `spoolway-macos-x64`, with `install.sh` and
+  `SHA256SUMS`. 0.14.1 carried a `.tar.gz` per target. Both Linux files are static and run on
+  any distribution. A downloaded file has no executable bit, so run `chmod +x` on it. Update
+  scripts that fetch the archives by name. See
+  [Standalone download](installation.md#standalone-download).
+- A binary that npm did not install, such as one from `cargo install` or the standalone download,
+  never checks for a newer release, and the board shows no `(<version> available)` notice for it.
+  `spoolway update` on it prints its version and the install line and exits 0. Run the install
+  line again to update it. A Homebrew copy checks through `brew info`, and `spoolway update`
+  upgrades it with `brew upgrade`. See [Homebrew](installation.md#homebrew).
 
 ## 0.13.0 to 0.14.0
 
