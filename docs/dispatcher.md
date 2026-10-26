@@ -915,7 +915,8 @@ section right, wrapping from active back to config. `←` and `→` still change
 
 The count on active is the number of keys in the layer: every config key, every field of every
 patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
-The prompts and active sections show an empty list, and `tab` is the only key they read.
+The active section shows an empty list, and `tab` is the only key it reads. On the other three
+sections `w` opens the overrides folder — see [Opening the overrides folder](#opening-the-overrides-folder).
 
 ### The config section
 
@@ -940,7 +941,7 @@ dotted key the list does not show, such as a `[models]` glob the config has no e
 │     dirs                        not set                                      │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] set value   [f] search   [tab] section   [q] quit
+ [enter] set value   [f] search   [w] open workspace   [tab] section   [q] quit
 ```
 
 On `+ new key` the key line reads `[enter] new key` instead.
@@ -950,6 +951,7 @@ On `+ new key` the key line reads `[enter] new key` instead.
 | `↑` `↓` | Move the cursor over `+ new key` and the keys. Table headings are skipped. |
 | `enter` | Open the value field of the key under the cursor, or the `new key` popup on `+ new key`. |
 | `f` | Open the `search:` row at the top of the list. |
+| `w` | Open the overrides folder. |
 | `tab` | Move to the next section. |
 
 While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
@@ -1030,10 +1032,11 @@ is left out, because every pipeline takes it from `[unattended]` in config.
 │     hide                 16 steps in  9 pipelines                            │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] select steps   [f] search   [tab] section   [q] quit
+ [enter] select steps   [f] search   [w] open workspace   [tab] section   [q] quit
 ```
 
 `↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
+`w` opens the overrides folder.
 `enter` on a field opens its step selection. It lists every pipeline with a step that takes the
 field, each closed to one row with its step count. An open pipeline lists those steps under it,
 each with the value in use now: the tracked step with the layer merged onto it. A step that leaves
@@ -1122,6 +1125,95 @@ written, and `spoolway override list` reports it as ignored with the reason. Whe
 parsing while the screen is open, a note at the top of the box names it and the command that
 drops it, `spoolway override drop <pipeline>`. That pipeline's steps then show their tracked
 values.
+
+### The prompts section
+
+The prompts section lists every prompt in the repo's `.spoolway/prompts/`, by name. A prompt the
+layer already holds a copy of reads `overridden`.
+
+```
+╭─ config   pipeline   [prompts]   active (2) ─────────────────────────────────╮
+│                                                                              │
+│   archivist                                                                  │
+│   code-reviewer                   overridden                                 │
+│   create-pr                                                                  │
+│ > implementer                                                                │
+│   prober                                                                     │
+│   reproducer                                                                 │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [enter] override   [f] search   [w] open workspace   [tab] section   [q] quit
+```
+
+`↑` and `↓` move the cursor. `f` opens a `search:` row that narrows the list to the prompts whose
+name holds what is typed, and `overridden` finds the prompts the layer holds.
+
+A prompt override replaces the whole `PROMPT.md`, so the tab has no field for it and starts no
+editor. `enter` on a prompt the layer does not hold writes its copy to
+`overrides/prompts/<name>/PROMPT.md`, the same copy `spoolway prompt override <name>` writes, and
+a popup says where it is. `enter` on a prompt the layer already holds writes nothing, so a copy
+you have edited is kept, and the popup says so.
+
+```
+╭─ prompt override ────────────────────────────────╮
+│                                                  │
+│  wrote overrides/prompts/implementer/PROMPT.md   │
+│                                                  │
+│  [enter] close   [w] open workspace              │
+╰──────────────────────────────────────────────────╯
+
+╭─ prompt override ────────────────────────────────╮
+│                                                  │
+│  overrides/prompts/code-reviewer/PROMPT.md       │
+│  already exists, nothing written                 │
+│                                                  │
+│  [enter] close   [w] open workspace              │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` closes either popup onto the list, and `w` closes it and opens the overrides folder, where
+the copy is edited by hand. A copy that cannot be written opens a `not written` popup naming the
+prompt and the error, closed by `enter`.
+
+### Opening the overrides folder
+
+`w` on the config, pipeline and prompts sections, and in both prompt popups, opens the overrides
+folder: the one on the `overrides:` line of `spoolway config path`. A project that has overridden
+nothing has no such folder, so `w` creates it empty first. An empty folder still reads as no
+overrides, to `spoolway override list` and to the dispatch tab alike.
+
+The folder opens in the file manager. macOS runs `open`, which opens it in Finder. WSL runs
+`explorer.exe`. Other Linux runs `xdg-open`, and only when `DISPLAY` or `WAYLAND_DISPLAY` is set,
+since with no display it cannot show anything.
+
+When none of these can start and the board runs inside herdr, a shell pane splits beside the
+board's own pane, starts in the folder and takes focus.
+
+```
+╭─ config  pipeline  [prompts]  active (2) ───╮ │ $ pwd
+│                                             │ │ /home/marvin/.spoolway/
+│   archivist                                 │ │ spoolway-1axtn7/overrides
+│   code-reviewer                             │ │ $ ls
+│ > implementer                               │ │ prompts
+│                                             │ │ $ ▏
+╰─────────────────────────────────────────────╯ │
+ [enter] override   [f] search   …              │
+```
+
+Outside herdr, the `open workspace` popup says why the folder could not be opened and gives its
+path, for you to open yourself. `enter` closes it.
+
+```
+╭─ open workspace ─────────────────────────────────────────╮
+│                                                          │
+│  w: could not open the overrides folder: no display is   │
+│  set, and the board is not running inside herdr.         │
+│  open this folder yourself:                              │
+│  /home/marvin/.spoolway/spoolway-1axtn7/overrides        │
+│                                                          │
+│  [enter] close                                           │
+╰──────────────────────────────────────────────────────────╯
+```
 
 ## Editing a pipeline while it runs
 

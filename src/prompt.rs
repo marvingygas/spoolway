@@ -677,8 +677,8 @@ pub(crate) fn missing_prompt_fix(prompt_name: &str) -> &'static str {
 }
 
 /// [`path_for`], with no patch layer applied — for a caller that must see
-/// only the tracked file: `commands::prompt_override` reads the source to
-/// fork, and `commands::override_promote` the destination to write.
+/// only the tracked file: `commands::write_prompt_override` reads the source
+/// to fork, and `commands::override_promote` the destination to write.
 pub fn path_for_tracked(repo: &Repo, name: &str) -> PathBuf {
     tracked_path_in(&repo.checkout, name)
 }
@@ -702,8 +702,8 @@ pub(crate) fn tracked_path_in(checkout: &Path, name: &str) -> PathBuf {
 
 /// The private prompt [`path_for_tracked`] cannot see, for a caller that
 /// must tell a genuinely missing name apart from one that merely has no
-/// tracked file: `commands::prompt_override` reads it as the source to fork
-/// when no tracked file exists, and `collect_override_rows` uses it to
+/// tracked file: `commands::write_prompt_override` reads it as the source to
+/// fork when no tracked file exists, and `collect_override_rows` uses it to
 /// report a whole-file override as waiting on a private prompt rather than
 /// naming one the checkout does not have.
 /// Directory shape only, the same as [`path_for`]'s own private fallback,

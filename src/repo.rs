@@ -869,15 +869,17 @@ impl Repo {
     /// already keyed on the main checkout's basename regardless. Not a
     /// `home_subdir` — it is never auto-created the way `queue_dir` and
     /// `pending_dir` are, since a project that has overridden nothing has no
-    /// `overrides/` at all, which is how "off" is spelled; only a promote or
-    /// create command (not this task's) ever writes into it.
+    /// `overrides/` at all, which is how "off" is spelled. An empty one reads
+    /// the same: the overrides tab's `w` creates it empty to open it, and
+    /// otherwise only a command that writes an override creates it.
     pub fn overrides_dir(&self) -> PathBuf {
         self.home.join(crate::config::OVERRIDES_DIR)
     }
 
     /// The file [`crate::lock::EditLock`] is taken on. Under [`Repo::home`]
     /// so every worktree of one project contends for the same file, and not
-    /// inside `overrides/`, whose absence is how "no overrides" is spelled.
+    /// inside `overrides/`, whose absence, or emptiness, is how "no
+    /// overrides" is spelled.
     pub fn edit_lock_path(&self) -> PathBuf {
         crate::lock::EditLock::path_in(&self.home)
     }
