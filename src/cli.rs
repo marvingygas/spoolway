@@ -1859,7 +1859,8 @@ pub enum ConfigCommand {
     Edit,
 
     /// Open or create `overrides/config.toml`, the patch layer's own copy —
-    /// never the tracked file `config edit` opens.
+    /// never the tracked file `config edit` opens. With `--set`, write one
+    /// key into it instead of opening an editor.
     Override {
         /// `<key>=<value>`, e.g. `dispatch.lane_quiet=5m`. Checked the way
         /// `config set` checks it, then written into the layer without
@@ -1885,12 +1886,13 @@ pub enum OverrideCommand {
     /// One line per overridden artifact: its kind and the keys it carries.
     List,
 
-    /// Write a patched artifact's values into the tracked file, then clear
-    /// it from the layer — an ordinary diff, ready to review and commit.
+    /// Write a patched artifact's values into the tracked file — an
+    /// ordinary diff, ready to review and commit. The entry stays in the
+    /// layer until `override drop` removes it.
     Promote(OverrideTargetArgs),
 
-    /// Remove one entry from the layer, or the whole layer when none is
-    /// named.
+    /// Remove one entry from the layer, one key of an entry when a key is
+    /// given, or the whole layer when no target is named.
     Drop(OverrideDropArgs),
 }
 

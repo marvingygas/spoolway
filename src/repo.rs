@@ -1394,8 +1394,8 @@ impl Repo {
         }
         // Resolved here, before anything is written, and handed back for
         // the note printed after the write: asked after it, a detached HEAD
-        // or a failing git would end the command with the file written and a
-        // promoted override already cleared.
+        // or a failing git would end the command with the file written and no
+        // note saying which branch it landed on.
         let branch = current_branch_at(&self.checkout).with_context(|| {
             format!("cannot tell which branch {} is on", self.checkout.display())
         })?;

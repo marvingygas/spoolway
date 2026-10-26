@@ -390,12 +390,14 @@ const OVERRIDE_CONTRACT_LINES: &[&str] = &[
     "THE FOUR `override` COMMANDS",
     "  spoolway override contract          this",
     "  spoolway override list              what is layered right now, and over what",
-    "  spoolway override promote <target>  write a patched artifact into the tracked file,",
-    "                                       then clear it from the layer",
-    "  spoolway override drop [<target>]   remove one entry, or the whole layer",
+    "  spoolway override promote <target>  write a patched artifact into the tracked file;",
+    "                                       the entry stays in the layer until dropped",
+    "  spoolway override drop [<target> [<key>]]",
+    "                                       remove the whole layer, one entry, or one key of it",
     "",
     "A patch is written by `spoolway pipeline override <name> --set <step>.<key>=<value>`,",
-    "`spoolway prompt override <name>` or `spoolway config override` — never by hand.",
+    "`spoolway prompt override <name>` or `spoolway config override [--set <key>=<value>]` —",
+    "never by hand.",
 ];
 
 /// [`override_contract`]'s body, built as a string so a test can assert on

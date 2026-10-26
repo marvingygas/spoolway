@@ -17,7 +17,8 @@
 //! `spoolway pipeline override`, `prompt override` and `config override`
 //! write into this layer, `spoolway override list` reads it back out, and
 //! `override promote`/`override drop` are the other side of the merge above:
-//! promoting edits the tracked file in place — a line edit, never a
+//! `drop` removes an entry, or one key of it, and promoting leaves the entry
+//! where it is. Promoting edits the tracked file in place — a line edit, never a
 //! re-serialisation, see [`promote_pipeline_patch`] — rather than trusting a
 //! YAML writer with a file half of it doesn't own.
 
@@ -778,7 +779,9 @@ pub(crate) fn warnings_ack_write(home: &Path, fingerprint: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // The write side: `pipeline override`, `prompt override` and `config
 // override` create or update an entry; `override list` reads every entry
-// back; `override promote` and `override drop` are the two ways one leaves.
+// back; `override drop` is how one leaves. `override promote` copies an entry
+// into the tracked files and leaves it in place, so the dispatcher keeps the
+// new values until the branch carrying the promote has merged.
 // Everything above this line only ever reads the layer to merge it onto a
 // loaded pipeline or config — nothing above needs any of what follows, and
 // nothing below reaches back into the merge itself.

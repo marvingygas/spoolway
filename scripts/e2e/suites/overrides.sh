@@ -85,10 +85,10 @@ says "so does the step description beside the promoted key" \
   "Write the code to satisfy the task's acceptance criteria." \
   cat "$TRACKED"
 
-works "promoting cleared the layer entry" \
-  test ! -e "$LAYER"
-says "override list says the layer is empty again" \
-  "no overrides" \
+works "promoting kept the layer entry" \
+  test -f "$LAYER"
+says "override list still names the promoted key" \
+  "implement.model" \
   "$SPOOLWAY" override list
 
 works "the promote is a real, uncommitted change to the tracked file" \
@@ -96,6 +96,37 @@ works "the promote is a real, uncommitted change to the tracked file" \
 says "and it is exactly the one line the patch named — nothing else moved" \
   " 1 file changed, 1 insertion(+), 1 deletion(-)" \
   git diff --stat -- "$TRACKED"
+
+# ------------------------------------------- override drop of one key
+# A second key, so the first can leave alone. The key is typed the way
+# `override list` printed it, and a file left with no key is removed with the
+# folders above it, so the layer never lists an empty patch.
+must "a second key in the same patch" \
+  "$SPOOLWAY" pipeline override default --set implement.effort=high
+says "override drop <target> <key> names the key and the file" \
+  "cleared implement.model from pipelines/default.yml" \
+  "$SPOOLWAY" override drop default implement.model
+says "the other key is still listed" \
+  "implement.effort" \
+  "$SPOOLWAY" override list
+silent_about "and the dropped key is not" \
+  "implement.model" \
+  "$SPOOLWAY" override list
+refuses "dropping a key the patch does not set is refused" \
+  "does not set" \
+  "$SPOOLWAY" override drop default implement.model
+says "dropping the last key takes the file off" \
+  "cleared implement.effort from pipelines/default.yml" \
+  "$SPOOLWAY" override drop pipelines/default.yml implement.effort
+works "so the patch file is gone" test ! -e "$LAYER"
+says "and the layer lists nothing" \
+  "no overrides" \
+  "$SPOOLWAY" override list
+must "a prompt override for the refusal case" "$SPOOLWAY" prompt override implementer
+refuses "override drop of a key on a prompt is refused" \
+  "no keys" \
+  "$SPOOLWAY" override drop prompts/implementer some.key
+must "clean up: drop the prompt override" "$SPOOLWAY" override drop prompts/implementer
 
 # --------------------------------------------------- dispatch's gate, no tty
 # Every command above ran through `$(...)`, which never hands the child a
@@ -454,6 +485,30 @@ says "setting the layered key says the layer still sets it" \
 has "and writes the new value to the tracked file" "lane_quiet = \"20m\"" "$TRACKED_CONFIG"
 must "clean up: drop the config layer" "$SPOOLWAY" override drop config.toml
 
+# ------------------------------------------------ config override --set
+# Bare `config override` opens an editor; `--set` writes one key, checked the
+# way `config set` checks it, and `override drop config.toml <key>` takes it
+# out again.
+says "config override --set shows the old and the new value" \
+  "-> 5m" \
+  "$SPOOLWAY" config override --set dispatch.lane_quiet=5m
+has "the key is in the layer's config.toml" "lane_quiet = \"5m\"" "$CONFIG_LAYER"
+says "config get reads the layer's value" "5m" "$SPOOLWAY" config get dispatch.lane_quiet
+works "the tracked config is untouched" \
+  git diff --quiet -- "$TRACKED_CONFIG"
+must "a second key in the layer" "$SPOOLWAY" config override --set dispatch.visible_lanes=5
+refuses "a value config set refuses is refused here too" \
+  "unattended.max_cost_usd" \
+  "$SPOOLWAY" config override --set unattended.max_cost_usd=-5
+lacks "and nothing was written" "max_cost_usd" "$CONFIG_LAYER"
+says "override drop config.toml <key> names the key and the file" \
+  "cleared dispatch.lane_quiet from config.toml" \
+  "$SPOOLWAY" override drop config.toml dispatch.lane_quiet
+lacks "the key left the layer file" "lane_quiet" "$CONFIG_LAYER"
+has "and the other key stayed" "visible_lanes = 5" "$CONFIG_LAYER"
+must "drop the last key" "$SPOOLWAY" override drop config.toml dispatch.visible_lanes
+works "which takes the file off" test ! -e "$CONFIG_LAYER"
+
 # ------------------------------- a session pair that is valid as a pair
 # The layer was applied one key at a time, each against the partly merged
 # config, so a reuse of 5 and a blocked of 12 over the tracked 20/40 applied
@@ -473,6 +528,8 @@ silent_about "neither key is listed as ignored" \
 works "override promote writes the pair" "$SPOOLWAY" override promote config.toml
 has "the tracked file holds the reuse threshold" "session_reuse_ctx = 5" "$TRACKED_CONFIG"
 has "and the blocked ceiling" "session_blocked_ctx = 12" "$TRACKED_CONFIG"
+has "the layer keeps the pair after the promote" "session_blocked_ctx = 12" "$CONFIG_LAYER"
+must "clean up: drop the promoted pair" "$SPOOLWAY" override drop config.toml
 
 # ------------------------------- config set races sync and override promote
 # `sync` and `override promote` rewrote the tracked config without the edit
@@ -552,8 +609,9 @@ must "clean up: drop the typo'd layer" "$SPOOLWAY" override drop config.toml
 # --------------------------------- promote from a worktree of its own
 # On a feature branch in its own worktree, `override promote` writes that
 # worktree's pipeline file, so the change can be committed and opened as a
-# pull request. The layer entry is cleared at once; the main checkout's file
-# stays as it was until the branch merges.
+# pull request. The layer entry stays, since the dispatcher reads nothing from
+# the worktree; the main checkout's file stays as it was until the branch
+# merges.
 must "fork a knob for the worktree case" \
   "$SPOOLWAY" pipeline override default --set implement.model=fake-wt
 cp "$TRACKED" "$LIVE/tracked.before"
@@ -566,7 +624,11 @@ has "the worktree's pipeline file carries the promoted value" \
   "model: fake-wt" "$LIVE/wt/$TRACKED"
 works "the main checkout's pipeline file is byte-identical" \
   cmp "$TRACKED" "$LIVE/tracked.before"
-works "and the layer entry is cleared" test ! -e "$LAYER"
+says "the promote says it kept the layer entry" \
+  "kept pipelines/default.yml in the layer until you drop it" \
+  "$SPOOLWAY" -C "$LIVE/wt" override promote default
+works "and the layer entry is still there" test -f "$LAYER"
+must "clean up: drop the layer entry" "$SPOOLWAY" override drop default
 must "remove the worktree" git worktree remove --force "$LIVE/wt"
 must "and its branch" git branch -D feature/promote
 

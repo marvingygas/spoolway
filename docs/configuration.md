@@ -325,10 +325,11 @@ is the file that does not parse, `doctor` names that file instead.
 or none. A session pair that is valid together is written as a pair. A key the tracked config refuses stops the promote with an error naming that key. The
 tracked file stays as it was, and the layer keeps all its keys.
 
-`spoolway override promote` in a linked worktree that has its own `.spoolway/` writes that
-worktree's pipeline file, prompt or `config.toml`. The layer belongs to the whole project, so the
-entry is cleared from it at once. The main checkout's files stay as they were until the branch
-merges. A worktree with no `.spoolway/` of its own, a dispatcher lane's worktree and a worktree
+`spoolway override promote` keeps the entry in the layer. The running dispatcher keeps using the
+overridden values until you remove the entry with `spoolway override drop`. In a linked worktree
+that has its own `.spoolway/`, it writes that worktree's pipeline file, prompt or `config.toml`.
+The layer belongs to the whole project, so the entry stays there for every checkout. The main
+checkout's files stay as they were until the branch merges. A worktree with no `.spoolway/` of its own, a dispatcher lane's worktree and a worktree
 on a detached HEAD refuse, as `config set` does.
 
 ### When an override takes effect
@@ -345,7 +346,9 @@ value at once. The running dispatcher keeps the old value of
 or restart it. See [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
-`config override` and `spoolway override list | promote | drop`. See
+`config override` and `spoolway override list | promote | drop`. `spoolway config override --set
+<key>=<value>` writes one config key, and `spoolway override drop <target> <key>` removes one key
+of a pipeline or config patch. A file left with no key is removed from the layer. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
 
 ### Commands in a lane
@@ -355,10 +358,10 @@ write nothing:
 
 | Command | What it would write |
 |---|---|
-| `spoolway override drop` | Removes the layer, or one entry of it. |
+| `spoolway override drop` | Removes the layer, one entry of it, or one key of an entry. |
 | `spoolway pipeline override` | `overrides/pipelines/<name>.yml` |
 | `spoolway prompt override` | `overrides/prompts/<name>/PROMPT.md` |
-| `spoolway config override` | `overrides/config.toml` |
+| `spoolway config override`, with or without `--set` | `overrides/config.toml` |
 | `spoolway pipeline copy`, `spoolway prompt copy` | The private `local/` folder. In home mode, the workspace's own setup. |
 | `spoolway pipeline rename` | The private pipeline file, its task skeleton, and the tasks and jobs that name it. |
 
