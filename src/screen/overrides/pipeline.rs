@@ -659,7 +659,7 @@ impl PipelineSection {
     fn save(&mut self, repo: &Repo, selection: Selection, value: &str) -> bool {
         let targets = selection.targets(&self.pipelines);
         let old = current_text(&self.pipelines, &selection);
-        match write(repo, selection.field, value, &targets) {
+        match write(repo, selection.field.name, value, &targets) {
             Ok(()) => {
                 self.view = View::Written {
                     written: Written {
@@ -1066,8 +1066,10 @@ fn written_popup(written: &Written) -> Vec<String> {
     crate::screen::panel("overrides written", &body, &keys(&[("enter", "close")]))
 }
 
-/// Write `value`, read as YAML, as `field` on every step `targets` names,
-/// one patch per pipeline.
+/// Write `value`, read as YAML, as the field named `field` on every step
+/// `targets` names, one patch per pipeline. The section's own `save` calls
+/// it, and so does the active section's `enter` on a step key, so a value
+/// one of them takes the other takes too.
 ///
 /// Every patch is built before any is written, so a patch that does not
 /// read, or a value that is not YAML, leaves every file as it was rather
@@ -1075,9 +1077,9 @@ fn written_popup(written: &Written) -> Vec<String> {
 /// already on disk, so a key a step's patch already holds is kept beside
 /// the new one. A file that fails to write after others were written leaves
 /// those written, and the error names which pipelines they are.
-fn write(
+pub(super) fn write(
     repo: &Repo,
-    field: Field,
+    field: &str,
     value: &str,
     targets: &[(String, Vec<String>)],
 ) -> std::result::Result<(), Unwritten> {
@@ -1095,7 +1097,7 @@ fn write(
             .unwrap_or_default();
         for step in steps {
             patch.steps.entry(step.clone()).or_default().insert(
-                serde_norway::Value::String(field.name.to_string()),
+                serde_norway::Value::String(field.to_string()),
                 parsed.clone(),
             );
         }
@@ -1107,14 +1109,14 @@ fn write(
 }
 
 /// Why [`write`] stopped, and which pipelines it had written by then.
-struct Unwritten {
+pub(super) struct Unwritten {
     /// The pipelines whose patch was written before the failure, in order.
     /// Empty when nothing was.
     written: Vec<String>,
     /// The pipeline whose write failed and every one after it. Empty when
     /// the write stopped before any file was touched.
     unwritten: Vec<String>,
-    err: anyhow::Error,
+    pub(super) err: anyhow::Error,
 }
 
 /// An error from before the first file is written: nothing was.

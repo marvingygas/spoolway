@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use super::pipeline::{column, fit_blocks, step_value, tick};
 use super::{POPUP_TEXT, SET_KEYS, edit, field, one_line, shown};
@@ -748,11 +748,16 @@ fn beside(head: &str, value: &str, width: usize) -> Vec<String> {
 }
 
 /// Write `value` as `key` into pipeline `pipeline`'s patch, keeping every
-/// other key in it: read as YAML for a step key, as `pipeline override
-/// --set` reads it, and as text for `description` and `task_template`.
-/// Checked no more than the pipeline section checks a value: the merge
-/// decides, and the row says so.
+/// other key in it. A step key goes through the pipeline section's own
+/// write, which reads the value as YAML as `pipeline override --set` does.
+/// `description` and `task_template` are written here, as text. Checked no
+/// more than the pipeline section checks a value: the merge decides, and
+/// the row says so.
 fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Result<()> {
+    if let Some((step, field)) = key.split_once('.') {
+        let targets = [(pipeline.to_string(), vec![step.to_string()])];
+        return super::pipeline::write(repo, field, value, &targets).map_err(|failed| failed.err);
+    }
     repo.refuse_in_lane("the overrides layer")?;
     let overrides = repo.overrides_dir();
     // Held from the read of the patch to its write, so a parallel
@@ -760,19 +765,10 @@ fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Re
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let mut patch =
         crate::overrides::read_pipeline_patch(&overrides, pipeline)?.unwrap_or_default();
-    match key.split_once('.') {
-        Some((step, field)) => {
-            let parsed: serde_norway::Value = serde_norway::from_str(value)
-                .with_context(|| format!("`{value}` does not read as YAML"))?;
-            patch
-                .steps
-                .entry(step.to_string())
-                .or_default()
-                .insert(serde_norway::Value::String(field.to_string()), parsed);
-        }
-        None if key == "description" => patch.description = Some(value.trim().to_string()),
-        None if key == "task_template" => patch.task_template = Some(value.trim().to_string()),
-        None => bail!("`{key}` is not a key a pipeline patch holds"),
+    match key {
+        "description" => patch.description = Some(value.trim().to_string()),
+        "task_template" => patch.task_template = Some(value.trim().to_string()),
+        _ => bail!("`{key}` is not a key a pipeline patch holds"),
     }
     crate::overrides::write_pipeline_patch(&overrides, pipeline, &patch)
 }
@@ -1718,5 +1714,29 @@ mod tests {
                 .iter()
                 .any(|l| l == " >       [ ] test.timeout             45m → 2h")
         );
+    }
+
+    // `enter` on a step key writes through the pipeline section's own
+    // write, so it refuses what that refuses, in its words, and leaves the
+    // patch as it was.
+    #[test]
+    fn enter_on_a_step_key_writes_as_the_pipeline_section_does() {
+        let (repo, _guard) = layered("set-pipeline-shared");
+        let path = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl_fast");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "test.timeout");
+        type_keys(&repo, &mut state, "\r\x7f\x7f\x7f[\r");
+        let super::View::Failed(notice) = &state.layer.view else {
+            panic!("the write is refused");
+        };
+        assert!(
+            notice
+                .text
+                .contains("`[` does not read as YAML, so nothing was written"),
+            "{}",
+            notice.text
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 }
