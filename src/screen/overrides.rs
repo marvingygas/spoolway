@@ -112,8 +112,8 @@ struct State {
     /// Which selectable row the cursor is on: `0` is `+ new key`, and `n` is
     /// the `n`th key [`State::matches`] answers.
     cursor: usize,
-    /// The tracked config with the layer merged onto it.
-    config: Config,
+    /// Every key, with its value in the tracked config with the layer
+    /// merged onto it.
     settings: Vec<Setting>,
     /// The count `active` carries in the box title.
     active: usize,
@@ -126,7 +126,6 @@ impl State {
             mode: Mode::Browsing,
             filter: String::new(),
             cursor: 0,
-            config: repo.config.clone(),
             settings: Vec::new(),
             active: 0,
         };
@@ -136,8 +135,7 @@ impl State {
 
     /// Read the config and the layer again, after a write or on a visit.
     fn reload(&mut self, repo: &Repo) {
-        self.config = in_use(repo);
-        self.settings = settings(&self.config);
+        self.settings = settings(&in_use(repo));
         self.active = layer_key_count(&repo.overrides_dir());
         self.clamp();
     }
@@ -547,7 +545,7 @@ fn popup(state: &State) -> Option<Vec<String>> {
                 String::new(),
                 field("value: ", value, true),
                 String::new(),
-                current(&state.config, key),
+                current(state, key),
             ];
             Some(super::panel(&format!("set {key}"), &body, &keys(SET_KEYS)))
         }
@@ -561,7 +559,7 @@ fn popup(state: &State) -> Option<Vec<String>> {
                 field("key:     ", key, !on_value),
                 field("value:   ", value, *on_value),
                 String::new(),
-                current(&state.config, key.trim()),
+                current(state, key.trim()),
             ];
             Some(super::panel("new key", &body, &keys(NEW_KEY_KEYS)))
         }
@@ -581,11 +579,20 @@ fn field(label: &str, text: &str, typing: bool) -> String {
     pad_to(&format!("{label}{tail}{cursor}"), POPUP_TEXT)
 }
 
-/// The `current` row: what `key` reads as in the config in use now, or
-/// `not set` for a key with no value or one the config does not know.
-fn current(config: &Config, key: &str) -> String {
-    let value = crate::confkv::get(config, key).unwrap_or_default();
-    format!("current   {}", shown(&value))
+/// The `current` row: the value `key` has in the list, which is the value in
+/// use now, or `not set` for a key with none or one the list does not show.
+///
+/// Read off the list rather than through `confkv::get`, which answers a
+/// `[models]` glob the config has never named with the zero that absence
+/// stands for: a new key's `current` would read `0.0` for a price nobody
+/// has set.
+fn current(state: &State, key: &str) -> String {
+    let value = state
+        .settings
+        .iter()
+        .find(|s| s.key() == key)
+        .map_or("", |s| s.value.as_str());
+    format!("current   {}", shown(value))
 }
 
 /// The set popup's keys, in the popup and on the line under the frame.
@@ -621,4 +628,378 @@ fn footer(state: &State) -> String {
         }
     };
     super::key_hint(&pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project with a tracked config and no layer yet, its machine home
+    /// inside the fixture so a write never reaches the real one.
+    fn project(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
+        let (repo, guard) = crate::status::testutil::fixture(&format!("overrides-tab-{name}"));
+        let path = Config::path_in(&repo.root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[dispatch]\nlane_quiet = \"15m\"\n").unwrap();
+        (repo, guard)
+    }
+
+    /// `keys` typed at `state` one key at a time, decoded the way the
+    /// terminal's bytes are.
+    fn type_keys(repo: &Repo, state: &mut State, keys: &str) {
+        let mut input = std::io::Cursor::new(keys.as_bytes().to_vec());
+        while let Some(key) = super::super::read_key(&mut input) {
+            handle_key(repo, state, key);
+        }
+    }
+
+    /// The frame's lines with the colour of its key line taken out.
+    fn lines(state: &State) -> Vec<String> {
+        frame(state).iter().map(|l| shell::plain(l)).collect()
+    }
+
+    /// The layer's config patch, as the file holds it.
+    fn layer(repo: &Repo) -> String {
+        std::fs::read_to_string(crate::overrides::config_patch_path(&repo.overrides_dir()))
+            .unwrap_or_default()
+    }
+
+    /// Put the cursor on `key`'s row.
+    fn cursor_on(state: &mut State, key: &str) {
+        let at = state.matches().iter().position(|s| s.key() == key).unwrap();
+        state.cursor = at + 1;
+    }
+
+    // `tab` moves the brackets through the four sections in the box title
+    // and wraps from active back to config, which is where the tab opens.
+    #[test]
+    fn tab_walks_the_sections_in_the_box_title_and_wraps_to_config() {
+        let (repo, _guard) = project("sections");
+        let mut state = State::new(&repo);
+        let mut titles = vec![top_border(&state, 80)];
+        for _ in 0..4 {
+            type_keys(&repo, &mut state, "\t");
+            titles.push(top_border(&state, 80));
+        }
+        let dashes = |n| "─".repeat(n);
+        assert_eq!(
+            titles,
+            [
+                format!(
+                    "╭─ [config]   pipeline   prompts   active (0) {}╮",
+                    dashes(33)
+                ),
+                format!(
+                    "╭─ config   [pipeline]   prompts   active (0) {}╮",
+                    dashes(33)
+                ),
+                format!(
+                    "╭─ config   pipeline   [prompts]   active (0) {}╮",
+                    dashes(33)
+                ),
+                format!(
+                    "╭─ config   pipeline   prompts   [active (0)] {}╮",
+                    dashes(33)
+                ),
+                format!(
+                    "╭─ [config]   pipeline   prompts   active (0) {}╮",
+                    dashes(33)
+                ),
+            ]
+        );
+    }
+
+    // The sections with no list yet draw an empty box, and name only the
+    // key that leaves them.
+    #[test]
+    fn a_section_with_no_list_yet_draws_an_empty_box() {
+        let (repo, _guard) = project("empty-sections");
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        let drawn = lines(&state);
+        assert!(!drawn.iter().any(|l| l.contains("new key")), "{drawn:?}");
+        assert_eq!(drawn.last().unwrap(), " [tab] section");
+    }
+
+    // Every config key, every pipeline step field and a pipeline's
+    // description count one each, and a prompt counts as one however long
+    // it is.
+    #[test]
+    fn active_counts_every_key_in_the_layer_with_a_prompt_as_one() {
+        let (repo, _guard) = project("active-count");
+        let dir = repo.overrides_dir();
+        crate::commands::write_config_override(&repo, "dispatch.lane_quiet", "5m").unwrap();
+        crate::commands::write_config_override(&repo, "dispatch.visible_lanes", "4").unwrap();
+        let pipeline = crate::overrides::pipeline_patch_path(&dir, "impl");
+        std::fs::create_dir_all(pipeline.parent().unwrap()).unwrap();
+        std::fs::write(
+            &pipeline,
+            "description: mine\nsteps:\n  implement:\n    model: opus\n    effort: high\n",
+        )
+        .unwrap();
+        let prompt = crate::overrides::prompt_patch_path(&dir, "reviewer");
+        std::fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+        std::fs::write(&prompt, "one\ntwo\nthree\n").unwrap();
+
+        let state = State::new(&repo);
+        assert_eq!(state.active, 2 + 3 + 1);
+        assert!(top_border(&state, 80).contains("   active (6) "));
+    }
+
+    // The list as the mockup draws it: `+ new key` first, each key under
+    // its table with the value in use now, and `not set` for a key with
+    // none.
+    #[test]
+    fn the_config_list_shows_every_key_under_its_table_with_not_set() {
+        let (repo, _guard) = project("list");
+        let _terminal = crate::screen::test_terminal((80, 200));
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.lane_quiet");
+        let drawn = lines(&state);
+        assert_eq!(drawn[1], format!("│{}│", " ".repeat(78)));
+        assert_eq!(drawn[2], format!("│   + new key{}│", " ".repeat(66)));
+        for row in [
+            "│   dispatch",
+            "│ >   lane_quiet                  15m",
+            "│     visible_lanes               3",
+            "│     hide_commands               false",
+            "│   watch",
+            "│     dirs                        not set",
+        ] {
+            assert!(
+                drawn.iter().any(|l| l.starts_with(row)),
+                "{row}: {drawn:#?}"
+            );
+        }
+        assert_eq!(
+            drawn
+                .iter()
+                .filter(|l| l.trim_end_matches('│').trim() == "│   dispatch")
+                .count(),
+            1,
+            "one heading per table"
+        );
+        assert_eq!(
+            drawn.last().unwrap(),
+            " [enter] set value   [f] search   [tab] section"
+        );
+    }
+
+    // `f` opens the search row, which narrows the list on key and value as
+    // it is typed; `enter` keeps the results and `esc` clears them.
+    #[test]
+    fn f_opens_the_search_row_and_esc_clears_it() {
+        let (repo, _guard) = project("search");
+        let mut state = State::new(&repo);
+        let all = state.matches().len();
+        type_keys(&repo, &mut state, "fnot set");
+        let drawn = lines(&state);
+        assert!(drawn[1].starts_with("│ search: not set▏"), "{drawn:?}");
+        assert_eq!(
+            drawn.last().unwrap(),
+            " [enter] leave search   [esc] cancel"
+        );
+        assert!(state.matches().iter().all(|s| s.value.is_empty()));
+        assert!(state.matches().iter().any(|s| s.key() == "watch.dirs"));
+
+        type_keys(&repo, &mut state, "\r");
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert!(state.matches().len() < all, "enter keeps the results");
+        assert!(!lines(&state)[1].contains("search:"));
+
+        type_keys(&repo, &mut state, "fzzz");
+        assert!(
+            lines(&state)
+                .iter()
+                .any(|l| l.contains("no keys match this search"))
+        );
+        type_keys(&repo, &mut state, "\x1b");
+        assert_eq!(state.matches().len(), all, "esc clears the search");
+    }
+
+    // A list taller than the screen keeps the cursor's row in view and
+    // spends its last row on how many keys are out of sight.
+    #[test]
+    fn a_list_taller_than_the_screen_scrolls_with_the_cursor() {
+        let (repo, _guard) = project("scroll");
+        let _terminal = crate::screen::test_terminal((80, 16));
+        let mut state = State::new(&repo);
+        let drawn = lines(&state);
+        assert_eq!(drawn.len(), 16 - 1, "one row is left for the cursor");
+        let marker = &drawn[drawn.len() - 3];
+        assert!(
+            marker.contains("keys below") && !marker.contains("above"),
+            "{marker}"
+        );
+
+        let down = "\x1b[B".repeat(state.matches().len());
+        type_keys(&repo, &mut state, &down);
+        let drawn = lines(&state);
+        let marker = &drawn[drawn.len() - 3];
+        assert!(
+            marker.contains("keys above") && !marker.contains("below"),
+            "{marker}"
+        );
+        assert!(drawn.iter().any(|l| l.starts_with("│ > ")), "{drawn:#?}");
+    }
+
+    // `enter` on a key opens the field filled with the value in use now,
+    // `current` shows it, and `enter` writes what was typed.
+    #[test]
+    fn enter_on_a_key_sets_it_in_the_layer_as_typed() {
+        let (repo, _guard) = project("set");
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.lane_quiet");
+        type_keys(&repo, &mut state, "\r");
+        let drawn = lines(&state);
+        let popup = |text: &str| drawn.iter().any(|l| l.contains(text));
+        assert!(
+            popup("╭─ set dispatch.lane_quiet ────────────────────────╮"),
+            "{drawn:#?}"
+        );
+        assert!(popup(&format!("│  {}│", pad_to("value: 15m▏", 48))));
+        assert!(popup(&format!("│  {}│", pad_to("current   15m", 48))));
+        assert!(popup(&format!(
+            "│  {}│",
+            pad_to("[enter] save   [esc] back", 48)
+        )));
+        assert_eq!(drawn.last().unwrap(), " [enter] save   [esc] back");
+
+        type_keys(&repo, &mut state, "\x7f\x7f\x7f5m\r");
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert!(
+            layer(&repo).contains("lane_quiet = \"5m\""),
+            "{}",
+            layer(&repo)
+        );
+        assert_eq!(state.active, 1);
+
+        // The field opens on the new value, and `current` says it is in use.
+        type_keys(&repo, &mut state, "\r");
+        assert!(lines(&state).iter().any(|l| l.contains("current   5m")));
+    }
+
+    // A field emptied before `enter` writes nothing, and `esc` writes
+    // nothing whatever the field holds.
+    #[test]
+    fn an_empty_field_or_esc_writes_nothing() {
+        let (repo, _guard) = project("set-empty");
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.lane_quiet");
+        type_keys(&repo, &mut state, "\r\x7f\x7f\x7f\r");
+        type_keys(&repo, &mut state, "\r\x7f\x7f\x7f   \r");
+        type_keys(&repo, &mut state, "\r9m\x1b");
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).exists());
+    }
+
+    // A key with no value reads `not set` in its `current` row and opens on
+    // an empty field.
+    #[test]
+    fn a_key_with_no_value_opens_on_an_empty_field() {
+        let (repo, _guard) = project("set-unset");
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "watch.dirs");
+        type_keys(&repo, &mut state, "\r");
+        let drawn = lines(&state);
+        assert!(
+            drawn.iter().any(|l| l.contains("│  value: ▏ ")),
+            "{drawn:#?}"
+        );
+        assert!(drawn.iter().any(|l| l.contains("│  current   not set ")));
+    }
+
+    // `+ new key` opens a key field and a value field, `tab` moves between
+    // them, and `enter` writes the typed key with the typed value.
+    #[test]
+    fn new_key_writes_the_typed_key_and_value() {
+        let (repo, _guard) = project("new-key");
+        let mut state = State::new(&repo);
+        assert_eq!(
+            lines(&state).last().unwrap(),
+            " [enter] new key   [f] search   [tab] section"
+        );
+        type_keys(&repo, &mut state, "\rmodels.qwen3-coder.input\t0.4");
+        let drawn = lines(&state);
+        let row = |text: &str| format!("│  {}│", pad_to(text, 48));
+        for text in [
+            "key:     models.qwen3-coder.input",
+            "value:   0.4▏",
+            "current   not set",
+            "[tab] next field   [enter] save   [esc] back",
+        ] {
+            assert!(
+                drawn.iter().any(|l| l.contains(&row(text))),
+                "{text}: {drawn:#?}"
+            );
+        }
+        assert!(drawn.iter().any(|l| l.contains("╭─ new key ─")));
+
+        // Back to the key field: the cursor moves with the keys.
+        type_keys(&repo, &mut state, "\t");
+        let drawn = lines(&state);
+        assert!(
+            drawn
+                .iter()
+                .any(|l| l.contains(&row("key:     models.qwen3-coder.input▏")))
+        );
+        assert!(drawn.iter().any(|l| l.contains(&row("value:   0.4"))));
+
+        type_keys(&repo, &mut state, "\r");
+        let text = layer(&repo);
+        assert!(text.contains("[models.qwen3-coder]"), "{text}");
+        assert!(text.contains("input = 0.4"), "{text}");
+    }
+
+    // A value is written as the TOML it reads as: a number, a boolean and an
+    // array keep their type, and a duration, a number with a leading zero
+    // and plain text are written as strings.
+    #[test]
+    fn each_value_is_written_as_the_toml_it_reads_as() {
+        let (repo, _guard) = project("typed");
+        let mut state = State::new(&repo);
+        for (key, value) in [
+            ("dispatch.visible_lanes", "5"),
+            ("dispatch.hide_commands", "true"),
+            ("watch.dirs", "[\"a\", \"b\"]"),
+            ("dispatch.lane_quiet", "5m"),
+            ("dispatch.lane_child_ceiling", "010"),
+            ("dispatch.priority", "group first"),
+        ] {
+            save(&repo, &mut state, key, value);
+        }
+        let text = layer(&repo);
+        for line in [
+            "visible_lanes = 5\n",
+            "hide_commands = true\n",
+            "dirs = [\"a\", \"b\"]\n",
+            "lane_quiet = \"5m\"\n",
+            "lane_child_ceiling = \"010\"\n",
+            "priority = \"group first\"\n",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+    }
+
+    // The tab under the shell's strip, as the mockup draws it opened: the
+    // strip, the box title and the key line with `q`.
+    #[test]
+    fn the_tab_opens_on_config_under_the_strip() {
+        let (repo, _guard) = project("hosted");
+        let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+        let mut input = std::io::Cursor::new(b"\x1b[C".to_vec());
+        let mut out = Vec::new();
+        let leave = tab(
+            &repo,
+            &mut super::super::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(leave, Leave::Switch(shell::Toward::Right));
+        let drawn = shell::plain(&String::from_utf8(out).unwrap());
+        assert!(drawn.contains("[OVERRIDES]"), "{drawn}");
+        assert!(drawn.contains("╭─ [config]   pipeline   prompts   active (0) ─"));
+        assert!(drawn.contains("[enter] new key   [f] search   [tab] section   [q] quit"));
+    }
 }
