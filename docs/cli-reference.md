@@ -1710,7 +1710,7 @@ and why. `--json` carries the same list under `ignored`.
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
 | `promote <target>` | Write the patched values into the tracked file and keep the entry in the layer. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
 | `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse. Refused in a dispatcher lane's worktree |
-| `drop <target> <key>` | Remove one key from the target's patch and print `cleared <key> from <file>`. The key is written the way `list` prints it: `<step>.<key>` for a pipeline, a dotted key for `config.toml`. A file left with no key is removed from the layer. Refused on a prompt, because a prompt override has no keys. Refused in a dispatcher lane's worktree |
+| `drop <target> <key>` | Remove one key from the target's patch and print `cleared <key> from <file>`. The key is written the way `list` prints it: `<step>.<key>`, `description` or `task_template` for a pipeline, a dotted key for `config.toml`. A file left with no key is removed from the layer. Refused on a prompt, because a prompt override has no keys. Refused in a dispatcher lane's worktree |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.

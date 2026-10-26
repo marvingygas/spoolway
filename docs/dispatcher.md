@@ -941,7 +941,7 @@ dotted key the list does not show, such as a `[models]` glob the config has no e
 │     dirs                        not set                                      │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] set value   [f] search   [w] open workspace   [tab] section   [q] quit
+ [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
 On `+ new key` the key line reads `[enter] new key` instead.
@@ -951,8 +951,11 @@ On `+ new key` the key line reads `[enter] new key` instead.
 | `↑` `↓` | Move the cursor over `+ new key` and the keys. Table headings are skipped. |
 | `enter` | Open the value field of the key under the cursor, or the `new key` popup on `+ new key`. |
 | `f` | Open the `search:` row at the top of the list. |
+| `o` | Open the options menu of the key under the cursor. |
 | `w` | Open the overrides folder. |
 | `tab` | Move to the next section. |
+
+The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set, or `+ new key`, shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
 
 While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
 typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
@@ -1032,11 +1035,12 @@ is left out, because every pipeline takes it from `[unattended]` in config.
 │     hide                 16 steps in  9 pipelines                            │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] select steps   [f] search   [w] open workspace   [tab] section   [q] quit
+ [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
 `↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
 `w` opens the overrides folder.
+`o` opens the options menu of the field under the cursor. It offers `delete override` when a pipeline patch sets the field. That removes the field from every step of every patch that sets it, after one confirm popup that names each file and key. A patch left with no keys leaves the layer.
 `enter` on a field opens its step selection. It lists every pipeline with a step that takes the
 field, each closed to one row with its step count. An open pipeline lists those steps under it,
 each with the value in use now: the tracked step with the layer merged onto it. A step that leaves
