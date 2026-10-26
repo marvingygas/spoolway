@@ -15,12 +15,17 @@
 //! is changed in one step, one write or its removal, so a delete that stops
 //! partway leaves whole files changed or not, and the notice names the ones
 //! already changed.
+//!
+//! `promote selected` writes whole files into a branch's tracked setup, as
+//! `override promote` does, so the menu offers it only when every selected
+//! key belongs to a fully selected file — see [`super::promote`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 
 use super::pipeline::{column, fit_blocks, step_value, tick};
+use super::promote::{self, Picked, Picker, Promoted, Promotion};
 use super::{POPUP_TEXT, SET_KEYS, edit, field, one_line, shown};
 use crate::config::Config;
 use crate::pipeline::Pipelines;
@@ -51,6 +56,9 @@ struct KeyRow {
     /// The value in use now, which `enter`'s field opens on: the layer's
     /// when the merge applies it, the setup's when it does not.
     in_use: String,
+    /// The layer's value, as the layer spells it: what a promote writes,
+    /// whether or not the merge applies it.
+    layered: String,
     state: KeyState,
 }
 
@@ -271,6 +279,10 @@ enum View {
     Menu(usize),
     /// A delete's confirm popup.
     Confirm(Deletion),
+    /// `promote selected`'s branch picker.
+    Pick(Picker),
+    /// A promote's confirm popup, once a branch is picked.
+    Promote(Promotion),
     /// The value field over a pipeline key, opened by `enter`.
     Set {
         pipeline: String,
@@ -278,8 +290,9 @@ enum View {
         current: String,
         value: String,
     },
-    /// A delete or a write that failed, until `enter` closes it.
-    Failed(Notice),
+    /// A delete or a write that failed, or what a promote did, until
+    /// `enter` closes it.
+    Notice(Notice),
 }
 
 /// The active section while the tab is open. Built fresh on every visit.
@@ -315,9 +328,14 @@ const KEY_FIELD: usize = 25;
 /// The columns between a file and its first key in the confirm popup.
 const TARGET_GAP: usize = 3;
 
-/// The menu's items, padded so the menu is 40 columns wide whatever it
-/// lists, the same width with or without a selection.
-const MENU: [&str; 2] = ["delete selected", "delete all overrides"];
+/// The menu's items, matched by name since `promote selected` is not
+/// always offered.
+const PROMOTE: &str = "promote selected";
+const DELETE: &str = "delete selected";
+const DELETE_ALL: &str = "delete all overrides";
+
+/// The menu's items are padded to this, so the menu is 40 columns wide
+/// whatever it lists, the same width with or without a selection.
 const MENU_TEXT: usize = 32;
 
 /// The keys of the menu and the confirm popup, on the line under the frame.
@@ -405,22 +423,54 @@ impl ActiveSection {
                     let len = self.menu_items().len();
                     self.view = View::Menu(crate::screen::move_cursor(cursor, len, key));
                 }
-                Key::Enter => {
-                    let deletion = match cursor {
-                        0 => self.selected_deletion(),
-                        _ => self.whole_deletion(),
-                    };
-                    if let Some(deletion) = deletion {
-                        self.view = View::Confirm(deletion);
+                Key::Enter => match self.menu_items().get(cursor).copied() {
+                    Some(PROMOTE) => self.view = self.picker(repo),
+                    Some(DELETE) => {
+                        if let Some(deletion) = self.selected_deletion() {
+                            self.view = View::Confirm(deletion);
+                        }
                     }
-                }
+                    Some(_) => {
+                        if let Some(deletion) = self.whole_deletion() {
+                            self.view = View::Confirm(deletion);
+                        }
+                    }
+                    None => {}
+                },
                 Key::Esc => {}
                 _ => self.view = View::Menu(cursor),
+            },
+            View::Pick(picker) => match picker.handle_key(key) {
+                Picked::Open(picker) => self.view = View::Pick(picker),
+                Picked::Closed => {}
+                Picked::Branch(files, branch) => {
+                    self.view = match Promotion::new(repo, files, branch) {
+                        Ok(promotion) => View::Promote(promotion),
+                        Err(err) => View::Notice(Notice::new(
+                            "not promoted",
+                            format!(
+                                "git could not say which checkout has the branch out: \
+                                 {err:#}. nothing was written; fix what stopped it and promote \
+                                 again."
+                            ),
+                        )),
+                    };
+                }
+            },
+            View::Promote(promotion) => match key {
+                Key::Enter => {
+                    self.view = View::Notice(promotion.run(repo));
+                    // Read again: a promote into the main checkout changes the
+                    // setup each row compares the layer with.
+                    return Outcome::Changed;
+                }
+                Key::Esc => {}
+                _ => self.view = View::Promote(promotion),
             },
             View::Confirm(deletion) => match key {
                 Key::Enter => {
                     if let Err(notice) = deletion.run(repo) {
-                        self.view = View::Failed(notice);
+                        self.view = View::Notice(notice);
                     } else {
                         self.selected.clear();
                     }
@@ -441,7 +491,7 @@ impl ActiveSection {
                 Key::Enter if value.trim().is_empty() => {}
                 Key::Enter => {
                     if let Err(err) = write_pipeline_key(repo, &pipeline, &name, &value) {
-                        self.view = View::Failed(Notice::new(
+                        self.view = View::Notice(Notice::new(
                             "not written",
                             format!(
                                 "{name} on pipeline {pipeline} was not written to the overrides \
@@ -464,9 +514,9 @@ impl ActiveSection {
                     };
                 }
             },
-            View::Failed(notice) => {
+            View::Notice(notice) => {
                 if key != Key::Enter {
-                    self.view = View::Failed(notice);
+                    self.view = View::Notice(notice);
                 }
             }
         }
@@ -526,12 +576,75 @@ impl ActiveSection {
         Outcome::Nothing
     }
 
-    /// The menu's items: both deletes, or none when the layer is empty.
-    fn menu_items(&self) -> &'static [&'static str] {
-        match self.files.is_empty() {
-            true => &[],
-            false => &MENU,
+    /// The menu's items: `promote selected` first when what it would act on
+    /// is whole files, then both deletes, or none when the layer is empty.
+    fn menu_items(&self) -> Vec<&'static str> {
+        if self.files.is_empty() {
+            return Vec::new();
         }
+        match self.promoted().is_some() {
+            true => vec![PROMOTE, DELETE, DELETE_ALL],
+            false => vec![DELETE, DELETE_ALL],
+        }
+    }
+
+    /// The branch picker over every branch a promote may go to, or a
+    /// notice saying why git could not list them.
+    fn picker(&self, repo: &Repo) -> View {
+        let Some(files) = self.promoted() else {
+            return View::List;
+        };
+        match promote::branches(repo) {
+            Ok(branches) => View::Pick(Picker::new(files, branches)),
+            Err(err) => View::Notice(Notice::new(
+                "not promoted",
+                format!(
+                    "git could not list the branches: {err:#}. nothing was written; fix what \
+                     stopped it and promote again."
+                ),
+            )),
+        }
+    }
+
+    /// What the menu acts on: the selected keys, or the row under the
+    /// cursor when nothing is selected.
+    fn chosen(&self) -> BTreeSet<Item> {
+        match self.selected.is_empty() {
+            true => self
+                .rows()
+                .get(self.cursor)
+                .map(|row| self.items(*row).into_iter().collect())
+                .unwrap_or_default(),
+            false => self.selected.clone(),
+        }
+    }
+
+    /// `promote selected`'s files, in list order: every file the menu acts
+    /// on, each with its keys and the layer's values. `None` when it acts
+    /// on nothing, or on part of a file, since a promote writes whole files
+    /// and would write keys nobody selected.
+    fn promoted(&self) -> Option<Vec<Promoted>> {
+        let chosen = self.chosen();
+        let mut files = Vec::new();
+        for (f, file) in self.files.iter().enumerate() {
+            let items = self.items(Row::File(f));
+            let taken = items.iter().filter(|item| chosen.contains(item)).count();
+            if taken == 0 {
+                continue;
+            }
+            if taken < items.len() {
+                return None;
+            }
+            files.push(Promoted {
+                target: file.target.clone(),
+                keys: file
+                    .keys
+                    .iter()
+                    .map(|key| (key.key.clone(), key.layered.clone()))
+                    .collect(),
+            });
+        }
+        (!files.is_empty()).then_some(files)
     }
 
     /// The menu's title: how many keys are selected, or the row under the
@@ -550,13 +663,7 @@ impl ActiveSection {
     /// `delete selected`: the selected keys, or the row under the cursor
     /// when nothing is selected, file by file in list order.
     fn selected_deletion(&self) -> Option<Deletion> {
-        let chosen: BTreeSet<Item> = match self.selected.is_empty() {
-            true => self
-                .rows()
-                .get(self.cursor)
-                .map(|row| self.items(*row).into_iter().collect())?,
-            false => self.selected.clone(),
-        };
+        let chosen = self.chosen();
         let files: Vec<Doomed> = self
             .files
             .iter()
@@ -663,8 +770,10 @@ impl ActiveSection {
     pub(super) fn popup(&self, rows: Option<usize>) -> Option<Vec<String>> {
         match &self.view {
             View::List => None,
-            View::Menu(cursor) => Some(menu(&self.menu_title(), self.menu_items(), *cursor)),
+            View::Menu(cursor) => Some(menu(&self.menu_title(), &self.menu_items(), *cursor)),
             View::Confirm(deletion) => Some(deletion.popup(rows)),
+            View::Pick(picker) => Some(picker.popup(rows)),
+            View::Promote(promotion) => Some(promotion.popup(rows)),
             View::Set {
                 pipeline,
                 key,
@@ -683,7 +792,7 @@ impl ActiveSection {
                     &keys(SET_KEYS),
                 ))
             }
-            View::Failed(notice) => Some(notice.panel(crate::screen::NOTICE_WRAP)),
+            View::Notice(notice) => Some(notice.panel(crate::screen::NOTICE_WRAP)),
         }
     }
 
@@ -704,9 +813,11 @@ impl ActiveSection {
             ]
             .concat(),
             View::Menu(_) if self.menu_items().is_empty() => vec![("esc", "close")],
-            View::Menu(_) | View::Confirm(_) => ANSWER_KEYS.to_vec(),
+            View::Menu(_) | View::Confirm(_) | View::Promote(_) => ANSWER_KEYS.to_vec(),
+            View::Pick(picker) if picker.searching => super::SEARCH_KEYS.to_vec(),
+            View::Pick(_) => promote::PICK_KEYS.to_vec(),
             View::Set { .. } => SET_KEYS.to_vec(),
-            View::Failed(_) => vec![("enter", "confirm")],
+            View::Notice(_) => vec![("enter", "confirm")],
         }
     }
 }
@@ -992,6 +1103,7 @@ fn key_row(
     new: String,
     same: bool,
 ) -> KeyRow {
+    let layered = new.clone();
     let (state, in_use) = match reasons.key(target, key) {
         Some(reason) => (KeyState::Ignored(reason.clone()), old),
         None if same => (KeyState::Matches, new),
@@ -1007,6 +1119,7 @@ fn key_row(
         key: key.to_string(),
         set_as: set_as.to_string(),
         in_use,
+        layered,
         state,
     }
 }
@@ -1392,7 +1505,8 @@ mod tests {
             [
                 "╭─ 3 selected ─────────────────────────╮",
                 "│                                      │",
-                "│  > delete selected                   │",
+                "│  > promote selected                  │",
+                "│    delete selected                   │",
                 "│    delete all overrides              │",
                 "│                                      │",
                 "│  [enter] confirm   [esc] close       │",
@@ -1401,7 +1515,7 @@ mod tests {
         );
         assert_eq!(key_line(&state), " [enter] confirm   [esc] close");
 
-        type_keys(&repo, &mut state, "\r");
+        type_keys(&repo, &mut state, "\x1b[B\r");
         let drawn = popup(&state);
         assert!(
             drawn[0].starts_with("╭─ delete these overrides ─"),
@@ -1460,7 +1574,7 @@ mod tests {
 
         // A prompt has no keys, so its row deletes the whole copy.
         cursor_on(&mut state, "prompts/code-reviewer");
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, "o\x1b[B\r");
         assert!(popup(&state).iter().any(|l| l.contains("whole file")));
         type_keys(&repo, &mut state, "\r");
         assert!(
@@ -1487,7 +1601,8 @@ mod tests {
     fn delete_all_overrides_empties_the_layer() {
         let (repo, _guard) = layered("delete-all");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\x1b[B\r");
+        // `promote selected` is first: the cursor is on a whole file.
+        type_keys(&repo, &mut state, "o\x1b[B\x1b[B\r");
         let drawn = popup(&state);
         assert!(
             drawn[0].starts_with("╭─ delete all overrides ─"),
@@ -1531,7 +1646,7 @@ mod tests {
         cursor_on(&mut state, "pipelines/impl.yml");
         type_keys(&repo, &mut state, " ");
         cursor_on(&mut state, "pipelines/impl_fast.yml");
-        type_keys(&repo, &mut state, " o\r");
+        type_keys(&repo, &mut state, " o\x1b[B\r");
         // The second file stops reading after the popup listed it.
         let second = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl_fast");
         std::fs::write(&second, "steps: [\n").unwrap();
@@ -1657,7 +1772,7 @@ mod tests {
         );
 
         cursor_on(&mut state, "pipelines/impl_fast.yml");
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, "o\x1b[B\r");
         assert!(popup(&state).iter().any(|l| l.contains("whole file")));
         type_keys(&repo, &mut state, "\r");
         assert!(
@@ -1727,7 +1842,7 @@ mod tests {
         let mut state = on_active(&repo);
         cursor_on(&mut state, "test.timeout");
         type_keys(&repo, &mut state, "\r\x7f\x7f\x7f[\r");
-        let super::View::Failed(notice) = &state.layer.view else {
+        let super::View::Notice(notice) = &state.layer.view else {
             panic!("the write is refused");
         };
         assert!(

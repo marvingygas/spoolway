@@ -29,6 +29,7 @@
 
 mod active;
 mod pipeline;
+mod promote;
 mod prompts;
 mod workspace;
 
