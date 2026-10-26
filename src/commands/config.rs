@@ -151,7 +151,8 @@ fn follow_up_lines(
 /// dropped on load, so a key the file names can still take the value just
 /// set. The file's keys only choose the wording. The advice starts with the
 /// one-key route, `override drop config.toml <key>`, spelled as the layer
-/// file holds it. The whole-layer forms come after it because they act on
+/// file holds it, once for each leaf that sets the key: a layer can hold the
+/// retired and the current spelling together. The whole-layer forms come after it because they act on
 /// every key: `drop` deletes every key in a file that lives outside git, and
 /// `promote` writes all of them into the tracked file, overwriting the value
 /// just set with the layer's.
@@ -170,11 +171,13 @@ fn shadow_note(
     // this one and replaced it. Naming a layer file that is not there, or
     // does not hold the key, sends the person to fix the wrong place.
     let layer_file = match overrides {
-        Some(dir) => crate::overrides::config_patch_leaf_for(&dir, key)?
-            .map(|leaf| (crate::overrides::config_patch_path(&dir), leaf)),
+        Some(dir) => {
+            let leaves = crate::overrides::config_patch_leaves_for(&dir, key)?;
+            (!leaves.is_empty()).then(|| (crate::overrides::config_patch_path(&dir), leaves))
+        }
         None => None,
     };
-    let Some((path, leaf)) = layer_file else {
+    let Some((path, leaves)) = layer_file else {
         return Ok(Some(format!(
             "note: the value in effect for `{key}` is {effective}, not the value just set, \
              and no override sets it. another change to the config landed after this one; \
@@ -182,10 +185,24 @@ fn shadow_note(
              that is not what you want."
         )));
     };
+    // A layer can set one key through its retired spelling and its current
+    // one at once. Each leaf needs its own drop, and naming one as enough
+    // would leave the value just set shadowed by the other.
+    let drops = leaves
+        .iter()
+        .map(|leaf| format!("`spoolway override drop config.toml {leaf}`"))
+        .collect::<Vec<_>>();
+    let one_key_route = match drops.as_slice() {
+        [only] => format!("{only} removes just that key and lets the value just set apply."),
+        _ => format!(
+            "{} each remove one of the keys that set it; the value just set applies once \
+             every one is gone.",
+            drops.join(" and ")
+        ),
+    };
     Ok(Some(format!(
         "note: {} still sets `{key}`, so the value in effect is {effective}.\n  \
-         `spoolway override drop config.toml {leaf}` removes just that key and lets the \
-         value just set apply. `spoolway override drop config.toml` clears the whole \
+         {one_key_route} `spoolway override drop config.toml` clears the whole \
          config layer, and \
          `spoolway override promote config.toml` writes all of its keys, this one \
          included, into the tracked file.",
@@ -1323,6 +1340,41 @@ mod tests {
                         "`spoolway override drop config.toml dispatch.keep_finished_lanes`"
                     ),
                     "the note must name the one-key removal, spelled as the file holds it: {note}"
+                );
+            },
+        );
+    }
+
+    /// A layer can set one key twice, once by its retired spelling and once by
+    /// the current one, and the current one is applied last. Dropping only the
+    /// retired leaf would leave the value just set shadowed, so the note has to
+    /// name a drop for each leaf and must not call either one enough.
+    #[test]
+    fn shadow_note_names_every_layer_leaf_that_sets_the_key() {
+        with_layer(
+            "shadow-note-two-leaves",
+            "[dispatch]\nvisible_lanes = 5\n",
+            "[dispatch]\nkeep_finished_lanes = true\nvisible_lanes = 3\n",
+            |root| {
+                let tracked = Config::load_tracked(root).unwrap();
+                let updated = crate::confkv::set(&tracked, "dispatch.visible_lanes", "7").unwrap();
+                let merged = Config::load(root).unwrap();
+                let note = shadow_note(root, "dispatch.visible_lanes", &updated, &merged)
+                    .unwrap()
+                    .expect("the layer's 3 is in effect, not the 7 just set");
+                assert!(
+                    note.contains(
+                        "`spoolway override drop config.toml dispatch.keep_finished_lanes`"
+                    ),
+                    "{note}"
+                );
+                assert!(
+                    note.contains("`spoolway override drop config.toml dispatch.visible_lanes`"),
+                    "{note}"
+                );
+                assert!(
+                    !note.contains("removes just that key"),
+                    "one drop is not enough when two keys set it: {note}"
                 );
             },
         );

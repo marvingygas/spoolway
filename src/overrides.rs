@@ -895,14 +895,17 @@ pub(crate) fn list_prompt_overrides(overrides: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// The leaf of `overrides/config.toml` that sets `key`, spelled as the file
-/// and `override list` hold it, or `None` when no leaf does.
+/// Every leaf of `overrides/config.toml` that sets `key`, spelled as the file
+/// and `override list` hold it, in the order the file is walked. Empty when no
+/// leaf does.
 ///
 /// `key` is read as the config spells it today. A layer holding the retired
 /// `dispatch.keep_finished_lanes` sets `dispatch.visible_lanes`, since that is
 /// the key [`apply_config_table`] applies it as, and the leaf returned is the
 /// retired spelling. `override drop config.toml <leaf>` takes that spelling.
-pub(crate) fn config_patch_leaf_for(overrides: &Path, key: &str) -> Result<Option<String>> {
+/// A layer can hold the retired leaf and the current one together, so there
+/// can be two: the value is only freed of the layer once every one is dropped.
+pub(crate) fn config_patch_leaves_for(overrides: &Path, key: &str) -> Result<Vec<String>> {
     // A quoted model glob, `models."x".input`, is the key `models.x.input`
     // that `current_spelling` names a layer's leaf by.
     let key = crate::confkv::split_models_key(key)
@@ -911,7 +914,7 @@ pub(crate) fn config_patch_leaf_for(overrides: &Path, key: &str) -> Result<Optio
     let path = config_patch_path(overrides);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let parsed: toml::Value =
@@ -919,14 +922,14 @@ pub(crate) fn config_patch_leaf_for(overrides: &Path, key: &str) -> Result<Optio
     let toml::Value::Table(table) = parsed else {
         bail!("{} must be a table of settings", path.display());
     };
-    let mut found = None;
+    let mut found = Vec::new();
     collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
         let spelled = match input {
             Ok(input) => current_spelling(leaf, input).0,
             Err(_) => leaf.to_string(),
         };
-        if spelled == key && found.is_none() {
-            found = Some(leaf.to_string());
+        if spelled == key {
+            found.push(leaf.to_string());
         }
     });
     Ok(found)
@@ -1093,7 +1096,7 @@ pub(crate) const CONFIG_PATCH_HEADER: &str = "# Every key here overrides the sam
 /// file holding only comments would still list as an override.
 pub(crate) fn remove_config_patch_key(overrides: &Path, key: &str) -> Result<()> {
     // Held against the leaves exactly as `override list` prints them, which is
-    // the spelling the file holds. `config_patch_leaf_for` takes the spelling a
+    // the spelling the file holds. `config_patch_leaves_for` takes the spelling a
     // leaf is applied as, and would refuse a retired key the list shows.
     let parts = crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
     let listed = parts.join(".");
@@ -2389,46 +2392,52 @@ agent: pi
 
     /// A layer written for an older release sets `visible_lanes` through the
     /// retired `keep_finished_lanes`, and a models glob with a dot in it is
-    /// spelled as the key a person types; both are found by their current key.
+    /// spelled as the key a person types; both are found by their current key,
+    /// and the leaf comes back spelled as the file holds it.
     #[test]
-    fn config_patch_leaf_for_reads_a_key_as_the_layer_applies_it() {
+    fn config_patch_leaves_for_reads_a_key_as_the_layer_applies_it() {
         let overrides = crate::scratch::root("overrides-patch-sets");
         let _ = std::fs::remove_dir_all(&overrides);
         std::fs::create_dir_all(&overrides).unwrap();
-        assert!(
-            !config_patch_leaf_for(&overrides, "dispatch.visible_lanes")
-                .unwrap()
-                .is_some()
-        );
+        let leaves = |key: &str| config_patch_leaves_for(&overrides, key).unwrap();
+        assert!(leaves("dispatch.visible_lanes").is_empty());
         std::fs::write(
             config_patch_path(&overrides),
             "[dispatch]\nkeep_finished_lanes = true\n[models.\"gpt-5.1\"]\ncompact_ctx = 50\n",
         )
         .unwrap();
-        assert!(
-            config_patch_leaf_for(&overrides, "dispatch.visible_lanes")
-                .unwrap()
-                .is_some()
+        assert_eq!(
+            leaves("dispatch.visible_lanes"),
+            ["dispatch.keep_finished_lanes"]
         );
-        assert!(
-            !config_patch_leaf_for(&overrides, "dispatch.keep_finished_lanes")
-                .unwrap()
-                .is_some()
+        assert!(leaves("dispatch.keep_finished_lanes").is_empty());
+        assert_eq!(
+            leaves("models.gpt-5.1.compact_ctx"),
+            ["models.gpt-5.1.compact_ctx"]
         );
-        assert!(
-            config_patch_leaf_for(&overrides, "models.gpt-5.1.compact_ctx")
-                .unwrap()
-                .is_some()
+        assert_eq!(
+            leaves("models.\"gpt-5.1\".compact_ctx"),
+            ["models.gpt-5.1.compact_ctx"]
         );
-        assert!(
-            config_patch_leaf_for(&overrides, "models.\"gpt-5.1\".compact_ctx")
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            !config_patch_leaf_for(&overrides, "dispatch.lane_quiet")
-                .unwrap()
-                .is_some()
+        assert!(leaves("dispatch.lane_quiet").is_empty());
+    }
+
+    /// The retired spelling and the current one can sit in one layer, and both
+    /// set `visible_lanes`: the lookup has to return both, because dropping
+    /// either alone leaves the other one applied.
+    #[test]
+    fn config_patch_leaves_for_returns_every_leaf_that_sets_the_key() {
+        let overrides = crate::scratch::root("overrides-patch-both");
+        let _ = std::fs::remove_dir_all(&overrides);
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            config_patch_path(&overrides),
+            "[dispatch]\nkeep_finished_lanes = true\nvisible_lanes = 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config_patch_leaves_for(&overrides, "dispatch.visible_lanes").unwrap(),
+            ["dispatch.keep_finished_lanes", "dispatch.visible_lanes"]
         );
     }
 }
