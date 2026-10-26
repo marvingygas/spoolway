@@ -915,8 +915,8 @@ section right, wrapping from active back to config. `←` and `→` still change
 
 The count on active is the number of keys in the layer: every config key, every field of every
 patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
-The [active section](#the-active-section) lists those keys and deletes them. On every section `w`
-opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
+The [active section](#the-active-section) lists those keys, deletes them, and promotes them onto
+a branch. On every section `w` opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
 
 ### The config section
 
@@ -1236,25 +1236,28 @@ branch has merged: a promote keeps its entries in the layer until you delete the
 | `↑` `↓` | Move the cursor over the files and keys. |
 | `space` | Select the row under the cursor, or clear it. A file selects every key under it. |
 | `a` | Select every file and key. A second `a` clears the selection. |
-| `o` | Open the menu: `delete selected` and `delete all overrides`. |
+| `o` | Open the menu: `promote selected`, `delete selected` and `delete all overrides`. |
 | `enter` | On a key, open its value field to set it again. |
 | `w` | Open the overrides folder. |
 | `tab` | Move to the next section. |
 
-The menu's title says how many keys are selected. With nothing selected, `delete selected` acts
-on the row under the cursor, and the menu is titled with that row's name.
+The menu's title says how many keys are selected. With nothing selected, `promote selected` and
+`delete selected` act on the row under the cursor, and the menu is titled with that row's name.
+`promote selected` comes first, and only when every selected key belongs to a fully selected file:
+a promote writes whole files, so on part of a file it would write keys you did not select.
 
 ```
 ╭─ 3 selected ─────────────────────────╮
 │                                      │
-│  > delete selected                   │
+│  > promote selected                  │
+│    delete selected                   │
 │    delete all overrides              │
 │                                      │
 │  [enter] confirm   [esc] close       │
 ╰──────────────────────────────────────╯
 ```
 
-Either answer opens one confirm popup that names every file and key it deletes. `enter` deletes
+Either delete opens one confirm popup that names every file and key it deletes. `enter` deletes
 them and `esc` closes the popup with nothing deleted.
 
 ```
@@ -1280,6 +1283,68 @@ delete that fails on its first file opens a `not deleted` popup instead. `enter`
 pipeline key opens a `set <key> in <pipeline>` field, filled with the value in use now, and
 writes what is typed into that one key, read as YAML the way `spoolway pipeline override --set`
 reads it. `enter` on an empty field writes nothing, and `esc` closes the field.
+
+#### Promoting from the tab
+
+`promote selected` writes the selected files into the tracked setup of a branch you pick, as
+`spoolway override promote` does in that branch's checkout. It opens a branch picker first. The
+picker lists local branches and `origin`'s in one list, sorted by name. A branch only `origin`
+has carries `origin`. Task branches are left out, and the default branch stays. The remote
+branches are the ones the last `git fetch` saw, since the tab fetches nothing. `f` searches the
+list, and `esc` closes the picker.
+
+```
+╭─ promote pipelines/bugfix.yml to ────────────────────────╮
+│  search: ▏                                               │
+│                                                          │
+│    ↑ 10 branches above                                   │
+│  > feature/config-update                                 │
+│    feature/github-issues                                 │
+│    fix/rehearsal-skips-homebrew                          │
+│    fix/release-verify-npm-lag                            │
+│    main                                                  │
+│    release-fix/release-spoolway-3                        │
+│    release-fix/v0.14.0-macos                   origin    │
+│    ↓ 4 branches below                                    │
+│                                                          │
+│  [enter] pick   [f] search   [esc] close                 │
+╰──────────────────────────────────────────────────────────╯
+```
+
+`enter` on a branch opens a confirm popup. It names the folder written, the branch, each file and
+each key with the value written, and says the change is not committed. A branch already checked
+out somewhere, in the main checkout or a worktree, is written in that checkout. Any other branch
+first gets a worktree beside the main checkout, at `<parent of the checkout>/<checkout
+name>-<branch>`, each `/` in the branch written as `-`. A branch only `origin` has gets a local
+branch tracking `origin`'s there.
+
+```
+╭─ promote pipelines/bugfix.yml ───────────────────────────╮
+│                                                          │
+│  makes a worktree for feature/config-update at           │
+│    ~/dev/project/spoolway-feature-config-update          │
+│  and writes .spoolway/pipelines/bugfix.yml there,        │
+│  not committed                                           │
+│                                                          │
+│    fix.model               claude-opus-5-5               │
+│    reproduce.model         claude-opus-5-5               │
+│                                                          │
+│  the overrides stay in the layer until you delete them   │
+│                                                          │
+│  [enter] confirm   [esc] close                           │
+╰──────────────────────────────────────────────────────────╯
+```
+
+`enter` makes the worktree when one is needed, then writes the files, and a `promoted` popup says
+where. Nothing is committed: commit the change on that branch and open a pull request for it. The
+layer keeps every promoted entry, so dispatch keeps the new values until the branch merges. Each
+entry then reads `matches the setup`, and you can delete it.
+
+Nothing is written when the worktree cannot be made, such as when a folder is already in its
+place. A `not promoted` popup then gives git's error and the path. A checkout that `spoolway
+override promote` would refuse is refused here in the same words: a lane's worktree, one on a
+detached HEAD, or a branch with no `.spoolway/` of its own. A branch with no `.spoolway/` is
+refused before any worktree is made.
 
 ### Opening the overrides folder
 

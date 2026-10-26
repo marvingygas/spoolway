@@ -22,7 +22,8 @@
 # key and a new one are each set through their popup, and both land in the
 # overrides layer, one step field is set on steps in two pipelines, one
 # prompt is copied into the layer, and the active section deletes one config
-# key from it.
+# key from it, then promotes one pipeline onto a local branch with no
+# checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -649,6 +650,36 @@ has "which names the file and the key" "config.toml   dispatch.lane_quiet" \
   "$ACTIVE_TAB.plain"
 lacks "enter deletes the key from the layer" "lane_quiet" "$CONFIG_LAYER"
 has "and keeps the other key" "input = 0.4" "$CONFIG_LAYER"
+
+# The active section promotes pipelines/bugfix.yml onto a local branch no
+# checkout has. config.toml is first with its one key left, so `↓` twice
+# lands on bugfix's file row. `o` opens its menu with `promote selected`
+# first, and `enter` opens the branch picker, where `f` searches it down to
+# the branch. `enter` leaves the search, `enter` picks the branch, and
+# `enter` on the confirm popup makes the worktree and writes the file.
+must "a local branch with no checkout" git branch feature/promote
+PROMOTE_TAB="$LIVE/overrides-promote.txt"
+on_screen '\x1b[C\x1b[C\t\t\t\x1b[B\x1b[Bo\rffeature/promote\r\r\r' "$PROMOTE_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$PROMOTE_TAB" >"$PROMOTE_TAB.plain"
+has "o on a whole file offers promote selected first" "│  > promote selected" \
+  "$PROMOTE_TAB.plain"
+has "promote opens the branch picker" "╭─ promote pipelines/bugfix.yml to ─" \
+  "$PROMOTE_TAB.plain"
+has "the confirm popup names the worktree it makes" \
+  "makes a worktree for feature/promote at" "$PROMOTE_TAB.plain"
+has "and the file, uncommitted" "and writes .spoolway/pipelines/bugfix.yml there," \
+  "$PROMOTE_TAB.plain"
+has "the write says where it landed" "╭─ promoted ─" "$PROMOTE_TAB.plain"
+PROMOTED="$LIVE/proj-feature-promote"
+works "a worktree is made beside the project" test -d "$PROMOTED"
+has "on the picked branch" "feature/promote" \
+  <(git -C "$PROMOTED" branch --show-current)
+has "its bugfix pipeline holds the promoted effort" "effort: low" \
+  "$PROMOTED/.spoolway/pipelines/bugfix.yml"
+lacks "the main checkout's is untouched" "effort: low" .spoolway/pipelines/bugfix.yml
+works "nothing is committed on the branch" \
+  test "$(git rev-parse feature/promote)" = "$(git rev-parse HEAD)"
+has "the layer keeps the promoted entry" "effort: low" "$PATCHES/bugfix.yml"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

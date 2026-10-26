@@ -13,8 +13,9 @@
 //! `[models]` glob the config has no entry for yet. The pipeline section
 //! sets one step field on many pipeline steps at once — see [`pipeline`].
 //! The prompts section copies a prompt into the layer — see [`prompts`].
-//! The active section lists everything the layer holds and deletes any of it
-//! — see [`active`]. `o` on a config key or a pipeline field offers `delete
+//! The active section lists everything the layer holds, deletes any of it,
+//! and promotes whole files onto a branch you pick — see [`active`] and
+//! [`promote`]. `o` on a config key or a pipeline field offers `delete
 //! override`, which removes that key from every file in the layer that sets
 //! it, after the same confirm popup.
 //!
