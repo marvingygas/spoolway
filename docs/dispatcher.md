@@ -915,7 +915,7 @@ section right, wrapping from active back to config. `←` and `→` still change
 
 The count on active is the number of keys in the layer: every config key, every field of every
 patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
-The pipeline, prompts and active sections show an empty list, and `tab` is the only key they read.
+The prompts and active sections show an empty list, and `tab` is the only key they read.
 
 ### The config section
 
@@ -1004,6 +1004,122 @@ The tab does not check the key or the value. A value the config cannot hold, or 
 spoolway does not know, is still written, and `spoolway override list` reports it as ignored
 with the reason. A write that fails, such as on a layer file that does not parse, opens a
 `not written` popup naming the key and the error, closed by `enter`.
+
+### The pipeline section
+
+The pipeline section sets one step field on many pipeline steps at once. It lists step fields,
+not pipelines, under two headers: the fields agent steps take, and the fields command steps take.
+A field goes only on the kind of step listed above it, because the merge refuses anything else.
+Each row says how many steps in how many pipelines take the field, and how many of them the layer
+already overrides it on. Only the pipelines in the repo's `.spoolway/` count. The `blocked` step
+is left out, because every pipeline takes it from `[unattended]` in config.
+
+```
+╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
+│                                                                              │
+│   agent steps                                                                │
+│ >   model                58 steps in 10 pipelines                            │
+│     effort               58 steps in 10 pipelines                            │
+│     agent                58 steps in 10 pipelines                            │
+│     prompt               58 steps in 10 pipelines                            │
+│     session              58 steps in 10 pipelines                            │
+│     skills               58 steps in 10 pipelines                            │
+│   command steps                                                              │
+│     run                  16 steps in  9 pipelines                            │
+│     timeout              16 steps in  9 pipelines      1 overridden          │
+│     hide                 16 steps in  9 pipelines                            │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [enter] select steps   [f] search   [tab] section   [q] quit
+```
+
+`↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
+`enter` on a field opens its step selection. It lists every pipeline with a step that takes the
+field, each closed to one row with its step count. An open pipeline lists those steps under it,
+each with the value in use now: the tracked step with the layer merged onto it. A step that leaves
+the field out, or leaves it blank, reads `not set`. Pipelines whose steps the layer already
+overrides the field on start open, with those steps selected.
+
+```
+╭─ select steps for model ─────────────────────────────────────────────────────╮
+│ search: sonnet                                                               │
+│                                                                              │
+│   [ ] bugfix                                           7 steps               │
+│ > [x] impl                                             4 of 6 selected       │
+│         [x] implement            claude-sonnet-5-5                           │
+│         [x] fix-spec-review      claude-sonnet-5-5                           │
+│         [x] fix-code-review      claude-sonnet-5-5                           │
+│         [ ] e2e                  claude-sonnet-5-5                           │
+│         [ ] screenshots          claude-sonnet-5-5                           │
+│         [x] document             claude-sonnet-5-5                           │
+│   [ ] impl_lite                                        5 steps               │
+│   ↓ 2 pipelines below                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [space] select   [a] all   [enter] set value   [esc] back
+```
+
+| Key | What it does |
+|---|---|
+| `space` | On a pipeline, open it and select every step listed under it, or, when one of its steps is selected, close it and clear them all. On a step, select or unselect it. |
+| `a` | Open every listed pipeline and select every listed step. Pressed again once they all are, clear the selection. |
+| `f` | Open the `search:` row. |
+| `enter` | Open the value field. With no step selected it does nothing. |
+| `esc` | Go back to the field list. |
+
+The search matches pipeline names, step ids and the values shown, `not set` included, so `not
+set` finds every step that leaves the field out. A pipeline whose name matches lists all its
+steps, and any other lists only the steps that match. `space` and `a` select only the steps the
+search leaves. After `enter` leaves the search, the `search:` row stays at the top of the list
+while the search narrows it.
+
+`enter` opens the value field over the selection. It is filled with the value the selected steps
+share, and empty when they differ. The `current` row shows the shared value, `not set`, or
+`varies`. Under it, each pipeline names its selected steps.
+
+```
+╭─ set model on 11 steps ──────────────────────────╮
+│                                                  │
+│  value: claude-opus-5-5▏                         │
+│                                                  │
+│  current   claude-sonnet-5-5                     │
+│  bugfix    reproduce, fix, fix-spec-review,      │
+│            fix-code-review, reproduce-again,     │
+│            fix-gate, document                    │
+│  impl      implement, fix-spec-review,           │
+│            fix-code-review, document             │
+│                                                  │
+│  [enter] save   [esc] back                       │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` writes the value into the patch of every pipeline with a selected step, under
+`overrides/pipelines/<name>.yml`, the same patch `spoolway pipeline override --set` writes. The
+value is written as the YAML it reads as: `true` is a boolean, and `claude-opus-5-5` and `5m` are
+strings. A field the patch already sets on another step, or another field on the same step, is
+kept. Every patch is built before any file is written, so a patch that does not parse, or a value
+that is not YAML, writes nothing at all and opens a `not written` popup with the reason. `enter`
+closes it onto the selection. `enter` on an empty field, or `esc`, goes back to the selection
+with nothing written. A popup naming more pipelines than the screen has rows for ends on a line
+such as `and 2 more pipelines`.
+
+A write that goes through opens a popup with the field, how many steps in how many pipelines it
+was written to, and the value it replaced. `enter` closes it onto the field list.
+
+```
+╭─ overrides written ──────────────────────────────╮
+│                                                  │
+│  model on 11 steps in 2 pipelines                │
+│    claude-sonnet-5-5 → claude-opus-5-5           │
+│                                                  │
+│  [enter] close                                   │
+╰──────────────────────────────────────────────────╯
+```
+
+Like the config section, the tab does not check the value. A value the merge cannot use is still
+written, and `spoolway override list` reports it as ignored with the reason. When a patch stops
+parsing while the screen is open, a note at the top of the box names it and the command that
+drops it, `spoolway override drop <pipeline>`. That pipeline's steps then show their tracked
+values.
 
 ## Editing a pipeline while it runs
 
