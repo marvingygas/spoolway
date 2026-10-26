@@ -541,10 +541,14 @@ text, and every other pair on the line is dim.
 | `u` | Ask the running dispatcher to load every pipeline file and `config.toml` again. Does nothing while `[u] update config` is not on the key line, or while an earlier `u` is still waiting for its answer. See [Updating the config](#updating-the-config). |
 | `ctrl-c` | Stop the run. |
 
-Every menu and panel these keys open lists its answers under its text, with `>` on the
-cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
+Every menu and every panel with two or more answers lists its answers under its text, with `>` on
+the cursor's row. `↑` and `↓` move the cursor, `enter` runs the answer under it, and `esc` closes it
 with nothing changed. No letter answers a menu or a panel. The cursor opens on the first answer,
 such as `open task` or `pause now`, and on the `(next)` step in the resume picker.
+
+A panel with only one answer draws no answer row. It ends on its text and
+`[enter] confirm   [esc] close`, and `enter` runs its one answer. The restart, skip and unqueue
+panels are drawn this way, and so is the pause panel on a command step.
 
 ### Updating the config
 
@@ -766,12 +770,13 @@ When the board cannot route the task for an `r`, the picker lists no steps and s
 Pausing an agent turn sends Escape to the pane. A resume picks the session back up on a step that
 declares `session: true`, and opens a fresh conversation on any other step. Pausing
 a command step kills the run, and the command runs again in full on resume. On a command step
-the panel says so in two lines above the answers: `pausing terminates the command's process.`
+the panel says so in two lines under the step: `pausing terminates the command's process.`
 and `resuming restarts the command.`
 
 `pause when <step> finishes` interrupts nothing. It writes a `gate_at` for the step the panel
 named, so the named task pauses itself once that step reports, whatever it reports. The answer is
-listed only on a running agent step. A running command step offers `pause now` alone. On a row
+listed only on a running agent step. A running command step offers `pause now` alone, so its
+panel draws no answer row and `enter` pauses at once. On a row
 that already has a scheduled pause, the same answer reads `cancel the scheduled pause` and clears
 it.
 
@@ -791,8 +796,6 @@ The agent form names the step, the lane and the session that a restart throws aw
 │ the lane is torn down and `review` is briefed from  │
 │ scratch. its conversation is not kept.              │
 │                                                     │
-│ > restart                                           │
-│                                                     │
 │ [enter] confirm   [esc] close                       │
 ╰─────────────────────────────────────────────────────╯
 ```
@@ -808,24 +811,22 @@ The command form is drawn for a command step, which has no lane and no session. 
 │  the command's process is ended and `build` runs again  │
 │  from the start. its log is kept as the previous log.   │
 │                                                         │
-│  > restart                                              │
-│                                                         │
 │  [enter] confirm   [esc] close                          │
 ╰─────────────────────────────────────────────────────────╯
 ```
 
 | Key | What it does |
 |---|---|
-| `enter` on `restart` | The same as `spoolway restart <task>`. |
+| `enter` | The same as `spoolway restart <task>`. |
 | `esc` | Close the panel and change nothing. |
 
-The options menu lists `restart` only for a task that `spoolway restart` accepts, judged on the pipelines the running dispatcher loaded. A queued, done or hook-held row does not list it. When those pipelines refuse the task, the panel opens with the refusal in it and `enter` restarts nothing. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the answer. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
+The options menu lists `restart` only for a task that `spoolway restart` accepts, judged on the pipelines the running dispatcher loaded. A queued, done or hook-held row does not list it. When those pipelines refuse the task, the panel opens with the refusal in it and `enter` restarts nothing. A restart the command refuses leaves the panel open and prints the reason under the closing sentence, above the key row. When the task has moved to another step since the panel opened, `enter` restarts nothing and says so.
 
 ### Skip panel
 
-`k` on a `hook_failed` row opens a panel titled `skip the <event> hook?`, where `<event>` is the hook that failed. The panel says where the task goes without that hook. It has one answer.
+`k` on a `hook_failed` row opens a panel titled `skip the <event> hook?`, where `<event>` is the hook that failed. The panel says where the task goes without that hook. It has one answer, so it draws no answer row.
 
-For a failed `done` hook the panel names the archive and the worktree removal. A line about the ticket follows when the task has a `ticket:`. The answer is `skip and archive`.
+For a failed `done` hook the panel names the archive and the worktree removal. A line about the ticket follows when the task has a `ticket:`.
 
 ```
 ╭─ skip the done hook? ────────────────────────╮
@@ -833,20 +834,18 @@ For a failed `done` hook the panel names the archive and the worktree removal. A
 │  worktree removed.                           │
 │  ticket #1025 stays as it is.                │
 │                                              │
-│  > skip and archive                          │
-│                                              │
 │  [enter] confirm   [esc] close               │
 ╰──────────────────────────────────────────────╯
 ```
 
-For a failed `queued` or `started` hook the panel names the step the task starts on, and the answer reads `skip and start <step>`.
+For a failed `queued` or `started` hook the panel names the step the task starts on.
 
 | Key | What it does |
 |---|---|
-| `enter` on the answer | The same as `spoolway resume <task> --skip-hook`. The board prints nothing over itself. RECENT reads `skipped <event> hook, archived` or `skipped <event> hook, moved to <step>`. |
+| `enter` | The same as `spoolway resume <task> --skip-hook`. The board prints nothing over itself. RECENT reads `skipped <event> hook, archived` or `skipped <event> hook, moved to <step>`. |
 | `esc` | Close the panel and change nothing. The task stays on `hook_failed`. |
 
-When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the answer. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
+When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the key row. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
 
 ### Footer
 
@@ -893,6 +892,510 @@ The line names no file or key. Press `u` to load them; see
 [Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). A prompt edit adds no kind,
 because each lane reads its `PROMPT.md` when it starts. With nothing to load, neither board draws
 the line, and `[u] update config` is off the key line.
+
+## The overrides tab
+
+Bare `spoolway`'s tab strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES`, `EVAL`. The
+overrides tab sets keys in the private [overrides layer](configuration.md#the-overrides-layer)
+from the screen, so a change needs no `override` command per key. A home-mode project has no
+overrides tab: its whole setup already lives privately in its workspace, so there is no
+checked-in file to override. Its strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `EVAL`, and `→`
+from routines reaches eval.
+
+The tab has four sections, named in its list box's title. The open one is bracketed, the way the
+strip brackets the open tab. The tab always opens on config, and `tab` moves the brackets one
+section right, wrapping from active back to config. `←` and `→` still change tabs.
+
+```
+╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
+╭─ config   [pipeline]   prompts   active (2) ─────────────────────────────────╮
+╭─ config   pipeline   [prompts]   active (2) ─────────────────────────────────╮
+╭─ config   pipeline   prompts   [active (2)] ─────────────────────────────────╮
+```
+
+The count on active is the number of keys in the layer: every config key, every field of every
+patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
+The [active section](#the-active-section) lists those keys, deletes them, and promotes them onto
+a branch. On every section `w` opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
+
+### The config section
+
+The config section lists every key `spoolway config list` prints, grouped under its table. Each
+key shows the value in use now, which is the tracked `config.toml` with the layer merged onto it.
+A key with no value, such as `watch.dirs`, reads `not set`. `+ new key` at the top takes any
+dotted key the list does not show, such as a `[models]` glob the config has no entry for yet.
+
+```
+    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+
+╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
+│                                                                              │
+│   + new key                                                                  │
+│   agents.claude                                                              │
+│     concurrency                 5                                            │
+│     permission_mode             auto                                         │
+│   dispatch                                                                   │
+│ >   lane_quiet                  15m                                          │
+│     visible_lanes               3                                            │
+│   watch                                                                      │
+│     dirs                        not set                                      │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+```
+
+On `+ new key` the key line reads `[enter] new key` instead.
+
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Move the cursor over `+ new key` and the keys. Table headings are skipped. |
+| `enter` | Open the value field of the key under the cursor, or the `new key` popup on `+ new key`. |
+| `f` | Open the `search:` row at the top of the list. |
+| `o` | Open the options menu of the key under the cursor. |
+| `w` | Open the overrides folder. |
+| `tab` | Move to the next section. |
+
+The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set, or `+ new key`, shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
+
+While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
+typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
+every key with no value. `enter` keeps the results, and `esc` clears the search. A list taller than
+the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,
+such as `↑ 3 keys above · ↓ 6 keys below`.
+
+`enter` on a key opens its one-line field, filled with the value in use now. The `current` row shows
+that value, any override already in the layer included, or `not set`.
+
+```
+╭─ set dispatch.lane_quiet ────────────────────────╮
+│                                                  │
+│  value: 5m▏                                      │
+│                                                  │
+│  current   15m                                   │
+│                                                  │
+│  [enter] save   [esc] back                       │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` on `+ new key` opens the `new key` popup, with a key field and a value field. `tab` moves
+between the two, and the `▏` marks the field that takes what is typed. Its `current` row reads
+the typed key's value in the list, or `not set` for a key the list does not show.
+
+```
+╭─ new key ────────────────────────────────────────╮
+│                                                  │
+│  key:     models.qwen3-coder.input               │
+│  value:   0.4▏                                   │
+│                                                  │
+│  current   not set                               │
+│                                                  │
+│  [tab] next field   [enter] save   [esc] back    │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` in either popup writes the key to the layer's `config.toml`, exactly as typed, and the
+list shows the new value. Text that reads as a TOML number, boolean or array is written as one,
+and anything else is written as a string: `5`, `true` and `["a", "b"]` keep their type, and
+`5m`, `010` and `group first` are written as strings. `enter` on an empty field, or a popup with
+an empty key, writes nothing. `esc` closes either popup with nothing written.
+
+When the tracked `config.toml` or `overrides/config.toml` stops loading while the screen is open,
+the list keeps the config the screen started with. A note at the top of the box names the file
+that failed and the first line of its error, and gives the command to fix it: `spoolway config
+edit` for the tracked file, `spoolway config override` for the layer. The note stays in view
+while the list scrolls and goes once the file loads again.
+
+The tab does not check the key or the value. A value the config cannot hold, or a key this
+spoolway does not know, is still written, and `spoolway override list` reports it as ignored
+with the reason. A write that fails, such as on a layer file that does not parse, opens a
+`not written` popup naming the key and the error, closed by `enter`.
+
+### The pipeline section
+
+The pipeline section sets one step field on many pipeline steps at once. It lists step fields,
+not pipelines, under two headers: the fields agent steps take, and the fields command steps take.
+A field goes only on the kind of step listed above it, because the merge refuses anything else.
+Each row says how many steps in how many pipelines take the field, and how many of them the layer
+already overrides it on. Only the pipelines in the repo's `.spoolway/` count. The `blocked` step
+is left out, because every pipeline takes it from `[unattended]` in config.
+
+```
+╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
+│                                                                              │
+│   agent steps                                                                │
+│ >   model                58 steps in 10 pipelines                            │
+│     effort               58 steps in 10 pipelines                            │
+│     agent                58 steps in 10 pipelines                            │
+│     prompt               58 steps in 10 pipelines                            │
+│     session              58 steps in 10 pipelines                            │
+│     skills               58 steps in 10 pipelines                            │
+│   command steps                                                              │
+│     run                  16 steps in  9 pipelines                            │
+│     timeout              16 steps in  9 pipelines      1 overridden          │
+│     hide                 16 steps in  9 pipelines                            │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+```
+
+`↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
+`w` opens the overrides folder.
+`o` opens the options menu of the field under the cursor. It offers `delete override` when a pipeline patch sets the field. That removes the field from every step of every patch that sets it, after one confirm popup that names each file and key. A patch left with no keys leaves the layer.
+`enter` on a field opens its step selection. It lists every pipeline with a step that takes the
+field, each closed to one row with its step count. An open pipeline lists those steps under it,
+each with the value in use now: the tracked step with the layer merged onto it. A step that leaves
+the field out, or leaves it blank, reads `not set`. Pipelines whose steps the layer already
+overrides the field on start open, with those steps selected.
+
+```
+╭─ select steps for model ─────────────────────────────────────────────────────╮
+│ search: sonnet                                                               │
+│                                                                              │
+│   [ ] bugfix                                           7 steps               │
+│ > [x] impl                                             4 of 6 selected       │
+│         [x] implement            claude-sonnet-5-5                           │
+│         [x] fix-spec-review      claude-sonnet-5-5                           │
+│         [x] fix-code-review      claude-sonnet-5-5                           │
+│         [ ] e2e                  claude-sonnet-5-5                           │
+│         [ ] screenshots          claude-sonnet-5-5                           │
+│         [x] document             claude-sonnet-5-5                           │
+│   [ ] impl_lite                                        5 steps               │
+│   ↓ 2 pipelines below                                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [space] select   [a] all   [enter] set value   [esc] back
+```
+
+| Key | What it does |
+|---|---|
+| `space` | On a pipeline, open it and select every step listed under it, or, when one of its steps is selected, close it and clear them all. On a step, select or unselect it. |
+| `a` | Open every listed pipeline and select every listed step. Pressed again once they all are, clear the selection. |
+| `f` | Open the `search:` row. |
+| `enter` | Open the value field. With no step selected it does nothing. |
+| `esc` | Go back to the field list. |
+
+The search matches pipeline names, step ids and the values shown, `not set` included, so `not
+set` finds every step that leaves the field out. A pipeline whose name matches lists all its
+steps, and any other lists only the steps that match. `space` and `a` select only the steps the
+search leaves. After `enter` leaves the search, the `search:` row stays at the top of the list
+while the search narrows it.
+
+`enter` opens the value field over the selection. It is filled with the value the selected steps
+share, and empty when they differ. The `current` row shows the shared value, `not set`, or
+`varies`. Under it, each pipeline names its selected steps.
+
+```
+╭─ set model on 11 steps ──────────────────────────╮
+│                                                  │
+│  value: claude-opus-5-5▏                         │
+│                                                  │
+│  current   claude-sonnet-5-5                     │
+│  bugfix    reproduce, fix, fix-spec-review,      │
+│            fix-code-review, reproduce-again,     │
+│            fix-gate, document                    │
+│  impl      implement, fix-spec-review,           │
+│            fix-code-review, document             │
+│                                                  │
+│  [enter] save   [esc] back                       │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` writes the value into the patch of every pipeline with a selected step, under
+`overrides/pipelines/<name>.yml`, the same patch `spoolway pipeline override --set` writes. The
+value is written as the YAML it reads as: `true` is a boolean, and `claude-opus-5-5` and `5m` are
+strings. A field the patch already sets on another step, or another field on the same step, is
+kept. Every patch is built before any file is written, so a patch that does not parse, or a value
+that is not YAML, writes nothing at all and opens a `not written` popup with the reason. A file
+that fails to write after others were written leaves those written, and opens a `written in part`
+popup naming the pipelines that took the value and those that did not. `enter` closes either
+popup onto the selection. `enter` on an empty field, or `esc`, goes back to the selection
+with nothing written. A popup naming more pipelines than the screen has rows for ends on a line
+such as `and 2 more pipelines`.
+
+A write that goes through opens a popup with the field, how many steps in how many pipelines it
+was written to, and the value it replaced. `enter` closes it onto the field list.
+
+```
+╭─ overrides written ──────────────────────────────╮
+│                                                  │
+│  model on 11 steps in 2 pipelines                │
+│    claude-sonnet-5-5 → claude-opus-5-5           │
+│                                                  │
+│  [enter] close                                   │
+╰──────────────────────────────────────────────────╯
+```
+
+Like the config section, the tab does not check the value. A value the merge cannot use is still
+written, and `spoolway override list` reports it as ignored with the reason. When a patch stops
+parsing while the screen is open, a note at the top of the box names it and the command that
+drops it, `spoolway override drop <pipeline>`. That pipeline's steps then show their tracked
+values.
+
+### The prompts section
+
+The prompts section lists every prompt in the repo's `.spoolway/prompts/`, by name. A prompt the
+layer already holds a copy of reads `overridden`.
+
+```
+╭─ config   pipeline   [prompts]   active (2) ─────────────────────────────────╮
+│                                                                              │
+│   archivist                                                                  │
+│   code-reviewer                   overridden                                 │
+│   create-pr                                                                  │
+│ > implementer                                                                │
+│   prober                                                                     │
+│   reproducer                                                                 │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [enter] override   [f] search   [w] open workspace   [tab] section   [q] quit
+```
+
+`↑` and `↓` move the cursor. `f` opens a `search:` row that narrows the list to the prompts whose
+name holds what is typed, and `overridden` finds the prompts the layer holds.
+
+A prompt override replaces the whole `PROMPT.md`, so the tab has no field for it and starts no
+editor. `enter` on a prompt the layer does not hold writes its copy to
+`overrides/prompts/<name>/PROMPT.md`, the same copy `spoolway prompt override <name>` writes, and
+a popup says where it is. `enter` on a prompt the layer already holds writes nothing, so a copy
+you have edited is kept, and the popup says so.
+
+```
+╭─ prompt override ────────────────────────────────╮
+│                                                  │
+│  wrote overrides/prompts/implementer/PROMPT.md   │
+│                                                  │
+│  [enter] close   [w] open workspace              │
+╰──────────────────────────────────────────────────╯
+
+╭─ prompt override ────────────────────────────────╮
+│                                                  │
+│  overrides/prompts/code-reviewer/PROMPT.md       │
+│  already exists, nothing written                 │
+│                                                  │
+│  [enter] close   [w] open workspace              │
+╰──────────────────────────────────────────────────╯
+```
+
+`enter` closes either popup onto the list, and `w` closes it and opens the overrides folder, where
+the copy is edited by hand. A copy that cannot be written opens a `not written` popup naming the
+prompt and the error, closed by `enter`.
+
+### The active section
+
+The active section lists every file in the layer, `config.toml` first, then the pipeline patches,
+then the prompt copies. Each file's keys are listed under it. A key shows the setup's value, then
+the layer's, as the layer spells it. The setup is the tracked files in the main checkout, the
+ones the dispatcher reads. A worktree's own copy of them never changes what a row says. A prompt
+copy replaces the whole file, so its row reads `whole file`.
+
+```
+    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+
+╭─ config   pipeline   prompts   [active (7)] ─────────────────────────────────╮
+│                                                                              │
+│   [ ] config.toml                                                            │
+│         [ ] dispatch.lane_quiet      15m → 5m                                │
+│   [ ] pipelines/bugfix.yml                                                   │
+│         [ ] fix.model                claude-sonnet-5-5 → claude-opus-5-5     │
+│         [ ] reproduce.model          claude-sonnet-5-5 → claude-opus-5-5     │
+│   [x] pipelines/impl.yml                                                     │
+│         [x] document.model           claude-sonnet-5-5 → claude-opus-5-5     │
+│         [x] implement.model          claude-sonnet-5-5 → claude-opus-5-5     │
+│ > [x] pipelines/impl_fast.yml                                                │
+│         [x] test.timeout             45m → 90m                               │
+│   [ ] prompts/code-reviewer          whole file                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ [space] select   [a] all   [o] options   [w] open workspace   [tab] section   [q] quit
+```
+
+A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints, and
+the row under it says what to do. A whole file the merge leaves out, such as a patch on a
+pipeline the checkout no longer has, carries the reason on its own row. A file that does not read
+says so on its row, lists no keys, and can still be deleted as a whole.
+
+```
+│   [ ] config.toml                                                            │
+│         [ ] dispatch.visible_lanes   ignored — setting                       │
+│                                      `dispatch.visible_lanes` to `three`     │
+│                                      produces an invalid config: …           │
+│                                      [enter] to set it again, or o to delete │
+```
+
+A key whose value the setup already holds reads `matches the setup — o to delete`. It does
+nothing, and this is how a [promoted](configuration.md#the-overrides-layer) entry shows that its
+branch has merged: a promote keeps its entries in the layer until you delete them.
+
+```
+│   [ ] pipelines/bugfix.yml                                                   │
+│         [ ] fix.model                matches the setup — o to delete         │
+│         [ ] reproduce.model          matches the setup — o to delete         │
+```
+
+| Key | What it does |
+|---|---|
+| `↑` `↓` | Move the cursor over the files and keys. |
+| `space` | Select the row under the cursor, or clear it. A file selects every key under it. |
+| `a` | Select every file and key. A second `a` clears the selection. |
+| `o` | Open the menu: `promote selected`, `delete selected` and `delete all overrides`. |
+| `enter` | On a key, open its value field to set it again. |
+| `w` | Open the overrides folder. |
+| `tab` | Move to the next section. |
+
+The menu's title says how many keys are selected. With nothing selected, `promote selected` and
+`delete selected` act on the row under the cursor, and the menu is titled with that row's name.
+`promote selected` comes first, and only when every selected key belongs to a fully selected file:
+a promote writes whole files, so on part of a file it would write keys you did not select.
+
+```
+╭─ 3 selected ─────────────────────────╮
+│                                      │
+│  > promote selected                  │
+│    delete selected                   │
+│    delete all overrides              │
+│                                      │
+│  [enter] confirm   [esc] close       │
+╰──────────────────────────────────────╯
+```
+
+Either delete opens one confirm popup that names every file and key it deletes. `enter` deletes
+them and `esc` closes the popup with nothing deleted.
+
+```
+╭─ delete these overrides ─────────────────────────╮
+│                                                  │
+│  3 keys in 2 files                               │
+│                                                  │
+│  pipelines/impl.yml        document.model        │
+│                            implement.model       │
+│  pipelines/impl_fast.yml   test.timeout          │
+│                                                  │
+│  [enter] confirm   [esc] close                   │
+╰──────────────────────────────────────────────────╯
+```
+
+`delete selected` removes the selected keys from each file with one write, and a file left with
+no keys leaves the layer. A selected prompt copy goes as a whole. `delete all overrides` removes
+every file the list shows. A delete that fails on one file stops there. The files before it are
+already changed, so a `deleted in part` popup names them and the files left as they were. A
+delete that fails on its first file opens a `not deleted` popup instead. `enter` closes either.
+
+`enter` on a config key opens the same value field the config section opens. `enter` on a
+pipeline key opens a `set <key> in <pipeline>` field, filled with the value in use now, and
+writes what is typed into that one key, read as YAML the way `spoolway pipeline override --set`
+reads it. `enter` on an empty field writes nothing, and `esc` closes the field.
+
+#### Promoting from the tab
+
+`promote selected` writes the selected files into the tracked setup of a branch you pick, as
+`spoolway override promote` does in that branch's checkout. It opens a branch picker first. The
+picker lists local branches and `origin`'s in one list, sorted by name. A branch only `origin`
+has carries `origin`. Task branches are left out, and the default branch stays. The remote
+branches are the ones the last `git fetch` saw, since the tab fetches nothing. `f` searches the
+list, and `esc` closes the picker.
+
+```
+╭─ promote pipelines/bugfix.yml to ────────────────────────╮
+│  search: ▏                                               │
+│                                                          │
+│    ↑ 10 branches above                                   │
+│  > feature/config-update                                 │
+│    feature/github-issues                                 │
+│    fix/rehearsal-skips-homebrew                          │
+│    fix/release-verify-npm-lag                            │
+│    main                                                  │
+│    release-fix/release-spoolway-3                        │
+│    release-fix/v0.14.0-macos                   origin    │
+│    ↓ 4 branches below                                    │
+│                                                          │
+│  [enter] pick   [f] search   [esc] close                 │
+╰──────────────────────────────────────────────────────────╯
+```
+
+`enter` on a branch opens a confirm popup. It names the folder written, the branch, each file and
+each key with the value written, and says the change is not committed. A branch already checked
+out somewhere, in the main checkout or a worktree, is written in that checkout. Any other branch
+first gets a worktree beside the main checkout, at `<parent of the checkout>/<checkout
+name>-<branch>`, each `/` in the branch written as `-`. A branch only `origin` has gets a local
+branch tracking `origin`'s there.
+
+```
+╭─ promote pipelines/bugfix.yml ───────────────────────────╮
+│                                                          │
+│  makes a worktree for feature/config-update at           │
+│    ~/dev/project/spoolway-feature-config-update          │
+│  and writes .spoolway/pipelines/bugfix.yml there,        │
+│  not committed                                           │
+│                                                          │
+│    fix.model               claude-opus-5-5               │
+│    reproduce.model         claude-opus-5-5               │
+│                                                          │
+│  the overrides stay in the layer until you delete them   │
+│                                                          │
+│  [enter] confirm   [esc] close                           │
+╰──────────────────────────────────────────────────────────╯
+```
+
+`enter` makes the worktree when one is needed, then writes the files, and a `promoted` popup says
+where. Nothing is committed: commit the change on that branch and open a pull request for it. The
+layer keeps every promoted entry, so dispatch keeps the new values until the branch merges. Each
+entry then reads `matches the setup`, and you can delete it.
+
+Nothing is written when the worktree cannot be made, such as when a folder is already in its
+place. A `not promoted` popup then gives git's error and the path. A checkout that `spoolway
+override promote` would refuse is refused here in the same words: a lane's worktree, one on a
+detached HEAD, or a branch with no `.spoolway/` of its own. A branch with no `.spoolway/` is
+refused before any worktree is made.
+
+Nothing is written, either, when the checkout no longer has the branch out by the time you press
+`enter`, such as after a `git switch` there. The popup names the branch it has out now. A
+worktree whose folder was deleted is still listed by git until it is pruned. Picking its branch
+says so and asks you to run `git worktree prune` and promote again. A worktree inside the main
+checkout's folder is refused too, since spoolway reads it as the main checkout. The popup names
+the `git worktree move` that puts it beside the main checkout instead.
+
+A project in home mode keeps its setup in its workspace, which no branch carries. `promote
+selected` refuses there before the picker opens, and names the `spoolway override promote`
+command for each file, which writes the workspace's setup.
+
+### Opening the overrides folder
+
+`w` on every section, and in both prompt popups, opens the overrides folder: the one on the
+`overrides:` line of `spoolway config path`. A project that has overridden nothing has no such
+folder, so `w` creates it empty first. An empty folder still reads as no overrides, to `spoolway
+override list` and to the dispatch tab alike.
+
+The folder opens in the file manager. macOS runs `open`, which opens it in Finder. WSL runs
+`explorer.exe`. Other Linux runs `xdg-open`, and only when `DISPLAY` or `WAYLAND_DISPLAY` is set,
+since with no display it cannot show anything.
+
+When none of these can start and the board runs inside herdr, a shell pane splits beside the
+board's own pane, starts in the folder and takes focus.
+
+```
+╭─ config  pipeline  [prompts]  active (2) ───╮ │ $ pwd
+│                                             │ │ /home/marvin/.spoolway/
+│   archivist                                 │ │ spoolway-1axtn7/overrides
+│   create-pr                                 │ │ $ ls
+│ > implementer                               │ │ prompts
+│                                             │ │ $ ▏
+╰─────────────────────────────────────────────╯ │
+ [enter] override   [f] search   …              │
+```
+
+Outside herdr, the `open workspace` popup says why the folder could not be opened and gives its
+path, for you to open yourself. `enter` closes it.
+
+```
+╭─ open workspace ─────────────────────────────────────────╮
+│                                                          │
+│  w: could not open the overrides folder: no display is   │
+│  set, and the board is not running inside herdr.         │
+│  open this folder yourself:                              │
+│  /home/marvin/.spoolway/spoolway-1axtn7/overrides        │
+│                                                          │
+│  [enter] close                                           │
+╰──────────────────────────────────────────────────────────╯
+```
 
 ## Editing a pipeline while it runs
 

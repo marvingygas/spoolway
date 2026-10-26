@@ -462,6 +462,18 @@ pub trait Mux: Sync {
         self.split_pane(tab_id, cwd)
     }
 
+    /// A shell pane split off `pane_id` in `tab_id`, started in `cwd` and
+    /// given focus, for a person to work in: the overrides tab's `w`, when no
+    /// file manager can open the overrides folder. The pane is picked the way
+    /// [`Mux::split_beside`] picks it, so it lands beside the pane named here
+    /// and never beside whichever pane happens to be focused.
+    ///
+    /// The default refuses: a backend gets this only by implementing it, and
+    /// headless has no pane for a person to look at.
+    fn split_beside_focused(&self, _tab_id: &str, _pane_id: &str, _cwd: &Path) -> Result<String> {
+        bail!("the {} backend has no pane to open a shell in", self.name())
+    }
+
     /// Run a shell script in a fresh pane of `tab_id`, labelled for a person,
     /// and answer the pane it landed in. `None` from a backend with no pane
     /// to run it in — headless — which is the caller's signal to fall back to
@@ -1317,14 +1329,18 @@ impl Herdr {
 
     /// Split `target` along its direction and answer the pane that appeared,
     /// confirmed against `before` — the tab's panes as `pane list` named them
-    /// just ahead of the split. Shared by [`Mux::split_pane`] and
-    /// [`Mux::split_beside`], which differ only in which pane they pick.
+    /// just ahead of the split. Shared by [`Mux::split_pane`],
+    /// [`Mux::split_beside`] and [`Mux::split_beside_focused`], which differ
+    /// only in which pane they pick and whether the new one takes focus. A
+    /// lane's pane never does: it would pull a person away from whatever
+    /// they were looking at each time a step starts.
     fn split_at(
         &self,
         tab_id: &str,
         cwd: &Path,
         target: SplitTarget,
         before: HashSet<String>,
+        focus: bool,
     ) -> Result<String> {
         let path = cwd.display().to_string();
         // `--pane`, never the positional `pane split <id>`: the positional form
@@ -1339,7 +1355,7 @@ impl Herdr {
             target.direction,
             "--cwd",
             &path,
-            "--no-focus",
+            if focus { "--focus" } else { "--no-focus" },
         ])?;
         let reported = created.pane.pane_id;
         // Read back from `pane list` rather than trusted outright: a `.pane`
@@ -2196,12 +2212,17 @@ impl Mux for Herdr {
 
     fn split_pane(&self, tab_id: &str, cwd: &Path) -> Result<String> {
         let (target, before) = self.pane_to_split(tab_id)?;
-        self.split_at(tab_id, cwd, target, before)
+        self.split_at(tab_id, cwd, target, before, false)
     }
 
     fn split_beside(&self, tab_id: &str, pane_id: &str, cwd: &Path) -> Result<String> {
         let (target, before) = self.pane_to_split_beside(tab_id, pane_id)?;
-        self.split_at(tab_id, cwd, target, before)
+        self.split_at(tab_id, cwd, target, before, false)
+    }
+
+    fn split_beside_focused(&self, tab_id: &str, pane_id: &str, cwd: &Path) -> Result<String> {
+        let (target, before) = self.pane_to_split_beside(tab_id, pane_id)?;
+        self.split_at(tab_id, cwd, target, before, true)
     }
 
     fn run_in_pane(

@@ -51,8 +51,9 @@ say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt
 
 ### `spoolway`
 
-At a terminal, with no other command typed, opens one screen: four tabs, dispatch, queue,
-routines and eval, in that order. It opens on the queue tab.
+At a terminal, with no other command typed, opens one screen: five tabs, dispatch, queue,
+routines, overrides and eval, in that order. It opens on the queue tab. A home-mode project has no
+overrides tab. See [the overrides tab](dispatcher.md#the-overrides-tab).
 
 ```
 spoolway
@@ -199,7 +200,7 @@ board's branch.
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
 | `o` | Open the options menu of the row the focused pane highlights, titled with its name |
-| `f` | Filter groups by name, task id and title. `enter` keeps the filter, `esc` clears it |
+| `f` | Search groups by name, task id and title. The footer reads `[enter] leave search   [esc] cancel` while you type. `enter` keeps the search, `esc` clears it |
 | `h` | Show or hide done groups. A queued group never appears |
 
 The options menu follows focus. Over the tasks pane it offers these items for the highlighted
@@ -255,8 +256,8 @@ or `start the dispatcher to begin working`. `enter` closes the popup back to the
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements and runs its `# spoolway-login:` command. A requirement this machine does not meet,
-or a login command that fails, draws a gate naming what is unmet, with
-one answer: `enter` on `queue anyway, without issue tracking` queues the group with `tracking:
+or a login command that fails, draws a gate naming what is unmet. It ends on
+`enter queues it without issue tracking.` and `[enter] confirm   [esc] close`. `enter` queues the group with `tracking:
 off` written onto every task, and `esc` returns to the queue screen with nothing queued. A task queued with `tracking: off` fires no
 `[issue_tracking]` hook event and is never held waiting on one. See [the shipped hook
 scripts](configuration.md#the-shipped-hook-scripts).
@@ -1660,10 +1661,23 @@ and the workspace list. That list is what `spoolway init --workspace <name>` nee
 
 See [Configuration](configuration.md).
 
-### `spoolway config override`
+### `spoolway config override [--set <key>=<value>]`
 
 Open `overrides/config.toml` in `$VISUAL`, else `$EDITOR`, else `vim`, creating it if needed. See the [overrides
 layer](configuration.md#the-overrides-layer).
+
+With `--set`, write one key into the file and open no editor. The value is checked the way
+[`config set`](#spoolway-config) checks it, and nothing is written if the check fails. The other
+keys and comments in the file stay as they were.
+
+```
+$ spoolway config override --set dispatch.lane_quiet=5m
+
+  wrote ~/.spoolway/spoolway/overrides/config.toml
+    dispatch.lane_quiet   15m -> 5m
+
+  a running dispatcher uses it on its next pass. `spoolway override drop config.toml dispatch.lane_quiet` to clear it.
+```
 
 Refused in a dispatcher lane's worktree. See [Commands in a lane](configuration.md#commands-in-a-lane).
 
@@ -1694,15 +1708,17 @@ and why. `--json` carries the same list under `ignored`.
 | Subcommand | What it does |
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
-| `promote <target>` | Write the patched values into the tracked file and clear the entry. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
+| `promote <target>` | Write the patched values into the tracked file and keep the entry in the layer. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
 | `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse. Refused in a dispatcher lane's worktree |
+| `drop <target> <key>` | Remove one key from the target's patch and print `cleared <key> from <file>`. The key is written the way `list` prints it: `<step>.<key>`, `description` or `task_template` for a pipeline, a dotted key for `config.toml`. A file left with no key is removed from the layer. Refused on a prompt, because a prompt override has no keys. Refused in a dispatcher lane's worktree |
 
 A target is a bare pipeline name, or the form `list` prints: `pipelines/<name>.yml`,
 `prompts/<name>`, `config.toml`.
 
-In a worktree of your own, `promote` leaves the main checkout's files as they are and clears
-the entry from the layer, which belongs to the whole project. The command prints this line, with
-the worktree's branch:
+`promote` keeps the entry in the layer, so the dispatcher keeps using the new values until the
+branch that carries the promote has merged. Run `drop` on the entry afterwards. In a worktree of
+your own, `promote` leaves the main checkout's files as they are. The command prints this line,
+with the worktree's branch:
 
 ```
   the main checkout keeps its own copy until feature/limits merges
@@ -1719,7 +1735,7 @@ $ spoolway override promote impl && git diff --stat
   wrote .spoolway/pipelines/impl.yml
     implement.model   claude-opus-5
     test.timeout      90m
-  cleared pipelines/impl.yml from the layer
+  kept pipelines/impl.yml in the layer until you drop it
 
  .spoolway/pipelines/impl.yml | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)

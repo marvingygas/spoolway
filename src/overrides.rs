@@ -17,11 +17,12 @@
 //! `spoolway pipeline override`, `prompt override` and `config override`
 //! write into this layer, `spoolway override list` reads it back out, and
 //! `override promote`/`override drop` are the other side of the merge above:
-//! promoting edits the tracked file in place — a line edit, never a
+//! `drop` removes an entry, or one key of it, and promoting leaves the entry
+//! where it is. Promoting edits the tracked file in place — a line edit, never a
 //! re-serialisation, see [`promote_pipeline_patch`] — rather than trusting a
 //! YAML writer with a file half of it doesn't own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -778,7 +779,9 @@ pub(crate) fn warnings_ack_write(home: &Path, fingerprint: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // The write side: `pipeline override`, `prompt override` and `config
 // override` create or update an entry; `override list` reads every entry
-// back; `override promote` and `override drop` are the two ways one leaves.
+// back; `override drop` is how one leaves. `override promote` copies an entry
+// into the tracked files and leaves it in place, so the dispatcher keeps the
+// new values until the branch carrying the promote has merged.
 // Everything above this line only ever reads the layer to merge it onto a
 // loaded pipeline or config — nothing above needs any of what follows, and
 // nothing below reaches back into the merge itself.
@@ -892,11 +895,17 @@ pub(crate) fn list_prompt_overrides(overrides: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Whether `overrides/config.toml` sets `key`, spelled as the config spells
-/// it today: a layer holding the retired `dispatch.keep_finished_lanes` sets
-/// `dispatch.visible_lanes`, since that is the key [`apply_config_table`]
-/// applies it as. `false` when there is no patch.
-pub(crate) fn config_patch_sets(overrides: &Path, key: &str) -> Result<bool> {
+/// Every leaf of `overrides/config.toml` that sets `key`, spelled as the file
+/// and `override list` hold it, in the order the file is walked. Empty when no
+/// leaf does.
+///
+/// `key` is read as the config spells it today. A layer holding the retired
+/// `dispatch.keep_finished_lanes` sets `dispatch.visible_lanes`, since that is
+/// the key [`apply_config_table`] applies it as, and the leaf returned is the
+/// retired spelling. `override drop config.toml <leaf>` takes that spelling.
+/// A layer can hold the retired leaf and the current one together, so there
+/// can be two: the value is only freed of the layer once every one is dropped.
+pub(crate) fn config_patch_leaves_for(overrides: &Path, key: &str) -> Result<Vec<String>> {
     // A quoted model glob, `models."x".input`, is the key `models.x.input`
     // that `current_spelling` names a layer's leaf by.
     let key = crate::confkv::split_models_key(key)
@@ -905,7 +914,7 @@ pub(crate) fn config_patch_sets(overrides: &Path, key: &str) -> Result<bool> {
     let path = config_patch_path(overrides);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let parsed: toml::Value =
@@ -913,15 +922,17 @@ pub(crate) fn config_patch_sets(overrides: &Path, key: &str) -> Result<bool> {
     let toml::Value::Table(table) = parsed else {
         bail!("{} must be a table of settings", path.display());
     };
-    let mut sets = false;
+    let mut found = Vec::new();
     collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
         let spelled = match input {
             Ok(input) => current_spelling(leaf, input).0,
             Err(_) => leaf.to_string(),
         };
-        sets |= spelled == key;
+        if spelled == key {
+            found.push(leaf.to_string());
+        }
     });
-    Ok(sets)
+    Ok(found)
 }
 
 /// The dotted leaf keys `overrides/config.toml` carries, sorted — `None`
@@ -964,8 +975,8 @@ fn collect_leaf_keys(table: &toml::value::Table, prefix: &mut String, keys: &mut
 }
 
 /// Remove `dir` if it holds nothing, then its parent if that too is now
-/// empty, stopping at `overrides` itself — `override drop` and `override
-/// promote` must leave `~/.spoolway/<project>/` and everything above the
+/// empty, stopping at `overrides` itself — `override drop`, for a whole entry
+/// or the last key of one, must leave `~/.spoolway/<project>/` and everything above the
 /// layer alone even when the layer itself is now empty; `queue/`, `archive/`
 /// and the rest of that directory are not this module's to tidy.
 fn remove_empty_dirs_up_to(overrides: &Path, mut dir: PathBuf) -> Result<()> {
@@ -1027,13 +1038,201 @@ pub(crate) fn remove_config_patch(overrides: &Path) -> Result<()> {
     remove_empty_dirs_up_to(overrides, overrides.to_path_buf())
 }
 
+/// `input` as the TOML value the layer should hold: a number, boolean or
+/// array when it reads as one, and the text as typed otherwise. A quoted
+/// string stays quoted text, so what a person typed is what the file holds.
+pub(crate) fn typed_config_value(input: &str) -> toml::Value {
+    // A comment after the value is not part of it, but it is part of what was
+    // typed, so a value with one stays text instead of being cut at the `#`.
+    // As a bare value `3 # three lanes` does not parse, which is what tells
+    // it apart from the document `v = 3 # three lanes` that does.
+    let parsed = input
+        .parse::<toml_edit::Value>()
+        .ok()
+        .and_then(|_| toml::from_str::<toml::Table>(&format!("v = {input}")).ok())
+        .and_then(|mut table| table.remove("v"));
+    match parsed {
+        Some(
+            value @ (toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Array(_)),
+        ) => value,
+        _ => toml::Value::String(input.to_string()),
+    }
+}
+
+/// Write `key` into `overrides/config.toml`, creating the file when there is
+/// none, and keep every other key and comment in it where it was.
+///
+/// This checks nothing: a key the config does not know, or a value it cannot
+/// hold, is written as given and `override list` then reports it as ignored.
+/// The checks belong to the caller that wants them, `config override --set`.
+/// `template` is the rendered config, which decides where a new key sits.
+pub(crate) fn set_config_patch_key(
+    overrides: &Path,
+    key: &str,
+    input: &str,
+    template: &str,
+) -> Result<()> {
+    let path = config_patch_path(overrides);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => CONFIG_PATCH_HEADER.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let parts = crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
+    let edited = crate::confdoc::set(&text, &parts, &typed_config_value(input), template)
+        .with_context(|| format!("editing {}", path.display()))?;
+    crate::task::write_atomic(&path, edited).with_context(|| format!("writing {}", path.display()))
+}
+
+/// What `spoolway config override` writes into a file it creates.
+pub(crate) const CONFIG_PATCH_HEADER: &str = "# Every key here overrides the same key in .spoolway/config.toml.\n\
+     # `spoolway override promote config.toml` writes these into the tracked file.\n";
+
+/// Remove every one of `keys` from `overrides/config.toml` in one step,
+/// leaving the others, so a process stopped partway leaves either every key
+/// or none. A key the file does not set refuses the whole call before
+/// anything is written. When no key is left the file is removed, with the
+/// empty folders above it, and never written first: a file holding only
+/// comments would still list as an override.
+pub(crate) fn remove_config_patch_keys(overrides: &Path, keys: &[String]) -> Result<()> {
+    match config_patch_after_removing(overrides, keys)? {
+        Some(text) => {
+            let path = config_patch_path(overrides);
+            crate::task::write_atomic(&path, &text)
+                .with_context(|| format!("writing {}", path.display()))
+        }
+        None => remove_config_patch(overrides),
+    }
+}
+
+/// The text of `overrides/config.toml` with `keys` taken out, or `None`
+/// when that leaves no key, for [`remove_config_patch_keys`] to remove the
+/// file instead of writing it. Refuses a key the file does not set.
+fn config_patch_after_removing(overrides: &Path, keys: &[String]) -> Result<Option<String>> {
+    // Held against the leaves exactly as `override list` prints them, which is
+    // the spelling the file holds. `config_patch_leaves_for` takes the spelling a
+    // leaf is applied as, and would refuse a retired key the list shows.
+    let held = config_patch_keys(overrides)?.unwrap_or_default();
+    let mut paths = Vec::new();
+    for key in keys {
+        let parts =
+            crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
+        if !held.contains(&parts.join(".")) {
+            bail!("`config.toml` in the layer does not set `{key}`");
+        }
+        paths.push(parts);
+    }
+    let dropped: BTreeSet<String> = paths.iter().map(|parts| parts.join(".")).collect();
+    if held.iter().all(|key| dropped.contains(key)) {
+        return Ok(None);
+    }
+    let path = config_patch_path(overrides);
+    let mut text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    for parts in &paths {
+        text = crate::confdoc::remove(&text, parts)?;
+    }
+    Ok(Some(text))
+}
+
+/// Each leaf of `overrides/config.toml`, spelled as the file and `override
+/// list` hold it, with the key it is applied as and the text
+/// [`crate::confkv::set`] is given for it — `None` when there is no patch.
+/// A leaf whose value cannot be set as text is left out: the merge ignores
+/// it, and `override list` says why.
+///
+/// For the OVERRIDES tab, which shows each key's value beside the setup's
+/// and says when the two are the same.
+pub(crate) fn config_patch_inputs(overrides: &Path) -> Result<Option<Vec<ConfigLeaf>>> {
+    let path = config_patch_path(overrides);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let toml::Value::Table(table) = parsed else {
+        bail!("{} must be a table of settings", path.display());
+    };
+    let mut leaves = Vec::new();
+    collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
+        if let Ok(input) = input {
+            let (applies_as, input) = current_spelling(leaf, input);
+            leaves.push(ConfigLeaf {
+                key: leaf.to_string(),
+                applies_as,
+                input,
+            });
+        }
+    });
+    Ok(Some(leaves))
+}
+
+/// One leaf of `overrides/config.toml` — see [`config_patch_inputs`].
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigLeaf {
+    /// The dotted key as the file spells it.
+    pub(crate) key: String,
+    /// The key the merge applies it as: `key` itself, but for a retired
+    /// spelling the merge still reads.
+    pub(crate) applies_as: String,
+    /// The value as the text `config set` would be given.
+    pub(crate) input: String,
+}
+
+/// Remove every one of `keys` from a pipeline's patch in one step, so a
+/// process stopped partway leaves either every key or none. Each is
+/// `<step>.<key>`, or `description` or `task_template`, the forms `override
+/// list` prints. A key the patch does not set refuses the whole call before
+/// anything is written. A step left with no key goes, and the file is
+/// removed, not written, when nothing is left in it.
+pub(crate) fn remove_pipeline_patch_keys(
+    overrides: &Path,
+    name: &str,
+    keys: &[String],
+) -> Result<()> {
+    let mut patch = read_pipeline_patch(overrides, name)?
+        .with_context(|| format!("no override for pipeline `{name}`"))?;
+    for step_key in keys {
+        let removed = match step_key.split_once('.') {
+            Some((step_id, key)) => {
+                let removed = patch
+                    .steps
+                    .get_mut(step_id)
+                    .is_some_and(|f| f.remove(key).is_some());
+                if patch.steps.get(step_id).is_some_and(|f| f.is_empty()) {
+                    patch.steps.remove(step_id);
+                }
+                removed
+            }
+            None if step_key == "description" => patch.description.take().is_some(),
+            None if step_key == "task_template" => patch.task_template.take().is_some(),
+            None => {
+                bail!("`{step_key}` — expected `<step>.<key>`, `description` or `task_template`")
+            }
+        };
+        if !removed {
+            bail!("the override for pipeline `{name}` does not set `{step_key}`");
+        }
+    }
+    if patch.steps.is_empty() && patch.description.is_none() && patch.task_template.is_none() {
+        return remove_pipeline_patch(overrides, name);
+    }
+    write_pipeline_patch(overrides, name, &patch)
+}
+
 /// `value`, rendered the way it would sit after a YAML `key: `, trimmed of
 /// the trailing newline `serde_norway` always writes — for the display of a
 /// step field's current value, and for the line [`promote_pipeline_patch`]
-/// writes into the tracked file. Refuses a nested value outright: a patch's
+/// writes into the tracked file, and for the OVERRIDES tab's active section
+/// to show a patch's value. Refuses a nested value outright: a patch's
 /// values are scalars, by the same rule [`apply_step_patch`] leans on, so
 /// there is never a mapping or a sequence here to render as one line.
-fn render_scalar(value: &serde_norway::Value) -> Result<String> {
+pub(crate) fn render_scalar(value: &serde_norway::Value) -> Result<String> {
     if matches!(
         value,
         serde_norway::Value::Mapping(_) | serde_norway::Value::Sequence(_)
@@ -1836,6 +2035,81 @@ agent: pi
         assert!(!overrides.is_dir());
     }
 
+    /// A key is removed under the spelling `override list` prints, which is
+    /// the one the file holds: a layer still carrying the retired
+    /// `dispatch.keep_finished_lanes` is dropped by that key, and the key it
+    /// is applied as is refused because the file does not hold it.
+    #[test]
+    fn remove_config_patch_keys_takes_the_key_as_the_file_spells_it() {
+        let overrides = crate::scratch::root("overrides-remove-config-key-retired");
+        let _ = std::fs::remove_dir_all(&overrides);
+        let path = config_patch_path(&overrides);
+        crate::task::write_atomic(
+            &path,
+            "[dispatch]\nkeep_finished_lanes = true\nlane_quiet = \"5m\"\n",
+        )
+        .unwrap();
+
+        let err = remove_config_patch_keys(&overrides, &["dispatch.visible_lanes".to_string()])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("does not set"), "{err:#}");
+        remove_config_patch_keys(&overrides, &["dispatch.keep_finished_lanes".to_string()])
+            .unwrap();
+        assert_eq!(
+            config_patch_keys(&overrides).unwrap(),
+            Some(vec!["dispatch.lane_quiet".to_string()])
+        );
+    }
+
+    /// Removing every key the file holds removes the file without writing
+    /// it first, so no process stopped between the two can leave a file of
+    /// comments that still lists as an override. Removing fewer writes the
+    /// rest.
+    #[test]
+    fn remove_config_patch_keys_removes_an_emptied_file_without_writing_it() {
+        let overrides = crate::scratch::root("overrides-remove-config-keys-all");
+        let _ = std::fs::remove_dir_all(&overrides);
+        let path = config_patch_path(&overrides);
+        crate::task::write_atomic(
+            &path,
+            format!("{CONFIG_PATCH_HEADER}[dispatch]\nlane_quiet = \"5m\"\nvisible_lanes = 5\n"),
+        )
+        .unwrap();
+        let keys = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        let both = keys(&["dispatch.lane_quiet", "dispatch.visible_lanes"]);
+
+        assert_eq!(
+            config_patch_after_removing(&overrides, &both).unwrap(),
+            None
+        );
+        let rest = config_patch_after_removing(&overrides, &keys(&["dispatch.lane_quiet"]))
+            .unwrap()
+            .unwrap();
+        assert!(!rest.contains("lane_quiet") && rest.contains("visible_lanes = 5"));
+
+        remove_config_patch_keys(&overrides, &both).unwrap();
+        assert!(!path.exists());
+        assert!(!overrides.is_dir());
+    }
+
+    /// Text after a TOML comment is part of what was typed, so the value is
+    /// kept whole as a string instead of cut at the `#`.
+    #[test]
+    fn typed_config_value_keeps_text_that_carries_a_comment() {
+        for input in ["3 # three lanes", "[\"a\"] # x", "true # yes"] {
+            assert_eq!(
+                typed_config_value(input),
+                toml::Value::String(input.to_string()),
+                "{input}"
+            );
+        }
+        assert_eq!(typed_config_value("3"), toml::Value::Integer(3));
+        assert_eq!(
+            typed_config_value("[\"a#b\", \"c\"]"),
+            toml::Value::Array(vec!["a#b".into(), "c".into()])
+        );
+    }
+
     /// A sibling entry keeps the layer directory alive: removing one patch
     /// never disturbs another.
     #[test]
@@ -2061,7 +2335,7 @@ agent: pi
 
     /// A project with no tracked `config.toml` yet still promotes: the file is
     /// created from the config the layer produces, as `config set` creates
-    /// it, and the layer is left for the caller to clear.
+    /// it, and the layer is left in place.
     #[test]
     fn promote_config_patch_creates_a_missing_tracked_file() {
         let root = crate::scratch::root("overrides-promote-config-absent");
@@ -2086,8 +2360,8 @@ agent: pi
     }
 
     /// Dropping an entry that was never there is refused by name, not a
-    /// silent no-op — the same courtesy `override promote` gets from the
-    /// same check.
+    /// silent no-op, which is what `override drop` relies on to report a
+    /// target that is not in the layer.
     #[test]
     fn remove_pipeline_patch_refuses_a_missing_entry() {
         let overrides = crate::scratch::root("overrides-remove-missing");
@@ -2235,22 +2509,52 @@ agent: pi
 
     /// A layer written for an older release sets `visible_lanes` through the
     /// retired `keep_finished_lanes`, and a models glob with a dot in it is
-    /// spelled as the key a person types; both are found by their current key.
+    /// spelled as the key a person types; both are found by their current key,
+    /// and the leaf comes back spelled as the file holds it.
     #[test]
-    fn config_patch_sets_reads_a_key_as_the_layer_applies_it() {
+    fn config_patch_leaves_for_reads_a_key_as_the_layer_applies_it() {
         let overrides = crate::scratch::root("overrides-patch-sets");
         let _ = std::fs::remove_dir_all(&overrides);
         std::fs::create_dir_all(&overrides).unwrap();
-        assert!(!config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
+        let leaves = |key: &str| config_patch_leaves_for(&overrides, key).unwrap();
+        assert!(leaves("dispatch.visible_lanes").is_empty());
         std::fs::write(
             config_patch_path(&overrides),
             "[dispatch]\nkeep_finished_lanes = true\n[models.\"gpt-5.1\"]\ncompact_ctx = 50\n",
         )
         .unwrap();
-        assert!(config_patch_sets(&overrides, "dispatch.visible_lanes").unwrap());
-        assert!(!config_patch_sets(&overrides, "dispatch.keep_finished_lanes").unwrap());
-        assert!(config_patch_sets(&overrides, "models.gpt-5.1.compact_ctx").unwrap());
-        assert!(config_patch_sets(&overrides, "models.\"gpt-5.1\".compact_ctx").unwrap());
-        assert!(!config_patch_sets(&overrides, "dispatch.lane_quiet").unwrap());
+        assert_eq!(
+            leaves("dispatch.visible_lanes"),
+            ["dispatch.keep_finished_lanes"]
+        );
+        assert!(leaves("dispatch.keep_finished_lanes").is_empty());
+        assert_eq!(
+            leaves("models.gpt-5.1.compact_ctx"),
+            ["models.gpt-5.1.compact_ctx"]
+        );
+        assert_eq!(
+            leaves("models.\"gpt-5.1\".compact_ctx"),
+            ["models.gpt-5.1.compact_ctx"]
+        );
+        assert!(leaves("dispatch.lane_quiet").is_empty());
+    }
+
+    /// The retired spelling and the current one can sit in one layer, and both
+    /// set `visible_lanes`: the lookup has to return both, because dropping
+    /// either alone leaves the other one applied.
+    #[test]
+    fn config_patch_leaves_for_returns_every_leaf_that_sets_the_key() {
+        let overrides = crate::scratch::root("overrides-patch-both");
+        let _ = std::fs::remove_dir_all(&overrides);
+        std::fs::create_dir_all(&overrides).unwrap();
+        std::fs::write(
+            config_patch_path(&overrides),
+            "[dispatch]\nkeep_finished_lanes = true\nvisible_lanes = 3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config_patch_leaves_for(&overrides, "dispatch.visible_lanes").unwrap(),
+            ["dispatch.keep_finished_lanes", "dispatch.visible_lanes"]
+        );
     }
 }

@@ -448,7 +448,7 @@ const RESTART_WRAP: usize = 56;
 /// The session row is left out when none is on record — a lane that never
 /// got as far as a turn — rather than printed empty, the same as
 /// `spoolway restart` prints no session line then. A refusal its answer met
-/// is printed under the closing sentence, above the one answer, `restart`.
+/// is printed under the closing sentence, above the key row.
 ///
 /// A command step has no lane and no session, so its form names the step and
 /// the run in their place, and says the command's process is ended and run
@@ -516,7 +516,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
 
 /// [`BoardMode::ResumePicker`]'s panel: where the task stopped, a refusal
 /// if `enter` met one, then the answers — its pipeline's steps with any
-/// pinned row under them, drawn by [`crate::screen::ask`] with `>` on the
+/// pinned row under them, drawn by [`crate::screen::pick`] with `>` on the
 /// cursor's row — and the key row every answer list closes on.
 ///
 /// `height` is [`pane_height`]'s: the list shows as many steps as the pane
@@ -603,7 +603,7 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
     body.extend(error);
 
     // The `▲`/`▼` lines sit among the answers, so the cursor's index into
-    // them counts those lines to land on the cursor's own step. `ask` gives
+    // them counts those lines to land on the cursor's own step. `pick` gives
     // them no `>` of their own: the cursor never rests on one.
     let mut answers = Vec::new();
     if window.marked && window.start > 0 {
@@ -641,7 +641,7 @@ pub(super) fn resume_picker_panel(picker: &ResumePicker, height: Option<usize>) 
             .filter(|at| *at < window.shown)
             .map_or(usize::MAX, |at| listed_at + at),
     };
-    crate::screen::ask(&format!("resume {}", picker.name), &body, &answers, cursor)
+    crate::screen::pick(&format!("resume {}", picker.name), &body, &answers, cursor)
 }
 
 /// The fewest rows a scrolled picker list is drawn in while it can still
@@ -720,7 +720,7 @@ fn list_window(picker: &ResumePicker, room: usize) -> Window {
 /// tracker; a task with no ticket gets no ticket line. A `queued` or
 /// `started` hook's form names the step the task starts on instead. A
 /// refusal, from opening the panel or from its answer, is printed under the
-/// body, above the one answer.
+/// body, above the key row.
 pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> {
     use crate::commands::SkipThen;
     let id = &confirm.id;
@@ -5328,8 +5328,6 @@ mod tests {
                 "  the lane is torn down and `review-spec` is briefed from",
                 "  scratch. its conversation is not kept.",
                 "",
-                "  > restart",
-                "",
                 "  [enter] confirm   [esc] close",
             ]
         );
@@ -5349,7 +5347,7 @@ mod tests {
             assert!(line.chars().count() <= 80, "{line}");
         }
         assert!(panel.iter().any(|line| line.contains("a report landed")));
-        assert!(panel[panel.len() - 4].contains("> restart"));
+        assert!(!panel.iter().any(|line| line.contains("> restart")));
         assert!(panel[panel.len() - 2].contains("[enter] confirm   [esc] close"));
     }
 
@@ -5391,8 +5389,6 @@ mod tests {
                 closing[0],
                 closing[1],
                 "",
-                "  > restart",
-                "",
                 "  [enter] confirm   [esc] close",
             ]
         );
@@ -5414,8 +5410,6 @@ mod tests {
                 "",
                 "  `build` runs again from the start. its log is kept as",
                 "  the previous log.",
-                "",
-                "  > restart",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
@@ -5445,7 +5439,7 @@ mod tests {
             closed < refusal,
             "the refusal sits under the closing sentence"
         );
-        assert!(panel[panel.len() - 4].contains("> restart"));
+        assert!(!panel.iter().any(|line| line.contains("> restart")));
         assert!(panel[panel.len() - 2].contains("[enter] confirm   [esc] close"));
     }
 
@@ -5505,8 +5499,6 @@ mod tests {
                 "",
                 "the routines tab queues it again.",
                 "",
-                "> unqueue it",
-                "",
             ]
             .map(String::from),
             "{panel:#?}"
@@ -5541,8 +5533,6 @@ mod tests {
                     format!("/pending/{id}.md").as_str(),
                     "",
                     "the queue tab is what sends it again.",
-                    "",
-                    "> unqueue it",
                     "",
                 ]
                 .map(String::from),
@@ -5589,8 +5579,6 @@ mod tests {
                 nightly.as_str(),
                 "",
                 "the routines tab queues them again.",
-                "",
-                "> unqueue them",
                 "",
             ]
             .map(String::from),

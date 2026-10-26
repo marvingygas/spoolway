@@ -246,7 +246,7 @@ has "naming the routine and its task count" "nightly · 2 tasks" "$LAST"
 has "the whole-folder job beside its store" "nightly-audit   user" "$LAST"
 has "the second job beside its store" "audit-docs      project" "$LAST"
 lacks "never a job on another routine" "weekly-prune" "$LAST"
-has "its one answer under the cursor" "> delete" "$LAST"
+lacks "no answer row for its one answer" "> delete" "$LAST"
 has "under the shared key row" "[enter] confirm   [esc] close" "$LAST"
 
 # The menu that led there names each job, offering to switch it.

@@ -16,6 +16,7 @@
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
+pub(crate) mod overrides;
 pub(crate) mod pane;
 pub(crate) mod shell;
 
@@ -786,8 +787,9 @@ pub(crate) mod corner {
 /// row loses the one they had the cursor on.
 ///
 /// Shared by [`panel`], which appends its own key line as one more row after
-/// a blank spacer, by [`ask`], which appends a popup's answers and their key
-/// row, and by callers whose body needs no key row after it at all.
+/// a blank spacer, by [`ask`] and [`pick`], which append a popup's answers
+/// and their key row, and by callers whose body needs no key row after it at
+/// all.
 pub(crate) fn boxed(title: &str, body: &[String]) -> Vec<String> {
     use corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     let head = format!("─ {title} ");
@@ -847,9 +849,11 @@ pub(crate) fn answer_keys() -> String {
 /// part of the answer rather than as answers of their own. A `cursor` past
 /// the last answer marks no row.
 ///
-/// Apart from [`ask`] for a caller that prints its answers under a notice
+/// Apart from [`pick`] for a caller that prints its answers under a notice
 /// of its own rather than in a box — `spoolway dispatch`'s gates in a
 /// terminal — so the printed answers and the boxed ones are the same rows.
+/// A popup with one answer drawn through [`ask`] draws none of these rows,
+/// though its printed twin still lists that answer.
 pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     for (i, answer) in answers.iter().enumerate() {
@@ -865,13 +869,38 @@ pub(crate) fn answer_rows(answers: &[String], cursor: usize) -> Vec<String> {
 }
 
 /// A framed popup that asks something: its `body`, then its `answers` as
-/// [`answer_rows`] draws them, the cursor on the `cursor`th.
+/// [`answer_rows`] draws them, the cursor on the `cursor`th, when there are
+/// two or more.
 ///
-/// Every popup that asks a question is drawn through this, so each one
-/// reads and answers alike: the arrows move the cursor, `enter` runs the
-/// answer under it, and `esc` closes. A popup that only says something is
-/// a [`notice`] instead, closed by [`confirm`].
+/// Every popup that asks a question is drawn through this or [`pick`], so
+/// each one reads and answers alike: `enter` runs the answer, and `esc`
+/// closes. With two or more answers the arrows move the cursor and `enter`
+/// runs the answer under it. A popup that only says something is a
+/// [`notice`] instead, closed by [`confirm`].
+///
+/// A popup with exactly one answer is a confirmation, and draws no answer
+/// row: it ends on its body, a blank row and [`answer_keys`]. A lone
+/// `> delete` under a body that already says what deleting does repeats
+/// the title, and reads like the first of a list of choices. `enter` still
+/// runs that answer and `esc` still closes, so nothing is lost but the row.
+/// A list built from data, which may come down to one entry and still
+/// needs that entry named, is drawn by [`pick`] instead.
 pub(crate) fn ask(title: &str, body: &[String], answers: &[String], cursor: usize) -> Vec<String> {
+    if answers.len() == 1 {
+        return panel(title, body, &answer_keys());
+    }
+    pick(title, body, answers, cursor)
+}
+
+/// A framed popup that picks one of `answers`: its `body`, then every
+/// answer as [`answer_rows`] draws them, the cursor on the `cursor`th —
+/// a single answer included.
+///
+/// For a popup whose answers are what it lists — a routine, a pipeline, a
+/// step — rather than a fixed confirmation. Through [`ask`], such a list
+/// narrowed to one entry would lose the one row that says what `enter`
+/// picks.
+pub(crate) fn pick(title: &str, body: &[String], answers: &[String], cursor: usize) -> Vec<String> {
     let mut full = body.to_vec();
     full.extend(answer_rows(answers, cursor));
     boxed(title, &full)
@@ -1035,7 +1064,7 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 /// sits inside the tab's own `│` border, which a pane's title never does.
 #[cfg(test)]
 pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
-    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "EVAL"]
+    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "OVERRIDES", "EVAL"]
         .into_iter()
         .find(|tab| {
             lines
@@ -1438,10 +1467,10 @@ mod tests {
     ///
     /// Renders every tab with something on it and with nothing on it, the
     /// details panes and the popups the keys below open, then reads each
-    /// line: the dispatch, queue and routines tabs through the shell on a
-    /// scripted terminal, the eval tab and its trials table through its own
-    /// synchronous loader, the popups no key reaches from where they are
-    /// built, and every list of asking popups. Every name in the fixtures
+    /// line: the dispatch, queue, routines and overrides tabs through the
+    /// shell on a scripted terminal, the eval tab and its trials table
+    /// through its own synchronous loader, the popups no key reaches from
+    /// where they are built, and every list of asking popups. Every name in the fixtures
     /// is lowercase, so a capital found is a word a screen brought itself.
     /// A screen is named by what it shows, since a walk's early frames are
     /// not where its keys end.
@@ -1507,6 +1536,20 @@ mod tests {
             format!("{right}{down}{down}o\r"),
             format!("{right} \r"),
             format!("{right} \r\r"),
+            // Overrides tab: each section, the search row, both config
+            // popups with something typed into them, and the pipeline
+            // section's step selection, searched, and its value field. The
+            // prompts section's own walks are below.
+            format!("{right}{right}"),
+            format!("{right}{right}\t"),
+            format!("{right}{right}\t\t\t"),
+            format!("{right}{right}fdispatch"),
+            format!("{right}{right}fzzz"),
+            format!("{right}{right}\rdispatch.x\t5"),
+            format!("{right}{right}{down}\r"),
+            format!("{right}{right}\t\r"),
+            format!("{right}{right}\t\rfnot set"),
+            format!("{right}{right}\t\ra\rx"),
             // Dispatch tab: the board's rows, their options and the
             // resume and skip-a-hook questions. Never `enter` outside a
             // popup, and never an option that opens a file.
@@ -1522,6 +1565,25 @@ mod tests {
         ];
         for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
+            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            screens.extend(walk_screens("queue", &frames));
+        }
+        // The overrides tab's prompts section with a prompt to list: its
+        // search, both popups `enter` opens, and the `open workspace` popup
+        // `w` opens when the folder cannot be opened.
+        let prompt_walks = [
+            format!("{right}{right}\t\t"),
+            format!("{right}{right}\t\tfimpl"),
+            format!("{right}{right}\t\t\r"),
+            format!("{right}{right}\t\t\r\r\r"),
+            format!("{right}{right}w"),
+        ];
+        crate::browser::refuse_opens("could not open the overrides folder: no display is set");
+        for (i, keys) in prompt_walks.iter().enumerate() {
+            let (repo, _guard) = full_project(&format!("capitals-prompts-{i}"));
+            let path = crate::prompt::directory_form(&repo, "implementer");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "implementer\n").unwrap();
             let frames = crate::screen::shell::drive_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
@@ -1566,9 +1628,13 @@ mod tests {
     /// Every popup in the project that asks a person something closes on
     /// `[enter] confirm   [esc] close` and nothing else: no letter answers,
     /// no key row of its own. Each module hands over its own asking popups,
-    /// drawn once; a listed popup that stops drawing through [`ask`], or
-    /// grows a key row of its own, fails here. A new popup has to be added
-    /// to its module's list to be walked.
+    /// drawn once; a listed popup that stops drawing through [`ask`] or
+    /// [`pick`], or grows a key row of its own, fails here. A new popup has
+    /// to be added to its module's list to be walked.
+    ///
+    /// The popups named in `confirmations` have one answer, so [`ask`]
+    /// draws no `>` row on them; every other one has its cursor on exactly
+    /// one answer.
     #[test]
     fn every_popup_that_asks_closes_on_confirm_and_close() {
         let popups = [
@@ -1586,6 +1652,20 @@ mod tests {
         ]
         .concat();
         assert_eq!(popups.len(), 22, "every popup is walked");
+        let confirmations = [
+            "issue tracking",
+            "delete routine",
+            "delete pending",
+            "pause, command step",
+            "restart",
+            "restart, command step",
+            "unqueue",
+            "unqueue, with a dependent",
+            "unqueue, a routine copy",
+            "unqueue, a chain with a routine copy",
+            "skip hook, done",
+            "skip hook, queued",
+        ];
         let row = |line: &str| line.trim_matches(['│', ' ']).to_string();
         for (name, panel) in popups {
             let drawn = panel.join("\n");
@@ -1604,13 +1684,14 @@ mod tests {
                 .filter(|line| line.starts_with('['))
                 .collect();
             assert_eq!(keyed, [answer_keys()], "{name}: one key row: {drawn}");
+            let cursors = usize::from(!confirmations.contains(&name));
             assert_eq!(
                 panel
                     .iter()
                     .filter(|line| row(line).starts_with("> "))
                     .count(),
-                1,
-                "{name}: the cursor on one answer: {drawn}"
+                cursors,
+                "{name}: {cursors} answer rows under the cursor: {drawn}"
             );
         }
     }

@@ -1859,8 +1859,15 @@ pub enum ConfigCommand {
     Edit,
 
     /// Open or create `overrides/config.toml`, the patch layer's own copy —
-    /// never the tracked file `config edit` opens.
-    Override,
+    /// never the tracked file `config edit` opens. With `--set`, write one
+    /// key into it instead of opening an editor.
+    Override {
+        /// `<key>=<value>`, e.g. `dispatch.lane_quiet=5m`. Checked the way
+        /// `config set` checks it, then written into the layer without
+        /// opening an editor.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Option<String>,
+    },
 }
 
 /// Manage the patch layer under `~/.spoolway/<project>/overrides/` — created
@@ -1879,12 +1886,13 @@ pub enum OverrideCommand {
     /// One line per overridden artifact: its kind and the keys it carries.
     List,
 
-    /// Write a patched artifact's values into the tracked file, then clear
-    /// it from the layer — an ordinary diff, ready to review and commit.
+    /// Write a patched artifact's values into the tracked file — an
+    /// ordinary diff, ready to review and commit. The entry stays in the
+    /// layer until `override drop` removes it.
     Promote(OverrideTargetArgs),
 
-    /// Remove one entry from the layer, or the whole layer when none is
-    /// named.
+    /// Remove one entry from the layer, one key of an entry when a key is
+    /// given, or the whole layer when no target is named.
     Drop(OverrideDropArgs),
 }
 
@@ -1899,6 +1907,13 @@ pub struct OverrideTargetArgs {
 pub struct OverrideDropArgs {
     /// Same forms as `override promote`'s target. Omit to clear everything.
     pub target: Option<String>,
+
+    /// One key to remove from the target's patch, as `override list` prints
+    /// it: `<step>.<key>`, `description` or `task_template` for a pipeline,
+    /// a dotted key for `config.toml`.
+    /// Refused on a prompt, whose override has no keys.
+    #[arg(requires = "target")]
+    pub key: Option<String>,
 }
 
 #[cfg(test)]
@@ -2407,8 +2422,41 @@ mod tests {
             Cli::try_parse_from(["spoolway", "config", "override"])
                 .unwrap()
                 .command,
-            Command::Config(ConfigCommand::Override)
+            Command::Config(ConfigCommand::Override { set: None })
         ));
+    }
+
+    #[test]
+    fn config_override_reads_the_set_flag() {
+        match Cli::try_parse_from([
+            "spoolway",
+            "config",
+            "override",
+            "--set",
+            "dispatch.lane_quiet=5m",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Config(ConfigCommand::Override { set }) => {
+                assert_eq!(set.as_deref(), Some("dispatch.lane_quiet=5m"));
+            }
+            other => panic!("expected Command::Config(Override), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn override_drop_reads_a_target_and_a_key_and_refuses_a_key_alone() {
+        match Cli::try_parse_from(["spoolway", "override", "drop", "impl", "implement.model"])
+            .unwrap()
+            .command
+        {
+            Command::Override(OverrideCommand::Drop(args)) => {
+                assert_eq!(args.target.as_deref(), Some("impl"));
+                assert_eq!(args.key.as_deref(), Some("implement.model"));
+            }
+            other => panic!("expected Command::Override(Drop), got {other:?}"),
+        }
     }
 
     #[test]
@@ -2434,7 +2482,9 @@ mod tests {
             .unwrap()
             .command
         {
-            Command::Override(OverrideCommand::Drop(args)) => assert_eq!(args.target, None),
+            Command::Override(OverrideCommand::Drop(args)) => {
+                assert_eq!((args.target, args.key), (None, None))
+            }
             other => panic!("expected Command::Override(Drop), got {other:?}"),
         }
         match Cli::try_parse_from(["spoolway", "override", "drop", "config.toml"])

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bare `spoolway`: the one screen with its dispatch, queue, routines and
-# eval tabs, driven end to end as the whole binary. It opens only with stdout on a
+# Bare `spoolway`: the one screen with its dispatch, queue, routines,
+# overrides and eval tabs, driven end to end as the whole binary. It opens only with stdout on a
 # terminal, so the run is wrapped in `script`, which gives it a pty for stdout
 # while the keys still arrive on an ordinary pipe — the same way every other
 # screen suite scripts its keystrokes.
@@ -18,7 +18,12 @@
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
-# menu removes its page after one popup.
+# menu removes its page after one popup. On the overrides tab a listed config
+# key and a new one are each set through their popup, and both land in the
+# overrides layer, one step field is set on steps in two pipelines, one
+# prompt is copied into the layer, and the active section deletes one config
+# key from it, then promotes one pipeline onto a local branch with no
+# checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -101,8 +106,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" 
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
-has "the strip names all four tabs in order" \
-  "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$FIRST"
+has "the strip names all five tabs in order" \
+  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$FIRST"
 has "it opens on the queue tab" "─ groups ─" "$FIRST"
 has "with the pending group listed" "cart" "$FIRST"
 lacks "not on the dispatch tab" "dispatcher" "$FIRST"
@@ -301,7 +306,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$SECOND.plain"
+lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -315,7 +320,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$AFTER.plain"
+has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -333,7 +338,7 @@ has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ groups" "$LAST"
-has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        EVAL" "$LAST"
+has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # A clean submission lands on the queued popup, which ends by saying whether a
@@ -393,14 +398,15 @@ rm -f "$TRACKING/billing-export · started.exit" "$TRACKING/billing-export · st
 
 # Every tab, both directions, on a real pty — the acceptance criterion the
 # task `frames-onto-writer` exists for: no redrawing screen erases the whole
-# terminal any more, all four of them painting through the shared frame
+# terminal any more, all five of them painting through the shared frame
 # writer instead (`src/screen/frame_writer.rs`). `←` from the queue tab
-# reaches dispatch, `→` three times walks back through queue and routines to
-# eval, and `←` three times walks all the way back — every tab this screen
-# has, both ways, with no `enter` anywhere so nothing is started or queued.
+# reaches dispatch, `→` four times walks back through queue, routines and
+# overrides to eval, and `←` four times walks all the way back — every tab
+# this screen has, both ways, with no `enter` anywhere so nothing is started
+# or queued.
 ALL_TABS="$LIVE/all-tabs.txt"
 works "cycling every tab does not crash the screen" \
-  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
 if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
   bad "no frame drawn while cycling every tab still erases the whole screen"
   tail -30 "$ALL_TABS" | cat -v
@@ -409,18 +415,19 @@ else
 fi
 sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
 # The check above passes on an empty capture too — a screen that crashed or
-# quit before drawing a single tab has no `ESC[2J` in it either. These four
+# quit before drawing a single tab has no `ESC[2J` in it either. These five
 # require every tab this walk visits actually drew, so the check above is
 # proof about frames that were really there.
 has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS.plain"
 has "and the queue tab" "─ groups" "$ALL_TABS.plain"
-has "and the routines tab" "QUEUE       [ROUTINES]       EVAL" "$ALL_TABS.plain"
-has "and the eval tab, → from routines" "ROUTINES       [EVAL]" "$ALL_TABS.plain"
+has "and the routines tab" "QUEUE       [ROUTINES]       OVERRIDES" "$ALL_TABS.plain"
+has "and the overrides tab" "ROUTINES       [OVERRIDES]       EVAL" "$ALL_TABS.plain"
+has "and the eval tab, → from overrides" "OVERRIDES       [EVAL]" "$ALL_TABS.plain"
 lacks "with no JOBS label left on the strip" "JOBS" "$ALL_TABS.plain"
 has "and the eval tab" "╭─ eval ·" "$ALL_TABS.plain"
 
 # `→` from the queue tab, where the screen opens, reaches the routines tab
-# between queue and eval, listing the one routine under `.spoolway/routines/`.
+# between queue and overrides, listing the one routine under `.spoolway/routines/`.
 # Written last, so no check above runs with a routine in the checkout.
 mkdir -p .spoolway/routines/nightly
 task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nightly"
@@ -430,7 +437,7 @@ works "→ from the queue tab ends when its keys run out" \
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "→ reaches the routines tab" \
-  "DISPATCH        QUEUE       [ROUTINES]       EVAL" "$LAST"
+  "DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL" "$LAST"
 has "titled routines" "─ routines ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
@@ -494,7 +501,7 @@ has "delete opens the delete popup" "─ delete group cart " "$LAST"
 has "counting every pending task it takes" "delete 3 pending tasks:" "$LAST"
 has "naming the dependent in another group" "checkout-total   (depends on cart-totals)" "$LAST"
 lacks "never a task nothing in the set depends on" "checkout-page" "$LAST"
-has "its one answer under the cursor" "> delete" "$LAST"
+lacks "and no row for its one answer" "> delete" "$LAST"
 
 # Delete asks, enter removes the files and the group leaves the list.
 on_screen 'o\x1b[B\x1b[B\r\r' "$DELETE"
@@ -535,7 +542,144 @@ works "delete then enter removes the plan page" \
   test ! -e "$SPOOLWAY_PROJECT_HOME/plans/2026-10-21-search.html"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$PLAN_DELETE" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-lacks "the plan row has left the list" "search" "$LAST"
+# Matched with the row's indent: the key line under the frame says
+# `[f] search` too.
+lacks "the plan row has left the list" "    search " "$LAST"
+
+# Delete routine on the routines tab (`→`, `o`, down, `enter`) asks with one
+# answer, so its popup draws no `> delete` row: it ends on its body, a blank
+# row and the shared key row, and `enter` still deletes the routine folder.
+ROUTINE_DELETE="$LIVE/routine-delete.txt"
+on_screen '\x1b[Co\x1b[B\r\r' "$ROUTINE_DELETE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete this routine/ { last = $0 } END { print last }' \
+  "$ROUTINE_DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "delete routine opens its popup" "─ delete this routine " "$LAST"
+has "naming the routine and its task count" "nightly · 1 task" "$LAST"
+lacks "with no answer row" "> delete" "$LAST"
+works "its body is followed by a blank row and the key row" bash -c \
+  'grep -B2 -F "[enter] confirm   [esc] close" "$1" | head -1 |
+     grep -qF "and only git can bring it back."' _ "$LAST"
+works "enter deletes the routine" test ! -e .spoolway/routines/nightly
+
+# The overrides tab (`→` twice from the queue tab) opens on its config
+# section. A listed key is set through its field: `f` searches the list down
+# to `lane_quiet`, `enter` leaves the search, `↓` moves onto the key, and
+# `enter` opens its field filled with the value in use, which the
+# backspaces clear before `5m` is typed and saved. A new key is set through
+# `+ new key`'s popup: `↑` back onto that row, `enter`, the key, `tab`, the
+# value, and `enter` saves both. Run after every other screen check, since
+# the layer it leaves would open the overrides gate on the dispatch tab.
+OVERRIDES_TAB="$LIVE/overrides-tab.txt"
+on_screen '\x1b[C\x1b[Cflane_quiet\r\x1b[B\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f5m\r\x1b[A\rmodels.qwen3-coder.input\t0.4\r' \
+  "$OVERRIDES_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$OVERRIDES_TAB" >"$OVERRIDES_TAB.plain"
+has "→ twice reaches the overrides tab" \
+  "DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL" "$OVERRIDES_TAB.plain"
+has "it opens on config, its sections named in the box title" \
+  "╭─ [config]   pipeline   prompts   active (0) ─" "$OVERRIDES_TAB.plain"
+has "enter on a key opens its field" "╭─ set dispatch.lane_quiet ─" "$OVERRIDES_TAB.plain"
+has "enter on + new key opens the new key popup" "╭─ new key ─" "$OVERRIDES_TAB.plain"
+CONFIG_LAYER="$SPOOLWAY_PROJECT_HOME/overrides/config.toml"
+has "the listed key is in the layer as typed" 'lane_quiet = "5m"' "$CONFIG_LAYER"
+has "and so is the new key's table" "[models.qwen3-coder]" "$CONFIG_LAYER"
+has "with its value written as a number" "input = 0.4" "$CONFIG_LAYER"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$OVERRIDES_TAB" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "active counts both keys" "active (2)" "$LAST"
+
+# The overrides tab's pipeline section sets one step field on steps in two
+# pipelines. bugfix's steps leave `effort` out, with its lines deleted here,
+# and default's carry it blank. `tab` moves onto the section, `↓` onto
+# effort, and `enter` lists both pipelines, where `a` selects every step.
+# `enter` opens the value field, `low` is typed and saved, and `enter`
+# closes the popup the save opened.
+sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
+lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
+PIPELINE_TAB="$LIVE/overrides-pipeline.txt"
+on_screen '\x1b[C\x1b[C\t\x1b[B\ra\rlow\r\r' "$PIPELINE_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$PIPELINE_TAB" >"$PIPELINE_TAB.plain"
+has "tab moves onto the pipeline section" \
+  "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
+has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
+has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
+has "a step that leaves effort out reads not set" "[x] reproduce            not set" \
+  "$PIPELINE_TAB.plain"
+has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE_TAB.plain"
+PATCHES="$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
+has "bugfix's patch sets the effort its steps left out" "effort: low" "$PATCHES/bugfix.yml"
+has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
+
+# The overrides tab's prompts section copies one prompt into the layer.
+# `tab` twice moves onto the section, `f` searches it down to implementer,
+# `enter` leaves the search, and `enter` on the prompt writes the copy and
+# opens the popup naming it, which `enter` closes. `w` is left to the unit
+# tests, since it starts a file manager outside this run.
+PROMPTS_TAB="$LIVE/overrides-prompts.txt"
+on_screen '\x1b[C\x1b[C\t\tfimplementer\r\r\r' "$PROMPTS_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$PROMPTS_TAB" >"$PROMPTS_TAB.plain"
+has "tab twice moves onto the prompts section" \
+  "╭─ config   pipeline   [prompts]   active (" "$PROMPTS_TAB.plain"
+has "its key line names enter and w" \
+  "[enter] override   [f] search   [w] open workspace   [tab] section" "$PROMPTS_TAB.plain"
+has "enter says where the copy is" "wrote overrides/prompts/implementer/PROMPT.md" \
+  "$PROMPTS_TAB.plain"
+PROMPT_COPY="$SPOOLWAY_PROJECT_HOME/overrides/prompts/implementer/PROMPT.md"
+works "the copy is in the layer" test -f "$PROMPT_COPY"
+works "and holds the tracked prompt" cmp -s .spoolway/prompts/implementer/PROMPT.md "$PROMPT_COPY"
+
+# The overrides tab's active section deletes one key from the layer. `tab`
+# three times moves onto the section, which lists config.toml first with its
+# keys sorted under it, so `↓` lands on dispatch.lane_quiet. `o` opens its
+# menu, `enter` on `delete selected` opens the confirm popup naming the file
+# and the key, and `enter` deletes it.
+ACTIVE_TAB="$LIVE/overrides-active.txt"
+on_screen '\x1b[C\x1b[C\t\t\t\x1b[Bo\r\r' "$ACTIVE_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$ACTIVE_TAB" >"$ACTIVE_TAB.plain"
+has "tab three times moves onto the active section" \
+  "╭─ config   pipeline   prompts   [active (" "$ACTIVE_TAB.plain"
+has "it lists the layer's config.toml" "[ ] config.toml" "$ACTIVE_TAB.plain"
+has "with the key set earlier under it" "[ ] dispatch.lane_quiet" "$ACTIVE_TAB.plain"
+has "a prompt reads whole file" "[ ] prompts/implementer            whole file" \
+  "$ACTIVE_TAB.plain"
+has "its key line names space, a, o and w" \
+  "[space] select   [a] all   [o] options   [w] open workspace" "$ACTIVE_TAB.plain"
+has "o opens the key's menu" "╭─ dispatch.lane_quiet ─" "$ACTIVE_TAB.plain"
+has "delete selected opens one confirm popup" "╭─ delete this override ─" \
+  "$ACTIVE_TAB.plain"
+has "which names the file and the key" "config.toml   dispatch.lane_quiet" \
+  "$ACTIVE_TAB.plain"
+lacks "enter deletes the key from the layer" "lane_quiet" "$CONFIG_LAYER"
+has "and keeps the other key" "input = 0.4" "$CONFIG_LAYER"
+
+# The active section promotes pipelines/bugfix.yml onto a local branch no
+# checkout has. config.toml is first with its one key left, so `↓` twice
+# lands on bugfix's file row. `o` opens its menu with `promote selected`
+# first, and `enter` opens the branch picker, where `f` searches it down to
+# the branch. `enter` leaves the search, `enter` picks the branch, and
+# `enter` on the confirm popup makes the worktree and writes the file.
+must "a local branch with no checkout" git branch feature/promote
+PROMOTE_TAB="$LIVE/overrides-promote.txt"
+on_screen '\x1b[C\x1b[C\t\t\t\x1b[B\x1b[Bo\rffeature/promote\r\r\r' "$PROMOTE_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$PROMOTE_TAB" >"$PROMOTE_TAB.plain"
+has "o on a whole file offers promote selected first" "│  > promote selected" \
+  "$PROMOTE_TAB.plain"
+has "promote opens the branch picker" "╭─ promote pipelines/bugfix.yml to ─" \
+  "$PROMOTE_TAB.plain"
+has "the confirm popup names the worktree it makes" \
+  "makes a worktree for feature/promote at" "$PROMOTE_TAB.plain"
+has "and the file, uncommitted" "and writes .spoolway/pipelines/bugfix.yml there," \
+  "$PROMOTE_TAB.plain"
+has "the write says where it landed" "╭─ promoted ─" "$PROMOTE_TAB.plain"
+PROMOTED="$LIVE/proj-feature-promote"
+works "a worktree is made beside the project" test -d "$PROMOTED"
+has "on the picked branch" "feature/promote" \
+  <(git -C "$PROMOTED" branch --show-current)
+has "its bugfix pipeline holds the promoted effort" "effort: low" \
+  "$PROMOTED/.spoolway/pipelines/bugfix.yml"
+lacks "the main checkout's is untouched" "effort: low" .spoolway/pipelines/bugfix.yml
+works "nothing is committed on the branch" \
+  test "$(git rev-parse feature/promote)" = "$(git rev-parse HEAD)"
+has "the layer keeps the promoted entry" "effort: low" "$PATCHES/bugfix.yml"
 
 # Off a terminal: the grouped help, on stderr, the way it always was.
 HELP="$LIVE/help.txt"

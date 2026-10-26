@@ -869,15 +869,17 @@ impl Repo {
     /// already keyed on the main checkout's basename regardless. Not a
     /// `home_subdir` — it is never auto-created the way `queue_dir` and
     /// `pending_dir` are, since a project that has overridden nothing has no
-    /// `overrides/` at all, which is how "off" is spelled; only a promote or
-    /// create command (not this task's) ever writes into it.
+    /// `overrides/` at all, which is how "off" is spelled. An empty one reads
+    /// the same: the overrides tab's `w` creates it empty to open it, and
+    /// otherwise only a command that writes an override creates it.
     pub fn overrides_dir(&self) -> PathBuf {
         self.home.join(crate::config::OVERRIDES_DIR)
     }
 
     /// The file [`crate::lock::EditLock`] is taken on. Under [`Repo::home`]
     /// so every worktree of one project contends for the same file, and not
-    /// inside `overrides/`, whose absence is how "no overrides" is spelled.
+    /// inside `overrides/`, whose absence, or emptiness, is how "no
+    /// overrides" is spelled.
     pub fn edit_lock_path(&self) -> PathBuf {
         crate::lock::EditLock::path_in(&self.home)
     }
@@ -1394,8 +1396,8 @@ impl Repo {
         }
         // Resolved here, before anything is written, and handed back for
         // the note printed after the write: asked after it, a detached HEAD
-        // or a failing git would end the command with the file written and a
-        // promoted override already cleared.
+        // or a failing git would end the command with the file written and no
+        // note saying which branch it landed on.
         let branch = current_branch_at(&self.checkout).with_context(|| {
             format!("cannot tell which branch {} is on", self.checkout.display())
         })?;
@@ -4357,7 +4359,10 @@ fn checkout_of(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool
 /// [`workspace_clone`]'s own doc for why `root`, not `start` or the
 /// worktree path `checkout_of` might otherwise answer, is what a clone
 /// entry's own `root` is matched against.
-fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool) {
+///
+/// `pub(crate)` so the OVERRIDES tab's promote decides a checkout's write
+/// as a command run in that checkout would.
+pub(crate) fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool) {
     if workspace_clone(root).is_some() {
         return (root.to_path_buf(), false);
     }

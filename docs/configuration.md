@@ -151,7 +151,7 @@ dropped on load, so it draws no note.
 $ spoolway config set dispatch.lane_quiet 20m
 dispatch.lane_quiet = 20m
 note: ~/.spoolway/<project>/overrides/config.toml still sets `dispatch.lane_quiet`, so the value in effect is 5m.
-  Remove `dispatch.lane_quiet` from that file to let the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
+  `spoolway override drop config.toml dispatch.lane_quiet` removes just that key and lets the value just set apply. `spoolway override drop config.toml` clears the whole config layer, and `spoolway override promote config.toml` writes all of its keys, this one included, into the tracked file.
 ```
 
 When the value in effect differs from the one just set and no layer key sets it, the note says
@@ -325,11 +325,16 @@ is the file that does not parse, `doctor` names that file instead.
 or none. A session pair that is valid together is written as a pair. A key the tracked config refuses stops the promote with an error naming that key. The
 tracked file stays as it was, and the layer keeps all its keys.
 
-`spoolway override promote` in a linked worktree that has its own `.spoolway/` writes that
-worktree's pipeline file, prompt or `config.toml`. The layer belongs to the whole project, so the
-entry is cleared from it at once. The main checkout's files stay as they were until the branch
-merges. A worktree with no `.spoolway/` of its own, a dispatcher lane's worktree and a worktree
-on a detached HEAD refuse, as `config set` does.
+`spoolway override promote` keeps the entry in the layer. The running dispatcher keeps using the
+overridden values until you remove the entry with `spoolway override drop`. In a linked worktree
+that has its own `.spoolway/`, it writes that worktree's pipeline file, prompt or `config.toml`.
+The layer belongs to the whole project, so the entry stays there for every checkout. The main
+checkout's files stay as they were until the branch merges. A worktree with no `.spoolway/` of
+its own, a dispatcher lane's worktree and a worktree on a detached HEAD refuse, as `config set`
+does.
+
+The overrides tab's active section promotes whole files onto a branch you pick, in the checkout
+that holds it. See [Promoting from the tab](dispatcher.md#promoting-from-the-tab).
 
 ### When an override takes effect
 
@@ -345,7 +350,9 @@ value at once. The running dispatcher keeps the old value of
 or restart it. See [Editing a pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).
 
 Write and inspect the layer with `spoolway pipeline override`, `prompt override`,
-`config override` and `spoolway override list | promote | drop`. See
+`config override` and `spoolway override list | promote | drop`. `spoolway config override --set
+<key>=<value>` writes one config key, and `spoolway override drop <target> <key>` removes one key
+of a pipeline or config patch. A file left with no key is removed from the layer. See
 [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
 
 ### Commands in a lane
@@ -355,10 +362,10 @@ write nothing:
 
 | Command | What it would write |
 |---|---|
-| `spoolway override drop` | Removes the layer, or one entry of it. |
+| `spoolway override drop` | Removes the layer, one entry of it, or one key of an entry. |
 | `spoolway pipeline override` | `overrides/pipelines/<name>.yml` |
 | `spoolway prompt override` | `overrides/prompts/<name>/PROMPT.md` |
-| `spoolway config override` | `overrides/config.toml` |
+| `spoolway config override`, with or without `--set` | `overrides/config.toml` |
 | `spoolway pipeline copy`, `spoolway prompt copy` | The private `local/` folder. In home mode, the workspace's own setup. |
 | `spoolway pipeline rename` | The private pipeline file, its task skeleton, and the tasks and jobs that name it. |
 
@@ -709,7 +716,7 @@ non-zero, takes longer than 15 seconds or cannot be started. The gate shows it a
 the tool rows, the hook with `login` and the command, then the command's program with `failed`
 and the first line of its stderr. The command is not run when its program is already unmet, and
 not for a batch where every task sets `tracking: off`. The answer and `esc` are the same as for a
-tool. On a screen it shows what is unmet as a popup: `enter` on `queue anyway, without issue tracking` queues with `tracking: off` written
+tool. On a screen it shows what is unmet as a popup: `enter` queues with `tracking: off` written
 onto every task, `esc` backs out. `spoolway queue add --from` at a terminal prints the notice and
 asks for the same two keys. Anywhere else it prints the same notice and proceeds the same way.
 A job the dispatcher fires never asks, even when the dispatcher runs in a terminal. It prints the

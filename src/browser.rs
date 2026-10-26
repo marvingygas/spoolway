@@ -1,14 +1,17 @@
-//! Open a file in the person's default browser, chosen per platform.
+//! Open a file in the person's default browser, or a folder in their file
+//! manager, chosen per platform.
 //!
 //! The program is named by the platform, never by "the first opener found on
 //! `PATH`". On Debian and Ubuntu `/usr/bin/open` is `openvt`, which is not a
 //! browser opener, and on WSL `xdg-open` is often installed with no browser
-//! behind it. So macOS gets `open`, WSL gets `wslview` (or `explorer.exe`
-//! when `wslview` is missing), and any other Unix gets `xdg-open`.
+//! behind it. So for a page macOS gets `open`, WSL gets `wslview` (or
+//! `explorer.exe` when `wslview` is missing), and any other Unix gets
+//! `xdg-open`. A folder takes a route of its own — see [`folder_plan`].
 //!
-//! The choice is a pure function over [`Inputs`], so a test can cover every
-//! route without starting a browser. [`open`] is the one caller that spawns,
-//! and [`open_plan`] is how the `o` menus reach it.
+//! Each choice is a pure function over [`Inputs`], so a test can cover every
+//! route without starting a program. [`open`] and [`open_folder`] are the
+//! callers that spawn; [`open_plan`] is how the `o` menus reach the first,
+//! and the overrides tab's `w` reaches the second.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -20,6 +23,9 @@ use anyhow::{Context, Result, bail};
 pub(crate) struct Inputs<'a> {
     pub macos: bool,
     pub wsl: bool,
+    /// Whether `DISPLAY` or `WAYLAND_DISPLAY` is set. Only the folder route
+    /// reads it.
+    pub display: bool,
     pub path: OsString,
     pub wslpath: &'a dyn Fn(&Path) -> Result<String>,
 }
@@ -27,17 +33,9 @@ pub(crate) struct Inputs<'a> {
 /// The line `sh` runs to open `file`: a program, then the quoted path.
 ///
 /// An `Err` means no browser can be started, and carries what to do instead.
-pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
-    // A relative path would be resolved against the browser's directory, not
-    // the caller's, and its empty parent would fail the spawn with a
-    // misleading "No such file or directory".
-    if !file.is_absolute() {
-        bail!(
-            "could not open the plan page: {} is not an absolute path.\n\
-             give the full path of the file, starting with /.",
-            file.display()
-        );
-    }
+/// Each refusal names `what` it could not open, such as "the plan page".
+pub(crate) fn plan(inputs: &Inputs, file: &Path, what: &str) -> Result<String> {
+    refuse_relative(file, what)?;
     let found = |program: &str| crate::platform::which(program, &inputs.path).is_some();
     let shown = file.display().to_string();
     if inputs.macos {
@@ -51,7 +49,7 @@ pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
             "explorer.exe"
         } else {
             bail!(
-                "could not open the plan page: neither wslview nor explorer.exe is on PATH.\n\
+                "could not open {what}: neither wslview nor explorer.exe is on PATH.\n\
                  install wslu, or open this file in a browser yourself:\n{shown}"
             );
         };
@@ -66,9 +64,59 @@ pub(crate) fn plan(inputs: &Inputs, file: &Path) -> Result<String> {
     }
     if !found("xdg-open") {
         bail!(
-            "could not open the plan page: xdg-open is not on PATH.\n\
+            "could not open {what}: xdg-open is not on PATH.\n\
              install xdg-utils, or open this file in a browser yourself:\n{shown}"
         );
+    }
+    Ok(format!("xdg-open {}", crate::platform::quote(&shown)))
+}
+
+/// A relative path would be resolved against the opener's directory, not the
+/// caller's, and its empty parent would fail the spawn with a misleading "No
+/// such file or directory".
+fn refuse_relative(file: &Path, what: &str) -> Result<()> {
+    if !file.is_absolute() {
+        bail!(
+            "could not open {what}: {} is not an absolute path.\n\
+             give the full path of the file, starting with /.",
+            file.display()
+        );
+    }
+    Ok(())
+}
+
+/// The line `sh` runs to open the folder `dir` in the file manager: a
+/// program, then the quoted path.
+///
+/// Not [`plan`]'s route. WSL runs `explorer.exe` itself, never `wslview`,
+/// which is the browser's opener. And `xdg-open` with no display to draw on
+/// fails after it has started, detached where nobody sees it, so other
+/// Linux runs it only when `DISPLAY` or `WAYLAND_DISPLAY` is set.
+///
+/// An `Err` means no file manager can be started. Its text is one clause,
+/// `could not open <what>: <reason>`, with no advice and no path: the caller
+/// knows what else it can try, and says it.
+pub(crate) fn folder_plan(inputs: &Inputs, dir: &Path, what: &str) -> Result<String> {
+    refuse_relative(dir, what)?;
+    let found = |program: &str| crate::platform::which(program, &inputs.path).is_some();
+    let shown = dir.display().to_string();
+    if inputs.macos {
+        return Ok(format!("open {}", crate::platform::quote(&shown)));
+    }
+    if inputs.wsl {
+        if !found("explorer.exe") {
+            bail!("could not open {what}: explorer.exe is not on PATH");
+        }
+        let windows = (inputs.wslpath)(dir).with_context(|| {
+            format!("could not open {what}: could not convert {shown} to a Windows path")
+        })?;
+        return Ok(format!("explorer.exe {}", crate::platform::quote(&windows)));
+    }
+    if !inputs.display {
+        bail!("could not open {what}: no display is set");
+    }
+    if !found("xdg-open") {
+        bail!("could not open {what}: xdg-open is not on PATH");
     }
     Ok(format!("xdg-open {}", crate::platform::quote(&shown)))
 }
@@ -99,6 +147,19 @@ pub(crate) fn open_plan(plan: &str) -> Option<crate::screen::Notice> {
         .map(|err| crate::screen::Notice::new("open plan", format!("o: {err:#}")))
 }
 
+/// What the choice depends on, read off this machine.
+#[cfg(all(unix, not(test)))]
+fn machine_inputs() -> Inputs<'static> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    Inputs {
+        macos: cfg!(target_os = "macos"),
+        wsl: crate::platform::on_wsl(),
+        display: set("DISPLAY") || set("WAYLAND_DISPLAY"),
+        path: std::env::var_os("PATH").unwrap_or_default(),
+        wslpath: &crate::platform::wslpath,
+    }
+}
+
 /// Open the existing file at the absolute path `file` in the default browser
 /// and return at once.
 ///
@@ -107,13 +168,7 @@ pub(crate) fn open_plan(plan: &str) -> Option<crate::screen::Notice> {
 /// the browser.
 #[cfg(all(unix, not(test)))]
 fn open(file: &Path) -> Result<()> {
-    let inputs = Inputs {
-        macos: cfg!(target_os = "macos"),
-        wsl: crate::platform::on_wsl(),
-        path: std::env::var_os("PATH").unwrap_or_default(),
-        wslpath: &crate::platform::wslpath,
-    };
-    let line = plan(&inputs, file)?;
+    let line = plan(&machine_inputs(), file, "the plan page")?;
     // `plan` has refused a relative path, so the parent is a real directory.
     let cwd = file.parent().unwrap_or(Path::new("/"));
     let child =
@@ -125,6 +180,23 @@ fn open(file: &Path) -> Result<()> {
 #[cfg(all(not(unix), not(test)))]
 fn open(_file: &Path) -> Result<()> {
     bail!("opening a browser needs a Unix platform")
+}
+
+/// Open the existing folder at the absolute path `dir` in the file manager
+/// and return at once, the way [`open`] starts a browser. `what` names the
+/// folder in a refusal — see [`folder_plan`].
+#[cfg(all(unix, not(test)))]
+pub(crate) fn open_folder(dir: &Path, what: &str) -> Result<()> {
+    let line = folder_plan(&machine_inputs(), dir, what)?;
+    let child = crate::headless::spawn_detached_shell(&line, dir)
+        .with_context(|| format!("could not open {what}: the file manager did not start"))?;
+    crate::headless::reap_when_it_ends(child);
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(test)))]
+pub(crate) fn open_folder(_dir: &Path, what: &str) -> Result<()> {
+    bail!("could not open {what}: opening a file manager needs a Unix platform")
 }
 
 /// Test-only [`open`]: records `file` instead of starting a browser, so a
@@ -139,6 +211,13 @@ fn open(file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Test-only [`open_folder`], recording and refusing the way the test-only
+/// [`open`] does, through the same [`opened`] and [`refuse_opens`].
+#[cfg(test)]
+pub(crate) fn open_folder(dir: &Path, _what: &str) -> Result<()> {
+    open(dir)
+}
+
 #[cfg(test)]
 mod test_opens {
     use std::cell::RefCell;
@@ -150,14 +229,16 @@ mod test_opens {
     }
 }
 
-/// Test-only: every file this thread's [`open`] was handed, in order.
+/// Test-only: every file or folder this thread's [`open`] or [`open_folder`]
+/// was handed, in order.
 #[cfg(test)]
 pub(crate) fn opened() -> Vec<std::path::PathBuf> {
     test_opens::OPENED.with(|o| o.borrow().clone())
 }
 
-/// Test-only: make this thread's [`open`] refuse with `text`, the way
-/// [`plan`] refuses on a machine with no opener.
+/// Test-only: make this thread's [`open`] and [`open_folder`] refuse with
+/// `text`, the way [`plan`] and [`folder_plan`] refuse on a machine with no
+/// opener.
 #[cfg(test)]
 pub(crate) fn refuse_opens(text: &str) {
     test_opens::REFUSAL.with(|r| *r.borrow_mut() = Some(text.to_string()));
@@ -205,6 +286,7 @@ mod tests {
         Inputs {
             macos,
             wsl,
+            display: false,
             path,
             wslpath,
         }
@@ -256,6 +338,7 @@ mod tests {
         let line = plan(
             &inputs(OsString::new(), true, false, &no_wslpath),
             Path::new("/a/b.html"),
+            "the plan page",
         )
         .unwrap();
         assert_eq!(line, "open '/a/b.html'");
@@ -269,6 +352,7 @@ mod tests {
         let line = plan(
             &inputs(path, false, false, &no_wslpath),
             Path::new("/a/b.html"),
+            "the plan page",
         )
         .unwrap();
         assert_eq!(line, "xdg-open '/a/b.html'");
@@ -283,6 +367,7 @@ mod tests {
         let err = plan(
             &inputs(path, false, false, &no_wslpath),
             Path::new("/a/b.html"),
+            "the plan page",
         )
         .unwrap_err();
         assert_eq!(
@@ -297,7 +382,12 @@ mod tests {
     fn wsl_prefers_wslview_with_a_windows_path() {
         let d = dir();
         let path = bin(&d, &["wslview", "explorer.exe", "xdg-open"]);
-        let line = plan(&inputs(path, false, true, &windows), Path::new("/a/b.html")).unwrap();
+        let line = plan(
+            &inputs(path, false, true, &windows),
+            Path::new("/a/b.html"),
+            "the plan page",
+        )
+        .unwrap();
         assert_eq!(line, r"wslview '\\wsl.localhost\Ubuntu\a\b.html'");
     }
 
@@ -306,7 +396,12 @@ mod tests {
     fn wsl_falls_back_to_explorer() {
         let d = dir();
         let path = bin(&d, &["explorer.exe", "xdg-open"]);
-        let line = plan(&inputs(path, false, true, &windows), Path::new("/a/b.html")).unwrap();
+        let line = plan(
+            &inputs(path, false, true, &windows),
+            Path::new("/a/b.html"),
+            "the plan page",
+        )
+        .unwrap();
         assert_eq!(line, r"explorer.exe '\\wsl.localhost\Ubuntu\a\b.html'");
     }
 
@@ -319,6 +414,7 @@ mod tests {
         let err = plan(
             &inputs(path, false, true, &no_wslpath),
             Path::new("/a/b.html"),
+            "the plan page",
         )
         .unwrap_err()
         .to_string();
@@ -338,6 +434,7 @@ mod tests {
         let line = plan(
             &inputs(path, false, false, &no_wslpath),
             Path::new("/a b/it's.html"),
+            "the plan page",
         )
         .unwrap();
         assert_eq!(line, r#"xdg-open '/a b/it'\''s.html'"#);
@@ -351,10 +448,90 @@ mod tests {
         let err = plan(
             &inputs(path, false, false, &no_wslpath),
             Path::new("plan.html"),
+            "the plan page",
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("plan.html is not an absolute path"), "{err}");
+    }
+
+    /// The folder route's inputs: `inputs`, with the display set or not.
+    fn folder_inputs(
+        path: OsString,
+        macos: bool,
+        wsl: bool,
+        display: bool,
+        wslpath: &dyn Fn(&Path) -> Result<String>,
+    ) -> Inputs<'_> {
+        Inputs {
+            display,
+            ..inputs(path, macos, wsl, wslpath)
+        }
+    }
+
+    const FOLDER: &str = "the overrides folder";
+
+    /// macOS opens a folder in Finder through `open`, with no PATH search.
+    #[test]
+    fn a_folder_opens_through_open_on_macos() {
+        let inputs = folder_inputs(OsString::new(), true, false, false, &no_wslpath);
+        let line = folder_plan(&inputs, Path::new("/h/overrides"), FOLDER).unwrap();
+        assert_eq!(line, "open '/h/overrides'");
+    }
+
+    /// WSL runs `explorer.exe` on the Windows path even when `wslview` is
+    /// there, since `wslview` hands a folder to the browser.
+    #[test]
+    fn a_folder_opens_through_explorer_on_wsl() {
+        let d = dir();
+        let path = bin(&d, &["wslview", "explorer.exe", "xdg-open"]);
+        let inputs = folder_inputs(path, false, true, true, &windows);
+        let line = folder_plan(&inputs, Path::new("/h/overrides"), FOLDER).unwrap();
+        assert_eq!(line, r"explorer.exe '\\wsl.localhost\Ubuntu\h\overrides'");
+    }
+
+    /// WSL with no `explorer.exe` refuses in one clause naming the folder,
+    /// with `wslview` on PATH or not.
+    #[test]
+    fn wsl_without_explorer_refuses_the_folder() {
+        let d = dir();
+        let path = bin(&d, &["wslview", "xdg-open"]);
+        let inputs = folder_inputs(path, false, true, true, &no_wslpath);
+        let err = folder_plan(&inputs, Path::new("/h/overrides"), FOLDER).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "could not open the overrides folder: explorer.exe is not on PATH"
+        );
+    }
+
+    /// Other Linux runs `xdg-open` only with a display to draw on.
+    #[test]
+    fn linux_opens_a_folder_through_xdg_open_only_with_a_display() {
+        let d = dir();
+        let path = bin(&d, &["xdg-open"]);
+        let shown = folder_inputs(path.clone(), false, false, true, &no_wslpath);
+        let line = folder_plan(&shown, Path::new("/h/overrides"), FOLDER).unwrap();
+        assert_eq!(line, "xdg-open '/h/overrides'");
+
+        let headless = folder_inputs(path, false, false, false, &no_wslpath);
+        let err = folder_plan(&headless, Path::new("/h/overrides"), FOLDER).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "could not open the overrides folder: no display is set"
+        );
+    }
+
+    /// A display with no `xdg-open` refuses naming the program.
+    #[test]
+    fn linux_without_xdg_open_refuses_the_folder() {
+        let d = dir();
+        let path = bin(&d, &["open"]);
+        let inputs = folder_inputs(path, false, false, true, &no_wslpath);
+        let err = folder_plan(&inputs, Path::new("/h/overrides"), FOLDER).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "could not open the overrides folder: xdg-open is not on PATH"
+        );
     }
 
     /// A failed conversion names the path and carries why `wslpath` gave up.
@@ -363,7 +540,12 @@ mod tests {
         let d = dir();
         let path = bin(&d, &["wslview"]);
         let fail = |_: &Path| bail!("wslpath exited 1");
-        let err = plan(&inputs(path, false, true, &fail), Path::new("/a/b.html")).unwrap_err();
+        let err = plan(
+            &inputs(path, false, true, &fail),
+            Path::new("/a/b.html"),
+            "the plan page",
+        )
+        .unwrap_err();
         let text = format!("{err:#}");
         assert!(
             text.contains("could not convert /a/b.html to a Windows path"),

@@ -56,6 +56,34 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
+    let write = write_prompt_override(repo, name)?;
+
+    println!("  wrote {}", write.path.display());
+    println!();
+    if write.private {
+        println!(
+            "  waiting on a promote — prompt `{name}` is private; this fork only starts applying \
+             once it is tracked. `spoolway override drop prompts/{name}` to clear it."
+        );
+    } else {
+        println!("  active on the next lane. `spoolway override drop prompts/{name}` to clear it.");
+    }
+    Ok(())
+}
+
+/// What [`write_prompt_override`] wrote, for the caller to print.
+pub(crate) struct PromptOverrideWrite {
+    pub(crate) path: std::path::PathBuf,
+    /// Whether the copy came from a private prompt, which it only starts
+    /// replacing once that prompt is tracked.
+    pub(crate) private: bool,
+}
+
+/// Copy prompt `name` into the layer, replacing any copy already there, and
+/// print nothing. `prompt override` prints around it; the OVERRIDES tab
+/// calls it directly, and checks for an existing copy first.
+pub(crate) fn write_prompt_override(repo: &Repo, name: &str) -> Result<PromptOverrideWrite> {
+    repo.refuse_in_lane("the overrides layer")?;
     let tracked = crate::prompt::path_for_tracked(repo, name);
     // A private prompt is never tracked, so forking from it reads
     // `local/prompts/` instead — but the layer this writes into only ever
@@ -73,21 +101,9 @@ pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
     let body = std::fs::read_to_string(&source)
         .with_context(|| format!("no prompt named `{name}` at {}", tracked.display()))?;
 
-    let overrides_dir = repo.overrides_dir();
-    let target = crate::overrides::prompt_patch_path(&overrides_dir, name);
-    write_atomic(&target, &body)?;
-
-    println!("  wrote {}", target.display());
-    println!();
-    if private {
-        println!(
-            "  waiting on a promote — prompt `{name}` is private; this fork only starts applying \
-             once it is tracked. `spoolway override drop prompts/{name}` to clear it."
-        );
-    } else {
-        println!("  active on the next lane. `spoolway override drop prompts/{name}` to clear it.");
-    }
-    Ok(())
+    let path = crate::overrides::prompt_patch_path(&repo.overrides_dir(), name);
+    write_atomic(&path, &body)?;
+    Ok(PromptOverrideWrite { path, private })
 }
 
 /// `spoolway config override`: open (creating if absent) `overrides/
@@ -118,11 +134,7 @@ pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Resul
     // PATH is refused without leaving a new file behind.
     let line = super::config::editor_line(&path)?;
     if !path.is_file() {
-        write_atomic(
-            &path,
-            "# Every key here overrides the same key in .spoolway/config.toml.\n\
-             # `spoolway override promote config.toml` writes these into the tracked file.\n",
-        )?;
+        write_atomic(&path, crate::overrides::CONFIG_PATCH_HEADER)?;
     }
 
     super::config::run_editor_line(&line)?;
@@ -394,12 +406,14 @@ const OVERRIDE_CONTRACT_LINES: &[&str] = &[
     "THE FOUR `override` COMMANDS",
     "  spoolway override contract          this",
     "  spoolway override list              what is layered right now, and over what",
-    "  spoolway override promote <target>  write a patched artifact into the tracked file,",
-    "                                       then clear it from the layer",
-    "  spoolway override drop [<target>]   remove one entry, or the whole layer",
+    "  spoolway override promote <target>  write a patched artifact into the tracked file;",
+    "                                       the entry stays in the layer until dropped",
+    "  spoolway override drop [<target> [<key>]]",
+    "                                       remove the whole layer, one entry, or one key of it",
     "",
     "A patch is written by `spoolway pipeline override <name> --set <step>.<key>=<value>`,",
-    "`spoolway prompt override <name>` or `spoolway config override` — never by hand.",
+    "`spoolway prompt override <name>` or `spoolway config override [--set <key>=<value>]` —",
+    "never by hand.",
 ];
 
 /// [`override_contract`]'s body, built as a string so a test can assert on
@@ -480,10 +494,9 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
 pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
     let write = repo.tracked_write_root("tracked files", &format!("override promote {target}"))?;
     let write_root = write.root;
-    match parse_target(target)? {
-        Target::Pipeline(name) => promote_pipeline(repo, write_root, &name)?,
-        Target::Prompt(name) => promote_prompt(repo, write_root, &name)?,
-        Target::Config => promote_config(repo, write_root)?,
+    let lines = promote_override(repo, write_root, target)?;
+    for line in lines {
+        println!("{line}");
     }
     if let Some(note) = write.note() {
         println!("{note}");
@@ -491,10 +504,30 @@ pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
-    // Held from the read of the patch to its removal: a `pipeline override
-    // --set` that lands in between is deleted with the patch, after this
-    // promote has printed that it wrote the file.
+/// Write one patched artifact into the tracked files under `write_root` and
+/// return the lines to show for it, printing nothing. The entry stays in the
+/// layer.
+///
+/// `override promote` prints these lines; the OVERRIDES tab shows them in a
+/// screen of its own. `write_root` comes from [`Repo::tracked_write_root`],
+/// which is also what refuses a lane.
+pub(crate) fn promote_override(
+    repo: &Repo,
+    write_root: &Path,
+    target: &str,
+) -> Result<Vec<String>> {
+    match parse_target(target)? {
+        Target::Pipeline(name) => promote_pipeline(repo, write_root, &name),
+        Target::Prompt(name) => promote_prompt(repo, write_root, &name),
+        Target::Config => promote_config(repo, write_root),
+    }
+}
+
+fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<Vec<String>> {
+    // Held from the read of the patch to the write of the tracked file: a
+    // `pipeline override --set` that lands in between would change the patch
+    // after the values were read, and this promote would print values the
+    // file does not hold.
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let overrides_dir = repo.overrides_dir();
     let patch = crate::overrides::read_pipeline_patch(&overrides_dir, name)?
@@ -503,17 +536,17 @@ fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
 
     let path = Pipelines::file_in(write_root, name);
     let changes = crate::overrides::promote_pipeline_patch(write_root, name, &patch)?;
-    crate::overrides::remove_pipeline_patch(&overrides_dir, name)?;
-
-    println!("  wrote {}", path.display());
+    let mut lines = vec![format!("  wrote {}", path.display())];
     for (key, _old, new) in &changes {
-        println!("    {key}   {new}");
+        lines.push(format!("    {key}   {new}"));
     }
-    println!("  cleared pipelines/{name}.yml from the layer");
-    Ok(())
+    lines.push(format!(
+        "  kept pipelines/{name}.yml in the layer until you drop it"
+    ));
+    Ok(lines)
 }
 
-fn promote_prompt(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
+fn promote_prompt(repo: &Repo, write_root: &Path, name: &str) -> Result<Vec<String>> {
     let overrides_dir = repo.overrides_dir();
     let source = crate::overrides::prompt_patch_path(&overrides_dir, name);
     let body = std::fs::read_to_string(&source)
@@ -521,58 +554,181 @@ fn promote_prompt(repo: &Repo, write_root: &Path, name: &str) -> Result<()> {
 
     let dest = crate::prompt::tracked_path_in(write_root, name);
     write_atomic(&dest, &body)?;
-    crate::overrides::remove_prompt_override(&overrides_dir, name)?;
 
-    println!("  wrote {}", dest.display());
-    println!("  cleared prompts/{name} from the layer");
-    Ok(())
+    Ok(vec![
+        format!("  wrote {}", dest.display()),
+        format!("  kept prompts/{name} in the layer until you drop it"),
+    ])
 }
 
-fn promote_config(repo: &Repo, write_root: &Path) -> Result<()> {
+fn promote_config(repo: &Repo, write_root: &Path) -> Result<Vec<String>> {
     // Held from the read of the tracked file to its write, so a parallel
     // `config set` is not overwritten by the text this promote read before
     // it landed.
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let changes = crate::overrides::promote_config_patch(write_root)?;
-    crate::overrides::remove_config_patch(&repo.overrides_dir())?;
-
     let path = Config::path_in(write_root);
-    println!("  wrote {}", path.display());
+    let mut lines = vec![format!("  wrote {}", path.display())];
     for (key, value) in &changes {
-        println!("    {key} = {value}");
+        lines.push(format!("    {key} = {value}"));
     }
-    println!("  cleared config.toml from the layer");
+    lines.push("  kept config.toml in the layer until you drop it".to_string());
+    Ok(lines)
+}
+
+/// What [`write_config_override`] changed, for the caller to print.
+pub(crate) struct ConfigOverrideWrite {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) old: String,
+}
+
+/// Write one config key into the layer exactly as typed, with no check on
+/// the key or the value. One that the config cannot take shows up in `override
+/// list` as ignored.
+///
+/// `config override --set` checks the value first and then calls this; the
+/// OVERRIDES tab calls it directly.
+pub(crate) fn write_config_override(
+    repo: &Repo,
+    key: &str,
+    value: &str,
+) -> Result<ConfigOverrideWrite> {
+    repo.refuse_in_lane("the overrides layer")?;
+    // Held from the read of the patch to its write, so a parallel set of
+    // another key starts from what this one saved instead of replacing it.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
+    // A key the config does not know has no value in effect to show.
+    let old = crate::confkv::get(&repo.config, key).unwrap_or_else(|_| "not set".to_string());
+    let overrides_dir = repo.overrides_dir();
+    crate::overrides::set_config_patch_key(&overrides_dir, key, value, &repo.config.render()?)?;
+    Ok(ConfigOverrideWrite {
+        path: crate::overrides::config_patch_path(&overrides_dir),
+        old,
+    })
+}
+
+/// `spoolway config override --set <key>=<value>`.
+pub fn config_override_set(repo: &Repo, set: &str) -> Result<()> {
+    repo.refuse_in_lane("the overrides layer")?;
+    let (key, value) = set
+        .split_once('=')
+        .with_context(|| format!("`--set {set}` — expected `<key>=<value>`"))?;
+    // The checks `config set` runs, so the CLI refuses what the layer would
+    // only report as ignored.
+    crate::confkv::check_typed(key, value)?;
+    let updated = crate::confkv::set(&repo.config, key, value)?;
+    if let Some(note) = repo.checkout_note()? {
+        note.print(false)?;
+    }
+    let write = write_config_override(repo, key, value)?;
+    // Switching a profile's `kind` settles its `permission_mode` onto the new
+    // kind, so the layer has to carry that key too or it would read back as
+    // the old kind's mode.
+    if let Some(profile) = key
+        .strip_suffix(".kind")
+        .filter(|p| p.starts_with("agents."))
+    {
+        let mode_key = format!("{profile}.permission_mode");
+        write_config_override(repo, &mode_key, &crate::confkv::get(&updated, &mode_key)?)?;
+    }
+    println!("  wrote {}", write.path.display());
+    println!(
+        "    {key}   {} -> {}",
+        write.old,
+        crate::confkv::get(&updated, key)?
+    );
+    println!();
+    println!(
+        "  a running dispatcher uses it on its next pass. `spoolway override drop config.toml \
+         {key}` to clear it."
+    );
     Ok(())
 }
 
-/// `spoolway override drop [<target>]`.
-pub fn override_drop(repo: &Repo, target: Option<&str>) -> Result<()> {
+/// Remove one key from a target's patch; returns the file as `override list`
+/// prints it. A file left with no key is removed from the layer.
+///
+/// `override drop <target> <key>` calls this.
+pub(crate) fn drop_override_key(repo: &Repo, target: &str, key: &str) -> Result<String> {
+    drop_override_keys(repo, target, &[key.to_string()])
+}
+
+/// Remove `keys` from a target's patch in one step, one write or the file's
+/// removal; returns the file as `override list` prints it. A key the patch
+/// does not set refuses the call with the file left as it was, and a file
+/// left with no key is removed from the layer without being written first.
+///
+/// The OVERRIDES tab calls this once per file, so a delete across several
+/// files that stops partway has changed whole files only.
+pub(crate) fn drop_override_keys(repo: &Repo, target: &str, keys: &[String]) -> Result<String> {
     repo.refuse_in_lane("the overrides layer")?;
     let dir = repo.overrides_dir();
-    let Some(target) = target else {
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", dir.display())),
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
+    match parse_target(target)? {
+        Target::Pipeline(name) => {
+            crate::overrides::remove_pipeline_patch_keys(&dir, &name, keys)?;
+            Ok(format!("pipelines/{name}.yml"))
         }
-        println!("cleared the whole layer");
-        return Ok(());
-    };
+        Target::Prompt(name) => bail!(
+            "`prompts/{name}` is a whole-file override with no keys; \
+             `spoolway override drop prompts/{name}` removes it"
+        ),
+        Target::Config => {
+            crate::overrides::remove_config_patch_keys(&dir, keys)?;
+            Ok(crate::config::CONFIG_FILE.to_string())
+        }
+    }
+}
 
+/// Remove one whole entry from the layer; returns the file as `override
+/// list` prints it.
+///
+/// `override drop <target>` calls this, and so does the OVERRIDES tab.
+pub(crate) fn drop_override_target(repo: &Repo, target: &str) -> Result<String> {
+    repo.refuse_in_lane("the overrides layer")?;
+    let dir = repo.overrides_dir();
+    // Held across the removal, so a parallel `pipeline override --set` that
+    // read the patch first does not write it back after it is gone.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     match parse_target(target)? {
         Target::Pipeline(name) => {
             crate::overrides::remove_pipeline_patch(&dir, &name)?;
-            println!("cleared pipelines/{name}.yml from the layer");
+            Ok(format!("pipelines/{name}.yml"))
         }
         Target::Prompt(name) => {
             crate::overrides::remove_prompt_override(&dir, &name)?;
-            println!("cleared prompts/{name} from the layer");
+            Ok(format!("prompts/{name}"))
         }
         Target::Config => {
             crate::overrides::remove_config_patch(&dir)?;
-            println!("cleared config.toml from the layer");
+            Ok(crate::config::CONFIG_FILE.to_string())
         }
     }
+}
+
+/// `spoolway override drop [<target>]`.
+pub fn override_drop(repo: &Repo, target: Option<&str>, key: Option<&str>) -> Result<()> {
+    if let (Some(target), Some(key)) = (target, key) {
+        let file = drop_override_key(repo, target, key)?;
+        println!("cleared {key} from {file}");
+        return Ok(());
+    }
+    if let Some(target) = target {
+        let file = drop_override_target(repo, target)?;
+        println!("cleared {file} from the layer");
+        return Ok(());
+    }
+    repo.refuse_in_lane("the overrides layer")?;
+    let dir = repo.overrides_dir();
+    // Held for the same reason as in `drop_override_target`: a parallel
+    // write would otherwise bring back the file it read.
+    let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing {}", dir.display())),
+    }
+    println!("cleared the whole layer");
     Ok(())
 }
 
@@ -978,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn override_promote_writes_the_tracked_pipeline_and_clears_the_layer() {
+    fn override_promote_writes_the_tracked_pipeline_and_keeps_the_layer() {
         with_repo("promote-pipeline", |repo| {
             pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
             override_promote(repo, "demo").unwrap();
@@ -989,8 +1145,8 @@ mod tests {
             assert!(
                 crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
                     .unwrap()
-                    .is_none(),
-                "promoting should clear the layer's own copy"
+                    .is_some(),
+                "promoting must keep the layer's own copy"
             );
         });
     }
@@ -1050,7 +1206,7 @@ mod tests {
     }
 
     /// In a worktree of its own, `override promote` writes that worktree's
-    /// pipeline file and clears the layer entry, and the main checkout's
+    /// pipeline file and keeps the layer entry, and the main checkout's
     /// file is left as it was.
     #[test]
     fn override_promote_in_a_worktree_of_its_own_writes_the_worktrees_file() {
@@ -1062,8 +1218,8 @@ mod tests {
             assert!(
                 crate::overrides::read_pipeline_patch(&own.overrides_dir(), "demo")
                     .unwrap()
-                    .is_none(),
-                "the entry is cleared at once, as in the main checkout"
+                    .is_some(),
+                "the entry stays, as in the main checkout"
             );
         });
     }
@@ -1207,11 +1363,11 @@ mod tests {
             let refusals: Vec<(&str, anyhow::Error)> = vec![
                 (
                     "override drop",
-                    override_drop(lane, None).expect_err("override drop"),
+                    override_drop(lane, None, None).expect_err("override drop"),
                 ),
                 (
                     "override drop <target>",
-                    override_drop(lane, Some("demo")).expect_err("override drop demo"),
+                    override_drop(lane, Some("demo"), None).expect_err("override drop demo"),
                 ),
                 (
                     "pipeline override",
@@ -1225,6 +1381,27 @@ mod tests {
                 (
                     "config override",
                     config_override(lane, None).expect_err("config override"),
+                ),
+                (
+                    "config override --set",
+                    config_override_set(lane, "dispatch.lane_quiet=5m")
+                        .expect_err("config override --set"),
+                ),
+                (
+                    "override drop <target> <key>",
+                    override_drop(lane, Some("demo"), Some("implement.model"))
+                        .expect_err("override drop demo implement.model"),
+                ),
+                (
+                    "write_config_override",
+                    write_config_override(lane, "dispatch.lane_quiet", "5m")
+                        .err()
+                        .expect("write_config_override"),
+                ),
+                (
+                    "drop_override_key",
+                    drop_override_key(lane, "demo", "implement.model")
+                        .expect_err("drop_override_key"),
                 ),
                 (
                     "pipeline copy",
@@ -1269,7 +1446,8 @@ mod tests {
                 "Whole new review.\n"
             );
             assert!(
-                !crate::overrides::prompt_patch_path(&repo.overrides_dir(), "reviewer").is_file()
+                crate::overrides::prompt_patch_path(&repo.overrides_dir(), "reviewer").is_file(),
+                "promoting must keep the prompt override"
             );
         });
     }
@@ -1287,7 +1465,10 @@ mod tests {
 
             let tracked_config = std::fs::read_to_string(Config::path_in(&repo.root)).unwrap();
             assert!(tracked_config.contains("blocked_agent = \"promoted\""));
-            assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).is_file());
+            assert!(
+                crate::overrides::config_patch_path(&repo.overrides_dir()).is_file(),
+                "promoting must keep the config patch"
+            );
         });
     }
 
@@ -1342,13 +1523,42 @@ mod tests {
         });
     }
 
+    /// A drop of a whole file, and of the whole layer, waits for the edit
+    /// lock a `pipeline override --set` holds. Without it the file went at
+    /// once, and that `--set` wrote back the patch it had read.
+    #[test]
+    fn override_drop_of_a_file_or_the_layer_waits_for_the_edit_lock() {
+        with_repo("drop-lock", |repo| {
+            for target in [Some("demo"), None] {
+                pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+                let held = crate::lock::EditLock::acquire(&repo.edit_lock_path()).unwrap();
+                let started = std::time::Instant::now();
+                // Timed inside the scope: leaving it waits for the thread
+                // that releases the lock, so a time taken after it would
+                // pass whether or not the drop waited.
+                let waited = std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        drop(held);
+                    });
+                    override_drop(repo, target, None).unwrap();
+                    started.elapsed()
+                });
+                assert!(
+                    waited >= std::time::Duration::from_millis(250),
+                    "the drop of {target:?} ran while the edit lock was held"
+                );
+            }
+        });
+    }
+
     #[test]
     fn override_drop_removes_one_entry_and_leaves_the_others() {
         with_repo("drop-one", |repo| {
             pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
             prompt_override(repo, "reviewer").unwrap();
 
-            override_drop(repo, Some("demo")).unwrap();
+            override_drop(repo, Some("demo"), None).unwrap();
             assert!(
                 crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
                     .unwrap()
@@ -1371,7 +1581,7 @@ mod tests {
             let path = crate::overrides::config_patch_path(&repo.overrides_dir());
             for target in [Some("config.toml"), None] {
                 write_atomic(&path, "[dispatch\nlane_quiet = \"7m\"\n").unwrap();
-                override_drop(repo, target).unwrap();
+                override_drop(repo, target, None).unwrap();
                 assert!(!path.is_file(), "{target:?}");
             }
         });
@@ -1383,8 +1593,247 @@ mod tests {
             pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
             prompt_override(repo, "reviewer").unwrap();
 
-            override_drop(repo, None).unwrap();
+            override_drop(repo, None, None).unwrap();
             assert!(!repo.overrides_dir().is_dir());
+        });
+    }
+
+    /// Every promote's closing line names the entry it left in the layer.
+    #[test]
+    fn override_promote_says_it_kept_the_entry() {
+        with_repo("promote-says-kept", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            prompt_override(repo, "reviewer").unwrap();
+            write_atomic(
+                &crate::overrides::config_patch_path(&repo.overrides_dir()),
+                "[unattended]\nblocked_agent = \"promoted\"\n",
+            )
+            .unwrap();
+            for (target, file) in [
+                ("demo", "pipelines/demo.yml"),
+                ("prompts/reviewer", "prompts/reviewer"),
+                ("config.toml", "config.toml"),
+            ] {
+                let write = repo.tracked_write_root("tracked files", "test").unwrap();
+                let lines = promote_override(repo, write.root, target).unwrap();
+                assert_eq!(
+                    lines.last().unwrap(),
+                    &format!("  kept {file} in the layer until you drop it")
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn config_override_set_writes_one_key_and_reports_old_and_new() {
+        with_repo("config-set", |repo| {
+            let write = write_config_override(repo, "dispatch.lane_quiet", "5m").unwrap();
+            assert_eq!(
+                write.path,
+                crate::overrides::config_patch_path(&repo.overrides_dir())
+            );
+            assert_eq!(write.old, "15m");
+            assert_eq!(
+                crate::overrides::config_patch_keys(&repo.overrides_dir()).unwrap(),
+                Some(vec!["dispatch.lane_quiet".to_string()])
+            );
+            config_override_set(repo, "dispatch.visible_lanes=5").unwrap();
+            let keys = crate::overrides::config_patch_keys(&repo.overrides_dir())
+                .unwrap()
+                .unwrap();
+            assert_eq!(keys.len(), 2, "a second set must keep the first: {keys:?}");
+            let merged = crate::overrides::apply_config_patch(
+                Config::load_tracked(&repo.checkout).unwrap(),
+                &repo.overrides_dir(),
+            )
+            .unwrap()
+            .0;
+            assert_eq!(
+                crate::confkv::get(&merged, "dispatch.lane_quiet").unwrap(),
+                "5m"
+            );
+            assert_eq!(
+                crate::confkv::get(&merged, "dispatch.visible_lanes").unwrap(),
+                "5"
+            );
+        });
+    }
+
+    /// The shared write takes the text as typed: a value the config cannot
+    /// hold, or a key it does not know, lands in the layer, where `override
+    /// list` then marks it ignored. Only `config override --set` refuses them.
+    #[test]
+    fn write_config_override_writes_what_it_is_given_without_a_check() {
+        with_repo("config-write-unchecked", |repo| {
+            write_config_override(repo, "dispatch.visible_lanes", "three").unwrap();
+            write_config_override(repo, "dispatch.no_such_key", "1").unwrap();
+            write_config_override(repo, "dispatch.lane_quiet", "banana").unwrap();
+            let rows = collect_override_rows(repo).unwrap();
+            assert_eq!(rows.len(), 1);
+            let ignored: Vec<&str> = rows[0].ignored.iter().map(|i| i.fields.as_str()).collect();
+            assert!(ignored.contains(&"dispatch.visible_lanes"), "{ignored:?}");
+            assert!(ignored.contains(&"dispatch.no_such_key"), "{ignored:?}");
+            let text =
+                std::fs::read_to_string(crate::overrides::config_patch_path(&repo.overrides_dir()))
+                    .unwrap();
+            assert!(text.contains("visible_lanes = \"three\""), "{text}");
+            assert!(text.contains("no_such_key = 1"), "{text}");
+        });
+    }
+
+    /// Switching a profile's kind settles its permission mode, and the layer
+    /// has to carry both or it would read back as the old kind's mode.
+    #[test]
+    fn config_override_set_of_a_kind_writes_the_settled_permission_mode_too() {
+        with_repo("config-set-kind", |repo| {
+            config_override_set(repo, "agents.claude.kind=codex").unwrap();
+            let keys = crate::overrides::config_patch_keys(&repo.overrides_dir())
+                .unwrap()
+                .unwrap();
+            assert!(
+                keys.contains(&"agents.claude.permission_mode".to_string()),
+                "{keys:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn config_override_set_writes_nothing_when_the_check_fails() {
+        with_repo("config-set-bad", |repo| {
+            for set in [
+                "dispatch.lane_quiet=banana",
+                "dispatch.no_such_key=1",
+                "unattended.max_cost_usd=-5",
+                "dispatch.lane_quiet",
+            ] {
+                config_override_set(repo, set).expect_err(set);
+                assert!(
+                    !crate::overrides::config_patch_path(&repo.overrides_dir()).exists(),
+                    "{set} left a file behind"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn override_drop_key_removes_one_pipeline_key_and_keeps_the_rest() {
+        with_repo("drop-key-pipeline", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            pipeline_override(repo, "demo", "implement.effort=high").unwrap();
+
+            let file = drop_override_key(repo, "demo", "implement.model").unwrap();
+            assert_eq!(file, "pipelines/demo.yml");
+            let rows = collect_override_rows(repo).unwrap();
+            assert_eq!(rows[0].overrides, "implement.effort");
+        });
+    }
+
+    /// Several keys of one file go in one write: a key the file does not
+    /// set refuses them all with the file as it was, and a pipeline's
+    /// `description` goes by its name, the way `override list` prints it.
+    #[test]
+    fn override_drop_keys_removes_every_key_or_none() {
+        with_repo("drop-keys", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            pipeline_override(repo, "demo", "implement.effort=high").unwrap();
+            let path = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "demo");
+            let mut patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "demo")
+                .unwrap()
+                .unwrap();
+            patch.description = Some("mine".to_string());
+            crate::overrides::write_pipeline_patch(&repo.overrides_dir(), "demo", &patch).unwrap();
+            let before = std::fs::read_to_string(&path).unwrap();
+
+            let keys = |keys: &[&str]| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+            let err = drop_override_keys(repo, "demo", &keys(&["implement.model", "fix.model"]))
+                .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("does not set `fix.model`"),
+                "{err:#}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+            drop_override_keys(repo, "demo", &keys(&["implement.model", "description"])).unwrap();
+            let rows = collect_override_rows(repo).unwrap();
+            assert_eq!(rows[0].overrides, "implement.effort");
+
+            write_config_override(repo, "dispatch.lane_quiet", "5m").unwrap();
+            write_config_override(repo, "dispatch.visible_lanes", "5").unwrap();
+            drop_override_keys(
+                repo,
+                "config.toml",
+                &keys(&["dispatch.lane_quiet", "dispatch.visible_lanes"]),
+            )
+            .unwrap();
+            assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).exists());
+        });
+    }
+
+    /// The last key of a file takes the file with it, and the empty folders
+    /// above it, so the layer never reads an empty patch as an override.
+    #[test]
+    fn override_drop_key_of_the_last_key_removes_the_file_and_empty_folders() {
+        with_repo("drop-key-last", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            drop_override_key(repo, "pipelines/demo.yml", "implement.model").unwrap();
+            assert!(!repo.overrides_dir().exists(), "empty layer folders remain");
+
+            write_config_override(repo, "dispatch.lane_quiet", "5m").unwrap();
+            let file = drop_override_key(repo, "config.toml", "dispatch.lane_quiet").unwrap();
+            assert_eq!(file, "config.toml");
+            assert!(!repo.overrides_dir().exists(), "empty layer folders remain");
+        });
+    }
+
+    #[test]
+    fn override_drop_key_keeps_the_other_keys_of_a_config_patch() {
+        with_repo("drop-key-config", |repo| {
+            write_config_override(repo, "dispatch.lane_quiet", "5m").unwrap();
+            write_config_override(repo, "dispatch.visible_lanes", "5").unwrap();
+            drop_override_key(repo, "config.toml", "dispatch.lane_quiet").unwrap();
+            assert_eq!(
+                crate::overrides::config_patch_keys(&repo.overrides_dir()).unwrap(),
+                Some(vec!["dispatch.visible_lanes".to_string()])
+            );
+        });
+    }
+
+    /// A key copied from `override list` goes straight into `override drop`.
+    #[test]
+    fn override_drop_accepts_a_key_as_override_list_prints_it() {
+        with_repo("drop-key-from-list", |repo| {
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            write_config_override(repo, "dispatch.lane_quiet", "5m").unwrap();
+            for row in collect_override_rows(repo).unwrap() {
+                let key = row.overrides.clone();
+                override_drop(repo, Some(&row.target), Some(&key)).unwrap();
+            }
+            assert!(collect_override_rows(repo).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn override_drop_key_refuses_a_prompt_and_a_missing_key() {
+        with_repo("drop-key-refusals", |repo| {
+            prompt_override(repo, "reviewer").unwrap();
+            pipeline_override(repo, "demo", "implement.model=claude-opus-5").unwrap();
+            let err = drop_override_key(repo, "prompts/reviewer", "x").unwrap_err();
+            assert!(format!("{err:#}").contains("no keys"), "{err:#}");
+            assert!(
+                crate::overrides::prompt_patch_path(&repo.overrides_dir(), "reviewer").is_file()
+            );
+            for (target, key) in [
+                ("demo", "implement.effort"),
+                ("demo", "nodot"),
+                ("config.toml", "dispatch.lane_quiet"),
+                ("nope", "implement.model"),
+            ] {
+                drop_override_key(repo, target, key).expect_err(key);
+            }
+            assert_eq!(
+                collect_override_rows(repo).unwrap()[0].overrides,
+                "implement.model"
+            );
         });
     }
 }

@@ -137,9 +137,9 @@ whole prompt, or any key `spoolway config contract` lists:
 - Otherwise, reach for the override layer by default:
   - a step's field: `spoolway pipeline override <name> --set <step>.<key>=<value>`
   - a whole prompt: `spoolway prompt override <name>`, then edit the fork
-  - a config key: set one key by hand in `overrides/config.toml`
+  - a config key: `spoolway config override --set <key>=<value>`
 - Say which layer you wrote, every time, and offer to undo it: `spoolway
-  override drop <target>`.
+  override drop <target>`, or `spoolway override drop <target> <key>` for one key.
 
 **Set up, join a workspace, or start from nothing** — `spoolway init`:
 

@@ -21,8 +21,8 @@ step and three panes and actions, one pair per command:
 | `dispatch` | Open spoolway | Spoolway | tab |
 | `doctor` | Check this project | Check this project | popup |
 
-The `dispatch` action opens bare `spoolway`, the one screen holding the dispatch, queue, jobs
-and eval tabs.
+The `dispatch` action opens bare `spoolway`, the one screen holding the dispatch, queue, routines,
+overrides and eval tabs.
 
 The `[[build]]` step runs `scripts/fetch-or-build.sh`, which downloads the release file for
 the host's operating system and CPU at the manifest's own `version`, verifies it against

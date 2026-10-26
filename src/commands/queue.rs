@@ -3059,9 +3059,14 @@ fn failed_login_detail(command: &[String]) -> Option<String> {
 /// printed by [`print_tool_gate_notice`] and in the queue screen's popup.
 const TOOL_GATE_VERDICT: &str = "issue tracking is not supported.";
 
-/// The gate's one answer, printed and in the popup alike. `esc` is the
-/// other way out, queueing nothing.
+/// The gate's one answer. The terminal prints it under the notice; the
+/// popup draws no row for a lone answer and runs it on `enter`, saying so
+/// in [`TOOL_GATE_ENTER`]. `esc` is the other way out, queueing nothing.
 const TOOL_GATE_ANSWER: &str = "queue anyway, without issue tracking";
+
+/// The popup's line saying what `enter` does, since its one answer draws no
+/// row of its own — see [`crate::screen::ask`].
+const TOOL_GATE_ENTER: &str = "enter queues it without issue tracking.";
 
 /// The gate's own box, drawn once per unmet requirement pair — the
 /// declaration line and what this machine actually has — followed by the
@@ -3090,12 +3095,14 @@ pub(crate) fn tool_gate_popup(repo: &Repo) -> Option<Vec<String>> {
 }
 
 /// The screens' own popup for the gate: the same rows and the same line
-/// under them as [`print_tool_gate_notice`], in a box over the tab.
+/// under them as [`print_tool_gate_notice`], in a box over the tab, then
+/// [`TOOL_GATE_ENTER`] in place of the answer row the terminal prints.
 fn tool_gate_panel(unmet: &[UnmetRequirement]) -> Vec<String> {
     let mut body = vec![String::new()];
     body.extend(tool_gate_rows(unmet));
     body.push(String::new());
     body.push(TOOL_GATE_VERDICT.to_string());
+    body.push(TOOL_GATE_ENTER.to_string());
     crate::screen::ask("issue tracking", &body, &[TOOL_GATE_ANSWER.to_string()], 0)
 }
 
@@ -8248,13 +8255,13 @@ fn group_line_index(cursor: usize, boundaries: &[usize]) -> usize {
 /// slice.
 ///
 /// While [`Mode::Filter`] is open, the query itself is the pane's first
-/// line — `find: `, whatever has been typed, and a cursor after it — ahead
+/// line — `search: `, whatever has been typed, and a cursor after it — ahead
 /// of every row below. `group_cursor` still addresses `shown` alone, never
 /// this line, the same way it never addresses the separator; [`draw`] is
 /// what shifts the row `window()` centres on to account for it.
 ///
 /// Comes back with the line each group's row sits on as well — see
-/// [`Items`] — so neither that `find:` row nor a separator is ever counted
+/// [`Items`] — so neither that `search:` row nor a separator is ever counted
 /// as a group out of sight.
 fn groups_pane_lines(
     groups: &[Group],
@@ -8264,7 +8271,7 @@ fn groups_pane_lines(
 ) -> (Vec<String>, Vec<usize>) {
     let mut lines = Vec::new();
     if matches!(state.mode, Mode::Filter) {
-        lines.push(format!("find: {}▏", state.filter));
+        lines.push(format!("search: {}▏", state.filter));
     }
 
     if shown.is_empty() {
@@ -9092,7 +9099,7 @@ fn two_pane_frame(
 /// then `enter queue`, and the pane's own keys come after them, `o options`
 /// first: every action on a row is in that menu, which acts on the row the
 /// focused pane highlights. The order is the same in both panes, `tab`
-/// straight after `o options` and then `f find`, so a key stays in the same
+/// straight after `o options` and then `f search`, so a key stays in the same
 /// spot when focus moves; only the label on `tab` changes. `tab` is named
 /// as the pane it leads to — the one way into the tasks pane inside bare
 /// `spoolway`, where `←`/`→` switch tabs instead — and the one way to a
@@ -9114,15 +9121,15 @@ fn two_pane_frame(
 ///
 /// While [`Mode::Filter`] is open the ordinary line makes no sense at all —
 /// none of the ordinary line's keys is read while the filter box has
-/// focus — so this draws the filter's own line instead, naming exactly the
-/// one key [`handle_filter_key`] does not simply append to the query:
-/// `enter`, which leaves it.
+/// focus — so this draws [`SEARCH_KEYS`] instead, naming the two ways
+/// [`handle_filter_key`] leaves the query: `enter`, which keeps its results,
+/// and `esc`, which clears it.
 ///
 /// `on_orphan` is whether the routines pane's cursor sits on a job row
 /// rather than a routine, which [`screen_footer`] works out.
 fn footer(state: &ScreenState, on_orphan: bool) -> String {
     match &state.mode {
-        Mode::Filter => key_hint(&[("enter", "leave search")]),
+        Mode::Filter => key_hint(SEARCH_KEYS),
         // The save panel reads a name the same way the filter box reads a
         // query, so its own line names the same two keys the filter's does
         // to leave it — `enter`/`esc` — rather than any of the ordinary
@@ -9184,8 +9191,8 @@ fn footer(state: &ScreenState, on_orphan: bool) -> String {
             // `q` only inside bare `spoolway`'s queue tab, the one place it
             // quits — see `crate::screen::shell::quit_hint`.
             let pane: &[(&str, &str)] = match state.focus {
-                Focus::Groups => &[("o", "options"), ("tab", "tasks"), ("f", "find")],
-                Focus::Tasks => &[("o", "options"), ("tab", "groups"), ("f", "find")],
+                Focus::Groups => &[("o", "options"), ("tab", "tasks"), ("f", "search")],
+                Focus::Tasks => &[("o", "options"), ("tab", "groups"), ("f", "search")],
             };
             let keys = [
                 [("space", "select"), ("enter", "queue")].as_slice(),
@@ -9226,6 +9233,10 @@ struct Panes<'a> {
     routines_dir: &'a std::path::Path,
     pipelines: &'a Pipelines,
 }
+
+/// The search box's keys, on the line under the frame while a query is
+/// typed.
+const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "leave search"), ("esc", "cancel")];
 
 /// The save panel's keys, in its popup and on the line under the frame.
 const SAVE_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "cancel")];
@@ -9540,7 +9551,7 @@ fn gate_steps_panel(
             format!("{step}{mark}")
         })
         .collect();
-    crate::screen::ask(&format!("gate {id} at"), &[], &answers, cursor)
+    crate::screen::pick(&format!("gate {id} at"), &[], &answers, cursor)
 }
 
 /// Every popup on the queue and routines tabs that asks something, drawn
@@ -10875,7 +10886,7 @@ fn pick_routine_panel(
         .iter()
         .map(|(name, _)| clip(name.clone(), PICK_ROUTINE_WIDTH))
         .collect();
-    crate::screen::ask("which routine", &body, &answers, cursor)
+    crate::screen::pick("which routine", &body, &answers, cursor)
 }
 
 /// Delete's popup: the routine, what deleting it means, and the jobs that go
@@ -11046,8 +11057,8 @@ fn begin_pending_delete(groups: &[Group], state: &ScreenState) -> Option<Mode> {
 
 /// Every row of the delete popup outside its listing: the borders, blank
 /// and key row of [`TRIAL_PANEL_ROWS`], then a blank, its count and a blank
-/// over the listing, and a blank and its one answer under it.
-const DELETE_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 5;
+/// over the listing. Its one answer draws no row — see [`crate::screen::ask`].
+const DELETE_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 3;
 
 /// Delete's popup on the pending screen: how many pending tasks go, then
 /// each group of the set at the body's edge with its tasks two columns in.
@@ -11062,8 +11073,7 @@ const DELETE_CHROME_ROWS: usize = TRIAL_PANEL_ROWS + 5;
 /// half the width, since the ids are what the popup removes, and a note
 /// still too long is cut at its end with the rest of its row. The listing
 /// is held to `height` with a `↓ n more` row — see [`scroll_rows`] — so a
-/// large group never pushes the answer and the key row past the frame's
-/// bottom.
+/// large group never pushes the key row past the frame's bottom.
 fn delete_pending_panel(
     title: &str,
     set: &[DeleteGroup],
@@ -15708,9 +15718,9 @@ mod tests {
         let (repo, _root_guard) = fixture("screen-hosted-footer-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
-        let groups_line = "[space] select   [enter] queue   [o] options   [tab] tasks   [f] find   \
+        let groups_line = "[space] select   [enter] queue   [o] options   [tab] tasks   [f] search   \
                            [h] show done tasks   [q] quit";
-        let tasks_line = "[space] select   [enter] queue   [o] options   [tab] groups   [f] find   \
+        let tasks_line = "[space] select   [enter] queue   [o] options   [tab] groups   [f] search   \
                           [h] show done tasks   [q] quit";
 
         // `key_hint` opens every key line on one column of indent.
@@ -15727,13 +15737,13 @@ mod tests {
         let drawn = screen(&repo, listed(&repo), "\t\x1b");
         let last = crate::status::strip_ansi(last_frame(&drawn));
         assert!(
-            last.contains("[o] options   [tab] tasks   [f] find"),
+            last.contains("[o] options   [tab] tasks   [f] search"),
             "{last}"
         );
     }
 
     /// The key line keeps one order whichever pane has focus: `o` options,
-    /// then `tab`, then `f` find, then `h`. Only the label on `tab` changes —
+    /// then `tab`, then `f` search, then `h`. Only the label on `tab` changes —
     /// `tasks` over the groups pane, `groups` over the tasks pane — so a key
     /// sits in the same spot when focus moves. Unhosted, so the line ends at
     /// `[h]`.
@@ -15748,7 +15758,7 @@ mod tests {
 
         let groups = line(Focus::Groups, HideScope::Pending);
         let tasks = line(Focus::Tasks, HideScope::Pending);
-        let rest = "[o] options   [tab] {}   [f] find   [h] show done tasks";
+        let rest = "[o] options   [tab] {}   [f] search   [h] show done tasks";
         assert!(
             groups.starts_with(" [space] select   [enter] queue   ")
                 && groups.contains(&rest.replace("{}", "tasks")),
@@ -15762,7 +15772,7 @@ mod tests {
 
         let shown = line(Focus::Tasks, HideScope::PlusDone);
         assert!(
-            shown.contains("[o] options   [tab] groups   [f] find   [h] hide done tasks"),
+            shown.contains("[o] options   [tab] groups   [f] search   [h] hide done tasks"),
             "{shown}"
         );
 
@@ -16307,8 +16317,6 @@ mod tests {
                 "│  checkout                                       │",
                 "│    checkout-total     (depends on cart-totals)  │",
                 "│                                                 │",
-                "│  > delete                                       │",
-                "│                                                 │",
                 "│  [enter] confirm   [esc] close                  │",
                 "╰─────────────────────────────────────────────────╯",
             ]
@@ -16324,8 +16332,6 @@ mod tests {
                 "│                                 │",
                 "│  cart                           │",
                 "│    cart-empty-state             │",
-                "│                                 │",
-                "│  > delete                       │",
                 "│                                 │",
                 "│  [enter] confirm   [esc] close  │",
                 "╰─────────────────────────────────╯",
@@ -16354,8 +16360,6 @@ mod tests {
                 "│    cart-discounts   (depends on cart-totals)  │",
                 "│  checkout                                     │",
                 "│    checkout-total   (depends on cart-totals)  │",
-                "│                                               │",
-                "│  > delete                                     │",
                 "│                                               │",
                 "│  [enter] confirm   [esc] close                │",
                 "╰───────────────────────────────────────────────╯",
@@ -16449,8 +16453,8 @@ mod tests {
     }
 
     /// A set with more rows than the frame has room for is held to the
-    /// popup's height: the listing ends on a `↓ n more` row, and the answer,
-    /// the key row and the bottom border are still drawn.
+    /// popup's height: the listing ends on a `↓ n more` row, and the key row
+    /// and the bottom border are still drawn.
     #[test]
     fn a_set_taller_than_the_frame_is_held_to_its_height() {
         let ids: Vec<String> = (0..25).map(|i| format!("task-{i}")).collect();
@@ -16466,9 +16470,12 @@ mod tests {
             panel[18].contains("[enter] confirm   [esc] close"),
             "{panel:#?}"
         );
-        assert!(panel[16].contains("> delete"), "{panel:#?}");
-        // 11 rows of listing: the group, nine tasks and the marker.
-        assert!(panel[14].contains("↓ 16 more"), "{panel:#?}");
+        assert!(
+            !panel.iter().any(|row| row.contains("> delete")),
+            "{panel:#?}"
+        );
+        // 13 rows of listing: the group, eleven tasks and the marker.
+        assert!(panel[16].contains("↓ 14 more"), "{panel:#?}");
         assert!(panel[2].contains("delete 25 pending tasks:"), "{panel:#?}");
     }
 
@@ -17288,9 +17295,9 @@ mod tests {
     }
 
     /// The groups pane counts groups: the blank row between two states and
-    /// the filter's own `find:` row are lines, never groups out of sight.
+    /// the filter's own `search:` row are lines, never groups out of sight.
     #[test]
-    fn the_groups_pane_marker_never_counts_separators_or_the_find_row() {
+    fn the_groups_pane_marker_never_counts_separators_or_the_search_row() {
         let (repo, _root_guard) = fixture("scroll-counts-groups");
         for i in 0..4 {
             let id = format!("g{i}");
@@ -17332,8 +17339,8 @@ mod tests {
 
         state.mode = Mode::Filter;
         let (lines, starts) = groups_pane_lines(&groups, &shown, &state, 30);
-        assert!(lines[0].starts_with("find:"), "{lines:?}");
-        assert!(!starts.contains(&0), "the find: row is not a group");
+        assert!(lines[0].starts_with("search:"), "{lines:?}");
+        assert!(!starts.contains(&0), "the search: row is not a group");
         let bottom = window(
             &lines,
             Items {
@@ -19223,20 +19230,25 @@ mod tests {
                 "│                                  │".to_string(),
                 "│    plans/2026-10-21-search.html  │".to_string(),
                 "│                                  │".to_string(),
-                "│  > delete                        │".to_string(),
-                "│                                  │".to_string(),
                 "│  [enter] confirm   [esc] close   │".to_string(),
                 format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(34)),
             ]
         );
 
+        // The plan's row, looked for only inside the frame: the key line
+        // under it says `[f] search` too.
+        let row_shown = |frame: &str| {
+            frame
+                .lines()
+                .any(|line| line.contains('│') && line.contains("search"))
+        };
         let kept = last_frame(&screen(&repo, rows(&repo), "\x1b[Bo\x1b[B\r\x1b")).to_string();
         assert!(page.exists(), "esc must remove nothing");
-        assert!(kept.contains("search"), "{kept}");
+        assert!(row_shown(&kept), "{kept}");
 
         let last = last_frame(&screen(&repo, rows(&repo), "\x1b[Bo\x1b[B\r\r")).to_string();
         assert!(!page.exists(), "enter must remove the page");
-        assert!(!last.contains("search"), "the row is gone: {last}");
+        assert!(!row_shown(&last), "the row is gone: {last}");
         assert!(last.contains("cart"), "{last}");
     }
 
@@ -20357,7 +20369,7 @@ mod tests {
         assert!(opening.contains("nothing to queue"), "{opening}");
         assert!(
             opening.contains(
-                "[space] select   [enter] queue   [o] options   [tab] tasks   [f] find   \
+                "[space] select   [enter] queue   [o] options   [tab] tasks   [f] search   \
                  [h] show done tasks"
             ),
             "the groups pane's line must lead with `space` and `enter`:\n{opening}"
@@ -21687,7 +21699,7 @@ mod tests {
         let drawn = screen(&repo, groups, "fqueue");
 
         let last = last_frame(&drawn);
-        assert!(last.contains("find: queue"), "{last}");
+        assert!(last.contains("search: queue"), "{last}");
         assert!(last.contains("queue-browse"), "{last}");
         assert!(last.contains("queue-second-group"), "{last}");
         assert!(
@@ -21715,19 +21727,19 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(
-            last.contains("find: tsp"),
+            last.contains("search: tsp"),
             "`t`, `s` and `p` must all reach the query as ordinary text:\n{last}"
         );
         assert!(!last.contains("trial demo"), "{last}");
         assert!(!last.contains("save demo as a routine"), "{last}");
     }
 
-    /// The filter footer names only how to leave the search box — the
-    /// ordinary queue actions it used to list are gone along with `p` and
-    /// `s`'s old reservation, since none of them apply while every letter
-    /// is text.
+    /// The search footer names only the two ways out of the search box —
+    /// `enter` keeping the results, `esc` clearing them. The ordinary queue
+    /// actions it used to list are gone along with `p` and `s`'s old
+    /// reservation, since none of them apply while every letter is text.
     #[test]
-    fn the_filter_footer_names_only_leaving_search() {
+    fn the_search_footer_names_leaving_and_cancelling() {
         let (repo, _root_guard) = fixture("screen-filter-footer");
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
@@ -21735,8 +21747,12 @@ mod tests {
         let drawn = screen(&repo, groups, "f");
 
         let last = last_frame(&drawn);
-        assert!(last.contains("[enter] leave search"), "{last}");
-        assert!(!last.contains("f find"), "{last}");
+        assert!(last.contains("search: ▏"), "{last}");
+        assert!(
+            last.contains("[enter] leave search   [esc] cancel"),
+            "{last}"
+        );
+        assert!(!last.contains("[f] search"), "{last}");
         assert!(!last.contains("esc back"), "{last}");
         assert!(!last.contains("type to narrow"), "{last}");
         assert!(!last.contains("q is a letter here"), "{last}");
@@ -21810,7 +21826,7 @@ mod tests {
         // a second time, or changed browsing state, instead of being inert.
         let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
         assert_eq!(frames.len(), 4, "{frames:?}");
-        assert!(frames[2].contains("find: q▏"), "{}", frames[2]);
+        assert!(frames[2].contains("search: q▏"), "{}", frames[2]);
     }
 
     /// A control byte other than `0x7f` — `0x08` (BS), what ctrl-h and many
@@ -21834,7 +21850,7 @@ mod tests {
         let drawn = screen(&repo, groups, "fq\x08q");
 
         let last = last_frame(&drawn);
-        assert!(last.contains("find: q▏"), "{last}");
+        assert!(last.contains("search: q▏"), "{last}");
     }
 
     // ---------------------------------------------------------- the routines pane
@@ -22324,11 +22340,36 @@ mod tests {
         assert!(last.contains("nightly-audit   user"), "{last}");
         assert!(last.contains("audit-docs      project"), "{last}");
         assert!(!last.contains("weekly-prune"), "{last}");
-        assert!(last.contains("> delete"), "{last}");
+        assert!(!last.contains("> delete"), "one answer, so no row: {last}");
         assert_eq!(
             last.matches("[enter] confirm   [esc] close").count(),
             2,
             "in the popup and on the line under the frame: {last}"
+        );
+    }
+
+    /// The popup has one answer, so it ends on its body, a blank row and
+    /// its keys, with no `> delete` row between them.
+    #[test]
+    fn the_routine_delete_popup_ends_on_its_body_and_its_keys() {
+        let target = RoutineDelete {
+            name: "nightly".to_string(),
+            path: std::path::PathBuf::from("nightly"),
+            tasks: 2,
+            jobs: Vec::new(),
+        };
+        assert_eq!(
+            delete_routine_panel(&target),
+            [
+                "╭─ delete this routine ────────────────╮",
+                "│                                      │",
+                "│    nightly · 2 tasks                 │",
+                "│    its folder is removed from disk,  │",
+                "│    and only git can bring it back.   │",
+                "│                                      │",
+                "│  [enter] confirm   [esc] close       │",
+                "╰──────────────────────────────────────╯",
+            ]
         );
     }
 
@@ -27269,8 +27310,12 @@ group_description: audit
                 "{frame}"
             );
             assert!(
-                frame.contains("> queue anyway, without issue tracking"),
-                "{frame}"
+                !frame.contains("queue anyway, without issue tracking"),
+                "one answer, so no row: {frame}"
+            );
+            assert!(
+                frame.contains("enter queues it without issue tracking."),
+                "the body says what enter does: {frame}"
             );
             assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
             assert!(frame.contains("─ groups"), "the tab under it: {frame}");

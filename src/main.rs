@@ -307,10 +307,17 @@ fn run() -> Result<()> {
         // Lenient for the same reason `config edit` is: an overrides/
         // config.toml that no longer parses is exactly when you want it
         // open.
-        Command::Config(ConfigCommand::Override) => {
+        Command::Config(ConfigCommand::Override { set: None }) => {
             commands::refuse_json("config override", cli.json)?;
             let (repo, _, home_error) = Repo::discover_lenient(&cwd)?;
             commands::config_override(&repo, home_error.as_ref())
+        }
+        // Strict, unlike the editor form: the value is checked against the
+        // config in effect, so a config that does not load has nothing to
+        // check it against.
+        Command::Config(ConfigCommand::Override { set: Some(set) }) => {
+            commands::refuse_json("config override", cli.json)?;
+            commands::config_override_set(&Repo::discover(&cwd)?, set)
         }
         command => {
             // `sync` and `override drop` are the commands below that have to
@@ -613,7 +620,7 @@ fn run() -> Result<()> {
                     commands::override_promote(&repo, &args.target)
                 }
                 Command::Override(OverrideCommand::Drop(args)) => {
-                    commands::override_drop(&repo, args.target.as_deref())
+                    commands::override_drop(&repo, args.target.as_deref(), args.key.as_deref())
                 }
 
                 Command::Template(TemplateCommand::Contract) => {
