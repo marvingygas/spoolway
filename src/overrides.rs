@@ -1030,44 +1030,46 @@ pub(crate) fn remove_config_patch(overrides: &Path) -> Result<()> {
     remove_empty_dirs_up_to(overrides, overrides.to_path_buf())
 }
 
-/// Write `key` into `overrides/config.toml` with the value `updated` holds
-/// for it, creating the file when there is none, and keep every other key and
-/// comment in it where it was.
+/// `input` as the TOML value the layer should hold: a number, boolean or
+/// array when it reads as one, and the text as typed otherwise. A quoted
+/// string stays quoted text, so what a person typed is what the file holds.
+pub(crate) fn typed_config_value(input: &str) -> toml::Value {
+    let parsed = toml::from_str::<toml::Table>(&format!("v = {input}"))
+        .ok()
+        .and_then(|mut table| table.remove("v"));
+    match parsed {
+        Some(
+            value @ (toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Array(_)),
+        ) => value,
+        _ => toml::Value::String(input.to_string()),
+    }
+}
+
+/// Write `key` into `overrides/config.toml`, creating the file when there is
+/// none, and keep every other key and comment in it where it was.
 ///
-/// `updated` is the config with the new value already applied through
-/// [`crate::confkv::set`], which is what types the text: `5m` stays a string
-/// and `5` becomes a number, as the layer will read them back. This does no
-/// check of its own on the value.
-pub(crate) fn set_config_patch_key(overrides: &Path, key: &str, updated: &Config) -> Result<()> {
+/// This checks nothing: a key the config does not know, or a value it cannot
+/// hold, is written as given and `override list` then reports it as ignored.
+/// The checks belong to the caller that wants them, `config override --set`.
+/// `template` is the rendered config, which decides where a new key sits.
+pub(crate) fn set_config_patch_key(
+    overrides: &Path,
+    key: &str,
+    input: &str,
+    template: &str,
+) -> Result<()> {
     let path = config_patch_path(overrides);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => CONFIG_PATCH_HEADER.to_string(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let value = toml::Value::try_from(updated).context("serialising config")?;
-    let rendered = updated.render()?;
-    // Switching a profile's `kind` settles its `permission_mode` onto the new
-    // kind, so the layer has to carry that key too or it would read back as
-    // the old kind's mode.
-    let mut keys = vec![key.to_string()];
-    if let Some(profile) = key
-        .strip_suffix(".kind")
-        .filter(|p| p.starts_with("agents."))
-    {
-        keys.push(format!("{profile}.permission_mode"));
-    }
-    let mut edited = text;
-    for key in &keys {
-        let parts = crate::confkv::parts(updated, key);
-        // Absent from the serialised config means the key was set to the
-        // value whose spelling is its absence; the layer then holds no line.
-        edited = match crate::confdoc::at(&value, &parts) {
-            Some(new) => crate::confdoc::set(&edited, &parts, new, &rendered),
-            None => crate::confdoc::remove(&edited, &parts),
-        }
+    let parts = crate::confkv::split_models_key(key).unwrap_or_else(|| key.split('.').collect());
+    let edited = crate::confdoc::set(&text, &parts, &typed_config_value(input), template)
         .with_context(|| format!("editing {}", path.display()))?;
-    }
     crate::task::write_atomic(&path, edited).with_context(|| format!("writing {}", path.display()))
 }
 

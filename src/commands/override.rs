@@ -478,11 +478,7 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
 pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
     let write = repo.tracked_write_root("tracked files", &format!("override promote {target}"))?;
     let write_root = write.root;
-    let lines = match parse_target(target)? {
-        Target::Pipeline(name) => promote_pipeline(repo, write_root, &name)?,
-        Target::Prompt(name) => promote_prompt(repo, write_root, &name)?,
-        Target::Config => promote_config(repo, write_root)?,
-    };
+    let lines = promote_override(repo, write_root, target)?;
     for line in lines {
         println!("{line}");
     }
@@ -490,6 +486,25 @@ pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
         println!("{note}");
     }
     Ok(())
+}
+
+/// Write one patched artifact into the tracked files under `write_root` and
+/// return the lines to show for it, printing nothing. The entry stays in the
+/// layer.
+///
+/// `override promote` prints these lines; the OVERRIDES tab shows them in a
+/// screen of its own. `write_root` comes from [`Repo::tracked_write_root`],
+/// which is also what refuses a lane.
+pub(crate) fn promote_override(
+    repo: &Repo,
+    write_root: &Path,
+    target: &str,
+) -> Result<Vec<String>> {
+    match parse_target(target)? {
+        Target::Pipeline(name) => promote_pipeline(repo, write_root, &name),
+        Target::Prompt(name) => promote_prompt(repo, write_root, &name),
+        Target::Config => promote_config(repo, write_root),
+    }
 }
 
 fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<Vec<String>> {
@@ -548,11 +563,11 @@ fn promote_config(repo: &Repo, write_root: &Path) -> Result<Vec<String>> {
 pub(crate) struct ConfigOverrideWrite {
     pub(crate) path: std::path::PathBuf,
     pub(crate) old: String,
-    pub(crate) new: String,
 }
 
-/// Write one config key into the layer, with no check on `value` beyond
-/// typing it the way the layer reads it back.
+/// Write one config key into the layer exactly as typed, with no check on
+/// the key or the value. One that the config cannot take shows up in `override
+/// list` as ignored.
 ///
 /// `config override --set` checks the value first and then calls this; the
 /// OVERRIDES tab calls it directly.
@@ -565,15 +580,13 @@ pub(crate) fn write_config_override(
     // Held from the read of the patch to its write, so a parallel set of
     // another key starts from what this one saved instead of replacing it.
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
-    let updated = crate::confkv::set(&repo.config, key, value)?;
-    let old = crate::confkv::get(&repo.config, key)?;
-    let new = crate::confkv::get(&updated, key)?;
+    // A key the config does not know has no value in effect to show.
+    let old = crate::confkv::get(&repo.config, key).unwrap_or_else(|_| "not set".to_string());
     let overrides_dir = repo.overrides_dir();
-    crate::overrides::set_config_patch_key(&overrides_dir, key, &updated)?;
+    crate::overrides::set_config_patch_key(&overrides_dir, key, value, &repo.config.render()?)?;
     Ok(ConfigOverrideWrite {
         path: crate::overrides::config_patch_path(&overrides_dir),
         old,
-        new,
     })
 }
 
@@ -583,13 +596,30 @@ pub fn config_override_set(repo: &Repo, set: &str) -> Result<()> {
     let (key, value) = set
         .split_once('=')
         .with_context(|| format!("`--set {set}` — expected `<key>=<value>`"))?;
+    // The checks `config set` runs, so the CLI refuses what the layer would
+    // only report as ignored.
     crate::confkv::check_typed(key, value)?;
+    let updated = crate::confkv::set(&repo.config, key, value)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
     let write = write_config_override(repo, key, value)?;
+    // Switching a profile's `kind` settles its `permission_mode` onto the new
+    // kind, so the layer has to carry that key too or it would read back as
+    // the old kind's mode.
+    if let Some(profile) = key
+        .strip_suffix(".kind")
+        .filter(|p| p.starts_with("agents."))
+    {
+        let mode_key = format!("{profile}.permission_mode");
+        write_config_override(repo, &mode_key, &crate::confkv::get(&updated, &mode_key)?)?;
+    }
     println!("  wrote {}", write.path.display());
-    println!("    {key}   {} -> {}", write.old, write.new);
+    println!(
+        "    {key}   {} -> {}",
+        write.old,
+        crate::confkv::get(&updated, key)?
+    );
     println!();
     println!(
         "  a running dispatcher uses it on its next pass. `spoolway override drop config.toml \
@@ -1512,12 +1542,7 @@ mod tests {
                 ("config.toml", "config.toml"),
             ] {
                 let write = repo.tracked_write_root("tracked files", "test").unwrap();
-                let lines = match parse_target(target).unwrap() {
-                    Target::Pipeline(n) => promote_pipeline(repo, write.root, &n),
-                    Target::Prompt(n) => promote_prompt(repo, write.root, &n),
-                    Target::Config => promote_config(repo, write.root),
-                }
-                .unwrap();
+                let lines = promote_override(repo, write.root, target).unwrap();
                 assert_eq!(
                     lines.last().unwrap(),
                     &format!("  kept {file} in the layer until you drop it")
@@ -1535,7 +1560,6 @@ mod tests {
                 crate::overrides::config_patch_path(&repo.overrides_dir())
             );
             assert_eq!(write.old, "15m");
-            assert_eq!(write.new, "5m");
             assert_eq!(
                 crate::overrides::config_patch_keys(&repo.overrides_dir()).unwrap(),
                 Some(vec!["dispatch.lane_quiet".to_string()])
@@ -1558,6 +1582,44 @@ mod tests {
             assert_eq!(
                 crate::confkv::get(&merged, "dispatch.visible_lanes").unwrap(),
                 "5"
+            );
+        });
+    }
+
+    /// The shared write takes the text as typed: a value the config cannot
+    /// hold, or a key it does not know, lands in the layer, where `override
+    /// list` then marks it ignored. Only `config override --set` refuses them.
+    #[test]
+    fn write_config_override_writes_what_it_is_given_without_a_check() {
+        with_repo("config-write-unchecked", |repo| {
+            write_config_override(repo, "dispatch.visible_lanes", "three").unwrap();
+            write_config_override(repo, "dispatch.no_such_key", "1").unwrap();
+            write_config_override(repo, "dispatch.lane_quiet", "banana").unwrap();
+            let rows = collect_override_rows(repo).unwrap();
+            assert_eq!(rows.len(), 1);
+            let ignored: Vec<&str> = rows[0].ignored.iter().map(|i| i.fields.as_str()).collect();
+            assert!(ignored.contains(&"dispatch.visible_lanes"), "{ignored:?}");
+            assert!(ignored.contains(&"dispatch.no_such_key"), "{ignored:?}");
+            let text =
+                std::fs::read_to_string(crate::overrides::config_patch_path(&repo.overrides_dir()))
+                    .unwrap();
+            assert!(text.contains("visible_lanes = \"three\""), "{text}");
+            assert!(text.contains("no_such_key = 1"), "{text}");
+        });
+    }
+
+    /// Switching a profile's kind settles its permission mode, and the layer
+    /// has to carry both or it would read back as the old kind's mode.
+    #[test]
+    fn config_override_set_of_a_kind_writes_the_settled_permission_mode_too() {
+        with_repo("config-set-kind", |repo| {
+            config_override_set(repo, "agents.claude.kind=codex").unwrap();
+            let keys = crate::overrides::config_patch_keys(&repo.overrides_dir())
+                .unwrap()
+                .unwrap();
+            assert!(
+                keys.contains(&"agents.claude.permission_mode".to_string()),
+                "{keys:?}"
             );
         });
     }
