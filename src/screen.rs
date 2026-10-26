@@ -1152,6 +1152,36 @@ mod tests {
         // Blanked rather than cut, so a column the report marks is still the
         // column in the line.
         let mut line = line.to_string();
+        // The fixtures live under the machine's temporary directory, a value
+        // the screens draw but do not write: macOS runners keep it under
+        // `/Users/runner/work/_temp`. A column may cut it short at either
+        // end, so any piece of it with a `/` in it counts, as long as it runs
+        // to the end of the directory or to where the line stops spelling a
+        // path.
+        let temp = crate::scratch::temp_root().to_string_lossy().into_owned();
+        let mut at = 0;
+        while at < line.len() {
+            let mut matched = 0;
+            for (i, c) in line[at..].char_indices() {
+                if !temp.contains(&line[at..at + i + c.len_utf8()]) {
+                    break;
+                }
+                matched = i + c.len_utf8();
+            }
+            let piece = &line[at..at + matched];
+            let whole_end = temp.ends_with(piece);
+            let cut_short = line[at + matched..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '/');
+            if piece.contains('/') && piece.len() > 2 && (whole_end || cut_short) {
+                let blank = " ".repeat(piece.chars().count());
+                line.replace_range(at..at + matched, &blank);
+                at += matched;
+            } else {
+                at += line[at..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
         for (phrase, _) in ALLOWED_PHRASES {
             while let Some(at) = line.find(phrase) {
                 let mut end = at + phrase.len();
