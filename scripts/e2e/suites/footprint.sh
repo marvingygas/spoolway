@@ -259,8 +259,9 @@ measure() { # history-name
   PASSES[$h]=$passes GIT[$h]=$git SWEEPS[$h]=$sweeps PER_PASS[$h]=$median
   dispatcher_stop
 
-  # The queue tab `screen_start` hands over, and where it sits when nobody is using it. The
-  # dispatch tab is not measured: it asks herdr for its agents every second.
+  # The queue tab `screen_start` hands over, and where it sits when nobody is
+  # using it. The dispatch tab is not measured: it asks herdr for its agents
+  # every second.
   screen_start "$LIVE/screen-$h.log"
   sleep "$UI_SETTLE_S"
   mark=$(($(wc -l < "$SPAWNS") + 1))

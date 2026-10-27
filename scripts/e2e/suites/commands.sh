@@ -1285,7 +1285,8 @@ works "and landed in the archive" \
 # (`src/screen/frame_writer.rs`) writes a fresh `\x1b[?2026h\x1b[H` before
 # every frame that differs from the last, so the python snippet below splits
 # the raw output back into the frames this draws — the dispatch tab the screen
-# opens on, the queue tab `on_screen` moves to, then one per press — rather than grepping the whole file, which could never tell
+# opens on, the queue tab `on_screen` moves to, then one per press —
+# rather than grepping the whole file, which could never tell
 # "shown once, then hidden again" from "never shown".
 on_screen 'hh' "$LIVE/queue-h-cycle.out"
 if python3 - "$LIVE/queue-h-cycle.out" arch-row <<'PY'

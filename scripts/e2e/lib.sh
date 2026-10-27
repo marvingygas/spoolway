@@ -512,7 +512,7 @@ screen_start() {
   }
   E2E_SCREEN_PID=$(cat "$pidfile")
   # The screen opens on the dispatch tab, and its board says `dispatcher
-  # stopped` as `screen_board` waits for. One `→` hands every caller the queue
+  # stopped`, the text `screen_board` waits for. One `→` hands every caller the queue
   # tab, which is where each counts its keys from, and the wait for its
   # `groups` pane keeps that opening board from standing in for a frame the
   # caller's own keys draw.

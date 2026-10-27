@@ -48,7 +48,7 @@ pending_doc alpha "$BODY" "group: audits" "pipeline:"
 pending_doc beta "$BODY" "group: audits" "pipeline:" \
   "depends_on: [alpha]"
 
-# `o` over the groups pane, where the screen opens on `audits`, opens the
+# `o` over the groups pane, where `on_screen` leaves the cursor on `audits`, opens the
 # group's options menu; `enter` picks its first item, trial. The tasks pane's
 # menu offers no trial, so the group has to be reached from the groups pane.
 # Trial opens
