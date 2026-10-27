@@ -523,6 +523,15 @@ leaves one. That dispatcher writes no line of its own for `ctrl-c`, an empty que
 ceiling. A lost lock writes the line shown under
 [When the lock file is lost](#when-the-lock-file-is-lost).
 
+A command step that exits non-zero and sends its task anywhere but `done` also leaves a copy of
+its log in `~/.spoolway/logs/<project>/`, beside the problem log. The copy is named
+`<task> · <step> · <YYYY-MM-DDTHH-MM>.log`, with ` · 2`, ` · 3` and so on before `.log` when two
+failures of one step fall in the same minute. The task's `## Status Log` line names the copy's
+path instead of the one under `commands/`, which archiving deletes and the step's next run
+overwrites. The unblocker-lap line keeps its wording, and its log is copied all the same. If the
+copy cannot be made, the reason goes to the problem log and the line keeps the `commands/` path.
+`retention_days` deletes copies older than that many days, and `0` keeps them all.
+
 ### Keys
 
 The key line under the board reads `[enter] start dispatching   [o] options   [q] quit`. It

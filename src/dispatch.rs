@@ -5713,6 +5713,34 @@ impl<'a> Dispatcher<'a> {
                 // instead of the path, which that lane's brief gives it
                 // itself (`compose.rs`).
                 if code != 0 {
+                    // The log is copied out of `commands/` while it is still
+                    // this run's: archiving deletes that folder's files, and
+                    // the step's next run truncates the file. A failure that
+                    // routes to `done` (a routine's `check` exiting 1 for
+                    // "nothing to do") is not a failure worth a copy. A copy
+                    // that cannot be made goes to the problem log and the
+                    // line keeps the `commands/` path, so the pass goes on.
+                    let kept = match destination.as_deref() {
+                        Some(crate::pipeline::DONE) => None,
+                        _ => match crate::problem_log::keep_command_log(
+                            self.repo,
+                            &task.front.id,
+                            &step.id,
+                            &runs.log_path(&key),
+                        ) {
+                            Ok(copy) => Some(copy),
+                            Err(err) => {
+                                crate::problem_log::append(
+                                    self.repo,
+                                    &format!(
+                                        "{id}: could not keep the log of `{}`: {err:#}",
+                                        step.id
+                                    ),
+                                );
+                                None
+                            }
+                        },
+                    };
                     // A failure after an unblocker's pass sent the task back
                     // is that pass's lap, so the log says which one of the
                     // bound it is (`UNBLOCK_LAP_LIMIT`).
@@ -5722,7 +5750,10 @@ impl<'a> Dispatcher<'a> {
                             crate::commands::UNBLOCK_LAP_LIMIT,
                             step.id
                         ),
-                        None => format!(" — see {}", runs.log_path(&key).display()),
+                        None => format!(
+                            " — see {}",
+                            kept.unwrap_or_else(|| runs.log_path(&key)).display()
+                        ),
                     };
                     task.log_status(&format!("`{}` exited {code}{lap}", step.id));
                 }
@@ -29398,10 +29429,90 @@ mod tests {
             log.contains("`implement` exited 2"),
             "names the step and the code: {log}"
         );
+        let kept = std::fs::read_dir(crate::problem_log::kept_dir(&repo))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(kept.len(), 1, "one kept copy: {kept:?}");
         assert!(
-            log.contains("demo · implement.log"),
-            "names the log a person or lane would read: {log}"
+            log.contains(&format!("— see {}", kept[0].display())),
+            "names the copy a person or lane would read: {log}"
         );
+        let name = kept[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("demo · implement · 20"), "{name}");
+        assert!(name.ends_with(".log"), "{name}");
+    }
+
+    /// The unblocker-lap line keeps its wording, and its log is copied all
+    /// the same.
+    #[test]
+    fn a_failing_command_in_an_unblocker_lap_still_keeps_its_log() {
+        let (repo, _root_guard) = fixture("command-fail-lap-keeps-log");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mut task = reload(&path);
+        task.front.unblock_laps.insert("implement".into(), 1);
+        task.save().unwrap();
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("echo boom; exit 1", false);
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+
+        let kept = std::fs::read_dir(crate::problem_log::kept_dir(&repo))
+            .unwrap()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(kept.len(), 1);
+        assert!(
+            std::fs::read_to_string(kept[0].path())
+                .unwrap()
+                .contains("boom")
+        );
+    }
+
+    /// A failure that routes to `done` is not kept, and the line keeps the
+    /// `commands/` path.
+    #[test]
+    fn a_failure_routed_to_done_keeps_no_copy() {
+        let (repo, _root_guard) = fixture("command-fail-done-no-copy");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let mut pipelines = pipelines_running("exit 1", false);
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some("done".into());
+
+        drive(&repo, &pipelines, &mux, &path, "done");
+
+        assert!(!crate::problem_log::kept_dir(&repo).exists());
+    }
+
+    /// A copy that cannot be made goes to the problem log, the line keeps the
+    /// `commands/` path, and the task still routes.
+    #[test]
+    fn a_copy_that_cannot_be_made_does_not_stop_the_pass() {
+        let (repo, _root_guard) = fixture("command-fail-copy-fails");
+        // A file where the folder belongs: it cannot be created.
+        let kept = crate::problem_log::kept_dir(&repo);
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "in the way").unwrap();
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(vec![]);
+        let pipelines = pipelines_running("exit 2", false);
+
+        drive(&repo, &pipelines, &mux, &path, "blocked");
+
+        let task = reload(&path);
+        let log = task.section("## Status Log").unwrap_or_default();
+        assert!(log.contains("demo · implement.log"), "{log}");
+        let problems = std::fs::read_to_string(crate::problem_log::path(&repo)).unwrap();
+        assert!(problems.contains("could not keep the log"), "{problems}");
     }
 
     /// A command that fails again after an unblocker's pass says which lap of

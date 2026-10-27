@@ -39,6 +39,12 @@ const WINDOW_DAYS: i64 = 30;
 /// writing to the one log file it always has, rather than starting a
 /// second one under its new basename. See the `binding-record` task.
 pub fn path(repo: &Repo) -> PathBuf {
+    let (logs, name) = logs_and_name(repo);
+    logs.join(format!("{name}.log"))
+}
+
+/// The `logs/` folder beside the project's home, and the home's own name.
+fn logs_and_name(repo: &Repo) -> (PathBuf, String) {
     let name = repo
         .home
         .file_name()
@@ -54,7 +60,63 @@ pub fn path(repo: &Repo) -> PathBuf {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(crate::mux::state_root);
-    state_root.join("logs").join(format!("{name}.log"))
+    (state_root.join("logs"), name)
+}
+
+/// Where a failed command step's log is kept: `logs/<home's name>/`, beside
+/// the problem log [`path`] names and named the same way.
+///
+/// Outside the home on purpose. Archiving a task deletes its `commands/`
+/// files, and a later run of the same step truncates the log, so the path a
+/// status line named there stops opening. A copy here outlives both, until
+/// the retention sweep in `src/retain.rs` ages it out.
+pub fn kept_dir(repo: &Repo) -> PathBuf {
+    let (logs, name) = logs_and_name(repo);
+    logs.join(name)
+}
+
+/// Copies a command step's `log` into [`kept_dir`] as `<task> · <step> ·
+/// <local time as YYYY-MM-DDTHH-MM>.log` and returns the copy's path.
+///
+/// A name already taken gets ` · 2`, ` · 3` and so on before `.log`: two
+/// failures of one step in the same minute would otherwise overwrite each
+/// other. The copy is created with `create_new`, so the check and the claim
+/// are one step and a second process cannot take the name in between.
+///
+/// An error, not a swallowed failure, because the caller must then keep the
+/// status line pointing at the `commands/` path rather than at a copy that
+/// is not there.
+pub fn keep_command_log(repo: &Repo, task: &str, step: &str, log: &Path) -> Result<PathBuf> {
+    let dir = kept_dir(repo);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut source =
+        std::fs::File::open(log).with_context(|| format!("opening {}", log.display()))?;
+    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M");
+    let sep = crate::mux::LANE_NAME_SEPARATOR;
+    for attempt in 1u32.. {
+        let suffix = match attempt {
+            1 => String::new(),
+            n => format!("{sep}{n}"),
+        };
+        let target = dir.join(format!("{task}{sep}{step}{sep}{stamp}{suffix}.log"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(mut copy) => {
+                std::io::copy(&mut source, &mut copy).with_context(|| {
+                    format!("copying {} to {}", log.display(), target.display())
+                })?;
+                return Ok(target);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("creating {}", target.display()));
+            }
+        }
+    }
+    unreachable!("the attempt counter does not end")
 }
 
 /// Trims a project's log to the last thirty days. Called once, at the start
@@ -142,6 +204,36 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::repo::Repo;
+
+    /// Two failures of one step inside the same minute leave two files, the
+    /// second named with ` · 2`, and the first is not overwritten.
+    #[test]
+    fn a_taken_name_gets_a_number_instead_of_overwriting() {
+        let base = crate::scratch::root("problem-log-kept-twice");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let repo = Repo {
+            borrowed: false,
+            root: base.to_path_buf(),
+            checkout: base.to_path_buf(),
+            config: Config::default(),
+            home: base.join("proj-abc"),
+        };
+        let log = base.join("run.log");
+        std::fs::write(&log, "first").unwrap();
+        let one = keep_command_log(&repo, "t", "test", &log).unwrap();
+        std::fs::write(&log, "second").unwrap();
+        let two = keep_command_log(&repo, "t", "test", &log).unwrap();
+        let name = two.file_name().unwrap().to_string_lossy().into_owned();
+        // Both calls may straddle a minute; a differing stamp proves the
+        // same thing, that nothing was overwritten.
+        assert_ne!(one, two);
+        assert!(name.ends_with(" · 2.log") || name != one.file_name().unwrap().to_string_lossy());
+        assert_eq!(std::fs::read_to_string(&one).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&two).unwrap(), "second");
+        assert_eq!(one.parent().unwrap(), base.join("logs").join("proj-abc"));
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// A renamed checkout keeps writing to the one log file it always had —
     /// `repo.home`'s own basename is frozen at the checkout's first stamp

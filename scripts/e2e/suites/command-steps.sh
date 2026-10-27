@@ -273,6 +273,17 @@ records "the lane sent back is told which command failed" \
 
 if drive broken gone 180; then ok "a task whose command fails still reaches the end"
 else bad "a task whose command fails still reaches the end (at \`$(stage_of broken)\`)"; fi
+# The status log names a copy of the failed log that archiving did not delete.
+# Read off the archived file, after `teardown.rs` reclaimed `commands/`.
+KEPT=$(grep -o 'build` exited 2 — see .*\.log' "$SPOOLWAY_PROJECT_HOME/archive/broken.md" \
+  | head -1 | sed 's/^.* — see //')
+if [ -n "$KEPT" ] && [ -f "$KEPT" ] && grep -q "the build is broken" "$KEPT" \
+  && [ ! -e "$SPOOLWAY_PROJECT_HOME/commands/broken · build.log" ]; then
+  ok "a failed gate's log still opens after its task is archived"
+else
+  bad "a failed gate's log still opens after its task is archived (status log names \`$KEPT\`)"
+fi
+
 # Counted rather than matched: every task arrives at `implement` once on its
 # way in, so the presence of that line says nothing. What the failing exit
 # bought is a *second* arrival there, which is the detour itself.
