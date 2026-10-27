@@ -20,8 +20,15 @@
 //! ever prunes. This
 //! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
-//! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for the one
-//! place that split is written down.
+//! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for where
+//! that split is written down. One folder is swept that it does not list,
+//! because it sits outside the home: the kept logs below.
+//!
+//! The copies of failed command steps' logs, in `logs/<home's name>/` beside
+//! the problem log (see [`crate::problem_log::kept_dir`]), are swept under
+//! the same key. They sit outside the home and outlive their task on
+//! purpose, so nothing guards them: a copy goes once it is old enough, queued
+//! task or not.
 //!
 //! `archive/` is the third case. It holds tasks that reached `done`, it is
 //! what `spoolway eval` and `queue add` read, and it is kept by default. It
@@ -182,6 +189,19 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         }
         budget = budget.saturating_sub(removed);
     }
+    // The kept logs of failed command steps sit outside the home, and
+    // `byproduct_dirs` holds only directories under it, so they are swept
+    // here instead. No guard: the copy exists to
+    // outlive its task, and one of a task still in `queue/` is a record of
+    // a past failure, not live state.
+    if budget > 0 {
+        budget = budget.saturating_sub(sweep_dir(
+            &crate::problem_log::kept_dir(repo),
+            max_age,
+            budget,
+            None,
+        ));
+    }
     limit - budget
 }
 
@@ -260,7 +280,8 @@ fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
 /// also holds their routines' names, since a routine copy's lane is named for
 /// its routine. For `archive/` it holds the `<id>.md` file names of finished
 /// tasks a queued task depends on or shares an id with, which `lane_task`
-/// leaves whole. `None` for `system-prompts/`.
+/// leaves whole. `None` for `system-prompts/` and for the kept logs of failed
+/// command steps, which are swept whatever task they belong to.
 ///
 /// Not gated by `days == 0` itself — that check belongs to the one caller
 /// that means it as "retention is off"; a test driving this directly passes
@@ -492,6 +513,47 @@ mod tests {
         assert!(!old.exists(), "the aged log was kept");
         assert!(fresh.exists(), "a fresh log went with it");
         assert!(logs.exists(), "the logs folder was swept whole");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A kept log of a failed command step goes once it is past
+    /// `retention_days`, a fresh one stays, and `0` keeps both. A file of a
+    /// task still in the queue is swept like any other.
+    #[test]
+    fn the_sweep_ages_kept_command_logs_and_zero_keeps_them() {
+        let base = crate::scratch::root("retain-kept-logs");
+        let _ = std::fs::remove_dir_all(&base);
+        let mut config = crate::config::Config::default();
+        config.housekeeping.retention_days = 30;
+        let mut repo = Repo {
+            borrowed: false,
+            checkout: base.to_path_buf(),
+            root: base.to_path_buf(),
+            config,
+            home: base.join(".home"),
+        };
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("held.md"),
+            "---\nid: held\nstage: paused\n---\n",
+        )
+        .unwrap();
+        let kept = crate::problem_log::kept_dir(&repo);
+        std::fs::create_dir_all(&kept).unwrap();
+        let old = kept.join("held \u{b7} test \u{b7} 2026-01-01T00-00.log");
+        let fresh = kept.join("held \u{b7} test \u{b7} 2026-10-01T00-00.log");
+        std::fs::write(&old, "stale").unwrap();
+        std::fs::write(&fresh, "warm").unwrap();
+        age(&old, 60 * SECS_PER_DAY);
+
+        repo.config.housekeeping.retention_days = 0;
+        sweep_now(&repo);
+        assert!(old.exists(), "retention_days = 0 swept a kept log");
+
+        repo.config.housekeeping.retention_days = 30;
+        sweep_now(&repo);
+        assert!(!old.exists(), "the aged kept log was kept");
+        assert!(fresh.exists(), "a fresh kept log went with it");
         std::fs::remove_dir_all(&base).ok();
     }
 

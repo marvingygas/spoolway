@@ -507,7 +507,8 @@ A panel's body still names a file by the task's id.
 ### The problem log
 
 Errors from a pass go to `~/.spoolway/logs/<project>.log`. The same file gets one line for every
-stop of a dispatcher. Each line starts with the time and the dispatcher's pid.
+stop of a dispatcher. Each line starts with the time and the dispatcher's pid. When a dispatcher
+starts, it deletes the lines older than `housekeeping.retention_days` days, and `0` keeps them all.
 
 | Who writes it | When | The line reads |
 |---|---|---|
@@ -522,6 +523,17 @@ The board writes the line for the dispatcher it started, so a dispatcher that wa
 leaves one. That dispatcher writes no line of its own for `ctrl-c`, an empty queue or a spend
 ceiling. A lost lock writes the line shown under
 [When the lock file is lost](#when-the-lock-file-is-lost).
+
+A command step that exits non-zero and sends its task anywhere but `done` also leaves a copy of
+its log in `~/.spoolway/logs/<project>/`, beside the problem log. The copy is named
+`<task> · <step> · <YYYY-MM-DDTHH-MM>.log`. When two failures of one step fall in the same
+minute, the second copy gets ` · 2` before `.log`, the third ` · 3`, and so on.
+
+The task's `## Status Log` line for that failure names the copy's path, not the path under
+`commands/`. The copy stays after the task is archived. The unblocker-lap line keeps its wording,
+and its log is copied too. If the copy cannot be made, the reason goes to the problem log and the
+line names the `commands/` path. `retention_days` deletes copies older than that many days, and
+`0` keeps them all.
 
 ### Keys
 

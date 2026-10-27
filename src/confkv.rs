@@ -147,7 +147,7 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "housekeeping.retention_days",
         values: "days",
-        sentence: "Delete old logs and temporary files after this many days. 0 = keep forever.",
+        sentence: "Delete old logs, the problem log's old lines and temporary files after this many days. 0 = keep forever.",
     },
     Reference {
         key: "housekeeping.archive_retention_days",
