@@ -1602,8 +1602,9 @@ mod tests {
         const ROUTINES: &str = "[ROUTINES]";
         // Its key line rather than its title: with no terminal to measure
         // the whole config list is drawn, and its top runs off the screen.
-        const OVERRIDES: &str = "[tab] section";
-        let eval: &str = &format!("{TOP_LEFT}─ eval ·");
+        // Not `[tab] section` alone, which the eval tab's key line reads too.
+        const OVERRIDES: &str = "[w] open workspace   [tab] section";
+        let eval: &str = &format!("{TOP_LEFT}─ [eval]   directories   trials ");
         let visited = [
             QUEUE, DISPATCH, QUEUE, ROUTINES, OVERRIDES, eval, OVERRIDES, ROUTINES, QUEUE,
             DISPATCH, QUEUE,

@@ -1428,7 +1428,8 @@ mod tests {
             shown_screen(&popup, "eval"),
             "routines tab, popup \"weekly\""
         );
-        let bare = lines(" ╭─ eval · by pipeline ─╮\n │  ╭─ filters ─╮ │");
+        let bare =
+            lines(" ╭─ [eval]   directories   trials ── by pipeline ─╮\n │  ╭─ filters ─╮ │");
         assert_eq!(shown_screen(&bare, "eval"), "eval tab, popup \"filters\"");
     }
 

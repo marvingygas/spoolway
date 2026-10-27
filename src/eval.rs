@@ -1060,7 +1060,7 @@ impl Figures {
         }
     }
 
-    /// What the frame title names this view as on `table`, after the `by`,
+    /// What the top border names this view as on `table`, after the `by`,
     /// and what the key line names it as beside `[t]` while the other one is
     /// drawn. The divided view is named for what it divides by: a lanes row
     /// by its `TASKS`, a directory row by its `SESSIONS`.
@@ -3851,15 +3851,29 @@ impl TableKind {
         }
     }
 
-    /// What `tab` names this table as, in the key line of the one before it.
-    /// The lanes table is `tasks` on screen, as its own `TASKS` column counts.
+    /// What the box title names this table's section as. The lanes table is
+    /// `eval`, the tab's own name, since it is the table the tab opens on.
     fn label(self) -> &'static str {
         match self {
-            TableKind::Lanes => "tasks",
-            TableKind::Dirs => "dirs",
+            TableKind::Lanes => "eval",
+            TableKind::Dirs => "directories",
             TableKind::Trials => "trials",
         }
     }
+}
+
+/// Every section's name, in the order `tab` walks them, the open one
+/// bracketed: the left side of the top border, as the overrides tab names
+/// its own sections.
+fn section_names(table: TableKind) -> String {
+    [TableKind::Lanes, TableKind::Dirs, TableKind::Trials]
+        .iter()
+        .map(|section| match *section == table {
+            true => format!("[{}]", section.label()),
+            false => section.label().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("   ")
 }
 
 /// Which project's ledger the screen reads. Set from `--project`/`--all` on
@@ -4703,9 +4717,10 @@ fn by_label(filters: &Filters, table: TableKind) -> &'static str {
     }
 }
 
-/// The left side of the top border: `by <by>` and which figures are drawn,
-/// such as `by pipeline · totals`, or plain `trials` for the table that has
-/// no `by` to name and no figures to switch.
+/// `by <by>` and which figures are drawn, such as `by pipeline · totals`, or
+/// plain `trials` for the table that has no `by` to name and no figures to
+/// switch — what the export confirmation names a table by. The top border's
+/// right side opens with it on the two tables that have a `by`.
 fn frame_title(filters: &Filters, table: TableKind) -> String {
     match table {
         TableKind::Trials => "trials".to_string(),
@@ -4830,9 +4845,24 @@ fn frame_rows(height: Option<usize>, key_rows: usize) -> Option<usize> {
     })
 }
 
-fn frame_top(title: &str, right: &str, width: usize) -> String {
+/// The right side of the top border: the grouping and view from
+/// [`frame_title`] first, since they say how the rows are cut as a filter
+/// does, then `filters`, joined by ` · `. The trials table has no grouping,
+/// so its right side is `filters` alone.
+fn view_label(filters: &Filters, table: TableKind, filters_label: &str) -> String {
+    let view = match table {
+        TableKind::Trials => None,
+        TableKind::Lanes | TableKind::Dirs => Some(frame_title(filters, table)),
+    };
+    view.into_iter()
+        .chain((!filters_label.is_empty()).then(|| filters_label.to_string()))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn frame_top(sections: &str, right: &str, width: usize) -> String {
     use crate::screen::corner::{TOP_LEFT, TOP_RIGHT};
-    let left = format!("─ eval · {title} ");
+    let left = format!("─ {sections} ");
     let right = match right.is_empty() {
         true => "─".to_string(),
         false => format!(" {right} ─"),
@@ -4932,12 +4962,12 @@ fn cursor_line_index(lines: &[Line], cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// The right side of the top border: the scope, every filter row the table
-/// on screen has narrowed by, and the window — so a frame read on its own
-/// still says what it is a table of. The left side names only the `by`.
-/// `scope` is the screen's own [`Scope::label`], not [`Loaded`]'s: the
-/// frame is drawn before the first load has landed. `loaded` is only read
-/// to name a `trial` by its group rather than its id.
+/// The top border's right side after the grouping and view [`view_label`]
+/// puts first: the scope, every filter row the table on screen has narrowed
+/// by, and the window — so a frame read on its own still says what it is a
+/// table of. `scope` is the screen's own [`Scope::label`], not [`Loaded`]'s:
+/// the frame is drawn before the first load has landed. `loaded` is only
+/// read to name a `trial` by its group rather than its id.
 fn filters_label(
     scope: &str,
     filters: &Filters,
@@ -4993,7 +5023,7 @@ fn filters_label(
 /// to open. Nor has it a `[t]`, which names the figures the other two would
 /// switch to.
 fn footer(table: TableKind, figures: Figures) -> String {
-    let tab = ("tab", table.next().label());
+    let tab = ("tab", "section");
     let flip = ("t", figures.other().label(table));
     let keys: &[(&str, &str)] = match table {
         TableKind::Trials => &[
@@ -5063,8 +5093,9 @@ fn eval_frame_rows_at(
     let lines = loaded.map_or_else(Default::default, |loaded| {
         state.table_lines(loaded, pipelines)
     });
-    let right = filters_label(&state.scope_label, &state.filters, state.table, loaded);
-    let title = frame_title(&state.filters, state.table);
+    let filters = filters_label(&state.scope_label, &state.filters, state.table, loaded);
+    let right = view_label(&state.filters, state.table, &filters);
+    let title = section_names(state.table);
     // Wide enough for the widest line plus its marker column, and for the
     // top border's own title and label with a dash or two between them.
     let content = lines
@@ -5076,7 +5107,7 @@ fn eval_frame_rows_at(
         .max()
         .unwrap_or(0)
         + 1;
-    let border = format!("─ eval · {title} ").chars().count() + right.chars().count() + 5;
+    let border = format!("─ {title} ").chars().count() + right.chars().count() + 5;
     let width = frame_width(content.max(border));
     // Wrapped before the body is measured, because each row it wraps onto
     // past its first comes off the body's.
@@ -9082,7 +9113,7 @@ mod screen_tests {
         assert_eq!(leave, Leave::Switch(Toward::Left));
         let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
         assert!(first.contains("DISPATCH"), "{first}");
-        assert!(first.contains("─ eval · by pipeline"), "{first}");
+        assert!(has_top(first, TableKind::Lanes, "by pipeline"), "{first}");
         assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
 
         // `f` opens the filters; `→` there cycles a row, and the input then
@@ -9177,6 +9208,15 @@ mod screen_tests {
         text.rsplit("\x1b[?2026h\x1b[H").next().unwrap_or(text)
     }
 
+    /// Whether `frame` draws the eval tab's top border with `table`'s
+    /// section open on its left side and `right` opening its right side.
+    fn has_top(frame: &str, table: TableKind, right: &str) -> bool {
+        let left = format!("{TOP_LEFT}─ {} ", section_names(table));
+        frame
+            .lines()
+            .any(|line| line.contains(&left) && line.contains(&format!("─ {right}")))
+    }
+
     /// Every frame the screen drew, in order.
     fn frames(text: &str) -> Vec<&str> {
         text.split("\x1b[?2026h\x1b[H").skip(1).collect()
@@ -9237,10 +9277,7 @@ mod screen_tests {
         assert_eq!(all.len(), 1, "no frame changed, so nothing was repainted");
         for frame in &all {
             assert!(frame.contains("DISPATCH"), "under the strip: {frame}");
-            assert!(
-                frame.contains(&format!("{TOP_LEFT}─ eval · by pipeline ")),
-                "{frame}"
-            );
+            assert!(has_top(frame, TableKind::Lanes, "by pipeline "), "{frame}");
             assert!(shows_loading(frame), "{frame}");
             assert!(!frame.contains("PIPELINE"), "no table yet: {frame}");
             assert!(
@@ -9248,7 +9285,7 @@ mod screen_tests {
                 "`f` was not read: {frame}"
             );
             assert!(
-                frame.contains("[a] ascending   [d] descending   [t] per task   [tab] dirs"),
+                frame.contains("[a] ascending   [d] descending   [t] per task   [tab] section"),
                 "{frame}"
             );
         }
@@ -10066,14 +10103,14 @@ mod screen_tests {
 
     /// The screen opens on the lanes table by pipeline, on its totals, with
     /// its `total` line and the bracketed key line naming the figures `t`
-    /// switches to and the table `tab` moves to.
+    /// switches to and `tab` as `section`.
     #[test]
     fn the_screen_opens_by_pipeline_with_a_total_and_bracketed_keys() {
         let (repo, _root_guard) = fixture_with_one_run("screen-opens");
         let text = screen(&repo, "q");
         let last = last_frame(&text);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · totals ")),
+            has_top(last, TableKind::Lanes, "by pipeline · totals "),
             "{last}"
         );
         assert!(last.contains("│ PIPELINE"), "{last}");
@@ -10081,7 +10118,7 @@ mod screen_tests {
         assert!(last.contains("│ total"), "{last}");
         assert!(
             last.contains(
-                "[a] ascending   [d] descending   [t] per task   [tab] dirs   [f] filters   [e] export   [r] refresh   [q] quit"
+                "[a] ascending   [d] descending   [t] per task   [tab] section   [f] filters   [e] export   [r] refresh   [q] quit"
             ),
             "{last}"
         );
@@ -10094,12 +10131,9 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-tab");
         let text = screen(&repo, "\t");
         let dirs = last_frame(&text);
-        assert!(
-            dirs.contains(&format!("{TOP_LEFT}─ eval · by dir ")),
-            "{dirs}"
-        );
+        assert!(has_top(dirs, TableKind::Dirs, "by dir "), "{dirs}");
         assert!(dirs.contains("│ DIR"), "{dirs}");
-        assert!(dirs.contains("[tab] trials"), "{dirs}");
+        assert!(dirs.contains("[tab] section"), "{dirs}");
         let root = repo.root.canonicalize().unwrap();
         assert!(
             dirs.contains(&*root.to_string_lossy()),
@@ -10107,23 +10141,79 @@ mod screen_tests {
         );
 
         let trials = last_frame(&screen(&repo, "\t\t")).to_string();
-        assert!(
-            trials.contains(&format!("{TOP_LEFT}─ eval · trials ")),
-            "{trials}"
-        );
+        assert!(has_top(&trials, TableKind::Trials, ""), "{trials}");
         assert!(trials.contains("no trials in this window."), "{trials}");
         assert!(
             trials.contains(
-                "[enter] open   [a] ascending   [d] descending   [tab] tasks   [f] filters   [r] refresh   [q] quit"
+                "[enter] open   [a] ascending   [d] descending   [tab] section   [f] filters   [r] refresh   [q] quit"
             ),
             "{trials}"
         );
 
         let text = screen(&repo, "\t\t\t");
         assert!(
-            last_frame(&text).contains(&format!("{TOP_LEFT}─ eval · by pipeline ")),
+            has_top(last_frame(&text), TableKind::Lanes, "by pipeline "),
             "{text}"
         );
+    }
+
+    /// Three `tab`s from opening walk the box title's brackets from `eval`
+    /// through `directories` and `trials` back to `eval`. The grouping and
+    /// view sit on the border's right side, and the trials section has none.
+    /// Every key line names `tab` as `section`.
+    #[test]
+    fn tab_walks_the_brackets_through_the_section_names() {
+        let (repo, _root_guard) = fixture_with_one_run("screen-tab-sections");
+        let lanes_keys = "[a] ascending   [d] descending   [t] per task   [tab] section   \
+                          [f] filters   [e] export   [r] refresh   [q] quit";
+        let walk = [
+            (
+                "",
+                "[eval]   directories   trials",
+                " by pipeline · totals ─",
+                lanes_keys,
+            ),
+            (
+                "\t",
+                "eval   [directories]   trials",
+                " by dir · totals ─",
+                "[a] ascending   [d] descending   [t] per session   [tab] section   \
+                 [f] filters   [e] export   [r] refresh   [q] quit",
+            ),
+            (
+                "\t\t",
+                "eval   directories   [trials]",
+                "───",
+                "[enter] open   [a] ascending   [d] descending   [tab] section   \
+                 [f] filters   [r] refresh   [q] quit",
+            ),
+            (
+                "\t\t\t",
+                "[eval]   directories   trials",
+                " by pipeline · totals ─",
+                lanes_keys,
+            ),
+        ];
+        for (input, left, right, keys) in walk {
+            let text = screen(&repo, &format!("{input}q"));
+            let last = last_frame(&text);
+            let top = last
+                .lines()
+                .find_map(|line| line.split_once(TOP_LEFT).map(|(_, top)| top))
+                .unwrap_or_else(|| panic!("no top border after {input:?}\n{last}"));
+            assert!(
+                top.starts_with(&format!("─ {left} ─")),
+                "after {input:?}: {top}"
+            );
+            assert!(
+                top.contains(&format!("{right}{TOP_RIGHT}")),
+                "after {input:?}: {top}"
+            );
+            if input == "\t\t" {
+                assert!(!top.contains(" by "), "no grouping on trials: {top}");
+            }
+            assert!(last.contains(keys), "after {input:?}: {last}");
+        }
     }
 
     /// `e` exports the table on screen to a file named after its `by` and
@@ -10332,10 +10422,7 @@ mod screen_tests {
         let (repo, _root_guard) = fixture_with_one_run("screen-by-step");
         let text = screen(&repo, &format!("f{RIGHT}\rq"));
         let last = last_frame(&text);
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by step ")),
-            "{last}"
-        );
+        assert!(has_top(last, TableKind::Lanes, "by step "), "{last}");
         assert!(last.contains("│ PIPELINE  STEP"), "{last}");
         assert!(last.contains("│>default   implement"), "{last}");
     }
@@ -10503,7 +10590,7 @@ mod screen_tests {
         });
         let sessions = last_frame(&text);
         assert!(
-            sessions.contains(&format!("{TOP_LEFT}─ eval · by session ")),
+            has_top(sessions, TableKind::Dirs, "by session "),
             "{sessions}"
         );
         assert!(sessions.contains("SKILL"), "{sessions}");
@@ -10515,10 +10602,7 @@ mod screen_tests {
             screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
-        assert!(
-            filtered.contains(&format!("{TOP_LEFT}─ eval · by dir ")),
-            "{filtered}"
-        );
+        assert!(has_top(filtered, TableKind::Dirs, "by dir "), "{filtered}");
         assert!(
             filtered.contains(&format!("skill /spoolway-plan ─{TOP_RIGHT}")),
             "{filtered}"
@@ -10576,10 +10660,7 @@ mod screen_tests {
             screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
-        assert!(
-            filtered.contains(&format!("{TOP_LEFT}─ eval · by dir ")),
-            "{filtered}"
-        );
+        assert!(has_top(filtered, TableKind::Dirs, "by dir "), "{filtered}");
         assert!(
             filtered.contains(&format!("skill spoolway-plan ─{TOP_RIGHT}")),
             "{filtered}"
@@ -10716,7 +10797,7 @@ mod screen_tests {
         });
         let sessions = last_frame(&text);
         assert!(
-            sessions.contains(&format!("{TOP_LEFT}─ eval · by session ")),
+            has_top(sessions, TableKind::Dirs, "by session "),
             "{sessions}"
         );
         assert!(!sessions.contains(subagent), "{sessions}");
@@ -11283,7 +11364,7 @@ mod screen_tests {
 
         let dirs = all
             .iter()
-            .find(|f| f.contains(&format!("{TOP_LEFT}─ eval · by dir ")))
+            .find(|f| has_top(f, TableKind::Dirs, "by dir "))
             .expect("`tab` reached the directory table");
         assert!(
             !dirs.contains('▼'),
@@ -11291,16 +11372,13 @@ mod screen_tests {
         );
 
         let last = last_frame(&text);
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by step ")),
-            "{last}"
-        );
+        assert!(has_top(last, TableKind::Lanes, "by step "), "{last}");
         assert!(sorted(last), "{last}");
         let lanes_frames: Vec<&&str> = all
             .iter()
             .filter(|f| {
-                f.contains(&format!("{TOP_LEFT}─ eval · by pipeline "))
-                    || f.contains(&format!("{TOP_LEFT}─ eval · by step "))
+                has_top(f, TableKind::Lanes, "by pipeline ")
+                    || has_top(f, TableKind::Lanes, "by step ")
             })
             .filter(|f| {
                 !shows_loading(f)
@@ -12224,10 +12302,7 @@ mod screen_tests {
         run_now(&repo, &args, &mut input, &mut out);
         let text = String::from_utf8(out).unwrap();
         let last = last_frame(&text);
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline ")),
-            "{last}"
-        );
+        assert!(has_top(last, TableKind::Lanes, "by pipeline "), "{last}");
         assert!(
             last.contains(&format!(" trial retire-worktree-root ─{TOP_RIGHT}")),
             "{last}"
@@ -12236,7 +12311,7 @@ mod screen_tests {
         assert!(last.contains("│ impl_ui "), "{last}");
         assert!(!last.contains("impl_tdd"), "the other trial: {last}");
         assert!(!last.contains("default"), "the ordinary lane: {last}");
-        assert!(last.contains("[tab] dirs"), "{last}");
+        assert!(last.contains("[tab] section"), "{last}");
 
         let to_trial = DOWN.repeat(4);
         let mut input = keys(&format!("{open}f{to_trial}{LEFT}\rq"));
@@ -12266,10 +12341,7 @@ mod screen_tests {
         );
 
         let last = last_frame(&screen(&repo, "\t\tq")).to_string();
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · trials ")),
-            "{last}"
-        );
+        assert!(has_top(&last, TableKind::Trials, ""), "{last}");
         let newer = last.find("retire-worktree-root").expect("t1's row");
         let older = last.find("board-step-grace-window").expect("t2's row");
         assert!(newer < older, "newest first: {last}");
@@ -12313,7 +12385,7 @@ mod screen_tests {
         let opened = screen(&repo, "q");
         let last = last_frame(&opened);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · totals ")),
+            has_top(last, TableKind::Lanes, "by pipeline · totals "),
             "{last}"
         );
         assert!(
@@ -12328,7 +12400,7 @@ mod screen_tests {
         let text = screen(&repo, "tq");
         let last = last_frame(&text);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · per task ")),
+            has_top(last, TableKind::Lanes, "by pipeline · per task "),
             "{last}"
         );
         assert!(
@@ -12339,18 +12411,18 @@ mod screen_tests {
             "{last}"
         );
         assert!(
-            last.contains("[d] descending   [t] totals   [tab] dirs"),
+            last.contains("[d] descending   [t] totals   [tab] section"),
             "{last}"
         );
 
         let text = screen(&repo, "ttq");
         let last = last_frame(&text);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · totals ")),
+            has_top(last, TableKind::Lanes, "by pipeline · totals "),
             "{last}"
         );
         assert!(
-            last.contains("[d] descending   [t] per task   [tab] dirs"),
+            last.contains("[d] descending   [t] per task   [tab] section"),
             "{last}"
         );
     }
@@ -12365,23 +12437,20 @@ mod screen_tests {
         let text = screen(&repo, "t\tq");
         let last = last_frame(&text);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by dir · per session ")),
+            has_top(last, TableKind::Dirs, "by dir · per session "),
             "{last}"
         );
         assert!(header_of(last).contains("IN/SESSION"), "{last}");
 
         let text = screen(&repo, "t\t\tq");
         let last = last_frame(&text);
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · trials ")),
-            "{last}"
-        );
+        assert!(has_top(last, TableKind::Trials, ""), "{last}");
         assert!(!last.contains("[t]"), "{last}");
 
         let text = screen(&repo, "t\t\t\trq");
         let last = last_frame(&text);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by pipeline · per task ")),
+            has_top(last, TableKind::Lanes, "by pipeline · per task "),
             "{last}"
         );
         assert!(header_of(last).contains("TIME/TASK"), "{last}");
@@ -12570,24 +12639,18 @@ mod screen_tests {
 
         let text = screen(&repo, &format!("\ttd{to_in}\r{to_session}t{to_dir}q"));
         let last = last_frame(&text);
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by dir · totals ")),
-            "{last}"
-        );
+        assert!(has_top(last, TableKind::Dirs, "by dir · totals "), "{last}");
         assert!(header_of(last).contains("▼IN  "), "{last}");
 
         let text = screen(&repo, &format!("\td{to_in}\r{to_session}q"));
         let last = last_frame(&text);
-        assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by session ")),
-            "{last}"
-        );
+        assert!(has_top(last, TableKind::Dirs, "by session "), "{last}");
         assert!(last.contains("▼IN  "), "a sort on IN reads as one: {last}");
 
         let text = screen(&repo, &format!("\td{to_in}\r{to_session}t{to_dir}q"));
         let last = last_frame(&text);
         assert!(
-            last.contains(&format!("{TOP_LEFT}─ eval · by dir · per session ")),
+            has_top(last, TableKind::Dirs, "by dir · per session "),
             "{last}"
         );
         assert!(header_of(last).contains("▼IN/SESSION"), "{last}");
