@@ -1015,9 +1015,9 @@ with the reason. A write that fails, such as on a layer file that does not parse
 The pipeline section sets one step field on many pipeline steps at once. It lists step fields,
 not pipelines, under two headers: the fields agent steps take, and the fields command steps take.
 A field goes only on the kind of step listed above it, because the merge refuses anything else.
-Each row names the field, and says on how many steps the layer already overrides it, when it
-does. Only the pipelines in the repo's `.spoolway/` count. The `blocked` step is left out,
-because every pipeline takes it from `[unattended]` in config.
+Each row names the field. A field the layer already overrides also shows `N overridden`, the
+number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are used. The
+`blocked` step is left out, because every pipeline takes it from `[unattended]` in config.
 
 ```
 ╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
