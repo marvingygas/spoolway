@@ -1075,6 +1075,17 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The list box's rows, from its top border to its bottom one, with
+    /// their escape codes: the strip above and the key line under it are
+    /// dimmed in places of their own.
+    fn box_rows(state: &State) -> Vec<String> {
+        frame(state)
+            .into_iter()
+            .skip(shell::strip().len())
+            .take_while(|l| shell::plain(l).starts_with(['╭', '│', '╰']))
+            .collect()
+    }
+
     /// Put the cursor on `key`'s row.
     fn cursor_on(state: &mut State, key: &str) {
         state.cursor = state.matches().iter().position(|s| s.key() == key).unwrap();
@@ -1633,6 +1644,53 @@ mod tests {
         assert_eq!(lines(&state).len(), 12 - 1, "{:#?}", lines(&state));
     }
 
+    // The set popup over a box of dimmed keys: once the escape codes are
+    // taken out, every row's right border sits in the frame's last column,
+    // and no column the popup covers is drawn dimmed.
+    #[test]
+    fn a_popup_over_dimmed_keys_keeps_every_border_in_its_column() {
+        let (repo, _guard) = project("dim-popup");
+        let _terminal = crate::screen::test_terminal((80, 30));
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.visible_lanes");
+        type_keys(&repo, &mut state, "\r");
+        let popup = popup(&state, None).unwrap();
+        let boxed = box_rows(&state);
+        let (x, y) = super::super::overlay_origin(&boxed, &popup).unwrap();
+        let mut under = 0;
+        for (at, row) in boxed.iter().enumerate() {
+            let plain: Vec<char> = shell::plain(row).chars().collect();
+            assert_eq!(plain.len(), 80, "{row:?}");
+            assert!(matches!(plain[79], '│' | '╮' | '╯'), "{row:?}");
+            if !(y..y + popup.len()).contains(&at) {
+                continue;
+            }
+            // The codes in force at each column, as `overlay_styled` keeps
+            // them.
+            let mut open = String::new();
+            for (column, (codes, _)) in cells(row).0.iter().enumerate() {
+                match codes.as_str() {
+                    "" => {}
+                    RESET => open.clear(),
+                    code => open.push_str(code),
+                }
+                let covered = (x..x + popup[0].chars().count()).contains(&column);
+                assert!(!covered || open.is_empty(), "{column}: {row:?}");
+                under += usize::from(column < x && !open.is_empty());
+            }
+        }
+        assert!(under > 0, "no dimmed key under the popup: {boxed:#?}");
+    }
+
+    // A colour open where a panel starts is closed before it and opened
+    // again after it, so the text on either side keeps its dim.
+    #[test]
+    fn a_panel_over_a_dimmed_row_closes_the_dim_and_opens_it_again() {
+        let mut frame = vec!["──────────".to_string(), format!("│{DIM}abcdefgh{RESET}│")];
+        overlay_styled(&mut frame, &["XY".to_string()]);
+        assert_eq!(frame[1], format!("│{DIM}abc{RESET}XY{DIM}fgh{RESET}│"));
+    }
+
     // A layer that no longer merges is named at the top of the box, and
     // stays there however far the list scrolls; once it merges again the
     // note goes.
@@ -1655,6 +1713,10 @@ mod tests {
         assert!(drawn.contains("no longer merges"), "{drawn}");
         assert!(drawn.contains("TOML parse error"), "{drawn}");
         assert!(drawn.contains("`spoolway config override`"), "{drawn}");
+        // Which file holds a key is read off files that do not load, so no
+        // row is dimmed, and a key nobody set shows its value.
+        assert!(!box_rows(&state).iter().any(|l| l.contains(DIM)));
+        assert!(drawn.contains("concurrency                 0"), "{drawn}");
 
         let down = "\x1b[B".repeat(state.matches().len());
         type_keys(&repo, &mut state, &down);
@@ -1665,6 +1727,7 @@ mod tests {
         state.reload(&repo);
         assert!(!note(&state).contains("no longer merges"));
         assert_eq!(state.active, 1);
+        assert!(box_rows(&state).iter().any(|l| l.contains(DIM)));
     }
 
     // A tracked config that no longer loads is named the same way, with the

@@ -2110,6 +2110,61 @@ agent: pi
         );
     }
 
+    /// A config file's keys come out as the dotted keys `config list` names
+    /// them by, however the file writes them: under a `[table]` heading, in
+    /// an inline table, under a quoted model glob, or by a name the load
+    /// still accepts. No file reads as `None`.
+    #[test]
+    fn config_file_keys_reads_every_spelling_as_the_listed_key() {
+        let dir = crate::scratch::root("overrides-config-file-keys");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.toml");
+        assert_eq!(config_file_keys(&path).unwrap(), None);
+
+        // Each key is one the list shows, so its row is not dimmed.
+        let listed = |raw: &str| -> Vec<String> {
+            let config: Config = toml::from_str(raw).unwrap();
+            crate::confkv::all_settings(&config)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect()
+        };
+        for (raw, want) in [
+            (
+                "[dispatch]\nlane_quiet = \"5m\"\n\n\
+                 [agents]\nclaude = { kind = \"claude\", concurrency = 2 }\n\n\
+                 [models.\"claude-*\"]\ninput = 3.0\ncache_ttl = \"1h\"\n",
+                &[
+                    "agents.claude.concurrency",
+                    "agents.claude.kind",
+                    "dispatch.lane_quiet",
+                    "models.claude-*.input",
+                    "models.claude-*.prompt_cache_ttl",
+                ][..],
+            ),
+            (
+                "[pricing.\"gpt-*\"]\ncache_write = 1.0\n",
+                &["models.gpt-*.cache_write_5m"][..],
+            ),
+        ] {
+            crate::task::write_atomic(&path, raw).unwrap();
+            let keys = config_file_keys(&path).unwrap().unwrap();
+            assert_eq!(keys.iter().map(String::as_str).collect::<Vec<_>>(), want);
+            let listed = listed(raw);
+            for key in want {
+                assert!(listed.iter().any(|l| l == key), "{key}: {listed:#?}");
+            }
+        }
+
+        // The layer's retired `keep_finished_lanes` sets `visible_lanes`.
+        crate::task::write_atomic(&path, "[dispatch]\nkeep_finished_lanes = true\n").unwrap();
+        assert_eq!(
+            config_file_keys(&path).unwrap(),
+            Some(BTreeSet::from(["dispatch.visible_lanes".to_string()]))
+        );
+    }
+
     /// Removing every key the file holds removes the file without writing
     /// it first, so no process stopped between the two can leave a file of
     /// comments that still lists as an override. Removing fewer writes the
