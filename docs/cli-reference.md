@@ -436,7 +436,7 @@ spoolway queue list
 spoolway queue list --json
 ```
 
-A running command step that has no pane reads `● running` in STATE. This table has no TIME column. The board's TIME column shows how long the run has gone.
+STATE is always 13 characters wide, the same as on the board, so NEXT starts at the same column whatever states the rows are in. A running command step that has no pane reads `● running` in STATE. This table has no TIME column. The board's TIME column shows how long the run has gone.
 
 `--json` prints the dispatcher's pid, one object per task, and an `unparseable` array. The `state` of a running command step is `running`, with no time.
 While a dispatcher runs, NEXT is routed on the pipelines that dispatcher loaded at start. See [Editing a

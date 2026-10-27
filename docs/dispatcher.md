@@ -406,7 +406,7 @@ An empty board draws no `RECENT`, whether a dispatcher is running or not. The bo
 | TASK | The task id. For a copy of a routine, the routine's name. See [Routines](planning.md#routines). |
 | PIPELINE | The pipeline the task runs on. |
 | STEP | The current step. For a starting task, the step the dispatcher is booting a lane for or starting as a command, ahead of the task file's own stage. For a paused row, or a blocked row no unblocker lane is working, the step the stop came from, and OUT, COST and TIME read that same step. For a `hook_failed` row, the stage the hook stopped the task on, `queued` or `done`. When the task file records no such step, the row shows `paused` or `blocked`. A task that cleanup held for a worktree off its branch reads `blocked`. `↻ <n>` is how many times the task has arrived at that step, whichever route carried it there. It appears from the second arrival on and always draws dim. |
-| STATE | One of the states below. |
+| STATE | One of the states below. The column is always 13 characters wide, the width of `● hook failed`, so the columns to its right stay in place when a task changes state. A narrow pane sheds other columns and never narrows STATE. |
 | CTX | How full the lane's context window is, as a percentage of the model's `context_window`. |
 | OUT | Output tokens this step has produced. |
 | COST | What this step has cost. |
