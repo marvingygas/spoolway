@@ -13,11 +13,11 @@
 //! `[models]` glob the config has no entry for yet. The pipeline section
 //! sets one step field on many pipeline steps at once — see [`pipeline`].
 //! The prompts section copies a prompt into the layer — see [`prompts`].
-//! The active section lists everything the layer holds, deletes any of it,
-//! and promotes whole files onto a branch you pick — see [`active`] and
-//! [`promote`]. `o` on a config key or a pipeline field offers `delete
-//! override`, which removes that key from every file in the layer that sets
-//! it, after the same confirm popup.
+//! The active section lists everything the layer holds, edits or deletes
+//! any of it, and promotes whole files onto a branch you pick — see
+//! [`active`] and [`promote`]. `o` on a config key or a pipeline field
+//! offers `delete override`, which removes that key from every file in the
+//! layer that sets it, after the same confirm popup.
 //!
 //! `w` on every section opens the overrides folder, where those files are
 //! edited by hand — see [`workspace`].
@@ -412,6 +412,12 @@ pub(crate) fn tab(
 /// all but the `tab` that leaves them, the `w` that opens the overrides
 /// folder, and the `o` that opens the pipeline section's field menu.
 fn handle_key(repo: &Repo, state: &mut State, key: Key) {
+    // An editor `edit` opened saves in its own pane or window, which sends
+    // no key here. Read the layer again before this key acts, so neither the
+    // list nor what the key does works from what the file held before.
+    if state.layer.opened_editor {
+        state.reload(repo);
+    }
     if key == Key::Char('w') && state.take_w() {
         if let Some(text) = workspace::open(repo) {
             state.mode = Mode::Workspace(text);

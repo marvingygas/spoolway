@@ -603,6 +603,8 @@ has "tab moves onto the pipeline section" \
   "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
 has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
 has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
+has "the step picker's key line names a as select all" \
+  "[space] select   [a] select all   [enter] set value   [esc] back" "$PIPELINE_TAB.plain"
 has "a step that leaves effort out reads not set" "[x] reproduce            not set" \
   "$PIPELINE_TAB.plain"
 has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE_TAB.plain"
@@ -631,10 +633,10 @@ works "and holds the tracked prompt" cmp -s .spoolway/prompts/implementer/PROMPT
 # The overrides tab's active section deletes one key from the layer. `tab`
 # three times moves onto the section, which lists config.toml first with its
 # keys sorted under it, so `↓` lands on dispatch.lane_quiet. `o` opens its
-# menu, `enter` on `delete selected` opens the confirm popup naming the file
-# and the key, and `enter` deletes it.
+# menu on `edit`, `↓` moves onto `delete selected`, `enter` there opens the
+# confirm popup naming the file and the key, and `enter` deletes it.
 ACTIVE_TAB="$LIVE/overrides-active.txt"
-on_screen '\x1b[C\x1b[C\t\t\t\x1b[Bo\r\r' "$ACTIVE_TAB"
+on_screen '\x1b[C\x1b[C\t\t\t\x1b[Bo\x1b[B\r\r' "$ACTIVE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$ACTIVE_TAB" >"$ACTIVE_TAB.plain"
 has "tab three times moves onto the active section" \
   "╭─ config   pipeline   prompts   [active (" "$ACTIVE_TAB.plain"
@@ -642,9 +644,11 @@ has "it lists the layer's config.toml" "[ ] config.toml" "$ACTIVE_TAB.plain"
 has "with the key set earlier under it" "[ ] dispatch.lane_quiet" "$ACTIVE_TAB.plain"
 has "a prompt reads whole file" "[ ] prompts/implementer            whole file" \
   "$ACTIVE_TAB.plain"
-has "its key line names space, a, o and w" \
-  "[space] select   [a] all   [o] options   [w] open workspace" "$ACTIVE_TAB.plain"
+has "its key line names space, a, o, w and tab" \
+  "[space] select   [a] select all   [o] options   [w] open workspace   [tab] section" \
+  "$ACTIVE_TAB.plain"
 has "o opens the key's menu" "╭─ dispatch.lane_quiet ─" "$ACTIVE_TAB.plain"
+has "the menu opens on edit" "│  > edit " "$ACTIVE_TAB.plain"
 has "delete selected opens one confirm popup" "╭─ delete this override ─" \
   "$ACTIVE_TAB.plain"
 has "which names the file and the key" "config.toml   dispatch.lane_quiet" \
@@ -655,14 +659,15 @@ has "and keeps the other key" "input = 0.4" "$CONFIG_LAYER"
 # The active section promotes pipelines/bugfix.yml onto a local branch no
 # checkout has. config.toml is first with its one key left, so `↓` twice
 # lands on bugfix's file row. `o` opens its menu with `promote selected`
-# first, and `enter` opens the branch picker, where `f` searches it down to
-# the branch. `enter` leaves the search, `enter` picks the branch, and
-# `enter` on the confirm popup makes the worktree and writes the file.
+# under `edit`, `↓` moves onto it, and `enter` opens the branch picker,
+# where `f` searches it down to the branch. `enter` leaves the search,
+# `enter` picks the branch, and `enter` on the confirm popup makes the
+# worktree and writes the file.
 must "a local branch with no checkout" git branch feature/promote
 PROMOTE_TAB="$LIVE/overrides-promote.txt"
-on_screen '\x1b[C\x1b[C\t\t\t\x1b[B\x1b[Bo\rffeature/promote\r\r\r' "$PROMOTE_TAB"
+on_screen '\x1b[C\x1b[C\t\t\t\x1b[B\x1b[Bo\x1b[B\rffeature/promote\r\r\r' "$PROMOTE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PROMOTE_TAB" >"$PROMOTE_TAB.plain"
-has "o on a whole file offers promote selected first" "│  > promote selected" \
+has "o on a whole file offers promote selected" "│  > promote selected" \
   "$PROMOTE_TAB.plain"
 has "promote opens the branch picker" "╭─ promote pipelines/bugfix.yml to ─" \
   "$PROMOTE_TAB.plain"

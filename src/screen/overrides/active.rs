@@ -1,5 +1,5 @@
 //! The overrides tab's active section: everything the layer holds, file by
-//! file with its keys under it, and `o` to delete any of it.
+//! file with its keys under it, and `o` to edit or delete any of it.
 //!
 //! Each key shows the setup's value and the layer's, the reason when the
 //! merge ignores it, or `matches the setup` when the two are the same. The
@@ -10,6 +10,12 @@
 //! main checkout, the one the dispatcher reads, never from a worktree's
 //! copy. The config and pipeline sections read the checkout the board runs
 //! in, so in a worktree with its own `.spoolway/` the two can differ.
+//!
+//! `edit` acts on the row under the cursor, selection or not: a key opens
+//! the field it is set in, and a file or a prompt copy opens in the
+//! person's editor through [`crate::editor::open`]. The editor runs in a
+//! pane or window of its own, so nothing here sees the save; the section
+//! reads the layer again on the next key instead.
 //!
 //! A delete names every file and key in one confirm popup first. Each file
 //! is changed in one step, one write or its removal, so a delete that stops
@@ -50,10 +56,10 @@ struct KeyRow {
     /// The key as `override list` prints it: a dotted config key,
     /// `<step>.<field>`, `description` or `task_template`.
     key: String,
-    /// The key `enter` sets: a config key as the merge applies it, which
+    /// The key `edit` sets: a config key as the merge applies it, which
     /// differs from `key` only for a retired spelling the merge still reads.
     set_as: String,
-    /// The value in use now, which `enter`'s field opens on: the layer's
+    /// The value in use now, which `edit`'s field opens on: the layer's
     /// when the merge applies it, the setup's when it does not.
     in_use: String,
     /// The layer's value, as the layer spells it: what a promote writes,
@@ -62,12 +68,25 @@ struct KeyRow {
     state: KeyState,
 }
 
-/// What kind of file a row is, and so how a key in it is set again.
+/// What kind of file a row is, and so how a key in it is set again and
+/// where the file is in the layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Kind {
     Config,
     Pipeline(String),
-    Prompt,
+    Prompt(String),
+}
+
+impl Kind {
+    /// The file in the layer at `overrides` that a row of this kind lists,
+    /// which `edit` opens.
+    fn path(&self, overrides: &std::path::Path) -> std::path::PathBuf {
+        match self {
+            Kind::Config => crate::overrides::config_patch_path(overrides),
+            Kind::Pipeline(name) => crate::overrides::pipeline_patch_path(overrides, name),
+            Kind::Prompt(name) => crate::overrides::prompt_patch_path(overrides, name),
+        }
+    }
 }
 
 /// One file in the layer.
@@ -95,12 +114,12 @@ enum Row {
 /// such as a prompt, as a whole.
 type Item = (String, Option<String>);
 
-/// What `enter` and `o` lead to that the tab itself has to act on.
+/// What `o`'s menu leads to that the tab itself has to act on.
 pub(super) enum Outcome {
     Nothing,
     /// The layer changed, so the tab reads everything again.
     Changed,
-    /// `enter` on a config key: the tab opens its own set popup on it.
+    /// `edit` on a config key: the tab opens its own set popup on it.
     SetConfig(String),
 }
 
@@ -283,15 +302,15 @@ enum View {
     Pick(Picker),
     /// A promote's confirm popup, once a branch is picked.
     Promote(Promotion),
-    /// The value field over a pipeline key, opened by `enter`.
+    /// The value field over a pipeline key, opened by `edit`.
     Set {
         pipeline: String,
         key: String,
         current: String,
         value: String,
     },
-    /// A delete or a write that failed, or what a promote did, until
-    /// `enter` closes it.
+    /// A delete, a write or an editor that failed, or what a promote did,
+    /// until `enter` closes it.
     Notice(Notice),
 }
 
@@ -305,6 +324,10 @@ pub(super) struct ActiveSection {
     /// Which of [`ActiveSection::rows`] the cursor is on.
     cursor: usize,
     selected: BTreeSet<Item>,
+    /// Whether `edit` opened an editor on a file since the layer was last
+    /// read: the save happens in the editor's own pane or window, so the
+    /// list would keep the old values until something else read it.
+    pub(super) opened_editor: bool,
 }
 
 /// What a prompt's row says: a prompt override replaces the whole file.
@@ -312,11 +335,6 @@ const WHOLE_FILE: &str = "whole file";
 
 /// What a key the setup already holds says.
 const MATCHES: &str = "matches the setup — o to delete";
-
-/// The row under an ignored key's reason, wrapped into the reason's column
-/// as the reason is: an 80-column terminal leaves the list too narrow for it
-/// on one line, and the border would otherwise cut it.
-const SET_AGAIN: &str = "[enter] to set it again, or o to delete";
 
 /// The column a file's note starts at, counted from its name, and the one a
 /// key's value starts at, counted from the key: both land on the same
@@ -330,9 +348,9 @@ const TARGET_GAP: usize = 3;
 
 /// The menu's items, matched by name since `promote selected` is not
 /// always offered.
+const EDIT: &str = "edit";
 const PROMOTE: &str = "promote selected";
 const DELETE: &str = "delete selected";
-const DELETE_ALL: &str = "delete all overrides";
 
 /// The menu's items are padded to this, so the menu is 40 columns wide
 /// whatever it lists, the same width with or without a selection.
@@ -349,6 +367,7 @@ impl ActiveSection {
             view: View::List,
             cursor: 0,
             selected: BTreeSet::new(),
+            opened_editor: false,
         }
     }
 
@@ -359,6 +378,7 @@ impl ActiveSection {
         let (files, stale) = load(repo, config);
         self.files = files;
         self.stale = stale;
+        self.opened_editor = false;
         let items: BTreeSet<Item> = self.every_item().into_iter().collect();
         self.selected.retain(|item| items.contains(item));
         self.cursor = self.cursor.min(self.rows().len().saturating_sub(1));
@@ -424,18 +444,14 @@ impl ActiveSection {
                     self.view = View::Menu(crate::screen::move_cursor(cursor, len, key));
                 }
                 Key::Enter => match self.menu_items().get(cursor).copied() {
+                    Some(EDIT) => return self.edit(repo),
                     Some(PROMOTE) => self.view = self.picker(repo),
                     Some(DELETE) => {
                         if let Some(deletion) = self.selected_deletion() {
                             self.view = View::Confirm(deletion);
                         }
                     }
-                    Some(_) => {
-                        if let Some(deletion) = self.whole_deletion() {
-                            self.view = View::Confirm(deletion);
-                        }
-                    }
-                    None => {}
+                    _ => {}
                 },
                 Key::Esc => {}
                 _ => self.view = View::Menu(cursor),
@@ -546,38 +562,68 @@ impl ActiveSection {
                     self.selected.extend(all);
                 }
             }
+            // `enter` does nothing here: every row is edited through `o`,
+            // then `edit`, the one way in for a key and a file alike.
             Key::Char('o') => self.view = View::Menu(0),
-            Key::Enter => {
-                if let Some(Row::Key(f, k)) = under {
-                    let (file, row) = (&self.files[f], &self.files[f].keys[k]);
-                    match &file.kind {
-                        Kind::Config => return Outcome::SetConfig(row.set_as.clone()),
-                        Kind::Pipeline(pipeline) => {
-                            self.view = View::Set {
-                                pipeline: pipeline.clone(),
-                                key: row.key.clone(),
-                                current: row.in_use.clone(),
-                                value: row.in_use.clone(),
-                            };
-                        }
-                        Kind::Prompt => {}
-                    }
-                }
-            }
             _ => {}
         }
         Outcome::Nothing
     }
 
-    /// The menu's items: `promote selected` first when what it would act on
-    /// is whole files, then both deletes, or none when the layer is empty.
+    /// `edit` on the row under the cursor, whatever is selected: a config
+    /// key opens the config section's value field, a pipeline key the
+    /// `set <key> in <pipeline>` field, and a file its copy in the layer in
+    /// the person's editor.
+    fn edit(&mut self, repo: &Repo) -> Outcome {
+        match self.rows().get(self.cursor).copied() {
+            Some(Row::Key(f, k)) => {
+                let (file, row) = (&self.files[f], &self.files[f].keys[k]);
+                match &file.kind {
+                    Kind::Config => return Outcome::SetConfig(row.set_as.clone()),
+                    Kind::Pipeline(pipeline) => {
+                        self.view = View::Set {
+                            pipeline: pipeline.clone(),
+                            key: row.key.clone(),
+                            current: row.in_use.clone(),
+                            value: row.in_use.clone(),
+                        };
+                    }
+                    // A prompt copy has no keys, so it has no key rows.
+                    Kind::Prompt(_) => {}
+                }
+            }
+            Some(Row::File(f)) => {
+                let file = &self.files[f];
+                let path = file.kind.path(&repo.overrides_dir());
+                let label = format!("{} · edit", file.target);
+                match crate::editor::open(repo, &label, &path) {
+                    Ok(()) => self.opened_editor = true,
+                    // Shown whole, as every open in the TUI shows its
+                    // refusal, but titled for this file: an editor that
+                    // cannot start must not look like an edit that did.
+                    Err(err) => {
+                        self.view = View::Notice(Notice::new(
+                            "not opened",
+                            format!("{} was not opened: {err:#}", file.target),
+                        ));
+                    }
+                }
+            }
+            None => {}
+        }
+        Outcome::Nothing
+    }
+
+    /// The menu's items: `edit`, then `promote selected` when what it would
+    /// act on is whole files, then `delete selected`, or none when the layer
+    /// is empty.
     fn menu_items(&self) -> Vec<&'static str> {
         if self.files.is_empty() {
             return Vec::new();
         }
         match self.promoted().is_some() {
-            true => vec![PROMOTE, DELETE, DELETE_ALL],
-            false => vec![DELETE, DELETE_ALL],
+            true => vec![EDIT, PROMOTE, DELETE],
+            false => vec![EDIT, DELETE],
         }
     }
 
@@ -690,23 +736,6 @@ impl ActiveSection {
         (!files.is_empty()).then(|| Deletion::of(files))
     }
 
-    /// `delete all overrides`: every file, as a whole.
-    fn whole_deletion(&self) -> Option<Deletion> {
-        let files: Vec<Doomed> = self
-            .files
-            .iter()
-            .map(|file| Doomed {
-                target: file.target.clone(),
-                keys: file.keys.iter().map(|key| key.key.clone()).collect(),
-                whole: true,
-            })
-            .collect();
-        (!files.is_empty()).then_some(Deletion {
-            title: "delete all overrides",
-            files,
-        })
-    }
-
     /// The list box's lines, `width` columns each: a blank row, then every
     /// file with its keys under it, cut to `rows` with the cursor's row
     /// kept in view.
@@ -740,10 +769,6 @@ impl ActiveSection {
                         KeyState::Ignored(reason) => format!("ignored — {reason}"),
                     };
                     lines.extend(beside(&head, &value, width));
-                    if matches!(key.state, KeyState::Ignored(_)) {
-                        let under = " ".repeat(head_len(&head));
-                        lines.extend(beside(&under, SET_AGAIN, width));
-                    }
                 }
             }
             if at == self.cursor {
@@ -800,7 +825,7 @@ impl ActiveSection {
             View::List => [
                 [
                     ("space", "select"),
-                    ("a", "all"),
+                    ("a", "select all"),
                     super::OPTIONS,
                     super::OPEN_WORKSPACE,
                     ("tab", "section"),
@@ -1014,7 +1039,7 @@ fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
                 // Spelled as the pipeline section spells the setup's value.
                 // A nested value does not render on one line, so it reads
                 // `not set` rather than putting several lines into one row
-                // and into `enter`'s field. The merge ignores it, and the
+                // and into `edit`'s field. The merge ignores it, and the
                 // row says why whenever `override list` reads the layer.
                 let new = crate::overrides::render_scalar(value).unwrap_or_default();
                 keys.push(key_row(&reasons, &target, &key, &key, old, new, same));
@@ -1036,7 +1061,7 @@ fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
         };
         files.push(FileRow {
             target,
-            kind: Kind::Prompt,
+            kind: Kind::Prompt(name),
             note: Some(note),
             keys: Vec::new(),
         });
@@ -1270,13 +1295,12 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [space] select   [a] all   [o] options   [w] open workspace   [tab] section"
+            " [space] select   [a] select all   [o] options   [w] open workspace   [tab] section"
         );
     }
 
     // A key the merge ignores reads `ignored —` with the reason `override
-    // list` prints, wrapped in its column, and the row under it says what
-    // to do.
+    // list` prints, wrapped in its column, and takes only the reason's rows.
     #[test]
     fn an_ignored_key_reads_the_reason_override_list_prints() {
         let (repo, _guard) = project("active-ignored");
@@ -1289,7 +1313,7 @@ mod tests {
         let indent = " ".repeat(38);
         let mut reading = drawn[2].split_at(38).1.to_string();
         let mut at = 3;
-        while drawn[at].starts_with(&indent) && !drawn[at].contains("[enter]") {
+        while drawn.get(at).is_some_and(|l| l.starts_with(&indent)) {
             reading = format!("{reading} {}", drawn[at].trim());
             at += 1;
         }
@@ -1301,18 +1325,18 @@ mod tests {
         // Wrapped into its column, so compared word for word.
         let words = reason.split_whitespace().collect::<Vec<_>>().join(" ");
         assert_eq!(reading, format!("ignored — {words}"));
-        assert_eq!(
-            drawn[at],
-            format!("{indent}[enter] to set it again, or o to delete")
+        assert!(
+            drawn[at..].iter().all(|l| l.is_empty()),
+            "nothing under the reason: {drawn:#?}"
         );
         assert!(drawn.iter().all(|l| l.chars().count() <= 78), "{drawn:#?}");
     }
 
-    // Under the shell at an 80-column terminal, the list is too narrow for
-    // the row under an ignored key on one line: it wraps under the reason
-    // and reads whole, for a key that fits its field and one that does not.
+    // Under the shell at an 80-column terminal, two ignored keys, one that
+    // fits its field and one that does not, each take only the rows of
+    // their reason, wrapped inside the border, and no row names `enter`.
     #[test]
-    fn the_row_under_an_ignored_key_wraps_at_an_80_column_terminal() {
+    fn an_ignored_key_takes_only_its_reason_at_an_80_column_terminal() {
         let (repo, _guard) = project("active-narrow");
         let _terminal = crate::screen::test_terminal((80, 40));
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Overrides);
@@ -1326,21 +1350,9 @@ mod tests {
             .skip_while(|l| !l.starts_with('╭'))
             .skip(1)
             .collect();
-        let hints: Vec<String> = (0..drawn.len())
-            .filter_map(|at| {
-                let column = drawn[at].find("[enter]")?;
-                let indent = " ".repeat(column);
-                let mut reading = drawn[at][column..].to_string();
-                for line in drawn[at + 1..].iter().take_while(|l| {
-                    l.starts_with(&indent) && l.chars().nth(column).is_some_and(|c| c != ' ')
-                }) {
-                    reading = format!("{reading} {}", line.trim());
-                }
-                Some(reading)
-            })
-            .collect();
-        let hint = "[enter] to set it again, or o to delete";
-        assert_eq!(hints, [hint, hint], "{drawn:#?}");
+        let reasons = drawn.iter().filter(|l| l.contains("ignored — ")).count();
+        assert_eq!(reasons, 2, "{drawn:#?}");
+        assert!(drawn.iter().all(|l| !l.contains("[enter]")), "{drawn:#?}");
         // The box is 78 columns wide here, 76 inside its borders.
         assert!(drawn.iter().all(|l| l.chars().count() <= 76), "{drawn:#?}");
     }
@@ -1434,7 +1446,7 @@ mod tests {
     // A patch value is spelled as the pipeline section spells one. A
     // hand-written list does not render on one line, so when the layer's
     // reasons do not load, and the merge's refusal of it is not shown, no
-    // row and no `enter` field gets several lines from it.
+    // row and no `edit` field gets several lines from it.
     #[test]
     fn a_nested_patch_value_stays_off_the_row() {
         let (repo, _guard) = layered("nested");
@@ -1485,10 +1497,10 @@ mod tests {
         assert!(state.layer.selected.is_empty());
     }
 
-    // `o` with keys selected opens the menu titled with how many, and
-    // `delete selected` names every file and key in its confirm popup, each
-    // file's keys under one another. `enter` deletes them, and a file left
-    // with no keys leaves the layer.
+    // `o` with keys selected opens the menu titled with how many, on
+    // `edit`, and `delete selected` names every file and key in its confirm
+    // popup, each file's keys under one another. `enter` deletes them, and
+    // a file left with no keys leaves the layer.
     #[test]
     fn delete_selected_names_every_file_and_key_then_deletes_them() {
         let (repo, _guard) = layered("delete-selected");
@@ -1502,9 +1514,9 @@ mod tests {
             [
                 "╭─ 3 selected ─────────────────────────╮",
                 "│                                      │",
-                "│  > promote selected                  │",
+                "│  > edit                              │",
+                "│    promote selected                  │",
                 "│    delete selected                   │",
-                "│    delete all overrides              │",
                 "│                                      │",
                 "│  [enter] confirm   [esc] close       │",
                 "╰──────────────────────────────────────╯",
@@ -1512,7 +1524,7 @@ mod tests {
         );
         assert_eq!(key_line(&state), " [enter] confirm   [esc] close");
 
-        type_keys(&repo, &mut state, "\x1b[B\r");
+        type_keys(&repo, &mut state, "\x1b[B\x1b[B\r");
         let drawn = popup(&state);
         assert!(
             drawn[0].starts_with("╭─ delete these overrides ─"),
@@ -1556,7 +1568,8 @@ mod tests {
         cursor_on(&mut state, "implement.model");
         type_keys(&repo, &mut state, "o");
         assert!(popup(&state)[0].starts_with("╭─ implement.model ─"));
-        type_keys(&repo, &mut state, "\r");
+        // One key of a two-key file: `edit`, then `delete selected`.
+        type_keys(&repo, &mut state, "\x1b[B\r");
         assert!(popup(&state)[0].starts_with("╭─ delete this override ─"));
         assert!(popup(&state).contains(&format!(
             "│  {:48}│",
@@ -1571,7 +1584,7 @@ mod tests {
 
         // A prompt has no keys, so its row deletes the whole copy.
         cursor_on(&mut state, "prompts/code-reviewer");
-        type_keys(&repo, &mut state, "o\x1b[B\r");
+        type_keys(&repo, &mut state, "o\x1b[B\x1b[B\r");
         assert!(popup(&state).iter().any(|l| l.contains("whole file")));
         type_keys(&repo, &mut state, "\r");
         assert!(
@@ -1587,22 +1600,35 @@ mod tests {
         let mut state = on_active(&repo);
         type_keys(&repo, &mut state, "o\x1b");
         assert!(state.layer.popup(None).is_none());
-        type_keys(&repo, &mut state, "o\r\x1b");
+        // Past `edit` and `promote selected`, onto `delete selected`.
+        type_keys(&repo, &mut state, "o\x1b[B\x1b[B\r");
+        assert!(popup(&state)[0].starts_with("╭─ delete this override ─"));
+        type_keys(&repo, &mut state, "\x1b");
         assert!(state.layer.popup(None).is_none());
         assert_eq!(state.active, 5);
     }
 
-    // `delete all overrides` names every file and key, and empties the
-    // layer.
+    // Clearing the layer is `a`, then `delete selected`: the confirm popup
+    // names every file and key, and `enter` empties the layer. No menu
+    // offers a delete of everything of its own.
     #[test]
-    fn delete_all_overrides_empties_the_layer() {
+    fn select_all_then_delete_selected_empties_the_layer() {
         let (repo, _guard) = layered("delete-all");
         let mut state = on_active(&repo);
-        // `promote selected` is first: the cursor is on a whole file.
-        type_keys(&repo, &mut state, "o\x1b[B\x1b[B\r");
+        type_keys(&repo, &mut state, "ao");
+        assert_eq!(
+            popup(&state)[2..5],
+            [
+                "│  > edit                              │",
+                "│    promote selected                  │",
+                "│    delete selected                   │",
+            ]
+        );
+        assert!(!popup(&state).join("\n").contains("delete all"));
+        type_keys(&repo, &mut state, "\x1b[B\x1b[B\r");
         let drawn = popup(&state);
         assert!(
-            drawn[0].starts_with("╭─ delete all overrides ─"),
+            drawn[0].starts_with("╭─ delete these overrides ─"),
             "{drawn:#?}"
         );
         assert!(drawn.iter().any(|l| l.contains("5 keys in 4 files")));
@@ -1643,7 +1669,7 @@ mod tests {
         cursor_on(&mut state, "pipelines/impl.yml");
         type_keys(&repo, &mut state, " ");
         cursor_on(&mut state, "pipelines/impl_fast.yml");
-        type_keys(&repo, &mut state, " o\x1b[B\r");
+        type_keys(&repo, &mut state, " o\x1b[B\x1b[B\r");
         // The second file stops reading after the popup listed it.
         let second = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl_fast");
         std::fs::write(&second, "steps: [\n").unwrap();
@@ -1769,7 +1795,7 @@ mod tests {
         );
 
         cursor_on(&mut state, "pipelines/impl_fast.yml");
-        type_keys(&repo, &mut state, "o\x1b[B\r");
+        type_keys(&repo, &mut state, "o\x1b[B\x1b[B\r");
         assert!(popup(&state).iter().any(|l| l.contains("whole file")));
         type_keys(&repo, &mut state, "\r");
         assert!(
@@ -1778,15 +1804,15 @@ mod tests {
         assert_eq!(state.layer.stale, None);
     }
 
-    // `enter` on an ignored config key opens the config section's set
+    // `edit` on an ignored config key opens the config section's set
     // popup, so it can be set again, and the write lands in the layer.
     #[test]
-    fn enter_on_a_config_key_sets_it_again() {
+    fn edit_on_a_config_key_sets_it_again() {
         let (repo, _guard) = project("active-set-config");
         crate::commands::write_config_override(&repo, "dispatch.visible_lanes", "three").unwrap();
         let mut state = on_active(&repo);
         cursor_on(&mut state, "dispatch.visible_lanes");
-        type_keys(&repo, &mut state, "\r");
+        type_keys(&repo, &mut state, "o\r");
         assert!(popup(&state)[0].starts_with("╭─ set dispatch.visible_lanes ─"));
         type_keys(&repo, &mut state, "\x7f\x7f\x7f\x7f\x7f4\r");
         let text =
@@ -1797,14 +1823,14 @@ mod tests {
         assert!(!rows_of(&state).iter().any(|l| l.contains("ignored")));
     }
 
-    // `enter` on a pipeline key opens a field on the value in use, and
+    // `edit` on a pipeline key opens a field on the value in use, and
     // writes what is typed into that one key.
     #[test]
-    fn enter_on_a_pipeline_key_sets_it_again() {
+    fn edit_on_a_pipeline_key_sets_it_again() {
         let (repo, _guard) = layered("set-pipeline");
         let mut state = on_active(&repo);
         cursor_on(&mut state, "test.timeout");
-        type_keys(&repo, &mut state, "\r");
+        type_keys(&repo, &mut state, "o\r");
         let drawn = popup(&state);
         assert!(
             drawn[0].starts_with("╭─ set test.timeout in impl_fast ─"),
@@ -1828,17 +1854,17 @@ mod tests {
         );
     }
 
-    // `enter` on a step key writes through the pipeline section's own
+    // `edit` on a step key writes through the pipeline section's own
     // write, so it refuses what that refuses, in its words, and leaves the
     // patch as it was.
     #[test]
-    fn enter_on_a_step_key_writes_as_the_pipeline_section_does() {
+    fn edit_on_a_step_key_writes_as_the_pipeline_section_does() {
         let (repo, _guard) = layered("set-pipeline-shared");
         let path = crate::overrides::pipeline_patch_path(&repo.overrides_dir(), "impl_fast");
         let before = std::fs::read_to_string(&path).unwrap();
         let mut state = on_active(&repo);
         cursor_on(&mut state, "test.timeout");
-        type_keys(&repo, &mut state, "\r\x7f\x7f\x7f[\r");
+        type_keys(&repo, &mut state, "o\r\x7f\x7f\x7f[\r");
         let super::View::Notice(notice) = &state.layer.view else {
             panic!("the write is refused");
         };
@@ -1850,5 +1876,143 @@ mod tests {
             notice.text
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    // `enter` on the list changes nothing on any row: a config key, a
+    // pipeline key, a file and a prompt copy alike open no popup and leave
+    // the layer as it was.
+    #[test]
+    fn enter_on_the_list_does_nothing() {
+        let (repo, _guard) = layered("enter");
+        let before = crate::commands::collect_override_rows(&repo).unwrap().len();
+        let mut state = on_active(&repo);
+        for row in [
+            "dispatch.lane_quiet",
+            "test.timeout",
+            "pipelines/impl.yml",
+            "prompts/code-reviewer",
+        ] {
+            cursor_on(&mut state, row);
+            type_keys(&repo, &mut state, "\r");
+            assert!(super::super::popup(&state, None).is_none(), "{row}");
+            assert!(matches!(state.mode, Mode::Browsing), "{row}");
+        }
+        let after = crate::commands::collect_override_rows(&repo).unwrap().len();
+        assert_eq!(after, before);
+        assert_eq!(state.active, 5);
+    }
+
+    // With keys selected, `edit` acts on the row under the cursor, not on
+    // the selection the menu's title counts.
+    #[test]
+    fn with_a_selection_edit_acts_on_the_row_under_the_cursor() {
+        let (repo, _guard) = layered("edit-selected");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "pipelines/impl.yml");
+        type_keys(&repo, &mut state, " ");
+        cursor_on(&mut state, "test.timeout");
+        type_keys(&repo, &mut state, "o");
+        assert!(popup(&state)[0].starts_with("╭─ 2 selected ─"));
+        assert_eq!(popup(&state)[2], format!("│{:38}│", "  > edit"));
+        type_keys(&repo, &mut state, "\r");
+        assert!(
+            popup(&state)[0].starts_with("╭─ set test.timeout in impl_fast ─"),
+            "{:#?}",
+            popup(&state)
+        );
+        assert_eq!(state.layer.selected.len(), 2, "the selection is kept");
+    }
+
+    /// An editor that draws its own window, as `.exe` says, which writes
+    /// the path it is given to `marker` and ends. Returns the command to
+    /// pin.
+    fn window_editor(repo: &Repo, marker: &std::path::Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let editor = repo.home.join("fake-editor.exe");
+        std::fs::write(
+            &editor,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        editor.display().to_string()
+    }
+
+    /// What the window editor wrote to `marker`, once it has run.
+    fn opened(marker: &std::path::Path) -> String {
+        for _ in 0..400 {
+            if let Ok(text) = std::fs::read_to_string(marker)
+                && text.ends_with('\n')
+            {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("the editor never ran");
+    }
+
+    // `edit` on a file row opens that file in the layer in the person's
+    // editor, a prompt copy included, and the next key reads the layer
+    // again, so a value saved in the editor shows without leaving the tab.
+    #[test]
+    fn edit_on_a_file_opens_it_and_the_next_key_reads_the_layer_again() {
+        let (repo, _guard) = layered("edit-file");
+        let marker = repo.home.join("opened.txt");
+        let _editor = crate::editor::pin_editor(&window_editor(&repo, &marker));
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "config.toml");
+        type_keys(&repo, &mut state, "o\r");
+        assert!(super::super::popup(&state, None).is_none());
+        // On WSL the path is given in Windows form, which ends the same.
+        assert!(opened(&marker).trim_end().ends_with("config.toml"));
+
+        // Saved in the editor: the tab sees no key for it.
+        crate::commands::write_config_override(&repo, "dispatch.lane_quiet", "7m").unwrap();
+        assert!(rows_of(&state).iter().any(|l| l.ends_with("15m → 5m")));
+        type_keys(&repo, &mut state, "x");
+        assert!(
+            rows_of(&state).iter().any(|l| l.ends_with("15m → 7m")),
+            "{:#?}",
+            rows_of(&state)
+        );
+        assert!(!state.layer.opened_editor);
+
+        std::fs::remove_file(&marker).unwrap();
+        cursor_on(&mut state, "prompts/code-reviewer");
+        type_keys(&repo, &mut state, "o\r");
+        let path = opened(&marker);
+        assert!(
+            path.trim_end().ends_with("PROMPT.md") && path.contains("code-reviewer"),
+            "{path}"
+        );
+    }
+
+    // An editor that cannot start opens the `not opened` popup naming the
+    // file, with the refusal whole, and only `enter` closes it.
+    #[test]
+    fn an_editor_that_cannot_start_opens_the_not_opened_popup() {
+        let (repo, _guard) = layered("edit-refused");
+        let _editor = crate::editor::pin_editor("no-such-editor-for-spoolway");
+        let mut state = on_active(&repo);
+        cursor_on(&mut state, "prompts/code-reviewer");
+        type_keys(&repo, &mut state, "o\r");
+        let super::View::Notice(notice) = &state.layer.view else {
+            panic!("the open is refused");
+        };
+        assert_eq!(notice.title, "not opened");
+        assert_eq!(
+            notice.text,
+            "prompts/code-reviewer was not opened: `no-such-editor-for-spoolway` is not on PATH \
+             — set $VISUAL or $EDITOR to an editor on PATH, or unset both to use vim"
+        );
+        assert!(!state.layer.opened_editor);
+        assert_eq!(key_line(&state), " [enter] confirm");
+        type_keys(&repo, &mut state, "\x1b");
+        assert!(state.layer.popup(None).is_some(), "only enter closes it");
+        type_keys(&repo, &mut state, "\r");
+        assert!(state.layer.popup(None).is_none());
     }
 }

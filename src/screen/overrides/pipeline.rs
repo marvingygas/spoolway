@@ -713,8 +713,7 @@ impl PipelineSection {
     }
 
     /// The field list: each kind's fields under its header, each with how
-    /// many steps in how many pipelines take it, and how many of those the
-    /// layer already sets it on.
+    /// many steps the layer already sets it on.
     fn field_lines(&self, rows: Option<usize>, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
         if matches!(self.view, View::Search) {
@@ -722,37 +721,23 @@ impl PipelineSection {
         }
         lines.push(String::new());
         let fields = self.fields();
-        let counts: Vec<(usize, usize, usize)> =
-            fields.iter().map(|field| self.count(*field)).collect();
-        let digits = |n: usize| n.to_string().len();
-        let steps_w = counts.iter().map(|c| digits(c.0)).max().unwrap_or(1);
-        let pipes_w = counts.iter().map(|c| digits(c.1)).max().unwrap_or(1);
         let mut starts = Vec::new();
         let mut kind = None;
-        for (at, (field, (steps, pipelines, overridden))) in fields.iter().zip(counts).enumerate() {
+        for (at, field) in fields.iter().enumerate() {
             if kind != Some(field.kind) {
                 kind = Some(field.kind);
                 lines.push(format!("  {}", kind_header(field.kind)));
             }
             let mark = if at == self.cursor { "> " } else { "  " };
-            let count = format!(
-                "{steps:>steps_w$} {} in {pipelines:>pipes_w$} {}",
-                noun(steps, "step"),
-                noun(pipelines, "pipeline")
-            );
-            let overridden = match overridden {
+            let overridden = match self.count(*field) {
                 0 => String::new(),
                 n => format!("{n} overridden"),
             };
             starts.push(lines.len());
             lines.push(
-                format!(
-                    "{mark}  {:FIELD_NAME$}{}{overridden}",
-                    field.name,
-                    pad_to(&count, FIELD_COUNT)
-                )
-                .trim_end()
-                .to_string(),
+                format!("{mark}  {:FIELD_NAME$}{overridden}", field.name)
+                    .trim_end()
+                    .to_string(),
             );
         }
         if fields.is_empty() {
@@ -763,25 +748,17 @@ impl PipelineSection {
         window(&lines, &starts, "field", focus, rows, width)
     }
 
-    /// How many steps take `field`, in how many pipelines, and on how many
-    /// of them the layer already sets it.
-    fn count(&self, field: Field) -> (usize, usize, usize) {
-        let mut steps = 0;
-        let mut pipelines = 0;
-        let mut overridden = 0;
-        for pipeline in &self.pipelines {
-            let taking: Vec<usize> = pipeline.taking(field).collect();
-            if taking.is_empty() {
-                continue;
-            }
-            pipelines += 1;
-            steps += taking.len();
-            overridden += taking
-                .iter()
-                .filter(|&&at| pipeline.steps[at].overridden.contains(field.name))
-                .count();
-        }
-        (steps, pipelines, overridden)
+    /// On how many steps the layer already sets `field`.
+    fn count(&self, field: Field) -> usize {
+        self.pipelines
+            .iter()
+            .map(|pipeline| {
+                pipeline
+                    .taking(field)
+                    .filter(|&at| pipeline.steps[at].overridden.contains(field.name))
+                    .count()
+            })
+            .sum()
     }
 
     /// The picking list: each pipeline on one row with its step count, and
@@ -941,17 +918,14 @@ impl PipelineSection {
 /// The picking list's keys, on the line under the frame.
 const SELECT_KEYS: &[(&str, &str)] = &[
     ("space", "select"),
-    ("a", "all"),
+    ("a", "select all"),
     ("enter", "set value"),
     ("esc", "back"),
 ];
 
-/// The column a field's step count starts at, counted from the field's name.
+/// The column a field's `overridden` note starts at, counted from the
+/// field's name.
 const FIELD_NAME: usize = 21;
-
-/// How wide a field's step count is padded, so `overridden` lines up after
-/// it on every row.
-const FIELD_COUNT: usize = 30;
 
 /// The column a pipeline's step count starts at, counted from its name. A
 /// name of 49 characters or more pushes only its own count along, one
@@ -1068,7 +1042,7 @@ fn written_popup(written: &Written) -> Vec<String> {
 
 /// Write `value`, read as YAML, as the field named `field` on every step
 /// `targets` names, one patch per pipeline. The section's own `save` calls
-/// it, and so does the active section's `enter` on a step key, so a value
+/// it, and so does the active section's `edit` on a step key, so a value
 /// one of them takes the other takes too.
 ///
 /// Every patch is built before any is written, so a patch that does not
@@ -1294,8 +1268,8 @@ mod tests {
     }
 
     // The field list as the mockup draws it: each kind's fields under its
-    // own header, with how many steps in how many pipelines take each one
-    // and how many of them the layer already sets it on.
+    // own header, with how many steps the layer already sets it on, and no
+    // count of the steps and pipelines that take it.
     #[test]
     fn the_section_lists_step_fields_under_a_header_per_kind() {
         let (repo, _guard) = pipelines_project("fields");
@@ -1308,16 +1282,16 @@ mod tests {
             [
                 "",
                 "  agent steps",
-                ">   model                5 steps in 2 pipelines",
-                "    effort               5 steps in 2 pipelines",
-                "    agent                5 steps in 2 pipelines",
-                "    prompt               5 steps in 2 pipelines",
-                "    session              5 steps in 2 pipelines",
-                "    skills               5 steps in 2 pipelines",
+                ">   model",
+                "    effort",
+                "    agent",
+                "    prompt",
+                "    session",
+                "    skills",
                 "  command steps",
-                "    run                  2 steps in 2 pipelines",
-                "    timeout              2 steps in 2 pipelines        1 overridden",
-                "    hide                 2 steps in 2 pipelines",
+                "    run",
+                "    timeout              1 overridden",
+                "    hide",
                 "",
                 "",
             ]
@@ -1359,7 +1333,7 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("gamma")), "{rows:#?}");
         assert_eq!(
             drawn.last().unwrap(),
-            " [space] select   [a] all   [enter] set value   [esc] back"
+            " [space] select   [a] select all   [enter] set value   [esc] back"
         );
 
         // `esc` goes back to the fields, and `tab` only then leaves.

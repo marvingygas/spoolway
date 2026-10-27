@@ -1036,24 +1036,24 @@ with the reason. A write that fails, such as on a layer file that does not parse
 The pipeline section sets one step field on many pipeline steps at once. It lists step fields,
 not pipelines, under two headers: the fields agent steps take, and the fields command steps take.
 A field goes only on the kind of step listed above it, because the merge refuses anything else.
-Each row says how many steps in how many pipelines take the field, and how many of them the layer
-already overrides it on. Only the pipelines in the repo's `.spoolway/` count. The `blocked` step
-is left out, because every pipeline takes it from `[unattended]` in config.
+Each row names the field. A field the layer already overrides also shows `N overridden`, the
+number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are used. The
+`blocked` step is left out, because every pipeline takes it from `[unattended]` in config.
 
 ```
 ╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
 │                                                                              │
 │   agent steps                                                                │
-│ >   model                58 steps in 10 pipelines                            │
-│     effort               58 steps in 10 pipelines                            │
-│     agent                58 steps in 10 pipelines                            │
-│     prompt               58 steps in 10 pipelines                            │
-│     session              58 steps in 10 pipelines                            │
-│     skills               58 steps in 10 pipelines                            │
+│ >   model                                                                    │
+│     effort                                                                   │
+│     agent                                                                    │
+│     prompt                                                                   │
+│     session                                                                  │
+│     skills                                                                   │
 │   command steps                                                              │
-│     run                  16 steps in  9 pipelines                            │
-│     timeout              16 steps in  9 pipelines      1 overridden          │
-│     hide                 16 steps in  9 pipelines                            │
+│     run                                                                      │
+│     timeout              1 overridden                                        │
+│     hide                                                                     │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
@@ -1083,7 +1083,7 @@ overrides the field on start open, with those steps selected.
 │   [ ] impl_lite                                        5 steps               │
 │   ↓ 2 pipelines below                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] all   [enter] set value   [esc] back
+ [space] select   [a] select all   [enter] set value   [esc] back
 ```
 
 | Key | What it does |
@@ -1226,20 +1226,19 @@ copy replaces the whole file, so its row reads `whole file`.
 │   [ ] prompts/code-reviewer          whole file                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] all   [o] options   [w] open workspace   [tab] section   [q] quit
+ [space] select   [a] select all   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
-A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints, and
-the row under it says what to do. A whole file the merge leaves out, such as a patch on a
-pipeline the checkout no longer has, carries the reason on its own row. A file that does not read
-says so on its row, lists no keys, and can still be deleted as a whole.
+A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints. The
+reason wraps under the key and takes no other row. A whole file the merge leaves out, such as a
+patch on a pipeline the checkout no longer has, carries the reason on its own row. A file that
+does not read says so on its row, lists no keys, and can still be deleted as a whole.
 
 ```
 │   [ ] config.toml                                                            │
 │         [ ] dispatch.visible_lanes   ignored — setting                       │
 │                                      `dispatch.visible_lanes` to `three`     │
 │                                      produces an invalid config: …           │
-│                                      [enter] to set it again, or o to delete │
 ```
 
 A key whose value the setup already holds reads `matches the setup — o to delete`. It does
@@ -1257,28 +1256,29 @@ branch has merged: a promote keeps its entries in the layer until you delete the
 | `↑` `↓` | Move the cursor over the files and keys. |
 | `space` | Select the row under the cursor, or clear it. A file selects every key under it. |
 | `a` | Select every file and key. A second `a` clears the selection. |
-| `o` | Open the menu: `promote selected`, `delete selected` and `delete all overrides`. |
-| `enter` | On a key, open its value field to set it again. |
+| `o` | Open the menu: `edit`, `promote selected` and `delete selected`. |
 | `w` | Open the overrides folder. |
 | `tab` | Move to the next section. |
 
-The menu's title says how many keys are selected. With nothing selected, `promote selected` and
-`delete selected` act on the row under the cursor, and the menu is titled with that row's name.
-`promote selected` comes first, and only when every selected key belongs to a fully selected file:
-a promote writes whole files, so on part of a file it would write keys you did not select.
+`enter` on the list does nothing: every row is edited through `o`, then `edit`. The menu opens
+on `edit`, which always acts on the row under the cursor. The menu's title says how many keys are
+selected. With nothing selected, `promote selected` and `delete selected` act on the row under
+the cursor too, and the menu is titled with that row's name. `promote selected` comes after
+`edit`, and only when every selected key belongs to a fully selected file: a promote writes whole
+files, so on part of a file it would write keys you did not select.
 
 ```
 ╭─ 3 selected ─────────────────────────╮
 │                                      │
-│  > promote selected                  │
+│  > edit                              │
+│    promote selected                  │
 │    delete selected                   │
-│    delete all overrides              │
 │                                      │
 │  [enter] confirm   [esc] close       │
 ╰──────────────────────────────────────╯
 ```
 
-Either delete opens one confirm popup that names every file and key it deletes. `enter` deletes
+`delete selected` opens one confirm popup that names every file and key it deletes. `enter` deletes
 them and `esc` closes the popup with nothing deleted.
 
 ```
@@ -1295,15 +1295,33 @@ them and `esc` closes the popup with nothing deleted.
 ```
 
 `delete selected` removes the selected keys from each file with one write, and a file left with
-no keys leaves the layer. A selected prompt copy goes as a whole. `delete all overrides` removes
-every file the list shows. A delete that fails on one file stops there. The files before it are
-already changed, so a `deleted in part` popup names them and the files left as they were. A
-delete that fails on its first file opens a `not deleted` popup instead. `enter` closes either.
+no keys leaves the layer. A selected prompt copy goes as a whole. To empty the layer, press `a`
+to select everything, then `delete selected`. A delete that fails on one file stops there. The
+files before it are already changed, so a `deleted in part` popup names them and the files left
+as they were. A delete that fails on its first file opens a `not deleted` popup instead. `enter`
+closes either.
 
-`enter` on a config key opens the same value field the config section opens. `enter` on a
+`edit` on a config key opens the same value field the config section opens. `edit` on a
 pipeline key opens a `set <key> in <pipeline>` field, filled with the value in use now, and
 writes what is typed into that one key, read as YAML the way `spoolway pipeline override --set`
 reads it. `enter` on an empty field writes nothing, and `esc` closes the field.
+
+`edit` on a file row, such as `config.toml` or `pipelines/impl.yml`, or on a prompt copy, opens
+that file in the layer in your editor: `$VISUAL`, else `$EDITOR`, else `vim`, as every open on
+the board picks it. The editor saves in its own pane or window, so the section reads the layer
+again on the next key you press, and the list then shows whatever the file holds. When the
+editor cannot start, a `not opened` popup names the file and why, and `enter` closes it.
+
+```
+╭─ not opened ─────────────────────────────────────────╮
+│                                                      │
+│  prompts/code-reviewer was not opened: `nano` is     │
+│  not on PATH — set $VISUAL or $EDITOR to an editor   │
+│  on PATH, or unset both to use vim                   │
+│                                                      │
+│  [enter] confirm                                     │
+╰──────────────────────────────────────────────────────╯
+```
 
 #### Promoting from the tab
 

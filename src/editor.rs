@@ -1,10 +1,11 @@
 //! Which editor the TUI's open runs, and how it is started.
 //!
-//! Every open in the TUI — the board's, the pending screen's and the
-//! routines pane's — goes through [`open`], so the three can never resolve
-//! different editors. `spoolway config edit` and `config override` wait for
-//! the editor and validate afterwards, so they build their line with
-//! [`plan`] and run it themselves, but they pick the editor here too.
+//! Every open in the TUI — the board's, the pending screen's, the
+//! routines pane's and the overrides tab's — goes through [`open`], so they
+//! can never resolve different editors. `spoolway config edit` and `config
+//! override` wait for the editor and validate afterwards, so they build
+//! their line with [`plan`] and run it themselves, but they pick the editor
+//! here too.
 //!
 //! spoolway keeps no editor setting of its own. The editor is the one
 //! `$VISUAL` names, then `$EDITOR`, then `vim`, so the board and `git commit`
@@ -207,13 +208,15 @@ pub(crate) fn open(repo: &crate::repo::Repo, label: &str, task: &Path) -> Result
     crate::mux::backend(repo)?.open_command(&repo.root, label, &plan.line)
 }
 
-/// The popup every open in the TUI shows when [`open`] refuses, titled
-/// `open task` and closed with `enter`. The refusal is carried whole, `{:#}`
-/// rather than `{}`, because a refusal can sit in a context chain: a
-/// failed path conversion names the task on the outer layer, and the error
-/// under it says why `wslpath` gave up. Built here, once, so
-/// the board, the pending screen, the routines pane and the jobs routine
-/// picker cannot word the same refusal differently.
+/// The popup every open of a task file in the TUI shows when [`open`]
+/// refuses, titled `open task` and closed with `enter`. The refusal is
+/// carried whole, `{:#}` rather than `{}`, because a refusal can sit in a
+/// context chain: a failed path conversion names the task on the outer
+/// layer, and the error under it says why `wslpath` gave up. Built here,
+/// once, so the board, the pending screen, the routines pane and the jobs
+/// routine picker cannot word the same refusal differently. The overrides
+/// tab opens no task, so it titles its own `not opened` popup, naming the
+/// file, and carries the refusal whole the same way.
 pub(crate) fn refusal(err: &anyhow::Error) -> crate::screen::Notice {
     crate::screen::Notice::new("open task", format!("o: {err:#}"))
 }

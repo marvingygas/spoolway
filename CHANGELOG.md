@@ -21,6 +21,16 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## Unreleased
+
+### Changed
+- The overrides tab's pipeline section no longer shows how many steps in how many pipelines take each field. A row names the field, followed by `N overridden` where the layer already sets it, and the step picker's key line reads `[a] select all` where it read `[a] all`.
+- Every row of the overrides tab's active section is edited through `o`, then `edit`, the first item of its menu. A key opens its value field, and a file or prompt copy opens in your editor. `enter` on the list no longer does anything, and an ignored key no longer spends a row under its reason naming the keys to press.
+- The active section's key line reads `[a] select all` where it read `[a] all`.
+
+### Removed
+- `delete all overrides` is gone from the active section's menu. Press `a` to select everything, then `delete selected`.
+
 ## 0.15.0
 
 ### Highlights
