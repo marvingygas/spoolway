@@ -621,8 +621,9 @@ pub trait Mux: Sync {
 
     /// Bring a lane's pane back in front of the person sitting there.
     ///
-    /// Called for exactly one thing: a task that has landed on `blocked`. What
-    /// a person needs then is not the stage change and not the fifteen lines
+    /// Called by the dispatcher only when `dispatch.autofocus_panes` is on,
+    /// for a task parked for a person or a lane given up on. What a person
+    /// needs then is not the stage change and not the fifteen lines
     /// the notification carries, but the session as it stood when it stopped —
     /// and that session is still in its pane, in a workspace nobody is looking
     /// at. Focusing is the whole gesture; the pane is left alone otherwise.

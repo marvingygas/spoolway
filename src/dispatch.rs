@@ -3201,15 +3201,16 @@ impl<'a> Dispatcher<'a> {
     /// no pane to keep is the exception, and still waits for a lane to settle
     /// before it stops it.
     ///
-    /// With two more exceptions. The first is what a person sees when a task stops:
-    /// a lane whose task has landed on `blocked` or `paused` —
+    /// With two more exceptions. The first is what a person sees when a task
+    /// stops: a lane whose task has landed on `blocked` or `paused` —
     /// `held_for_block`, set by `hold_for_block` and by
     /// `tear_down_and_escalate` alike — is focused once when
     /// `dispatch.autofocus_panes` is on, and while the task stays parked a
-    /// person's rounds in it are committed as they end. A stage change and fifteen lines of tail do not tell anybody what the session
-    /// was doing when it stopped, and by the time they come to look the only
-    /// copy of that is the pane. It becomes a kept lane like any other on the
-    /// pass after the task moves on.
+    /// person's rounds in it are committed as they end. A stage change and
+    /// fifteen lines of tail do not tell anybody what the session was doing
+    /// when it stopped, and by the time they come to look the only copy of
+    /// that is the pane. It becomes a kept lane like any other on the pass
+    /// after the task moves on.
     ///
     /// The second is a held lane that is busy while its task has come back to
     /// its step: a person is mid-round in it, and it is finished on the pass
@@ -3405,9 +3406,9 @@ impl<'a> Dispatcher<'a> {
         true
     }
 
-    /// Keep a parked task's pane, book what it spent, and put it in front of
-    /// the person it is now waiting on — `spoolway resume`, whichever kind of
-    /// stop it is.
+    /// Keep a parked task's pane, book what it spent, and, when
+    /// `dispatch.autofocus_panes` is on, put it in front of the person it is
+    /// now waiting on — `spoolway resume`, whichever kind of stop it is.
     ///
     /// The record is what makes this survive: it is the only thing that later
     /// tells a pane held for a person from a lane still holding a question, and
@@ -3936,9 +3937,9 @@ impl<'a> Dispatcher<'a> {
         ))
     }
 
-    /// Stop a lane that is being given up on, bank what it spent, and bring
-    /// its pane forward where the backend keeps one. Answers the lane's
-    /// record, which says where the branch stood when the lane began.
+    /// Stop a lane that is being given up on, bank what it spent, and keep
+    /// its pane where the backend keeps one, bringing it forward when
+    /// `dispatch.autofocus_panes` is on. Answers the lane's record, which says where the branch stood when the lane began.
     ///
     /// The one place a torn-down lane is stopped, for
     /// [`Dispatcher::tear_down_and_escalate`] and
@@ -20306,7 +20307,10 @@ mod tests {
     /// arguing over one name.
     #[test]
     fn a_pane_held_for_a_person_is_closed_once_the_block_is_cleared() {
-        let (repo, _root_guard) = fixture("block-holds-its-pane");
+        let (mut repo, _root_guard) = fixture("block-holds-its-pane");
+        // On, so the later-pass assertion below proves a held pane is focused
+        // once and not again; off, it would pass for nothing.
+        repo.config.dispatch.autofocus_panes = true;
         let path = add_task_with(&repo, "demo", "implement", |f| {
             f.workspace_id = Some("w1".into());
             f.worktree_path = Some(stand_in_checkout(&repo));
