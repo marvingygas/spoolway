@@ -1713,8 +1713,8 @@ mod tests {
         assert!(drawn.contains("no longer merges"), "{drawn}");
         assert!(drawn.contains("TOML parse error"), "{drawn}");
         assert!(drawn.contains("`spoolway config override`"), "{drawn}");
-        // Which file holds a key is read off files that do not load, so no
-        // row is dimmed, and a key nobody set shows its value.
+        // The layer does not load, so it cannot say which keys it holds: no
+        // row is dimmed, and a concurrency no file sets shows its value.
         assert!(!box_rows(&state).iter().any(|l| l.contains(DIM)));
         assert!(drawn.contains("concurrency                 0"), "{drawn}");
 
