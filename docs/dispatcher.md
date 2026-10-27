@@ -525,12 +525,14 @@ ceiling. A lost lock writes the line shown under
 
 A command step that exits non-zero and sends its task anywhere but `done` also leaves a copy of
 its log in `~/.spoolway/logs/<project>/`, beside the problem log. The copy is named
-`<task> · <step> · <YYYY-MM-DDTHH-MM>.log`, with ` · 2`, ` · 3` and so on before `.log` when two
-failures of one step fall in the same minute. The task's `## Status Log` line names the copy's
-path instead of the one under `commands/`, which archiving deletes and the step's next run
-overwrites. The unblocker-lap line keeps its wording, and its log is copied all the same. If the
-copy cannot be made, the reason goes to the problem log and the line keeps the `commands/` path.
-`retention_days` deletes copies older than that many days, and `0` keeps them all.
+`<task> · <step> · <YYYY-MM-DDTHH-MM>.log`. When two failures of one step fall in the same
+minute, the second copy gets ` · 2` before `.log`, the third ` · 3`, and so on.
+
+The task's `## Status Log` line for that failure names the copy's path, not the path under
+`commands/`. The copy stays after the task is archived. The unblocker-lap line keeps its wording,
+and its log is copied too. If the copy cannot be made, the reason goes to the problem log and the
+line names the `commands/` path. `retention_days` deletes copies older than that many days, and
+`0` keeps them all.
 
 ### Keys
 
