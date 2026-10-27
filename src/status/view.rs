@@ -132,10 +132,11 @@ pub(super) const ST: &str = "\x1b\\";
 
 impl State {
     /// Every state there is, so the STATE column can be sized to the longest
-    /// word among them rather than to the rows on one board. Kept complete by
-    /// [`State::position`]: a new variant fails to compile there until it is
-    /// given a slot, and `every_state_is_in_all_once` fails until that slot
-    /// is filled here.
+    /// word among them rather than to the rows on one board. A state missing
+    /// here is a word the column is not sized for. [`State::position`] has no
+    /// wildcard, so a new variant does not compile until it is given a slot
+    /// there, and `every_state_is_in_all_once` holds each slot to the entry
+    /// here at that index: give it the next one, `ALL.len()`, and add it.
     pub(super) const ALL: [State; 13] = [
         State::Paused,
         State::HookFailed,
