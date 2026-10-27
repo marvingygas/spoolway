@@ -52,7 +52,7 @@ say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt
 ### `spoolway`
 
 At a terminal, with no other command typed, opens one screen: five tabs, dispatch, queue,
-routines, overrides and eval, in that order. It opens on the queue tab. A home-mode project has no
+routines, overrides and eval, in that order. It opens on the dispatch tab. A home-mode project has no
 overrides tab. See [the overrides tab](dispatcher.md#the-overrides-tab).
 
 ```

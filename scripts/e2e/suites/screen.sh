@@ -5,15 +5,15 @@
 # while the keys still arrive on an ordinary pipe — the same way every other
 # screen suite scripts its keystrokes.
 #
-# What is asserted is the order of the frames it drew: the first is the queue
-# tab, and `←` from there draws the dispatch tab's board, where `enter` starts
-# a dispatcher and, with no step running and nothing queued, stops it at once
+# What is asserted is the order of the frames it drew: the first is the dispatch
+# tab's board, `←` from there stays on it and `→` reaches the queue tab. On the
+# board `enter` starts a dispatcher and, with no step running and nothing queued, stops it at once
 # with no popup. With a task queued it asks first. `u` there asks the running
 # dispatcher to reload, and the popup it opens closes itself once loaded.
 # While one screen is open, a second `spoolway` or `spoolway dispatch` in
 # the same project refuses. A refusal on the queue tab is drawn in a popup
 # over the tab, and so is what a clean submission queued, ending on whether a
-# dispatcher will pick it up. `→` from the queue tab reaches the routines tab.
+# dispatcher will pick it up. `→` twice from the opening tab reaches the routines tab.
 # Delete off the queue tab's options menu removes a pending group and every
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
@@ -41,7 +41,7 @@ source "$HERE/../agents.sh"
 
 LIVE=${WORK:-$(mktemp -d)}
 
-# Bare `spoolway` shows a newer release as a popup over the queue tab, and a
+# Bare `spoolway` shows a newer release as a popup over the opening tab, and a
 # popup takes every key — so a release cache that names one, or the lookup
 # the first run here starts, would eat the keys every check below sends.
 # What this suite drives is the screen, not the release check.
@@ -66,7 +66,7 @@ pending_doc cart-totals "$BODY" "group: cart"
 # `script` writes is everything the screen drew.
 DRAWN="$LIVE/drawn.txt"
 works "bare spoolway opens and ends when its keys run out" \
-  script -qec "printf '\\033[D' | '$SPOOLWAY'" "$DRAWN"
+  script -qec "printf '\\033[D\\033[C' | '$SPOOLWAY'" "$DRAWN"
 
 # The real `TermGuard` the screen holds across its whole life enters the
 # alternate screen and turns wheel-as-arrows off before drawing a thing, and
@@ -96,7 +96,7 @@ fi
 
 # Every frame opens with the shared frame writer's own start code
 # (`\x1b[?2026h\x1b[H` — see `src/screen/frame_writer.rs`), so the transcript
-# splits into frames on it. The first one drawn is the queue tab's, its label
+# splits into frames on it. The first one drawn is the dispatch tab's, its label
 # bracketed on the strip. Colour codes are taken out of each frame — the
 # strip's own bold and the colour of the tab drawn under it.
 FIRST="$LIVE/first.txt"
@@ -107,15 +107,16 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 
 has "the strip names all five tabs in order" \
-  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$FIRST"
-has "it opens on the queue tab" "─ groups ─" "$FIRST"
-has "with the pending group listed" "cart" "$FIRST"
-lacks "not on the dispatch tab" "dispatcher" "$FIRST"
+  "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$FIRST"
+has "it opens on the dispatch tab's board" "dispatcher stopped" "$FIRST"
+lacks "drawn inside a box with no title" "─ dispatch" "$FIRST"
+lacks "not on the queue tab" "─ groups ─" "$FIRST"
 
-has "← reaches the dispatch tab's board" "dispatcher stopped" "$LAST"
-lacks "drawn inside a box with no title" "─ dispatch" "$LAST"
-has "with dispatch the open tab on the strip" "← [DISPATCH]       QUEUE" "$LAST"
-lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
+has "→ reaches the queue tab" "─ groups ─" "$LAST"
+has "with the pending group listed" "cart" "$LAST"
+has "with queue the open tab on the strip" \
+  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
+lacks "which is no longer the dispatch tab" "dispatcher" "$LAST"
 
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
 # again, with no step running, stops it at once and draws no stop popup.
@@ -129,7 +130,7 @@ lacks "which is no longer the queue tab" "─ groups ─" "$LAST"
 # proof it stayed up.
 RUN="$LIVE/run.txt"
 works "enter on the dispatch tab starts dispatching, and enter again stops it" \
-  script -qec "{ printf '\\033[D\\r'; sleep 1; printf '\\033[B\\r'; sleep 5; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
+  script -qec "{ printf '\\r'; sleep 1; printf '\\033[B\\r'; sleep 5; printf '\\r'; sleep 3; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$RUN" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
@@ -280,7 +281,7 @@ cp "$LIVE/default.yml.update" .spoolway/pipelines/default.yml
 LATE=".spoolway/pipelines/late-pipeline.yml"
 RUN="$LIVE/late.txt"
 works "a pipeline added after the screen opened is checked on enter" \
-  script -qec "{ printf '\\033[D'; sleep 1; printf 'steps:\\n  - id: build\\n    agent: pi\\n    prompt: late-prompt\\n    model: m\\n    on_pass: finish\\n  - id: finish\\n    run: x\\n    on_pass: done\\n' >'$LATE'; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$RUN"
+  script -qec "{ sleep 1; printf 'steps:\\n  - id: build\\n    agent: pi\\n    prompt: late-prompt\\n    model: m\\n    on_pass: finish\\n  - id: finish\\n    run: x\\n    on_pass: done\\n' >'$LATE'; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$RUN"
 sed 's/\x1b\[[0-9;]*m//g' "$RUN" >"$RUN.plain"
 rm -f "$LATE"
 has "the popup names the prompt of the pipeline added since" "late-prompt" "$RUN.plain"
@@ -306,7 +307,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$SECOND.plain"
+lacks "without drawing a screen" "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -320,7 +321,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$AFTER.plain"
+has "drawing the strip" "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -331,7 +332,7 @@ has "drawing the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES 
 pending_doc bad-stage "$BODY" "group: refused" "stage: taken"
 REFUSED="$LIVE/refused.txt"
 works "a refused submission on the queue tab ends when its keys run out" \
-  script -qec "printf ' \\r' | '$SPOOLWAY'" "$REFUSED"
+  script -qec "printf '\\033[C \\r' | '$SPOOLWAY'" "$REFUSED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
@@ -350,7 +351,7 @@ rm -f "$SPOOLWAY_PROJECT_HOME/pending/bad-stage.md"
 pending_doc billing-export "$BODY" "group: billing"
 QUEUED="$LIVE/queued.txt"
 works "a clean submission on the queue tab ends when its keys run out" \
-  script -qec "printf ' \\r' | '$SPOOLWAY'" "$QUEUED"
+  script -qec "printf '\\033[C \\r' | '$SPOOLWAY'" "$QUEUED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$QUEUED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queued popup is drawn over the tab" "╭─ queued " "$LAST"
@@ -364,7 +365,7 @@ works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export
 # on the board. `billing-export` is queued above, so a non-zero `.exit` for
 # its `started` hook under `tracking/` is a failure the popup has to name
 # under `problems`. `fetch-*` runs belong to `spoolway issue show` and give
-# no row. The pipe sends `←` to reach the dispatch tab and `enter` to ask,
+# no row. The screen opens on the dispatch tab, so the pipe sends only `enter` to ask,
 # then runs out with the popup still up, so the last frame holds both the
 # popup and the board footer under it. Wording is checked, not line breaks:
 # the row wraps at the pane's width.
@@ -375,7 +376,7 @@ printf 'hook said no\n' >"$TRACKING/billing-export · started.log"
 printf '1\n' >"$TRACKING/fetch-acme-app-7.exit"
 HOOKFAIL="$LIVE/hookfail.txt"
 works "asking to dispatch with a failed hook on a queued task ends when its keys run out" \
-  script -qec "{ printf '\\033[D'; sleep 1; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$HOOKFAIL"
+  script -qec "{ sleep 1; printf '\\r'; sleep 2; } | '$SPOOLWAY'" "$HOOKFAIL"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$HOOKFAIL" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 # Words wrap between lines, with the popup's border and the cursor save,
@@ -399,14 +400,14 @@ rm -f "$TRACKING/billing-export · started.exit" "$TRACKING/billing-export · st
 # Every tab, both directions, on a real pty — the acceptance criterion the
 # task `frames-onto-writer` exists for: no redrawing screen erases the whole
 # terminal any more, all five of them painting through the shared frame
-# writer instead (`src/screen/frame_writer.rs`). `←` from the queue tab
-# reaches dispatch, `→` four times walks back through queue, routines and
-# overrides to eval, and `←` four times walks all the way back — every tab
+# writer instead (`src/screen/frame_writer.rs`). `→` four times walks from
+# dispatch, where the screen opens, through queue, routines and overrides to
+# eval, and `←` four times walks all the way back — every tab
 # this screen has, both ways, with no `enter` anywhere so nothing is started
 # or queued.
 ALL_TABS="$LIVE/all-tabs.txt"
 works "cycling every tab does not crash the screen" \
-  script -qec "printf '\\033[D\\033[C\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+  script -qec "printf '\\033[C\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
 if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
   bad "no frame drawn while cycling every tab still erases the whole screen"
   tail -30 "$ALL_TABS" | cat -v
@@ -426,17 +427,17 @@ has "and the eval tab, → from overrides" "OVERRIDES       [EVAL]" "$ALL_TABS.p
 lacks "with no JOBS label left on the strip" "JOBS" "$ALL_TABS.plain"
 has "and the eval tab" "╭─ eval ·" "$ALL_TABS.plain"
 
-# `→` from the queue tab, where the screen opens, reaches the routines tab
-# between queue and overrides, listing the one routine under `.spoolway/routines/`.
+# `→` twice from the dispatch tab, where the screen opens, reaches the routines tab
+# past the queue tab, between queue and overrides, listing the one routine under `.spoolway/routines/`.
 # Written last, so no check above runs with a routine in the checkout.
 mkdir -p .spoolway/routines/nightly
 task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nightly"
 ROUTINES="$LIVE/routines.txt"
-works "→ from the queue tab ends when its keys run out" \
-  script -qec "printf '\\033[C' | '$SPOOLWAY'" "$ROUTINES"
+works "→ twice from the opening tab ends when its keys run out" \
+  script -qec "printf '\\033[C\\033[C' | '$SPOOLWAY'" "$ROUTINES"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "→ reaches the routines tab" \
+has "→ twice reaches the routines tab" \
   "DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL" "$LAST"
 has "titled routines" "─ routines ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
@@ -457,7 +458,7 @@ for g in 1 2 3 4 5 6; do
 done
 FULL="$LIVE/full.txt"
 works "a full board in a short pane ends when its keys run out" \
-  script -qec "stty rows 30 cols 120; printf '\\033[D' | '$SPOOLWAY'" "$FULL"
+  script -qec "stty rows 30 cols 120; printf '' | '$SPOOLWAY'" "$FULL"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FULL" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the full board is the dispatch tab's" "← [DISPATCH]       QUEUE" "$LAST"

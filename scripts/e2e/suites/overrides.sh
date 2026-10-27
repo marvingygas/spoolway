@@ -347,8 +347,8 @@ IGNORED_SCREEN="$LIVE/ignored-screen.txt"
 git commit -qm "settle config.toml the way sync writes it" -- .spoolway/config.toml >/dev/null 2>&1 || true
 on_screen '\r' "$IGNORED_SCREEN"
 frame "$IGNORED_SCREEN" 1 >"$IGNORED_SCREEN.first"
-has "bare spoolway opens on the queue tab" \
-  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$IGNORED_SCREEN.first"
+has "bare spoolway opens on the dispatch tab" \
+  "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$IGNORED_SCREEN.first"
 lacks "with no override ignored popup over it" \
   "override ignored" "$IGNORED_SCREEN.first"
 lacks "and no ignored-override note anywhere in the session's output" \

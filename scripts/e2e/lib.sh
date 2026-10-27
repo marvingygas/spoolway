@@ -318,9 +318,12 @@ wait_for_said() {
 }
 
 # Bare `spoolway` — the one screen — with `keys` typed into it, and every
-# frame it drew written to `out`. It opens on the queue tab; `\033[C` from
-# there is the routines tab, a second one the eval tab, and `\033[D` the
-# dispatch tab. The screen draws only with stdout on a terminal, so `script`
+# frame it drew written to `out`. The screen opens on the dispatch tab, so
+# one `\033[C` is typed ahead of `keys` and the caller is handed the queue
+# tab, as before: `\033[C` from there is the routines tab, a second one the
+# overrides tab, and `\033[D` the dispatch tab. The first frame in `out` is
+# therefore the dispatch tab's, with the queue tab's after it. The screen
+# draws only with stdout on a terminal, so `script`
 # gives it a pty for stdout while the keys still arrive on an ordinary pipe,
 # and the screen ends the moment that pipe runs dry. The keys and the binary
 # go in through the environment rather than being spliced into `script`'s
@@ -339,7 +342,7 @@ wait_for_said() {
 on_screen() {
   local keys=$1 out=$2; shift 2
   _screen_ready
-  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="$keys" E2E_BIN="$SPOOLWAY" \
+  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="\033[C$keys" E2E_BIN="$SPOOLWAY" \
     script -qec 'printf "$E2E_KEYS" | "$E2E_BIN"' "$out" >/dev/null 2>&1
 }
 
@@ -472,8 +475,8 @@ PY
 # `screen_dispatch` does that and starts dispatching there, and `screen_stop`
 # quits it, which stops that dispatcher with it. One screen at a time per
 # suite; a second `screen_start` stops the first. It opens the way
-# `on_screen` does: no release check, the project synced, and the resident
-# dispatcher stopped.
+# `on_screen` does: no release check, the project synced, the resident
+# dispatcher stopped, and the queue tab handed over.
 E2E_SCREEN_PID=""
 E2E_SCREEN_LOG=""
 
@@ -506,6 +509,9 @@ screen_start() {
     exit 2
   }
   E2E_SCREEN_PID=$(cat "$pidfile")
+  # The screen opens on the dispatch tab. One `→` hands every caller the
+  # queue tab, which is where each counts its keys from.
+  screen_press $'\x1b[C'
 }
 
 # One keystroke, or several, into the open screen. `\x1b` for esc, `\r` for
@@ -525,7 +531,7 @@ screen_drew_since() {
   grep -qaF -- "$2" < <(tail -n "+$(($1 + 1))" "$E2E_SCREEN_LOG")
 }
 
-# Onto the dispatch tab, one `←` from the queue tab the screen opens on, and
+# Onto the dispatch tab, one `←` from the queue tab `screen_start` hands over, and
 # nothing started there. Fails the suite's setup if the board is never drawn.
 screen_board() {
   local mark
