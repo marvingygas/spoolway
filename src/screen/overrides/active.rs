@@ -562,8 +562,8 @@ impl ActiveSection {
                     self.selected.extend(all);
                 }
             }
-            // `enter` is left to do nothing: every row is edited through
-            // `o`, so a key never opens a field the menu did not name.
+            // `enter` does nothing here: every row is edited through `o`,
+            // then `edit`, the one way in for a key and a file alike.
             Key::Char('o') => self.view = View::Menu(0),
             _ => {}
         }
@@ -1497,10 +1497,10 @@ mod tests {
         assert!(state.layer.selected.is_empty());
     }
 
-    // `o` with keys selected opens the menu titled with how many, on `edit`,
-    // and `delete selected` names every file and key in its confirm popup, each
-    // file's keys under one another. `enter` deletes them, and a file left
-    // with no keys leaves the layer.
+    // `o` with keys selected opens the menu titled with how many, on
+    // `edit`, and `delete selected` names every file and key in its confirm
+    // popup, each file's keys under one another. `enter` deletes them, and
+    // a file left with no keys leaves the layer.
     #[test]
     fn delete_selected_names_every_file_and_key_then_deletes_them() {
         let (repo, _guard) = layered("delete-selected");
