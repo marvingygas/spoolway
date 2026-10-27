@@ -1205,11 +1205,11 @@ copy replaces the whole file, so its row reads `whole file`.
 │   [ ] prompts/code-reviewer          whole file                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] all   [o] options   [w] open workspace   [tab] section   [q] quit
+ [space] select   [a] select all   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
-A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints, and
-the row under it says what to do. A whole file the merge leaves out, such as a patch on a
+A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints,
+wrapped under itself, and takes no other row. A whole file the merge leaves out, such as a patch on a
 pipeline the checkout no longer has, carries the reason on its own row. A file that does not read
 says so on its row, lists no keys, and can still be deleted as a whole.
 
@@ -1218,7 +1218,6 @@ says so on its row, lists no keys, and can still be deleted as a whole.
 │         [ ] dispatch.visible_lanes   ignored — setting                       │
 │                                      `dispatch.visible_lanes` to `three`     │
 │                                      produces an invalid config: …           │
-│                                      [enter] to set it again, or o to delete │
 ```
 
 A key whose value the setup already holds reads `matches the setup — o to delete`. It does
@@ -1236,28 +1235,29 @@ branch has merged: a promote keeps its entries in the layer until you delete the
 | `↑` `↓` | Move the cursor over the files and keys. |
 | `space` | Select the row under the cursor, or clear it. A file selects every key under it. |
 | `a` | Select every file and key. A second `a` clears the selection. |
-| `o` | Open the menu: `promote selected`, `delete selected` and `delete all overrides`. |
-| `enter` | On a key, open its value field to set it again. |
+| `o` | Open the menu: `edit`, `promote selected` and `delete selected`. |
 | `w` | Open the overrides folder. |
 | `tab` | Move to the next section. |
 
-The menu's title says how many keys are selected. With nothing selected, `promote selected` and
-`delete selected` act on the row under the cursor, and the menu is titled with that row's name.
-`promote selected` comes first, and only when every selected key belongs to a fully selected file:
-a promote writes whole files, so on part of a file it would write keys you did not select.
+`enter` on the list does nothing: every row is edited through `o`, then `edit`. The menu opens
+on `edit`, which always acts on the row under the cursor. The menu's title says how many keys are
+selected. With nothing selected, `promote selected` and `delete selected` act on the row under
+the cursor too, and the menu is titled with that row's name. `promote selected` comes after
+`edit`, and only when every selected key belongs to a fully selected file: a promote writes whole
+files, so on part of a file it would write keys you did not select.
 
 ```
 ╭─ 3 selected ─────────────────────────╮
 │                                      │
-│  > promote selected                  │
+│  > edit                              │
+│    promote selected                  │
 │    delete selected                   │
-│    delete all overrides              │
 │                                      │
 │  [enter] confirm   [esc] close       │
 ╰──────────────────────────────────────╯
 ```
 
-Either delete opens one confirm popup that names every file and key it deletes. `enter` deletes
+`delete selected` opens one confirm popup that names every file and key it deletes. `enter` deletes
 them and `esc` closes the popup with nothing deleted.
 
 ```
@@ -1274,15 +1274,32 @@ them and `esc` closes the popup with nothing deleted.
 ```
 
 `delete selected` removes the selected keys from each file with one write, and a file left with
-no keys leaves the layer. A selected prompt copy goes as a whole. `delete all overrides` removes
-every file the list shows. A delete that fails on one file stops there. The files before it are
+no keys leaves the layer. A selected prompt copy goes as a whole. To empty the layer, press `a`
+to select everything, then `delete selected`. A delete that fails on one file stops there. The files before it are
 already changed, so a `deleted in part` popup names them and the files left as they were. A
 delete that fails on its first file opens a `not deleted` popup instead. `enter` closes either.
 
-`enter` on a config key opens the same value field the config section opens. `enter` on a
+`edit` on a config key opens the same value field the config section opens. `edit` on a
 pipeline key opens a `set <key> in <pipeline>` field, filled with the value in use now, and
 writes what is typed into that one key, read as YAML the way `spoolway pipeline override --set`
 reads it. `enter` on an empty field writes nothing, and `esc` closes the field.
+
+`edit` on a file row, such as `config.toml` or `pipelines/impl.yml`, or on a prompt copy, opens
+that file in the layer in your editor: `$VISUAL`, else `$EDITOR`, else `vim`, as every open on
+the board picks it. The editor saves in its own pane or window, so the section reads the layer
+again on the next key you press, and the list then shows whatever the file holds. When the
+editor cannot start, a `not opened` popup names the file and why, and `enter` closes it.
+
+```
+╭─ not opened ─────────────────────────────────────────╮
+│                                                      │
+│  prompts/code-reviewer was not opened: `nano` is     │
+│  not on PATH — set $VISUAL or $EDITOR to an editor   │
+│  on PATH, or unset both to use vim                   │
+│                                                      │
+│  [enter] confirm                                     │
+╰──────────────────────────────────────────────────────╯
+```
 
 #### Promoting from the tab
 
