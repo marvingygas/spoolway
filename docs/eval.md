@@ -84,6 +84,14 @@ After the grouping and the view, the top border's right side names the scope onl
 `--project` and `--all`, then lists the filters in force. The trials table has no grouping, so
 with nothing else to show its right side has no label.
 
+When the right side is wider than the room the terminal leaves, it drops whole parts from its end
+and a final `…` stands in for them. The section names on the left are always drawn whole. The
+grouping is the first part, so it is the last to drop. For example, in an 80-column terminal:
+
+```
+╭─ [eval]   directories   trials ───── by pipeline · totals · step review · … ─╮
+```
+
 ### The sort popup
 
 `[a]` or `[d]` opens a popup listing `default order`, then every column the table draws in its
