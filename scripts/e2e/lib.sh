@@ -906,6 +906,17 @@ worktree_of()    { grep '^worktree_path:' "$SPOOLWAY_PROJECT_HOME/queue/$1.md" 2
 workspace_of()   { grep '^workspace_id:'  "$SPOOLWAY_PROJECT_HOME/queue/$1.md" 2>/dev/null | sed 's/^workspace_id: *//'; }
 tab_of()         { grep '^tab_id:'        "$SPOOLWAY_PROJECT_HOME/queue/$1.md" 2>/dev/null | sed 's/^tab_id: *//'; }
 
+# The alias a lane has on record, if any. `lane_aliases.json` writes each
+# entry's `alias` on the line above its `lane`, which is what `-B1` relies on.
+recorded_alias() { # lane
+  grep -F -B1 "\"lane\": \"$1\"" "$SPOOLWAY_PROJECT_HOME/lane_aliases.json" 2>/dev/null \
+    | sed -n 's/.*"alias": "\([^"]*\)".*/\1/p'
+}
+
+# The pane `herdr-stub.sh` started the agent named `$1` in, read from its
+# `agents` file under the `$HSTATE` the suite pointed the double at.
+pane_of_agent() { awk -F'\t' -v n="$1" '$1 == n {print $2; exit}' "$HSTATE/agents"; }
+
 # What a give-up has to show for itself, beside the log: everything still
 # alive in the supervisor's own process group. A suite that timed out because
 # a lane is genuinely still working looks nothing like one where the

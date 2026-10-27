@@ -13,6 +13,11 @@
 # A task held at a gate is resumed onto a step whose old lane is still standing. The resume must close that lane, so
 # the dispatcher starts a fresh one instead of waiting on the old pane.
 #
+# While the two-step task's second step runs beside its kept first lane, the
+# board's options menu offers `focus` on its row, and picking it zooms the
+# running lane's pane, never the kept one's. A zoom herdr refuses opens the
+# `focus` popup with herdr's own message.
+#
 # Against the double rather than a real server — its header says why there is
 # no isolated herdr to run this on. An agent there is a registration, not a
 # process, so the suite stands in for each lane's agent and reports for it:
@@ -150,6 +155,89 @@ if [ "$(panes_standing)" -ge 2 ]; then
 else
   bad "both lanes have a pane standing: $(cat "$HSTATE/panes")"
 fi
+
+# ------------------------------------------------------ focus from the board
+# `focus` in the board's options menu brings the running step's pane forward
+# with `herdr pane zoom <pane> --on`, which the double writes down in
+# `zoomed.index`. The board is opened on the dispatch tab without dispatching
+# — `screen_start` stops the resident dispatcher — so nothing moves the task
+# while the menu is read; the dispatcher is started again after.
+#
+# The pane is found the way the dispatcher named the lane's agent: the alias
+# on record for `kept · second`, then the pane the double started that agent
+# in.
+board_now() { screen_last_frame | sed -E $'s/\x1b\\[[0-9;]*[a-zA-Z]//g'; }
+board_shows() { grep -qF -- "$1" < <(board_now); }
+zoomed() { grep -qxF -- "$1" "$HSTATE/zoomed.index"; }
+
+SECOND_PANE=$(pane_of_agent "$(recorded_alias "kept · second")")
+FIRST_PANE=$(pane_of_agent "$(recorded_alias "kept · first")")
+if [ -n "$SECOND_PANE" ] && [ -n "$FIRST_PANE" ]; then
+  ok "both lanes' panes are found"
+else
+  bad "both lanes' panes are found: first \`$FIRST_PANE\`, second \`$SECOND_PANE\`"
+  sed 's/^/        /' "$HSTATE/agents"
+fi
+
+screen_start "$LIVE/board.out"
+screen_board
+# `kept` is the only row, so the cursor is already on it. A running agent
+# row lists open task, pause, focus and restart, in that order; each `↓` is
+# sent only once the screen shows the one before it landed.
+screen_press o
+if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
+  && poll_until 10 board_shows "> pause" && screen_press $'\x1b[B' \
+  && poll_until 10 board_shows "> focus"; then
+  ok "a running agent row's menu lists focus under pause"
+else
+  bad "a running agent row's menu lists focus under pause"; board_now | sed 's/^/        /'
+fi
+if board_shows "    restart"; then ok "and restart under focus"
+else bad "and restart under focus"; board_now | sed 's/^/        /'; fi
+screen_press $'\r'
+if poll_until 10 zoomed "$SECOND_PANE"; then
+  ok "picking focus zooms the running lane's pane"
+else
+  bad "picking focus zooms the running lane's pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
+fi
+if ! zoomed "$FIRST_PANE"; then ok "and not the kept lane's"
+else bad "and not the kept lane's ($FIRST_PANE)"; fi
+if poll_while 10 board_shows "> focus"; then ok "and closes the menu"
+else bad "and closes the menu"; board_now | sed 's/^/        /'; fi
+
+# A zoom herdr refuses opens the `focus` popup with herdr's own message, not
+# the JSON envelope it came in. The double is told to refuse only once the
+# menu stands on `focus`, so the lane is still listed when the menu opens and
+# when `enter` looks its pane up again: what fails is the zoom alone, as when
+# herdr closes the pane between the two.
+screen_press o
+if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
+  && poll_until 10 board_shows "> pause" && screen_press $'\x1b[B' \
+  && poll_until 10 board_shows "> focus"; then
+  ok "the menu offers focus again"
+else
+  bad "the menu offers focus again"; board_now | sed 's/^/        /'
+fi
+printf '%s\n' "$SECOND_PANE" >"$HSTATE/zoom.refused"
+screen_press $'\r'
+if poll_until 10 board_shows "─ focus ─"; then ok "a refused zoom opens the focus popup"
+else bad "a refused zoom opens the focus popup"; board_now | sed 's/^/        /'; fi
+if board_shows "o: herdr pane zoom $SECOND_PANE --on: no pane $SECOND_PANE"; then
+  ok "which names the call and herdr's own message"
+else
+  bad "which names the call and herdr's own message"; board_now | sed 's/^/        /'
+fi
+if board_shows "The step's pane may have been closed."; then
+  ok "and says the pane may have been closed"
+else
+  bad "and says the pane may have been closed"; board_now | sed 's/^/        /'
+fi
+screen_press $'\r'
+if poll_while 10 board_shows "─ focus ─"; then ok "enter closes the popup"
+else bad "enter closes the popup"; board_now | sed 's/^/        /'; fi
+rm -f "$HSTATE/zoom.refused"
+screen_stop
+dispatcher_restart
 
 # ----------------------------------------------------------------- the end
 must "the second step reports" report_as kept second

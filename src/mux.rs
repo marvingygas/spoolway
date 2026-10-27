@@ -305,6 +305,25 @@ pub trait Mux: Sync {
         false
     }
 
+    /// Bring the pane `pane_id` in front of the person and maximize it, for
+    /// whatever runs in it: an agent's pane and a command step's pane alike,
+    /// which is why this goes by pane id rather than through
+    /// [`Mux::focus_lane`], whose herdr call needs a live agent in the pane.
+    ///
+    /// The default refuses, the same way [`Mux::open_command`] does: a
+    /// backend gets this only by implementing it, and headless has no pane to
+    /// bring forward.
+    fn focus_pane(&self, _pane_id: &str) -> Result<()> {
+        bail!("this backend has no pane to focus")
+    }
+
+    /// Whether [`Mux::focus_pane`] works on this backend, so a caller can
+    /// hide the action instead of offering one that refuses. A backend that
+    /// implements `focus_pane` overrides this to `true`.
+    fn can_focus_pane(&self) -> bool {
+        false
+    }
+
     /// Every tab this backend currently has open on a checkout of ours,
     /// with just enough about each to judge
     /// [`crate::dispatch::sweep_anchor_tabs`]'s four conditions — never a
@@ -1069,22 +1088,15 @@ impl Herdr {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if let Ok(envelope) = serde_json::from_str::<Envelope<serde_json::Value>>(&stderr)
             && let Some(error) = envelope.error
-        {
-            if matches!(
+            && matches!(
                 error.code.as_deref(),
                 Some("agent_prompt_stalled") | Some("timeout")
-            ) {
-                return PromptOutcome::Stalled;
-            }
-            return PromptOutcome::Failed(anyhow!("herdr {}: {}", args.join(" "), error.message));
+            )
+        {
+            return PromptOutcome::Stalled;
         }
 
-        PromptOutcome::Failed(anyhow!(
-            "`herdr {}` failed ({}): {}",
-            args.join(" "),
-            output.status,
-            stderr.trim()
-        ))
+        PromptOutcome::Failed(herdr_refusal(args, output.status, &stderr))
     }
 
     /// Wait for `pane_id`'s foreground process group to be its own shell,
@@ -1961,6 +1973,28 @@ impl Mux for Herdr {
         self.pane_run(&workspace.pane_id, command)
     }
 
+    fn can_focus_pane(&self) -> bool {
+        true
+    }
+
+    /// Spawned here rather than through [`Herdr::call_ignoring_result`],
+    /// because a person reads this refusal, in the board's `focus` popup:
+    /// `repo::run`'s message carries herdr's whole JSON envelope, and
+    /// [`herdr_refusal`] carries only the sentence inside it.
+    fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        let argv = pane_zoom_argv(pane_id);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let output = spawn_and_wait(&self.cwd, "herdr", &argv, &mut || {})?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(herdr_refusal(
+            &argv,
+            output.status,
+            &String::from_utf8_lossy(&output.stderr),
+        ))
+    }
+
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
         let workspaces: WorkspaceList = self.call(&["workspace", "list"])?;
         let panes: PaneList = self.call(&["pane", "list"])?;
@@ -2822,6 +2856,46 @@ fn tab_create_argv(workspace_id: &str, cwd: &str, label: &str) -> Vec<String> {
         "--label".to_string(),
         label.to_string(),
     ]
+}
+
+/// The call that brings a pane forward by id. herdr's `pane focus` only moves
+/// to a neighbour by direction, so it cannot do this; `pane zoom --on` takes
+/// any pane id, switches to that pane's workspace and tab, gives it focus and
+/// maximizes it.
+///
+/// Pulled out on its own, like [`tab_create_argv`], so the shape of the call
+/// is checkable without a real herdr to send it to.
+fn pane_zoom_argv(pane_id: &str) -> Vec<String> {
+    vec![
+        "pane".to_string(),
+        "zoom".to_string(),
+        pane_id.to_string(),
+        "--on".to_string(),
+    ]
+}
+
+/// A failed herdr call `args`, worded for a person: `herdr <args>:` and the
+/// message out of the JSON error envelope herdr writes to `stderr`. Without
+/// an envelope to read — a crash, or a herdr too old to answer in JSON — it
+/// falls back to `repo::run`'s own wording with `stderr` whole, so nothing
+/// herdr said is lost. The one wording for [`Herdr::focus_pane`] and for
+/// [`Herdr::call_watching_for_stall`] once it has ruled out a stall.
+pub(crate) fn herdr_refusal(
+    args: &[&str],
+    status: impl std::fmt::Display,
+    stderr: &str,
+) -> anyhow::Error {
+    match serde_json::from_str::<Envelope<serde_json::Value>>(stderr) {
+        Ok(Envelope {
+            error: Some(error), ..
+        }) => anyhow!("herdr {}: {}", args.join(" "), error.message),
+        _ => anyhow!(
+            "`herdr {}` failed ({}): {}",
+            args.join(" "),
+            status,
+            stderr.trim()
+        ),
+    }
 }
 
 /// A branch name reduced to one directory component: `task/add-endpoint`
@@ -4396,6 +4470,37 @@ mod tests {
             ]
         );
         assert!(!argv.iter().any(|arg| arg.contains("focus")));
+    }
+
+    /// A pane is focused by id through `pane zoom --on`, the one herdr call
+    /// that takes any pane id and brings it forward.
+    #[test]
+    fn a_pane_is_focused_by_zooming_it_on() {
+        assert_eq!(
+            pane_zoom_argv("w5S:p31"),
+            ["pane", "zoom", "w5S:p31", "--on"]
+        );
+    }
+
+    /// A refused zoom names the call and herdr's own message, not the JSON
+    /// envelope it came in; with no envelope to read, nothing is dropped.
+    #[test]
+    fn a_refused_herdr_call_reads_the_message_out_of_its_envelope() {
+        let argv = ["pane", "zoom", "w2:p3", "--on"];
+        let refused = herdr_refusal(
+            &argv,
+            "exit status: 1",
+            "{\"error\":{\"code\":\"pane_not_found\",\"message\":\"no pane w2:p3\"}}\n",
+        );
+        assert_eq!(
+            format!("{refused:#}"),
+            "herdr pane zoom w2:p3 --on: no pane w2:p3"
+        );
+        let bare = herdr_refusal(&argv, "exit status: 2", "connection refused\n");
+        assert_eq!(
+            format!("{bare:#}"),
+            "`herdr pane zoom w2:p3 --on` failed (exit status: 2): connection refused"
+        );
     }
 
     /// `tab create` answers the tab and the bare pane it opened with; the
