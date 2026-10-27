@@ -752,6 +752,7 @@ impl Runs {
     pub fn forget(&self, key: &str) -> Result<()> {
         self.keep_the_group(key);
         self.files.clear(key)?;
+        self.clear_kept(key);
         self.clear_kills(key)
     }
 
@@ -791,6 +792,7 @@ impl Runs {
     /// go ahead as if the step were clean.
     pub fn begin_visit(&self, key: &str) -> Result<()> {
         self.end(key)?;
+        self.clear_kept(key);
         self.clear_kills(key)
     }
 
@@ -895,6 +897,33 @@ impl Runs {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Where the path of this run's kept copy of its log is recorded. A file
+    /// of its own, so a pass that reads the same failed run again — its
+    /// destination was waiting for a slot — finds the copy it already made
+    /// instead of writing another. [`Runs::forget`] and [`Runs::begin_visit`]
+    /// clear it, so the next failure of the step is a new run with a new copy.
+    fn kept_path(&self, key: &str) -> PathBuf {
+        self.dir.join(format!("{key}.kept"))
+    }
+
+    /// The copy of this run's log already kept for it, if one was recorded.
+    pub fn kept(&self, key: &str) -> Option<PathBuf> {
+        let text = std::fs::read_to_string(self.kept_path(key)).ok()?;
+        let path = PathBuf::from(text.trim());
+        path.is_file().then_some(path)
+    }
+
+    /// Record the copy made for this run. A record that cannot be written
+    /// costs a second copy on a later pass, not the routing, so it is not an
+    /// error.
+    pub fn note_kept(&self, key: &str, copy: &Path) {
+        let _ = std::fs::write(self.kept_path(key), copy.to_string_lossy().as_bytes());
+    }
+
+    fn clear_kept(&self, key: &str) {
+        let _ = std::fs::remove_file(self.kept_path(key));
     }
 
     /// Every run belonging to one task, whatever step started it.

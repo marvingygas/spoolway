@@ -20,8 +20,9 @@
 //! ever prunes. This
 //! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
-//! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for the one
-//! place that split is written down.
+//! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for where
+//! that split is written down. One folder is swept that it does not list,
+//! because it sits outside the home: the kept logs below.
 //!
 //! The copies of failed command steps' logs, in `logs/<home's name>/` beside
 //! the problem log (see [`crate::problem_log::kept_dir`]), are swept under
@@ -188,8 +189,9 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         }
         budget = budget.saturating_sub(removed);
     }
-    // The kept logs of failed command steps sit outside the home, so
-    // `byproduct_dirs` does not list them. No guard: the copy exists to
+    // The kept logs of failed command steps sit outside the home, and
+    // `byproduct_dirs` holds only directories under it, so they are swept
+    // here instead. No guard: the copy exists to
     // outlive its task, and one of a task still in `queue/` is a record of
     // a past failure, not live state.
     if budget > 0 {
@@ -278,7 +280,8 @@ fn depended_on_files(repo: &Repo) -> Option<BTreeSet<String>> {
 /// also holds their routines' names, since a routine copy's lane is named for
 /// its routine. For `archive/` it holds the `<id>.md` file names of finished
 /// tasks a queued task depends on or shares an id with, which `lane_task`
-/// leaves whole. `None` for `system-prompts/`.
+/// leaves whole. `None` for `system-prompts/` and for the kept logs of failed
+/// command steps, which are swept whatever task they belong to.
 ///
 /// Not gated by `days == 0` itself — that check belongs to the one caller
 /// that means it as "retention is off"; a test driving this directly passes

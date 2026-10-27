@@ -5720,25 +5720,34 @@ impl<'a> Dispatcher<'a> {
                     // "nothing to do") is not a failure worth a copy. A copy
                     // that cannot be made goes to the problem log and the
                     // line keeps the `commands/` path, so the pass goes on.
+                    // This arm runs again on every pass while the
+                    // destination waits for a slot, so the copy is recorded
+                    // beside the run and reused rather than made afresh.
                     let kept = match destination.as_deref() {
                         Some(crate::pipeline::DONE) => None,
-                        _ => match crate::problem_log::keep_command_log(
-                            self.repo,
-                            &task.front.id,
-                            &step.id,
-                            &runs.log_path(&key),
-                        ) {
-                            Ok(copy) => Some(copy),
-                            Err(err) => {
-                                crate::problem_log::append(
-                                    self.repo,
-                                    &format!(
-                                        "{id}: could not keep the log of `{}`: {err:#}",
-                                        step.id
-                                    ),
-                                );
-                                None
-                            }
+                        _ => match runs.kept(&key) {
+                            Some(copy) => Some(copy),
+                            None => match crate::problem_log::keep_command_log(
+                                self.repo,
+                                &task.front.id,
+                                &step.id,
+                                &runs.log_path(&key),
+                            ) {
+                                Ok(copy) => {
+                                    runs.note_kept(&key, &copy);
+                                    Some(copy)
+                                }
+                                Err(err) => {
+                                    crate::problem_log::append(
+                                        self.repo,
+                                        &format!(
+                                            "{id}: could not keep the log of `{}`: {err:#}",
+                                            step.id
+                                        ),
+                                    );
+                                    None
+                                }
+                            },
                         },
                     };
                     // A failure after an unblocker's pass sent the task back
@@ -28427,6 +28436,62 @@ mod tests {
             1,
             "the command step's run never landed in `steps:`"
         );
+    }
+
+    /// A failed command whose destination waits for a slot is read again on
+    /// every pass, and its log is copied once, not once per pass.
+    ///
+    /// Fails if the copy is made each time the `Exited` arm reads the run:
+    /// the folder then holds one file per pass.
+    #[test]
+    fn a_failure_waiting_for_a_slot_keeps_one_copy() {
+        let (mut repo, _root_guard) = fixture("command-fail-waits-one-copy");
+        repo.config.models.insert(
+            "claude-opus-5".to_string(),
+            crate::usage::ModelPrice {
+                slots: 1,
+                ..Default::default()
+            },
+        );
+        add_task_with_worktree(&repo, "occupant", "review");
+        let occupant_lanes = idle_lanes(&repo, "review");
+        let path = add_task_with_worktree(&repo, "demo", "implement");
+        let mux = FakeMux::new(occupant_lanes);
+        let mut pipelines = pipelines_running("exit 1", false);
+        pipelines
+            .pipelines
+            .get_mut("default")
+            .unwrap()
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "implement")
+            .unwrap()
+            .on_fail = Some("review".into());
+        let key = crate::command_step::Runs::key("implement", "demo");
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+
+        let started = std::time::Instant::now();
+        while runs.state(&key) != crate::command_step::RunState::Exited(1) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command never exited"
+            );
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for _ in 0..5 {
+            Dispatcher::new(&repo, &pipelines, &mux)
+                .pass(&mut || {})
+                .unwrap();
+        }
+
+        assert_eq!(reload(&path).stage(), "implement", "the slot was free");
+        let copies = std::fs::read_dir(crate::problem_log::kept_dir(&repo))
+            .unwrap()
+            .count();
+        assert_eq!(copies, 1, "one copy per run, however many passes read it");
     }
 
     /// A command step's exit code is read once and its run files forgotten

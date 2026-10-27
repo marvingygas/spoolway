@@ -812,8 +812,11 @@ impl Repo {
         self.home_subdir(crate::cut::CUTS_DIR)
     }
 
-    /// Every directory [`crate::retain`]'s sweep may delete an old entry
-    /// from under `housekeeping.retention_days`. [`Repo::archive_dir`] is
+    /// Every directory under the home that [`crate::retain`]'s sweep may
+    /// delete an old entry from under `housekeeping.retention_days`. The
+    /// kept logs of failed command steps are swept too but sit outside the
+    /// home, beside the problem log, so they are not listed here — see
+    /// [`crate::problem_log::kept_dir`]. [`Repo::archive_dir`] is
     /// deliberately not here: finished tasks age under their own key,
     /// `housekeeping.archive_retention_days`, which defaults to keeping them.
     /// The one place that split is written down as code — see
@@ -6215,7 +6218,7 @@ mod tests {
     }
 
     /// `byproduct_dirs` is `retain`'s sweep's whole map of what it may
-    /// delete — see its own doc. A composed system prompt is a byproduct;
+    /// delete under the home — see its own doc. A composed system prompt is a byproduct;
     /// the project's own tracked prompt templates under `checkout` are not,
     /// and must never be swept.
     #[test]

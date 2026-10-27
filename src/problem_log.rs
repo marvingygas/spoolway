@@ -7,6 +7,10 @@
 //! read at a glance, and it did so with the same string every pass until
 //! somebody cleared it. This is where that trouble goes instead: appended
 //! here, in full, and left off the board entirely.
+//!
+//! The module also keeps copies of failed command steps' logs, in
+//! `logs/<home's name>/` beside the problem log. It already owns the `logs/`
+//! path, and a failed step's log is the other record of the same trouble.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -87,11 +91,23 @@ pub fn kept_dir(repo: &Repo) -> PathBuf {
 /// status line pointing at the `commands/` path rather than at a copy that
 /// is not there.
 pub fn keep_command_log(repo: &Repo, task: &str, step: &str, log: &Path) -> Result<PathBuf> {
+    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M").to_string();
+    keep_command_log_at(repo, task, step, log, &stamp)
+}
+
+/// [`keep_command_log`] with the minute stamp given, so a test can fail one
+/// step twice inside one minute without racing the clock.
+fn keep_command_log_at(
+    repo: &Repo,
+    task: &str,
+    step: &str,
+    log: &Path,
+    stamp: &str,
+) -> Result<PathBuf> {
     let dir = kept_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut source =
         std::fs::File::open(log).with_context(|| format!("opening {}", log.display()))?;
-    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M");
     let sep = crate::mux::LANE_NAME_SEPARATOR;
     for attempt in 1u32.. {
         let suffix = match attempt {
@@ -105,9 +121,16 @@ pub fn keep_command_log(repo: &Repo, task: &str, step: &str, log: &Path) -> Resu
             .open(&target)
         {
             Ok(mut copy) => {
-                std::io::copy(&mut source, &mut copy).with_context(|| {
-                    format!("copying {} to {}", log.display(), target.display())
-                })?;
+                // A copy that stops part-way (a full disk) is removed: left
+                // in the folder it would pass for a whole log until the
+                // sweep, while the status line names `commands/`.
+                if let Err(err) = std::io::copy(&mut source, &mut copy) {
+                    drop(copy);
+                    let _ = std::fs::remove_file(&target);
+                    return Err(err).with_context(|| {
+                        format!("copying {} to {}", log.display(), target.display())
+                    });
+                }
                 return Ok(target);
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -206,33 +229,51 @@ mod tests {
     use crate::repo::Repo;
 
     /// Two failures of one step inside the same minute leave two files, the
-    /// second named with ` · 2`, and the first is not overwritten.
+    /// second named with ` · 2`, the third with ` · 3`, and the first is not
+    /// overwritten.
     #[test]
     fn a_taken_name_gets_a_number_instead_of_overwriting() {
-        let base = crate::scratch::root("problem-log-kept-twice");
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let repo = Repo {
-            borrowed: false,
-            root: base.to_path_buf(),
-            checkout: base.to_path_buf(),
-            config: Config::default(),
-            home: base.join("proj-abc"),
-        };
+        let (repo, base) = kept_fixture("problem-log-kept-twice");
         let log = base.join("run.log");
         std::fs::write(&log, "first").unwrap();
-        let one = keep_command_log(&repo, "t", "test", &log).unwrap();
+        let one = keep_command_log_at(&repo, "t", "test", &log, "2026-10-27T19-30").unwrap();
         std::fs::write(&log, "second").unwrap();
-        let two = keep_command_log(&repo, "t", "test", &log).unwrap();
-        let name = two.file_name().unwrap().to_string_lossy().into_owned();
-        // Both calls may straddle a minute; a differing stamp proves the
-        // same thing, that nothing was overwritten.
-        assert_ne!(one, two);
-        assert!(name.ends_with(" · 2.log") || name != one.file_name().unwrap().to_string_lossy());
+        let two = keep_command_log_at(&repo, "t", "test", &log, "2026-10-27T19-30").unwrap();
+        let three = keep_command_log_at(&repo, "t", "test", &log, "2026-10-27T19-30").unwrap();
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name(&one), "t · test · 2026-10-27T19-30.log");
+        assert_eq!(name(&two), "t · test · 2026-10-27T19-30 · 2.log");
+        assert_eq!(name(&three), "t · test · 2026-10-27T19-30 · 3.log");
         assert_eq!(std::fs::read_to_string(&one).unwrap(), "first");
         assert_eq!(std::fs::read_to_string(&two).unwrap(), "second");
         assert_eq!(one.parent().unwrap(), base.join("logs").join("proj-abc"));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A copy that fails part-way leaves no file behind. Here the source is a
+    /// directory: it opens, then the first read fails after the target exists.
+    #[test]
+    fn a_copy_that_stops_part_way_leaves_nothing_in_the_folder() {
+        let (repo, base) = kept_fixture("problem-log-kept-partial");
+        let log = base.join("a-directory");
+        std::fs::create_dir_all(&log).unwrap();
+        assert!(keep_command_log_at(&repo, "t", "test", &log, "2026-10-27T19-30").is_err());
+        assert_eq!(std::fs::read_dir(kept_dir(&repo)).unwrap().count(), 0);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    fn kept_fixture(name: &str) -> (Repo, PathBuf) {
+        let base = crate::scratch::root(name).to_path_buf();
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let repo = Repo {
+            borrowed: false,
+            root: base.clone(),
+            checkout: base.clone(),
+            config: Config::default(),
+            home: base.join("proj-abc"),
+        };
+        (repo, base)
     }
 
     /// A renamed checkout keeps writing to the one log file it always had —
