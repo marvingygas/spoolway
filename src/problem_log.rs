@@ -384,6 +384,27 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// A config that never mentions `retention_days` — an older release's
+    /// `config.toml` — still trims at thirty days, not at nothing.
+    #[test]
+    fn open_trims_at_thirty_days_when_the_config_sets_no_window() {
+        let (mut repo, base) = kept_fixture("problem-log-open-default");
+        repo.config = toml::from_str::<Config>("").unwrap();
+        let now = chrono::Local::now();
+        let old = (now - chrono::Duration::days(45)).to_rfc3339();
+        let recent = (now - chrono::Duration::days(10)).to_rfc3339();
+        let log = path(&repo);
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, format!("{old}  forty-five\n{recent}  ten\n")).unwrap();
+
+        open(&repo);
+
+        let after = std::fs::read_to_string(&log).unwrap();
+        assert!(!after.contains("forty-five"), "{after}");
+        assert!(after.contains("ten"), "{after}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// No file yet is not an error — a fresh project's first problem should
     /// not have to survive a spurious failure on the way in.
     #[test]
