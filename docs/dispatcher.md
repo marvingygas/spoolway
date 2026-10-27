@@ -1796,7 +1796,7 @@ new tab opens first and the old one closes after, because closing a workspace's 
 workspace. A lane that is still running, and a pane held for you on `blocked` or `paused`, keep their
 tab.
 
-When a task blocks, its lane's tab is brought forward, as its pane is in `panes` mode.
+When `dispatch.autofocus_panes` is on and a task blocks, its lane's tab is brought forward, as its pane is in `panes` mode.
 
 A task switched from `panes` while it runs has all its earlier panes in its first tab. Each counts as
 a finished lane, and the limit closes them one pane at a time. That tab keeps the task's name while
