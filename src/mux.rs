@@ -1087,22 +1087,15 @@ impl Herdr {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if let Ok(envelope) = serde_json::from_str::<Envelope<serde_json::Value>>(&stderr)
             && let Some(error) = envelope.error
-        {
-            if matches!(
+            && matches!(
                 error.code.as_deref(),
                 Some("agent_prompt_stalled") | Some("timeout")
-            ) {
-                return PromptOutcome::Stalled;
-            }
-            return PromptOutcome::Failed(anyhow!("herdr {}: {}", args.join(" "), error.message));
+            )
+        {
+            return PromptOutcome::Stalled;
         }
 
-        PromptOutcome::Failed(anyhow!(
-            "`herdr {}` failed ({}): {}",
-            args.join(" "),
-            output.status,
-            stderr.trim()
-        ))
+        PromptOutcome::Failed(herdr_refusal(args, output.status, &stderr))
     }
 
     /// Wait for `pane_id`'s foreground process group to be its own shell,
@@ -2881,11 +2874,11 @@ fn pane_zoom_argv(pane_id: &str) -> Vec<String> {
 }
 
 /// A failed herdr call `args`, worded for a person: `herdr <args>:` and the
-/// message out of the JSON error envelope herdr writes to `stderr`, the same
-/// wording [`Herdr::call_watching_for_stall`] gives a refusal. Without an
-/// envelope to read — a crash, or a herdr too old to answer in JSON — it
+/// message out of the JSON error envelope herdr writes to `stderr`. Without
+/// an envelope to read — a crash, or a herdr too old to answer in JSON — it
 /// falls back to `repo::run`'s own wording with `stderr` whole, so nothing
-/// herdr said is lost.
+/// herdr said is lost. The one wording for [`Herdr::focus_pane`] and for
+/// [`Herdr::call_watching_for_stall`] once it has ruled out a stall.
 pub(crate) fn herdr_refusal(
     args: &[&str],
     status: impl std::fmt::Display,

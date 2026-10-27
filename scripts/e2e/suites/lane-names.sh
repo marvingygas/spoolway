@@ -90,11 +90,6 @@ agent_names() { awk -F'\t' '$1 != "-" {print $1}' "$HSTATE/agents" | paste -sd' 
 agent_named() { agent_names | tr ' ' '\n' | grep -qxF "$1"; }
 # How many agents the double lists, named or not.
 agent_count() { wc -l < "$HSTATE/agents" | tr -d ' '; }
-# The alias a lane has on record, if any.
-recorded_alias() { # lane
-  grep -F -B1 "\"lane\": \"$1\"" "$SPOOLWAY_PROJECT_HOME/lane_aliases.json" 2>/dev/null \
-    | sed -n 's/.*"alias": "\([^"]*\)".*/\1/p'
-}
 
 # `names-a0` and `names-a1` share the tag `c9e`, and the four characters `c9e9`.
 FIRST=names-a0
@@ -139,7 +134,6 @@ if poll_until 30 agent_named "second-$TAG"; then
   ok "named for its own step and the same tag"
 else bad "named second-$TAG: $(agent_names)"; fi
 
-pane_of_agent() { awk -F'\t' -v n="$1" '$1 == n {print $2; exit}' "$HSTATE/agents"; }
 rows_on() { awk -F'\t' -v p="$1" -v n="$2" '$2 == p && $1 == n' "$HSTATE/agents" | wc -l | tr -d ' '; }
 named_once() { [ "$(agent_names | tr ' ' '\n' | grep -cxF "first-$TAG")" -eq 1 ]; }
 HOLDER=$(pane_of_agent "first-${TAG}9")

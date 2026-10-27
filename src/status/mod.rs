@@ -12365,8 +12365,8 @@ mod tests {
     /// writes down every pane it is asked to focus, refusing each when
     /// `refuse` is set: that is the stderr herdr answers `pane zoom` with,
     /// worded by [`crate::mux::herdr_refusal`] exactly as the real backend
-    /// words it. A call that opens, closes or types into a
-    /// pane panics, since `focus` must make none.
+    /// words it. A call that opens, closes or types into a pane panics,
+    /// since `focus` must make none.
     #[derive(Default)]
     struct FocusMux {
         can: bool,

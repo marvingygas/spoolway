@@ -56,6 +56,8 @@
 #   typed/<n>      one file per `pane run`, holding exactly what was typed
 #   typed.index    pane_id \t bytes \t typed/<n>, one line per `pane run`
 #   zoomed.index   pane_id, one line per `pane zoom ... --on` that landed
+#   zoom.refused   pane_id, one line per pane a suite wants `pane zoom` to
+#                  refuse with `pane_not_found`; see that verb
 #   p<n>.cwd       the directory that pane's shell was started in
 #   p<n>.in        the fifo that pane's shell reads its lines from
 #   p<n>.out       everything that pane's shell has printed
@@ -491,6 +493,14 @@ case "$DOMAIN $VERB" in
     # this double opened, as herdr refuses an id it does not know.
     [ "${FLAG[on]+set}" = set ] || fail unsupported "this double only implements \`herdr pane zoom <pane> --on\`"
     [ -n "$(field "$pane" 1 "$STATE/panes")" ] || fail pane_not_found "no pane $pane"
+    # A pane named in `zoom.refused` is refused the same way while it still
+    # stands. That is herdr closing a pane after `agent list` showed its
+    # agent and before the zoom reached it. Removing the pane's row cannot
+    # stand in for that here, because `agent list` above reads the same row
+    # and would stop listing the agent too.
+    if grep -qxF -- "$pane" "$STATE/zoom.refused" 2>/dev/null; then
+      fail pane_not_found "no pane $pane"
+    fi
     printf '%s\n' "$pane" >>"$STATE/zoomed.index"
     printf '{"result":{"type":"pane_zoom","zoom":{"changed":true,"focus_changed":true,"focused_pane_id":%s,"zoomed":true}}}\n' \
       "$(jstr "$pane")"
