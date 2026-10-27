@@ -1119,7 +1119,9 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
         out.extend(codes.iter().map(String::as_str));
         out.push(*ch);
     }
-    if cells.len() < end {
+    // A row that ends under the panel, or right where it ends, never
+    // reached `end` above.
+    if cells.len() <= end {
         out.push_str(&hidden);
     }
     out.extend(tail.iter().map(String::as_str));
@@ -1247,6 +1249,13 @@ mod tests {
             frame[1],
             format!("│{link}{dim}abc{reset}XY{dim}{reset}fgh│")
         );
+
+        // A row that ends right where the panel does still closes the
+        // hyperlink its last character carried the close of.
+        let close = "\x1b]8;;\x1b\\";
+        let mut frame = vec!["──────────".to_string(), format!("│abc{link}d{close}e")];
+        overlay(&mut frame, &["XY".to_string()]);
+        assert_eq!(frame[1], format!("│abcXY{link}{close}"));
     }
 
     /// A row with no codes is written as a character-for-character replace
