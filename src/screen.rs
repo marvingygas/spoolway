@@ -1028,13 +1028,9 @@ pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
 /// Draw `panel` over `frame`, centred, one row down from centre so the
 /// frame's own top border and its titles stay readable behind it.
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
-    let Some(width) = frame.first().map(|line| line.chars().count()) else {
+    let Some((x, y)) = overlay_origin(frame, panel) else {
         return;
     };
-    let panel_width = panel.first().map_or(0, |line| line.chars().count());
-    let x = width.saturating_sub(panel_width) / 2;
-    let y = (frame.len().saturating_sub(panel.len()) / 2).max(1);
-
     for (i, line) in panel.iter().enumerate() {
         let Some(row) = frame.get_mut(y + i) else {
             break;
@@ -1048,6 +1044,19 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
         }
         *row = chars.into_iter().collect();
     }
+}
+
+/// The column and row [`overlay`] draws `panel`'s top-left corner at, `None`
+/// for an empty frame. Measured off the frame's first row, its top border,
+/// which carries no escape codes. Apart from [`overlay`] for the overrides
+/// tab, which draws a panel over dimmed rows by its own walk and has to put
+/// it in the same place.
+pub(crate) fn overlay_origin(frame: &[String], panel: &[String]) -> Option<(usize, usize)> {
+    let width = frame.first()?.chars().count();
+    let panel_width = panel.first().map_or(0, |line| line.chars().count());
+    let x = width.saturating_sub(panel_width) / 2;
+    let y = (frame.len().saturating_sub(panel.len()) / 2).max(1);
+    Some((x, y))
 }
 
 /// `n` with its noun, singular where that is what `n` is.

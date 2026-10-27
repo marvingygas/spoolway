@@ -956,6 +956,55 @@ pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>>
     Ok(Some(keys))
 }
 
+/// The dotted key of every leaf the config file at `path` holds, spelled as
+/// the config spells it today — `None` when there is no file. Read the way
+/// [`config_patch_keys`] reads the layer, so a key under a `[table]` heading,
+/// in an inline table or under a quoted `[models."claude-*"]` glob all come
+/// out as the one dotted key `confkv::all_settings` lists it under.
+///
+/// For the overrides tab, which dims every key neither the tracked file nor
+/// the layer holds. An old spelling the load still accepts is read as the
+/// key it sets: left as written, a row the file does set would dim.
+pub(crate) fn config_file_keys(path: &Path) -> Result<Option<BTreeSet<String>>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    let toml::Value::Table(table) = parsed else {
+        bail!("{} must be a table of settings", path.display());
+    };
+    let mut keys = Vec::new();
+    collect_leaf_keys(&table, &mut String::new(), &mut keys);
+    Ok(Some(keys.iter().map(|key| spelled_today(key)).collect()))
+}
+
+/// `key` under the name the config gives it today. The old names are the
+/// serde aliases a load still reads — `[pricing]` for `[models]`, a glob's
+/// `cache_ttl` and `session_reuse_idle` for `prompt_cache_ttl`, its
+/// `cache_write` for `cache_write_5m` — and the layer's
+/// `dispatch.keep_finished_lanes`, which [`current_spelling`] applies as
+/// `dispatch.visible_lanes`. Every other key passes through unchanged.
+fn spelled_today(key: &str) -> String {
+    if key == KEEP_FINISHED_LANES {
+        return "dispatch.visible_lanes".to_string();
+    }
+    let key = match key.strip_prefix("pricing.") {
+        Some(rest) => format!("models.{rest}"),
+        None => key.to_string(),
+    };
+    if !key.starts_with("models.") {
+        return key;
+    }
+    match key.rsplit_once('.') {
+        Some((table, "cache_ttl" | "session_reuse_idle")) => format!("{table}.prompt_cache_ttl"),
+        Some((table, "cache_write")) => format!("{table}.cache_write_5m"),
+        _ => key,
+    }
+}
+
 /// Every dotted path to a leaf (non-table) value in `table` — the sibling of
 /// [`apply_config_table`]'s walk, over the same shape, kept separate because
 /// one applies a value through `confkv::set` and the other only names it.

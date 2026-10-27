@@ -8,7 +8,9 @@
 //!
 //! The config section shows every key `spoolway config list` prints,
 //! grouped under its table, with the value in use now: the tracked config
-//! with the layer merged onto it. A key with no value reads `not set`. A key
+//! with the layer merged onto it. A key neither the tracked `config.toml` nor
+//! the layer holds is drawn dimmed and reads `not set`, whatever default it
+//! falls back to; a key a file sets empty reads `empty`. A key
 //! the list does not show, such as a `[models]` glob the config has no entry
 //! for yet, is written by hand in the folder `w` opens, or by `spoolway
 //! config override --set`. The pipeline section
@@ -43,6 +45,7 @@ use super::shell::{self, Leave};
 use super::{Key, Notice, PollableRead, keys, pad_to};
 use crate::config::Config;
 use crate::repo::Repo;
+use crate::status::{DIM, RESET};
 
 /// The sections, in the order the box title draws them and `tab` walks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,17 +82,46 @@ struct Setting {
     name: String,
     /// The value in use now, empty for a key with none.
     value: String,
+    /// Whether the tracked `config.toml` or the layer holds the key. Also
+    /// `true` for every key while the list is stale: which file holds what
+    /// is then read off files that do not load, so no row is dimmed.
+    set: bool,
 }
 
 impl Setting {
     fn key(&self) -> String {
         format!("{}.{}", self.table, self.name)
     }
+
+    /// What the list and the set popup's `current` row read for the key:
+    /// [`NOT_SET`] when no file holds it, [`EMPTY`] when one sets it to an
+    /// empty list or string, and the value otherwise.
+    fn shown(&self) -> &str {
+        match (self.set, self.value.is_empty()) {
+            (false, _) => NOT_SET,
+            (true, true) => EMPTY,
+            (true, false) => &self.value,
+        }
+    }
+
+    /// What `enter`'s field opens on: the value in use, or nothing for a key
+    /// no file holds, whose value is only the built-in default.
+    fn field(&self) -> String {
+        match self.set {
+            true => self.value.clone(),
+            false => String::new(),
+        }
+    }
 }
 
-/// What a value with nothing in it reads as, in the list and in a popup's
-/// `current` row.
+/// What a value with nothing in it reads as, in the pipeline section, in a
+/// popup's `current` row, and on a config key no file holds.
 const NOT_SET: &str = "not set";
+
+/// What a config key a file sets to an empty list or string reads as. Kept
+/// apart from [`NOT_SET`], so that a search for `not set` finds exactly the
+/// keys no file holds.
+const EMPTY: &str = "empty";
 
 /// `value`, or [`NOT_SET`] when it is empty.
 fn shown(value: &str) -> &str {
@@ -174,7 +206,13 @@ impl State {
     /// after a write or on a visit.
     fn reload(&mut self, repo: &Repo) {
         let (config, stale) = in_use(repo);
-        self.settings = settings(&config);
+        // A stale list shows the config the screen started with, so the
+        // files read now cannot say which of its keys they hold.
+        let set = match stale {
+            Some(_) => None,
+            None => set_keys(repo),
+        };
+        self.settings = settings(&config, set.as_ref());
         self.stale = stale;
         self.pipeline.reload(repo, &config);
         self.prompts.reload(repo);
@@ -184,8 +222,8 @@ impl State {
     }
 
     /// The keys the search leaves, in list order. A key matches on its
-    /// dotted name or on the value shown beside it, `not set` included, so
-    /// a search for that finds every key with no value.
+    /// dotted name or on what is shown beside it, `not set` included, so a
+    /// search for that finds every key no file holds.
     fn matches(&self) -> Vec<&Setting> {
         let query = self.filter.to_lowercase();
         self.settings
@@ -193,7 +231,7 @@ impl State {
             .filter(|s| {
                 query.is_empty()
                     || s.key().to_lowercase().contains(&query)
-                    || shown(&s.value).to_lowercase().contains(&query)
+                    || s.shown().to_lowercase().contains(&query)
             })
             .collect()
     }
@@ -311,13 +349,26 @@ fn one_line(err: &anyhow::Error) -> String {
         .join(": ")
 }
 
-/// Every key [`crate::confkv::all_settings`] lists, grouped by table.
+/// The dotted keys the tracked `config.toml` or `overrides/config.toml`
+/// holds, `None` when either does not read: a row would then dim over a file
+/// nobody could read, so none does.
+fn set_keys(repo: &Repo) -> Option<std::collections::BTreeSet<String>> {
+    let tracked = crate::overrides::config_file_keys(&Config::path_in(&repo.checkout)).ok()?;
+    let layer = crate::overrides::config_file_keys(&crate::overrides::config_patch_path(
+        &repo.overrides_dir(),
+    ))
+    .ok()?;
+    Some(tracked.into_iter().chain(layer).flatten().collect())
+}
+
+/// Every key [`crate::confkv::all_settings`] lists, grouped by table, each
+/// marked set when `set` holds it. With no `set`, every key is marked set.
 ///
 /// That list is sorted by the whole key, which splits a table around a
 /// nested one: a `[models]` glob's own fields sort on both sides of its
 /// tier's table, and its heading would be drawn twice. Sorting by table
 /// first keeps each table's keys under one heading.
-fn settings(config: &Config) -> Vec<Setting> {
+fn settings(config: &Config, set: Option<&std::collections::BTreeSet<String>>) -> Vec<Setting> {
     let mut out: Vec<Setting> = crate::confkv::all_settings(config)
         .unwrap_or_default()
         .into_iter()
@@ -326,6 +377,7 @@ fn settings(config: &Config) -> Vec<Setting> {
             Some(Setting {
                 table: table.to_string(),
                 name: name.to_string(),
+                set: set.is_none_or(|set| set.contains(&entry.key)),
                 value: entry.value,
             })
         })
@@ -446,7 +498,7 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
                     .settings
                     .iter()
                     .find(|s| s.key() == name)
-                    .map_or(String::new(), |s| s.value.clone());
+                    .map_or(String::new(), Setting::field);
                 state.mode = Mode::Set { key: name, value };
             }
         }
@@ -522,7 +574,7 @@ fn browse(state: &mut State, key: Key) {
             if let Some(setting) = state.under_cursor() {
                 state.mode = Mode::Set {
                     key: setting.key(),
-                    value: setting.value.clone(),
+                    value: setting.field(),
                 };
             }
         }
@@ -628,7 +680,7 @@ fn frame(state: &State) -> Vec<String> {
     let mut frame = vec![top_border(state, width)];
     frame.extend(
         body.iter()
-            .map(|line| format!("│ {}│", pad_to(line, inner.saturating_sub(1)))),
+            .map(|line| format!("│ {}│", pad_styled(line, inner.saturating_sub(1)))),
     );
     frame.push(format!(
         "{}{}{}",
@@ -637,12 +689,104 @@ fn frame(state: &State) -> Vec<String> {
         super::corner::BOTTOM_RIGHT
     ));
     if let Some(popup) = popup {
-        super::overlay(&mut frame, &popup);
+        overlay_styled(&mut frame, &popup);
     }
     let mut out = shell::strip();
     out.extend(frame);
     out.extend(footer);
     out
+}
+
+/// `line` cut or padded to `width` columns as a reader counts them, where an
+/// escape code takes no column. [`pad_to`] counts every character, so the
+/// codes of a dimmed key would pull the row's right border in by eight
+/// columns. A line cut before the code that ends its colour gets [`RESET`]
+/// in its place, so the colour stops short of the border.
+fn pad_styled(line: &str, width: usize) -> String {
+    if !line.contains('\x1b') {
+        return pad_to(line, width);
+    }
+    let (cells, tail) = cells(line);
+    let mut out: String = cells
+        .iter()
+        .take(width)
+        .flat_map(|(codes, ch)| codes.chars().chain(std::iter::once(*ch)))
+        .collect();
+    match cells.len() > width {
+        true => out.push_str(RESET),
+        false => out.push_str(&tail),
+    }
+    out.push_str(&" ".repeat(width.saturating_sub(cells.len())));
+    out
+}
+
+/// [`super::overlay`] for a frame whose rows may carry escape codes: `panel`
+/// lands on the same columns a reader sees, wherever a dimmed key's codes
+/// sit. A colour open where the panel starts is closed there and opened
+/// again where it ends, so the panel is never drawn dimmed and the row's
+/// text to the right of it still is.
+fn overlay_styled(frame: &mut [String], panel: &[String]) {
+    let Some((x, y)) = super::overlay_origin(frame, panel) else {
+        return;
+    };
+    for (i, line) in panel.iter().enumerate() {
+        let Some(row) = frame.get_mut(y + i) else {
+            break;
+        };
+        let (cells, tail) = cells(row);
+        let over: Vec<char> = line.chars().collect();
+        let end = x + over.len();
+        // The codes in force at the current column, cleared by a reset.
+        let mut open = String::new();
+        let mut out = String::new();
+        for (j, (codes, ch)) in cells.iter().enumerate() {
+            let before = open.clone();
+            for code in codes.split_inclusive(|c: char| c.is_ascii_alphabetic()) {
+                match code == RESET {
+                    true => open.clear(),
+                    false => open.push_str(code),
+                }
+            }
+            if (x..end).contains(&j) {
+                if j == x && !before.is_empty() {
+                    out.push_str(RESET);
+                }
+                out.push(over[j - x]);
+                continue;
+            }
+            if j == end {
+                out.push_str(&before);
+            }
+            out.push_str(codes);
+            out.push(*ch);
+        }
+        out.push_str(&tail);
+        *row = out;
+    }
+}
+
+/// `row` as a reader sees it: each visible character with the escape codes
+/// drawn just before it, then the codes after the last one. A code is a CSI
+/// sequence, `ESC [` up to its final letter, the only kind the tab draws.
+fn cells(row: &str) -> (Vec<(String, char)>, String) {
+    let mut cells = Vec::new();
+    let mut codes = String::new();
+    let mut chars = row.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            cells.push((std::mem::take(&mut codes), c));
+            continue;
+        }
+        codes.push(c);
+        // `[` is not a letter, so the code runs on past it to its last one.
+        for c in chars.by_ref() {
+            codes.push(c);
+            if c.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    (cells, codes)
 }
 
 /// The box's top border, its title naming every section with the open one
@@ -742,12 +886,16 @@ fn keys_list(state: &State, rows: Option<usize>, width: usize) -> Vec<String> {
             lines.push(format!("  {}", setting.table));
         }
         starts.push(lines.len());
-        lines.push(format!(
+        let row = format!(
             "{}  {:name_field$}{}",
             mark(at),
             setting.name,
-            shown(&setting.value)
-        ));
+            setting.shown()
+        );
+        lines.push(match setting.set {
+            true => row,
+            false => format!("{DIM}{row}{RESET}"),
+        });
     }
     if matches.is_empty() && !state.filter.is_empty() {
         lines.push("  no keys match this search".to_string());
@@ -828,21 +976,21 @@ fn field(label: &str, text: &str, typing: bool) -> String {
     pad_to(&format!("{label}{tail}{cursor}"), POPUP_TEXT)
 }
 
-/// The `current` row: the value `key` has in the list, which is the value in
-/// use now unless the box says the list is stale, or `not set` for a key
-/// with none or one the list does not show.
+/// The `current` row: what `key` reads in the list — the value in use now
+/// unless the box says the list is stale, `empty`, or `not set` — and `not
+/// set` for a key the list does not show.
 ///
 /// Read off the list rather than through `confkv::get`, which answers a
 /// `[models]` glob the config has never named with the zero that absence
 /// stands for: a key the active section sets again that the list does not
 /// show would read `0.0` for a price nobody has set.
 fn current(state: &State, key: &str) -> String {
-    let value = state
+    let shown = state
         .settings
         .iter()
         .find(|s| s.key() == key)
-        .map_or("", |s| s.value.as_str());
-    format!("current   {}", shown(value))
+        .map_or(NOT_SET, Setting::shown);
+    format!("current   {shown}")
 }
 
 /// The set popup's keys, in the popup and on the line under the frame.
@@ -1123,27 +1271,36 @@ mod tests {
     }
 
     // The list as the mockup draws it: each key under its table with the
-    // value in use now, and `not set` for a key with none.
+    // value in use now. A key no file holds is dimmed and reads `not set`,
+    // whatever its default; a key a file sets to its default stays bright,
+    // and a list a file sets empty reads `empty`.
     #[test]
-    fn the_config_list_shows_every_key_under_its_table_with_not_set() {
+    fn the_config_list_dims_every_key_no_file_sets() {
         let (repo, _guard) = project("list");
+        std::fs::write(
+            Config::path_in(&repo.root),
+            "[dispatch]\nlane_quiet = \"15m\"\nhide_commands = false\n\n[watch]\ndirs = []\n",
+        )
+        .unwrap();
         let _terminal = crate::screen::test_terminal((80, 200));
         let mut state = State::new(&repo);
         cursor_on(&mut state, "dispatch.lane_quiet");
-        let drawn = lines(&state);
-        for row in [
-            "│   dispatch",
-            "│ >   lane_quiet                  15m",
-            "│     visible_lanes               3",
-            "│     hide_commands               false",
-            "│   watch",
-            "│     dirs                        not set",
+        let drawn = frame(&state);
+        for (row, dimmed) in [
+            ("│   dispatch", false),
+            ("│ >   lane_quiet                  15m", false),
+            ("│     visible_lanes               not set", true),
+            ("│     hide_commands               false", false),
+            ("│   watch", false),
+            ("│     dirs                        empty", false),
         ] {
-            assert!(
-                drawn.iter().any(|l| l.starts_with(row)),
-                "{row}: {drawn:#?}"
-            );
+            let line = drawn
+                .iter()
+                .find(|l| shell::plain(l).starts_with(row))
+                .unwrap_or_else(|| panic!("{row}: {drawn:#?}"));
+            assert_eq!(line.contains(DIM), dimmed, "{line:?}");
         }
+        let drawn = lines(&state);
         assert_eq!(
             drawn
                 .iter()
@@ -1172,8 +1329,17 @@ mod tests {
             drawn.last().unwrap(),
             " [enter] leave search   [esc] cancel"
         );
-        assert!(state.matches().iter().all(|s| s.value.is_empty()));
-        assert!(state.matches().iter().any(|s| s.key() == "watch.dirs"));
+        // Exactly the dimmed keys: every key no file holds, and no other.
+        let unset: Vec<String> = state
+            .settings
+            .iter()
+            .filter(|s| !s.set)
+            .map(Setting::key)
+            .collect();
+        let found: Vec<String> = state.matches().iter().map(|s| s.key()).collect();
+        assert_eq!(found, unset);
+        assert!(found.iter().any(|key| key == "dispatch.visible_lanes"));
+        assert!(!found.iter().any(|key| key == "dispatch.lane_quiet"));
 
         type_keys(&repo, &mut state, "\r");
         assert!(matches!(state.mode, Mode::Browsing));
@@ -1272,11 +1438,28 @@ mod tests {
         assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).exists());
     }
 
-    // A key with no value reads `not set` in its `current` row and opens on
-    // an empty field.
+    // A key no file holds reads `not set` in its `current` row and opens on
+    // an empty field, not on the default it falls back to.
     #[test]
-    fn a_key_with_no_value_opens_on_an_empty_field() {
+    fn a_key_no_file_sets_opens_on_an_empty_field() {
         let (repo, _guard) = project("set-unset");
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.visible_lanes");
+        type_keys(&repo, &mut state, "\r");
+        let drawn = lines(&state);
+        assert!(
+            drawn.iter().any(|l| l.contains("│  value: ▏ ")),
+            "{drawn:#?}"
+        );
+        assert!(drawn.iter().any(|l| l.contains("│  current   not set ")));
+    }
+
+    // A list a file sets empty reads `empty` in its `current` row, as it
+    // does in the list, and opens on an empty field.
+    #[test]
+    fn a_key_a_file_sets_empty_reads_empty_in_its_popup() {
+        let (repo, _guard) = project("set-empty");
+        crate::commands::write_config_override(&repo, "watch.dirs", "[]").unwrap();
         let mut state = State::new(&repo);
         cursor_on(&mut state, "watch.dirs");
         type_keys(&repo, &mut state, "\r");
@@ -1285,7 +1468,7 @@ mod tests {
             drawn.iter().any(|l| l.contains("│  value: ▏ ")),
             "{drawn:#?}"
         );
-        assert!(drawn.iter().any(|l| l.contains("│  current   not set ")));
+        assert!(drawn.iter().any(|l| l.contains("│  current   empty ")));
     }
 
     // `enter` opens the field of the key under the cursor, whichever row
