@@ -1042,7 +1042,7 @@ fn written_popup(written: &Written) -> Vec<String> {
 
 /// Write `value`, read as YAML, as the field named `field` on every step
 /// `targets` names, one patch per pipeline. The section's own `save` calls
-/// it, and so does the active section's `enter` on a step key, so a value
+/// it, and so does the active section's `edit` on a step key, so a value
 /// one of them takes the other takes too.
 ///
 /// Every patch is built before any is written, so a patch that does not

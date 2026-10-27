@@ -780,6 +780,10 @@ mod tests {
         (repo, scratch)
     }
 
+    /// `o` on the row under the cursor, `↓` past `edit` onto `promote
+    /// selected`, and `enter`: the picker, when promote is offered.
+    const OPEN_PROMOTE: &str = "o\x1b[B\r";
+
     /// The tab, opened on its active section, the cursor on
     /// `pipelines/impl.yml`.
     fn on_active(repo: &Repo) -> State {
@@ -863,9 +867,10 @@ mod tests {
         );
     }
 
-    // `promote selected` is offered first when everything selected is whole
-    // files, and opens the picker. On one key of a two-key file, selected or
-    // under the cursor, it is left out: it would write the other key too.
+    // `promote selected` is offered after `edit` when everything selected is
+    // whole files, and opens the picker. On one key of a two-key file,
+    // selected or under the cursor, it is left out: it would write the
+    // other key too.
     #[test]
     fn promote_is_offered_only_when_every_selected_key_has_its_whole_file() {
         let (repo, _guard) = branched("menu");
@@ -875,10 +880,7 @@ mod tests {
         type_keys(&repo, &mut state, "\x1b[B o");
         assert_eq!(
             inside(&state)[1..3],
-            [
-                "  > delete selected".to_string(),
-                "    delete all overrides".to_string()
-            ]
+            ["  > edit".to_string(), "    delete selected".to_string()]
         );
         type_keys(&repo, &mut state, "\x1b ");
 
@@ -894,15 +896,15 @@ mod tests {
             [
                 "╭─ 2 selected ─────────────────────────╮",
                 "│                                      │",
-                "│  > promote selected                  │",
+                "│  > edit                              │",
+                "│    promote selected                  │",
                 "│    delete selected                   │",
-                "│    delete all overrides              │",
                 "│                                      │",
                 "│  [enter] confirm   [esc] close       │",
                 "╰──────────────────────────────────────╯",
             ]
         );
-        type_keys(&repo, &mut state, "\r");
+        type_keys(&repo, &mut state, "\x1b[B\r");
         assert!(popup(&state)[0].starts_with("╭─ promote pipelines/impl.yml to ─"));
     }
 
@@ -913,7 +915,7 @@ mod tests {
     fn the_picker_draws_its_branches_and_f_searches() {
         let (repo, _guard) = branched("picker");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         assert_eq!(
             popup(&state),
             [
@@ -958,7 +960,7 @@ mod tests {
             git(&repo.root, &["branch", &format!("fix/{n:02}")]);
         }
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         let rows = inside(&state);
         assert_eq!(rows[2], "");
         assert_eq!(rows[3], "  > bare");
@@ -985,7 +987,7 @@ mod tests {
     fn promote_onto_a_branch_with_no_checkout_makes_a_worktree_beside_it() {
         let (repo, scratch) = branched("worktree");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(1));
         let made = scratch.join("proj-feature-config-update");
         // A scratch path is longer than the popup's text, so it wraps.
@@ -1058,7 +1060,7 @@ mod tests {
     fn promote_onto_a_remote_only_branch_makes_a_local_branch_tracking_it() {
         let (repo, scratch) = branched("remote");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(2));
         type_keys(&repo, &mut state, "\r");
         let made = scratch.join("proj-feature-remote");
@@ -1076,7 +1078,7 @@ mod tests {
     fn promote_onto_the_main_checkouts_branch_writes_the_main_checkout() {
         let (repo, scratch) = branched("main");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(3));
         let rows = inside(&state);
         assert_eq!(rows[1], "  main is checked out at");
@@ -1104,7 +1106,7 @@ mod tests {
         std::fs::create_dir_all(&made).unwrap();
         std::fs::write(made.join("notes.txt"), "mine\n").unwrap();
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(1));
         type_keys(&repo, &mut state, "\r");
 
@@ -1129,7 +1131,7 @@ mod tests {
     fn a_branch_with_no_setup_is_refused_before_a_worktree_is_made() {
         let (repo, scratch) = branched("no-setup");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r\r");
+        type_keys(&repo, &mut state, &format!("{OPEN_PROMOTE}\r"));
         assert!(text(&state).contains("makes a worktree for bare at"));
         type_keys(&repo, &mut state, "\r");
         assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
@@ -1156,7 +1158,7 @@ mod tests {
             ],
         );
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(1));
         assert!(text(&state).contains("feature/config-update is checked out at"));
         type_keys(&repo, &mut state, "\r");
@@ -1194,7 +1196,7 @@ mod tests {
         let (repo, _guard) = branched("two-files");
         add_review(&repo);
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "ao\r");
+        type_keys(&repo, &mut state, &format!("a{OPEN_PROMOTE}"));
         assert!(popup(&state)[0].starts_with("╭─ promote 2 files to ─"));
         type_keys(&repo, &mut state, &down_enter(3));
         assert!(popup(&state)[0].starts_with("╭─ promote 2 files ─"));
@@ -1239,7 +1241,7 @@ mod tests {
         let (repo, scratch) = branched("in-part");
         add_review(&repo);
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "ao\r");
+        type_keys(&repo, &mut state, &format!("a{OPEN_PROMOTE}"));
         type_keys(&repo, &mut state, &down_enter(1));
         type_keys(&repo, &mut state, "\r");
 
@@ -1265,7 +1267,7 @@ mod tests {
         let (repo, _guard) = branched("two-refused");
         add_review(&repo);
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "ao\r\r\r");
+        type_keys(&repo, &mut state, &format!("a{OPEN_PROMOTE}\r\r"));
         assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
         let said = text(&state).replace(' ', "");
         let root = repo.root.display().to_string();
@@ -1281,7 +1283,7 @@ mod tests {
     fn a_checkout_switched_after_the_pick_is_refused() {
         let (repo, _guard) = branched("switched");
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(3));
         assert_eq!(inside(&state)[1], "  main is checked out at");
         git(&repo.root, &["switch", "-q", "feature/config-update"]);
@@ -1315,7 +1317,7 @@ mod tests {
         );
         std::fs::remove_dir_all(&gone).unwrap();
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(1));
 
         assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
@@ -1346,7 +1348,7 @@ mod tests {
             ],
         );
         let mut state = on_active(&repo);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(1));
         assert!(text(&state).contains("feature/config-update is checked out at"));
         type_keys(&repo, &mut state, "\r");
@@ -1367,7 +1369,7 @@ mod tests {
         type_keys(&repo, &mut state, "\r");
         let (from, to) = (nested.to_str().unwrap(), moved.to_str().unwrap());
         git(&repo.root, &["worktree", "move", from, to]);
-        type_keys(&repo, &mut state, "o\r");
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
         type_keys(&repo, &mut state, &down_enter(1));
         type_keys(&repo, &mut state, "\r");
         assert!(popup(&state)[0].starts_with("╭─ promoted ─"));
@@ -1409,7 +1411,7 @@ mod tests {
 
         crate::platform::test_home::with_home(&home, || {
             let mut state = on_active(&repo);
-            type_keys(&repo, &mut state, "o\r");
+            type_keys(&repo, &mut state, OPEN_PROMOTE);
             assert!(popup(&state)[0].starts_with("╭─ not promoted ─"));
             let said = text(&state);
             assert!(said.contains("no branch to promote onto"), "{said}");
