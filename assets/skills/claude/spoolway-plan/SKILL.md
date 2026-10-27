@@ -19,8 +19,8 @@ not this session.
 Not the source you just read to understand it, not the typo you noticed, not this skill. Read
 anything; change nothing else — a fix made here is an unreviewed change on whatever branch the
 session sits on, landing under a task describing a starting state the code is no longer in. What
-you found while reading becomes a decision, a line of context, or a question with **AskUserQuestion** before
-the cut that the person makes a task or rules out of scope — never an edit, and no request lifts this.
+you found while reading becomes a decision, a line of context, or a question. Ask that question with **AskUserQuestion** before the cut.
+The person makes it a task or rules it out of scope. It never becomes an edit, and no request lifts this.
 
 ## Understand the intent, then settle every question
 
