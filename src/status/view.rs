@@ -154,8 +154,8 @@ impl State {
     ];
 
     /// Where this state sits in [`State::ALL`]. The match has no wildcard on
-    /// purpose: it is the one place a new variant cannot be left out of, and
-    /// that is what keeps `ALL` from silently missing a longer word.
+    /// purpose: it is the one place a new variant cannot be left out of, so
+    /// whoever adds one is sent to `ALL` before a longer word goes unsized.
     #[cfg(test)]
     fn position(self) -> usize {
         match self {
