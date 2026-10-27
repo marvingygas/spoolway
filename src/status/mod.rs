@@ -12362,8 +12362,10 @@ mod tests {
 
     /// A multiplexer for the options menu's `focus`: it answers
     /// [`crate::mux::Mux::can_focus_pane`] with `can`, lists `lanes`, and
-    /// writes down every pane it is asked to focus, refusing each with
-    /// `refuse` when that is set. A call that opens, closes or types into a
+    /// writes down every pane it is asked to focus, refusing each when
+    /// `refuse` is set: that is the stderr herdr answers `pane zoom` with,
+    /// worded by [`crate::mux::herdr_refusal`] exactly as the real backend
+    /// words it. A call that opens, closes or types into a
     /// pane panics, since `focus` must make none.
     #[derive(Default)]
     struct FocusMux {
@@ -12408,7 +12410,11 @@ mod tests {
         fn focus_pane(&self, pane_id: &str) -> Result<()> {
             self.focused.lock().unwrap().push(pane_id.to_string());
             match self.refuse {
-                Some(why) => anyhow::bail!("{why}"),
+                Some(stderr) => Err(crate::mux::herdr_refusal(
+                    &["pane", "zoom", pane_id, "--on"],
+                    "exit status: 1",
+                    stderr,
+                )),
                 None => Ok(()),
             }
         }
@@ -12645,7 +12651,9 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add_to(&repo, "running", &[], Some("implement"), Some("running"));
         let refusing = FocusMux {
-            refuse: Some("herdr pane zoom w2:p3 --on: pane not found"),
+            // What the herdr double in `scripts/e2e/herdr-stub.sh` writes for
+            // a pane it does not know.
+            refuse: Some(r#"{"error":{"code":"pane_not_found","message":"no pane w2:p3"}}"#),
             ..FocusMux::with(vec![lane_in(&repo, "running", "implement", "w2:p3")])
         };
 
@@ -12654,7 +12662,7 @@ mod tests {
         assert_eq!(notice.title, "focus");
         assert_eq!(
             notice.text,
-            "o: herdr pane zoom w2:p3 --on: pane not found\n\n\
+            "o: herdr pane zoom w2:p3 --on: no pane w2:p3\n\n\
              The step's pane may have been closed. restart in this menu \
              starts the step again in a new pane."
         );

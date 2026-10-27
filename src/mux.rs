@@ -1983,10 +1983,22 @@ impl Mux for Herdr {
         true
     }
 
+    /// Run rather than [`Herdr::call_ignoring_result`]'d, because a refusal
+    /// here is read by a person, in the board's `focus` popup: `repo::run`'s
+    /// message carries herdr's whole JSON envelope, and [`herdr_refusal`]
+    /// carries only the sentence inside it.
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
         let argv = pane_zoom_argv(pane_id);
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        self.call_ignoring_result(&argv)
+        let output = spawn_and_wait(&self.cwd, "herdr", &argv, &mut || {})?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(herdr_refusal(
+            &argv,
+            output.status,
+            &String::from_utf8_lossy(&output.stderr),
+        ))
     }
 
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
@@ -2866,6 +2878,30 @@ fn pane_zoom_argv(pane_id: &str) -> Vec<String> {
         pane_id.to_string(),
         "--on".to_string(),
     ]
+}
+
+/// A failed herdr call `args`, worded for a person: `herdr <args>:` and the
+/// message out of the JSON error envelope herdr writes to `stderr`, the same
+/// wording [`Herdr::call_watching_for_stall`] gives a refusal. Without an
+/// envelope to read — a crash, or a herdr too old to answer in JSON — it
+/// falls back to `repo::run`'s own wording with `stderr` whole, so nothing
+/// herdr said is lost.
+pub(crate) fn herdr_refusal(
+    args: &[&str],
+    status: impl std::fmt::Display,
+    stderr: &str,
+) -> anyhow::Error {
+    match serde_json::from_str::<Envelope<serde_json::Value>>(stderr) {
+        Ok(Envelope {
+            error: Some(error), ..
+        }) => anyhow!("herdr {}: {}", args.join(" "), error.message),
+        _ => anyhow!(
+            "`herdr {}` failed ({}): {}",
+            args.join(" "),
+            status,
+            stderr.trim()
+        ),
+    }
 }
 
 /// A branch name reduced to one directory component: `task/add-endpoint`
@@ -4449,6 +4485,27 @@ mod tests {
         assert_eq!(
             pane_zoom_argv("w5S:p31"),
             ["pane", "zoom", "w5S:p31", "--on"]
+        );
+    }
+
+    /// A refused zoom names the call and herdr's own message, not the JSON
+    /// envelope it came in; with no envelope to read, nothing is dropped.
+    #[test]
+    fn a_refused_herdr_call_reads_the_message_out_of_its_envelope() {
+        let argv = ["pane", "zoom", "w2:p3", "--on"];
+        let refused = herdr_refusal(
+            &argv,
+            "exit status: 1",
+            "{\"error\":{\"code\":\"pane_not_found\",\"message\":\"no pane w2:p3\"}}\n",
+        );
+        assert_eq!(
+            format!("{refused:#}"),
+            "herdr pane zoom w2:p3 --on: no pane w2:p3"
+        );
+        let bare = herdr_refusal(&argv, "exit status: 2", "connection refused\n");
+        assert_eq!(
+            format!("{bare:#}"),
+            "`herdr pane zoom w2:p3 --on` failed (exit status: 2): connection refused"
         );
     }
 
