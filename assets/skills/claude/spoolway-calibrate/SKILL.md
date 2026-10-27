@@ -1,6 +1,6 @@
 ---
 name: spoolway-calibrate
-description: Review real spoolway runs to explain review failures, blocked sessions, loops, context pressure and spend. Compare lane-written task records with the prompts, pipelines, settings, skills, scripts and code that produced them, then present every finding in one ranked table and apply the ones the person picks. Use when someone wants to learn from finished work and tune how spoolway runs.
+description: Review real spoolway runs to explain review failures, blocked sessions, loops, context pressure and spend. Compare lane-written task records with the prompts, pipelines, settings, skills, scripts and code that produced them. Present every finding in tables, one per kind of fix, and apply the ones the person picks. Use when someone wants to learn from finished work and tune how spoolway runs.
 disable-model-invocation: true
 ---
 
@@ -18,7 +18,11 @@ or both.
 - Read `housekeeping.calibrate_window` and the archived tasks completed in that window under
   the project home's `archive/`. The home is `~/.spoolway/<label>-<id>/`, never a folder named
   after the repo alone: it is the directory above the `output.dir` that `spoolway task
-  contract` prints.
+  contract` prints. Skip a task whose only steps were command steps that ended it at `done`,
+  such as a routine's check that found nothing to do.
+- Read the project's problem log, `~/.spoolway/logs/<label>-<id>.log`, for the window. Read the
+  failed command logs in the folder beside it, `~/.spoolway/logs/<label>-<id>/`. If that folder
+  is missing or empty, go on without it.
 - Read `## Status Log`, `## Handoff` and `## Blocker` — the three fixed sections a lane writes to
   in every archived task — and follow the sequence of events. Work out why review sent work
   back, why a session blocked, what an agent misunderstood, and what later cleared it.
@@ -34,6 +38,10 @@ or both.
   - Inside one version: `spoolway eval --by task --sort when:asc --per-task`.
   - Per complexity point, where tasks carry `complexity`: a task far above its neighbours' cost
     per point is a finding, even when it passed.
+- Look across tasks. The same cause, missing tool or note in several tasks' records is one
+  finding, with its count.
+- Look for steps that spend tokens and change nothing: no diff, no capture, no edit. Name the
+  step and how often it ran empty.
 - For a lane that went wrong, read `spoolway prompt contract --task <id> --step <step>` to see what it was handed.
 - Read the pipelines, prompts, templates and settings involved in those runs. Compare what the
   agents did with what the control plane asked them to do.
@@ -51,23 +59,46 @@ lane-written record to explain why it happened. Look for repeated waste and for 
 in a single run. Check instructions, step ownership, routing, information passed between steps,
 gates, task shape, model fit, context pressure, timeouts and concurrency.
 
+Never propose:
+
+- a change to how an agent's permissions are set: permission mode, allow lists or sandbox
+  settings. Drop a finding whose only fix is one of those.
+- more knowledge in the prompt of the step that does the main work, usually the longest-running
+  one. Move the fix to a cheaper step, a gate or a skill, or leave it out.
+
+A review sending work back is expected. A low review pass rate is a finding only when another
+file could remove its cause.
+
 Trace each finding from the task record to whatever caused or failed to prevent it: a prompt, a
 setting, a skill, a script, a test or the source. Separate evidence from inference. Cite the task and the relevant
 lane-written text.
 Use counts and spend when they add meaning, but do not invent precision or drop a sound finding
 only because it has no useful number.
 
-Keep the report short. Present every grounded finding, ranked by likely value, wherever its fix
-lands. For each one, state the problem, the evidence, the likely cause, and the fix. Say when the
-evidence is limited or another cause is still possible.
+Keep the report short. Present every grounded finding, wherever its fix lands. For each one,
+state the problem, the evidence, the likely cause, and the fix. Say when the evidence is limited
+or another cause is still possible.
 
 Write the report from `assets/report.md`, beside this skill: copy its shape and fill it, keeping
-its headings and its table's columns. Every finding is one row of that table, with the fix you
-propose, the kind of file it lands in, and the files it touches with the size of each edit in
-lines. Whoever reads it is choosing which rows to apply, and the cost of a change belongs beside
-the case for it. The evidence — the task name and the lane's own words — goes in the prose above
-the table, never inside a cell. Where a finding has two honest fixes, put both in the cell with
-their two sizes, and say which you would take.
+its headings and its columns. The report is tables and nothing else. Print nothing above the
+first table and nothing below the last. This rule covers the findings report only. The report
+after rows are applied is described under "Make improvements".
+
+- Make one table per kind of fix, under a `###` heading. The kinds, in this order, are pipeline,
+  prompt, config, template, skill, script, test, source and docs. Leave out a kind that has no
+  row.
+- The columns are `# | Finding | Evidence | Proposed fix | Risk | Reward`. Row numbers run on
+  across tables, so the person can name a row by its number alone.
+- Evidence is the task name and the lane's own words, short enough to sit in the cell.
+- Rate Reward as `+`, `++` or `+++`. Use `+` for a small saving, or one task's trouble. Use `++`
+  for a steady saving across several tasks. Use `+++` for a failure or a cost that recurs across
+  the window.
+- Rate Risk as `-`, `--` or `---`. Use `-` when one file and one step are touched and the change
+  is easy to undo. Use `--` when several steps or pipelines read the file. Use `---` when every
+  lane reads it, or it changes what reaches main.
+- Order the rows in each table by reward first, highest on top. Break a tie by lowest risk.
+- Where a finding has two workable fixes, keep both in the Proposed fix cell and name the one to
+  take.
 
 Make prompt fixes exact and short. Add only what is needed to stop the issue from happening
 again, without repeating rules already present. Also check existing prompts for stale text.
@@ -77,7 +108,7 @@ the exact step, route or setting to change.
 
 ## Make improvements
 
-Change nothing until the person has picked rows from the table. Then apply exactly those, each
+Change nothing until the person has picked rows from the tables. Then apply exactly those, each
 with the file kind's own care:
 
 - A prompt, pipeline, template or config: read its matching contract from the spoolway binary
@@ -87,8 +118,9 @@ with the file kind's own care:
   code is written. Run the project's own checks for what you touched — its tests, its formatter,
   the gate a command step runs.
 
-A fix too large to make well here — a refactor, a feature — says so in its size, and the person
-chooses between a direct edit now and a task to queue. Do not hand a change to another skill
-unless the person asks. Do not edit archived task records.
+Some fixes are too large to make well here, such as a refactor or a feature. Say so in that
+row's Proposed fix cell. The person then chooses between a direct edit now and a task to queue.
+Do not hand a change to another skill unless the
+person asks. Do not edit archived task records.
 
 Report what changed, what evidence led to it, and how to undo an override.
