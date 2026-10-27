@@ -602,6 +602,8 @@ has "tab moves onto the pipeline section" \
   "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
 has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
 has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
+has "the step picker's key line names a as select all" \
+  "[space] select   [a] select all   [enter] set value   [esc] back" "$PIPELINE_TAB.plain"
 has "a step that leaves effort out reads not set" "[x] reproduce            not set" \
   "$PIPELINE_TAB.plain"
 has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE_TAB.plain"

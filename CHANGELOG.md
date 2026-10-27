@@ -21,6 +21,11 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## Unreleased
+
+### Changed
+- The overrides tab's pipeline section no longer shows how many steps in how many pipelines take each field. A row names the field, followed by `N overridden` where the layer already sets it, and the step picker's key line reads `[a] select all` where it read `[a] all`.
+
 ## 0.15.0
 
 ### Highlights

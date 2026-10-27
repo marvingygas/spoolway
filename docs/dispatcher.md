@@ -1015,24 +1015,24 @@ with the reason. A write that fails, such as on a layer file that does not parse
 The pipeline section sets one step field on many pipeline steps at once. It lists step fields,
 not pipelines, under two headers: the fields agent steps take, and the fields command steps take.
 A field goes only on the kind of step listed above it, because the merge refuses anything else.
-Each row says how many steps in how many pipelines take the field, and how many of them the layer
-already overrides it on. Only the pipelines in the repo's `.spoolway/` count. The `blocked` step
-is left out, because every pipeline takes it from `[unattended]` in config.
+Each row names the field, and says on how many steps the layer already overrides it, when it
+does. Only the pipelines in the repo's `.spoolway/` count. The `blocked` step is left out,
+because every pipeline takes it from `[unattended]` in config.
 
 ```
 ╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
 │                                                                              │
 │   agent steps                                                                │
-│ >   model                58 steps in 10 pipelines                            │
-│     effort               58 steps in 10 pipelines                            │
-│     agent                58 steps in 10 pipelines                            │
-│     prompt               58 steps in 10 pipelines                            │
-│     session              58 steps in 10 pipelines                            │
-│     skills               58 steps in 10 pipelines                            │
+│ >   model                                                                    │
+│     effort                                                                   │
+│     agent                                                                    │
+│     prompt                                                                   │
+│     session                                                                  │
+│     skills                                                                   │
 │   command steps                                                              │
-│     run                  16 steps in  9 pipelines                            │
-│     timeout              16 steps in  9 pipelines      1 overridden          │
-│     hide                 16 steps in  9 pipelines                            │
+│     run                                                                      │
+│     timeout              1 overridden                                        │
+│     hide                                                                     │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
@@ -1062,7 +1062,7 @@ overrides the field on start open, with those steps selected.
 │   [ ] impl_lite                                        5 steps               │
 │   ↓ 2 pipelines below                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] all   [enter] set value   [esc] back
+ [space] select   [a] select all   [enter] set value   [esc] back
 ```
 
 | Key | What it does |
