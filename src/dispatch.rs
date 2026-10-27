@@ -361,15 +361,15 @@ pub(crate) struct LaneRecord {
     /// When the model last wrote a turn in this lane's transcript, in Unix
     /// seconds. `None` until [`Dispatcher::note_progress`] reads one, and
     /// always `None` for a kind whose transcript carries no harness replies,
-    /// where `last_progress` already says as much. The board reads it beside
-    /// `reminder_unanswered` to show how long a lane has been silent.
+    /// where `last_progress` already says as much. [`Self::silent_since`]
+    /// counts a silent lane's silence from it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_model_turn: Option<i64>,
     /// The lane's last write before the first reminder it left unanswered,
     /// in Unix seconds, kept while that reminder and every one sent again
     /// after it stay unanswered, and cleared with `reminder_unanswered`.
     ///
-    /// What the board's `● silent` counts from when there is no
+    /// What [`Self::silent_since`] counts from when there is no
     /// `last_model_turn` to count from. `last_progress` cannot stand in: a
     /// reminder sent again moves it, by changing the pane's hash or by being
     /// written to the transcript itself, so a lane dead for hours would read
@@ -519,8 +519,9 @@ impl LaneRecord {
     }
 
     /// When this lane last spoke, if its last reminder is still unanswered,
-    /// in Unix seconds: the board's `● silent` counts from here. `None` for a
-    /// lane that was never reminded or answered its last reminder.
+    /// in Unix seconds. The board draws a settled lane with one as
+    /// `● silent`. `None` for a lane that was never reminded or answered its
+    /// last reminder.
     ///
     /// The model's own last turn where one was read. Otherwise the lane's
     /// last write before the first reminder it left unanswered — see
@@ -19713,7 +19714,7 @@ mod tests {
         }
     }
 
-    /// The board's silent time keeps growing across reminders sent again. A
+    /// A lane's silence keeps counting across reminders sent again. A
     /// lane with no transcript is read by its pane's hash, and every reminder
     /// typed into the pane changes that hash and moves `last_progress` to the
     /// pass that sent it, so a clock read off that restarted at each one.

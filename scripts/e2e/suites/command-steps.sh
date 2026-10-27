@@ -1141,17 +1141,20 @@ must "a task through a hide: true command step" \
 # this log.
 records "and its output is on the record just the same" "hidden-command-marker" \
   "$SPOOLWAY_PROJECT_HOME/commands/hiddenc · hidden.log" hiddenc
-# A hidden step has no pane, so its row is the only sign it is working, and
-# `queue list` draws how long it has run after the state: `47s`, `9m 12s`,
-# `1h 04m`. Polled, as every check on a live row here is: the row is redrawn
+# A hidden step has no pane, so its row is the only sign it is working.
+# `queue list` draws the bare `● running` on it, with no time after the word:
+# STATE holds the state word alone, and the run's time is the board's TIME
+# column. Polled, as every check on a live row here is: the row is redrawn
 # from disk on each call.
 hidden_row_timed() {
-  "$SPOOLWAY" queue list | grep -E 'hiddenc.*● running [0-9]+(s|m [0-9]{2}s|h [0-9]{2}m)'
+  local line
+  line=$("$SPOOLWAY" queue list | grep 'hiddenc.*● running') || return 1
+  ! grep -qE '● running [0-9]' <<<"$line"
 }
 if poll_until 30 hidden_row_timed; then
-  ok "queue list shows how long a running hidden step has run"
+  ok "queue list shows a running hidden step as the bare running word"
 else
-  bad "queue list shows how long a running hidden step has run"
+  bad "queue list shows a running hidden step as the bare running word"
   "$SPOOLWAY" queue list 2>&1 | sed 's/^/        /'
 fi
 
