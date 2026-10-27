@@ -4863,9 +4863,16 @@ fn view_label(filters: &Filters, table: TableKind, filters_label: &str) -> Strin
         .join(" · ")
 }
 
+/// The top border: `sections` on the left, always whole, and `right` — the
+/// [`view_label`] — on the right, cut down by [`trim_right`] to the room
+/// left over, so the line is exactly `width` columns between its corners.
 fn frame_top(sections: &str, right: &str, width: usize) -> String {
     use crate::screen::corner::{TOP_LEFT, TOP_RIGHT};
     let left = format!("─ {sections} ");
+    // The right side spends a space before its label and ` ─` after it, and
+    // at least one dash must stay between the two sides.
+    let room = width.saturating_sub(left.chars().count() + 1 + 3);
+    let right = trim_right(right, room);
     let right = match right.is_empty() {
         true => "─".to_string(),
         false => format!(" {right} ─"),
@@ -4875,6 +4882,25 @@ fn frame_top(sections: &str, right: &str, width: usize) -> String {
         "{TOP_LEFT}{left}{}{right}{TOP_RIGHT}",
         "─".repeat(dashes.max(1))
     )
+}
+
+/// `right` cut to at most `room` columns by dropping whole ` · ` parts from
+/// its end, with a final `…` part standing in for what was dropped, such as
+/// `by pipeline · totals · step review · …`. A part is never cut in its
+/// middle: half a date would read as a different date. The first part — the
+/// grouping, on a table that has one — is the last to go; with no room for
+/// even it and the `…`, the right side is dropped entirely rather than drawn
+/// past the frame.
+fn trim_right(right: &str, room: usize) -> String {
+    if right.chars().count() <= room {
+        return right.to_string();
+    }
+    let parts: Vec<&str> = right.split(" · ").collect();
+    (1..parts.len())
+        .rev()
+        .map(|kept| format!("{} · …", parts[..kept].join(" · ")))
+        .find(|label| label.chars().count() <= room)
+        .unwrap_or_default()
 }
 
 fn frame_bottom(width: usize) -> String {
@@ -10044,6 +10070,81 @@ mod screen_tests {
         assert_eq!(Scope::Mine.label(), "");
         assert_eq!(Scope::All.label(), "all projects");
         assert_eq!(filters_label("", &no_filters(), TableKind::Lanes, None), "");
+    }
+
+    /// A right label too long for the border loses whole parts from its end
+    /// behind a final `…`, down to the grouping alone, and then nothing.
+    #[test]
+    fn trim_right_drops_whole_parts_from_the_end() {
+        let right = "by pipeline · totals · step review · 2026-08-01 → now";
+        assert_eq!(right.chars().count(), 53);
+        assert_eq!(trim_right(right, 53), right);
+        assert_eq!(
+            trim_right(right, 52),
+            "by pipeline · totals · step review · …"
+        );
+        assert_eq!(trim_right(right, 20), "by pipeline · …");
+        assert_eq!(trim_right(right, 14), "");
+        assert_eq!(trim_right("", 0), "");
+    }
+
+    /// An 80-column terminal's frame, with a step filter and a since date,
+    /// keeps the section names whole and cuts the date from the right side.
+    #[test]
+    fn a_narrow_top_border_drops_the_window_behind_an_ellipsis() {
+        let filters = Filters {
+            since: "2026-08-01".to_string(),
+            step: Some("review".into()),
+            ..no_filters()
+        };
+        let right = view_label(
+            &filters,
+            TableKind::Lanes,
+            &filters_label("", &filters, TableKind::Lanes, None),
+        );
+        assert_eq!(
+            frame_top(&section_names(TableKind::Lanes), &right, 78),
+            format!(
+                "{TOP_LEFT}─ [eval]   directories   trials ───── \
+                 by pipeline · totals · step review · … ─{TOP_RIGHT}"
+            )
+        );
+    }
+
+    /// The top border is exactly the frame's width whatever the right label
+    /// holds, from nothing to more than the frame itself, and a label that
+    /// fits is drawn whole.
+    #[test]
+    fn the_top_border_is_always_the_frame_s_width() {
+        let sections = section_names(TableKind::Lanes);
+        let parts = [
+            "by pipeline",
+            "totals",
+            "demo",
+            "step review",
+            "2026-08-01 → now",
+        ];
+        for width in [MIN_WIDTH, 78, 130] {
+            for n in 0..=parts.len() * 3 {
+                let right = parts
+                    .iter()
+                    .cycle()
+                    .take(n)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let top = frame_top(&sections, &right, width);
+                assert_eq!(top.chars().count(), width + 2, "{top:?}");
+                assert!(top.contains(&format!("─ {sections} ")), "{top:?}");
+                let fits =
+                    format!("─ {sections} ").chars().count() + right.chars().count() + 4 <= width;
+                // An empty label draws no text at all, only the border's dash.
+                if fits && !right.is_empty() {
+                    assert!(top.contains(&format!(" {right} ─")), "{top:?}");
+                    assert!(!top.contains('…'), "{top:?}");
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------- render
