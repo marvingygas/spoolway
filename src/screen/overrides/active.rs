@@ -1710,7 +1710,7 @@ mod tests {
             .iter()
             .position(|s| s.key() == "dispatch.visible_lanes")
             .unwrap();
-        state.cursor = at + 1;
+        state.cursor = at;
         type_keys(&repo, &mut state, "o");
         assert!(
             popup(&state)
@@ -1725,7 +1725,7 @@ mod tests {
             .iter()
             .position(|s| s.key() == "dispatch.lane_quiet")
             .unwrap();
-        state.cursor = at + 1;
+        state.cursor = at;
         type_keys(&repo, &mut state, "o");
         assert_eq!(
             popup(&state)[..3],

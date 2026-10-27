@@ -18,12 +18,12 @@
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
-# menu removes its page after one popup. On the overrides tab a listed config
-# key and a new one are each set through their popup, and both land in the
-# overrides layer, one step field is set on steps in two pipelines, one
-# prompt is copied into the layer, and the active section deletes one config
-# key from it, then promotes one pipeline onto a local branch with no
-# checkout, into a worktree it makes beside the project.
+# menu removes its page after one popup. On the overrides tab a config key no
+# file sets is drawn dimmed, two listed config keys are each set through their
+# popup, and both land in the overrides layer, one step field is set on steps
+# in two pipelines, one prompt is copied into the layer, and the active
+# section deletes one config key from it, then promotes one pipeline onto a
+# local branch with no checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -563,15 +563,15 @@ works "its body is followed by a blank row and the key row" bash -c \
 works "enter deletes the routine" test ! -e .spoolway/routines/nightly
 
 # The overrides tab (`→` twice from the queue tab) opens on its config
-# section. A listed key is set through its field: `f` searches the list down
-# to `lane_quiet`, `enter` leaves the search, `↓` moves onto the key, and
-# `enter` opens its field filled with the value in use, which the
-# backspaces clear before `5m` is typed and saved. A new key is set through
-# `+ new key`'s popup: `↑` back onto that row, `enter`, the key, `tab`, the
-# value, and `enter` saves both. Run after every other screen check, since
+# section. Two listed keys are set through their fields: `f` searches the
+# list down to `lane_quiet`, which leaves the cursor on it, `enter` leaves
+# the search, and `enter` opens its field filled with the value in use,
+# which the backspaces clear before `5m` is typed and saved. `f` again, the
+# old query backspaced away and `visible_lanes` typed, reaches the second
+# key, set to `4` the same way. Run after every other screen check, since
 # the layer it leaves would open the overrides gate on the dispatch tab.
 OVERRIDES_TAB="$LIVE/overrides-tab.txt"
-on_screen '\x1b[C\x1b[Cflane_quiet\r\x1b[B\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f5m\r\x1b[A\rmodels.qwen3-coder.input\t0.4\r' \
+on_screen '\x1b[C\x1b[Cflane_quiet\r\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f5m\rf\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7fvisible_lanes\r\r\x7f\x7f\x7f\x7f4\r' \
   "$OVERRIDES_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$OVERRIDES_TAB" >"$OVERRIDES_TAB.plain"
 has "→ twice reaches the overrides tab" \
@@ -579,11 +579,17 @@ has "→ twice reaches the overrides tab" \
 has "it opens on config, its sections named in the box title" \
   "╭─ [config]   pipeline   prompts   active (0) ─" "$OVERRIDES_TAB.plain"
 has "enter on a key opens its field" "╭─ set dispatch.lane_quiet ─" "$OVERRIDES_TAB.plain"
-has "enter on + new key opens the new key popup" "╭─ new key ─" "$OVERRIDES_TAB.plain"
+has "and on the second key opens its own" "╭─ set dispatch.visible_lanes ─" "$OVERRIDES_TAB.plain"
+lacks "the list draws no + new key row" "+ new key" "$OVERRIDES_TAB.plain"
+# The fixture's `[agents.pi]` profile leaves `concurrency` out, and the layer
+# does not set it either, so its row, the one under the table's heading, is
+# drawn with the dim code and reads `not set`.
+works "a concurrency no file sets is dimmed and reads not set" bash -c \
+  'grep -A1 -F "│   agents.pi " "$1" | grep -qF "$2"' _ "$OVERRIDES_TAB" \
+  "$(printf '\033[2m    concurrency                 not set\033[0m')"
 CONFIG_LAYER="$SPOOLWAY_PROJECT_HOME/overrides/config.toml"
 has "the listed key is in the layer as typed" 'lane_quiet = "5m"' "$CONFIG_LAYER"
-has "and so is the new key's table" "[models.qwen3-coder]" "$CONFIG_LAYER"
-has "with its value written as a number" "input = 0.4" "$CONFIG_LAYER"
+has "and so is the second, written as a number" "visible_lanes = 4" "$CONFIG_LAYER"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$OVERRIDES_TAB" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "active counts both keys" "active (2)" "$LAST"
@@ -654,7 +660,7 @@ has "delete selected opens one confirm popup" "╭─ delete this override ─" 
 has "which names the file and the key" "config.toml   dispatch.lane_quiet" \
   "$ACTIVE_TAB.plain"
 lacks "enter deletes the key from the layer" "lane_quiet" "$CONFIG_LAYER"
-has "and keeps the other key" "input = 0.4" "$CONFIG_LAYER"
+has "and keeps the other key" "visible_lanes = 4" "$CONFIG_LAYER"
 
 # The active section promotes pipelines/bugfix.yml onto a local branch no
 # checkout has. config.toml is first with its one key left, so `↓` twice

@@ -710,18 +710,16 @@ impl Board {
     fn with_popup(&self, frame: String, popup: Option<&[String]>) -> String {
         match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
             Some(panel) => {
-                // `overlay` reads its target width off line zero and writes
-                // each panel row by walking a target row's own characters —
-                // right for `spoolway queue`'s own frame, whose every row is
-                // one fixed-width pane with no colour under where a picker
-                // lands. This board's rows carry colour throughout — the
-                // state dot, the dimmed footer, the key hint — and `overlay`
-                // counts an escape byte as a column exactly like a visible
-                // one, so it writes at the wrong column and can slice a
-                // `DIM`/`RESET` pair in two, printing what is left of the
-                // code as stray text. A panel carries no colour of its own,
-                // so the frame under one loses its for the frame this draws
-                // — [`strip_ansi`] — and gets it back the moment the panel
+                // `overlay` lines a panel up by the columns a reader sees,
+                // but the rows under it are padded below through `pad_to`
+                // and measured by their characters, and both count an
+                // escape byte as a column exactly like a visible one. This
+                // board's rows carry colour throughout — the state dot, the
+                // dimmed footer, the key hint — so a coloured row would pad
+                // short of a plain one, with too few columns for the panel
+                // to land on. A panel carries no colour of its own, so the
+                // frame under one loses its for the frame this draws —
+                // [`strip_ansi`] — and gets it back the moment the panel
                 // closes and the next frame is read fresh.
                 //
                 // Also opens on a blank spacer line, and has other blank
@@ -13443,13 +13441,13 @@ mod tests {
 
     /// A confirm panel is drawn in plain text over a frame the table beneath
     /// it colours throughout — the state dot, the dimmed footer, the key
-    /// hint. `overlay` counts an escape byte as a column exactly like a
-    /// visible one, and a naive overlay wrote panel text at the wrong
-    /// column for it, slicing a `DIM`/`RESET` pair in two and leaving what
-    /// survived of the code sitting in the frame as stray text — this pins
-    /// that every escape sequence in the raw, unstripped frame is still
-    /// whole, an `ESC[` opened and a bare `m` closing it with nothing but
-    /// digits and `;` between, panel open or not.
+    /// hint. An overlay that counted an escape byte as a column exactly
+    /// like a visible one wrote panel text at the wrong column for it,
+    /// slicing a `DIM`/`RESET` pair in two and leaving what survived of the
+    /// code sitting in the frame as stray text — this pins that every
+    /// escape sequence in the raw, unstripped frame is still whole, an
+    /// `ESC[` opened and a bare `m` closing it with nothing but digits and
+    /// `;` between, panel open or not.
     #[test]
     fn a_confirm_panel_never_slices_a_coloured_rows_escape_sequence() {
         let (repo, _root_guard) = fixture("panel-colour-safe");

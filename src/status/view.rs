@@ -2697,14 +2697,11 @@ pub(super) fn clamp_rows(frame: &str, height: Option<usize>) -> String {
 /// `m` inside `12m 03s` is not a code ending, and neither is one inside the
 /// url of a group band's hyperlink.
 ///
-/// Used only where a confirm panel is drawn over the board: [`crate::screen::overlay`]
-/// writes a panel row by walking a target row's own characters, escape bytes
-/// included, so it has no way to line a panel's *visible* columns up with a
-/// coloured row's — a `DIM`/`RESET` pair sliced apart by a panel row reads
-/// back as stray digits and letters, not as the colour it opened. A panel
-/// carries no colour of its own, so the frame beneath one can afford to lose
-/// its while it is up; the next frame, once the panel closes, is read fresh
-/// and in colour again.
+/// Used to measure a row by the columns it takes on screen, and by the board
+/// to draw a panel over a frame with its colour taken out, so every row pads
+/// to one width: a panel carries no colour of its own, so the frame beneath
+/// one can afford to lose its while it is up; the next frame, once the panel
+/// closes, is read fresh and in colour again.
 pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();

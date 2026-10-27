@@ -622,6 +622,30 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
     }
 }
 
+/// [`pad_to`] by the columns a reader sees: an escape code takes none, so a
+/// row with a dimmed part pads out to the same border as a plain one. A row
+/// cut before the code that ends its colour gets [`crate::status::RESET`] in
+/// its place, so the colour stops short of whatever is drawn after the row.
+/// The board's own `fit_visible` also closes a hyperlink on every cut, which
+/// a row that never opened one has no use for.
+pub(crate) fn pad_visible(line: &str, width: usize) -> String {
+    if !line.contains('\x1b') {
+        return pad_to(line, width);
+    }
+    let (cells, tail) = cells(line);
+    let mut out = String::new();
+    for (codes, ch) in cells.iter().take(width) {
+        out.extend(codes.iter().map(String::as_str));
+        out.push(*ch);
+    }
+    match cells.len() > width {
+        true => out.push_str(crate::status::RESET),
+        false => out.extend(tail.iter().map(String::as_str)),
+    }
+    out.push_str(&" ".repeat(width.saturating_sub(cells.len())));
+    out
+}
+
 /// The key line every full-screen view draws at its own foot: an ordered
 /// list of key/label pairs, dimmed the way the board dims its own.
 ///
@@ -1027,8 +1051,18 @@ pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
 
 /// Draw `panel` over `frame`, centred, one row down from centre so the
 /// frame's own top border and its titles stay readable behind it.
+///
+/// Columns are the ones a reader sees: an escape code in a row takes none,
+/// so a panel lands in the same place over a coloured row as over a plain
+/// one. A row with no codes is written exactly as a character-for-character
+/// replace would write it. See [`overlay_row`] for the colour around a panel.
+/// The panel itself is still written one character to a column, so it
+/// carries no codes of its own — see [`keys`].
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
-    let Some(width) = frame.first().map(|line| line.chars().count()) else {
+    let Some(width) = frame
+        .first()
+        .map(|line| crate::status::strip_ansi(line).chars().count())
+    else {
         return;
     };
     let panel_width = panel.first().map_or(0, |line| line.chars().count());
@@ -1039,15 +1073,100 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
         let Some(row) = frame.get_mut(y + i) else {
             break;
         };
-        let mut chars: Vec<char> = row.chars().collect();
-        for (j, ch) in line.chars().enumerate() {
-            match chars.get_mut(x + j) {
-                Some(slot) => *slot = ch,
-                None => break,
+        *row = overlay_row(row, line, x);
+    }
+}
+
+/// `row` with `line` written over it from visible column `x`, stopping at
+/// the row's last character as [`overlay`] always has.
+///
+/// A colour open where the panel starts is closed there with
+/// [`crate::status::RESET`], so the panel is never drawn in a dimmed row's
+/// dim, and opened again where the panel ends, so the row's text on the far
+/// side keeps it. The codes of the characters the panel covers are written
+/// after it, in order, rather than dropped: one may close a colour or a
+/// hyperlink that the rest of the row must not carry on into.
+fn overlay_row(row: &str, line: &str, x: usize) -> String {
+    let (cells, tail) = cells(row);
+    let over: Vec<char> = line.chars().collect();
+    let end = x + over.len();
+    // The colour codes in force, from the last reset on.
+    let mut colour = String::new();
+    let mut at_start = String::new();
+    let mut hidden = String::new();
+    let mut out = String::new();
+    for (j, (codes, ch)) in cells.iter().enumerate() {
+        if j == x && !colour.is_empty() {
+            at_start = colour.clone();
+            out.push_str(crate::status::RESET);
+        }
+        if j == end {
+            out.push_str(&at_start);
+            out.push_str(&hidden);
+        }
+        for code in codes {
+            if code == crate::status::RESET {
+                colour.clear();
+            } else if code.starts_with("\x1b[") {
+                colour.push_str(code);
             }
         }
-        *row = chars.into_iter().collect();
+        if (x..end).contains(&j) {
+            hidden.extend(codes.iter().map(String::as_str));
+            out.push(over[j - x]);
+            continue;
+        }
+        out.extend(codes.iter().map(String::as_str));
+        out.push(*ch);
     }
+    // A row that ends under the panel, or right where it ends, never
+    // reached `end` above.
+    if cells.len() <= end {
+        out.push_str(&hidden);
+    }
+    out.extend(tail.iter().map(String::as_str));
+    out
+}
+
+/// `row` as a reader sees it: each visible character with the escape codes
+/// drawn just before it, then the codes after the last one. A colour code
+/// runs from `ESC [` to its final letter; a hyperlink's `ESC ]` runs to the
+/// `ESC \` or BEL that ends it, never to a letter, since its url has letters
+/// in it — the same two kinds [`crate::status::strip_ansi`] reads past.
+fn cells(row: &str) -> (Vec<(Vec<String>, char)>, Vec<String>) {
+    let mut cells = Vec::new();
+    let mut codes = Vec::new();
+    let mut chars = row.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            cells.push((std::mem::take(&mut codes), c));
+            continue;
+        }
+        let mut code = String::from(c);
+        if chars.peek() == Some(&']') {
+            while let Some(c) = chars.next() {
+                code.push(c);
+                match c {
+                    '\u{7}' => break,
+                    '\x1b' => {
+                        code.extend(chars.next());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            // `[` is not a letter, so the code runs on past it to its last one.
+            for c in chars.by_ref() {
+                code.push(c);
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+        codes.push(code);
+    }
+    (cells, codes)
 }
 
 /// `n` with its noun, singular where that is what `n` is.
@@ -1103,6 +1222,55 @@ pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A colour open where a panel starts is closed before it and opened
+    /// again after it, so the text on either side keeps its dim.
+    #[test]
+    fn a_panel_over_a_dimmed_row_closes_the_dim_and_opens_it_again() {
+        let (dim, reset) = (crate::status::DIM, crate::status::RESET);
+        let mut frame = vec!["──────────".to_string(), format!("│{dim}abcdefgh{reset}│")];
+        overlay(&mut frame, &["XY".to_string()]);
+        assert_eq!(frame[1], format!("│{dim}abc{reset}XY{dim}fgh{reset}│"));
+    }
+
+    /// A code on a character the panel covers is written after the panel,
+    /// not dropped: a reset there still ends the dim for the rest of the
+    /// row, and a hyperlink's codes count for no column.
+    #[test]
+    fn a_code_under_a_panel_is_written_after_it() {
+        let (dim, reset) = (crate::status::DIM, crate::status::RESET);
+        let link = "\x1b]8;;https://example.com/m\x1b\\";
+        let mut frame = vec![
+            "──────────".to_string(),
+            format!("│{link}{dim}abcd{reset}efgh│"),
+        ];
+        overlay(&mut frame, &["XY".to_string()]);
+        assert_eq!(
+            frame[1],
+            format!("│{link}{dim}abc{reset}XY{dim}{reset}fgh│")
+        );
+
+        // A row that ends right where the panel does still closes the
+        // hyperlink its last character carried the close of.
+        let close = "\x1b]8;;\x1b\\";
+        let mut frame = vec!["──────────".to_string(), format!("│abc{link}d{close}e")];
+        overlay(&mut frame, &["XY".to_string()]);
+        assert_eq!(frame[1], format!("│abcXY{link}{close}"));
+    }
+
+    /// A row with no codes is written as a character-for-character replace
+    /// would write it, and a panel past the row's end stops there.
+    #[test]
+    fn a_panel_over_a_plain_row_replaces_its_characters() {
+        let mut frame = vec![
+            "──────────".to_string(),
+            "│abcdefgh│".to_string(),
+            "│ab".to_string(),
+        ];
+        overlay(&mut frame, &["XY".to_string(), "ZZ".to_string()]);
+        assert_eq!(frame[1], "│abcXYfgh│");
+        assert_eq!(frame[2], "│ab");
+    }
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     /// Words that keep a capital in TUI text, each under the one category

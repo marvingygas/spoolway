@@ -445,16 +445,8 @@ pub(crate) fn apply_config_patch(
     config: Config,
     overrides: &Path,
 ) -> Result<(Config, Vec<Ignored>)> {
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((config, Vec::new())),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok((config, Vec::new()));
     };
     let mut ignored = Vec::new();
     let config = apply_config_table(config, &table, &mut ignored);
@@ -911,16 +903,8 @@ pub(crate) fn config_patch_leaves_for(overrides: &Path, key: &str) -> Result<Vec
     let key = crate::confkv::split_models_key(key)
         .map(|parts| parts.join("."))
         .unwrap_or_else(|| key.to_string());
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok(Vec::new());
     };
     let mut found = Vec::new();
     collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
@@ -935,25 +919,74 @@ pub(crate) fn config_patch_leaves_for(overrides: &Path, key: &str) -> Result<Vec
     Ok(found)
 }
 
-/// The dotted leaf keys `overrides/config.toml` carries, sorted — `None`
-/// when there is no patch. For `override list`, which shows what a config
-/// patch overrides the same way it shows a pipeline patch's step keys.
-pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>> {
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
+/// The config file at `path` as a TOML table, `None` when there is no file:
+/// what every reader of a config file here starts from, so a missing file,
+/// a read error and a parse error read the same in each. A TOML document is
+/// a table at its top, so it parses straight into one.
+fn read_config_table(path: &Path) -> Result<Option<toml::Table>> {
+    let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    toml::from_str(&raw)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
+/// The dotted leaf keys `overrides/config.toml` carries, sorted — `None`
+/// when there is no patch. For `override list`, which shows what a config
+/// patch overrides the same way it shows a pipeline patch's step keys.
+pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>> {
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok(None);
     };
     let mut keys = Vec::new();
     collect_leaf_keys(&table, &mut String::new(), &mut keys);
     keys.sort();
     Ok(Some(keys))
+}
+
+/// The dotted key of every leaf the config file at `path` holds, spelled as
+/// the config spells it today — `None` when there is no file. Read the way
+/// [`config_patch_keys`] reads the layer, so a key under a `[table]` heading,
+/// in an inline table or under a quoted `[models."claude-*"]` glob all come
+/// out as the one dotted key `confkv::all_settings` lists it under.
+///
+/// For the overrides tab, which dims every key neither the tracked file nor
+/// the layer holds. An old spelling the load still accepts is read as the
+/// key it sets: left as written, a row the file does set would dim.
+pub(crate) fn config_file_keys(path: &Path) -> Result<Option<BTreeSet<String>>> {
+    let Some(table) = read_config_table(path)? else {
+        return Ok(None);
+    };
+    let mut keys = Vec::new();
+    collect_leaf_keys(&table, &mut String::new(), &mut keys);
+    Ok(Some(keys.iter().map(|key| spelled_today(key)).collect()))
+}
+
+/// `key` under the name the config gives it today. The old names are the
+/// serde aliases a load still reads — `[pricing]` for `[models]`, a glob's
+/// `cache_ttl` and `session_reuse_idle` for `prompt_cache_ttl`, its
+/// `cache_write` for `cache_write_5m` — and the layer's
+/// `dispatch.keep_finished_lanes`, which [`current_spelling`] applies as
+/// `dispatch.visible_lanes`. Every other key passes through unchanged.
+fn spelled_today(key: &str) -> String {
+    if key == KEEP_FINISHED_LANES {
+        return "dispatch.visible_lanes".to_string();
+    }
+    let key = match key.strip_prefix("pricing.") {
+        Some(rest) => format!("models.{rest}"),
+        None => key.to_string(),
+    };
+    if !key.starts_with("models.") {
+        return key;
+    }
+    match key.rsplit_once('.') {
+        Some((table, "cache_ttl" | "session_reuse_idle")) => format!("{table}.prompt_cache_ttl"),
+        Some((table, "cache_write")) => format!("{table}.cache_write_5m"),
+        _ => key,
+    }
 }
 
 /// Every dotted path to a leaf (non-table) value in `table` — the sibling of
@@ -1147,16 +1180,8 @@ fn config_patch_after_removing(overrides: &Path, keys: &[String]) -> Result<Opti
 /// For the OVERRIDES tab, which shows each key's value beside the setup's
 /// and says when the two are the same.
 pub(crate) fn config_patch_inputs(overrides: &Path) -> Result<Option<Vec<ConfigLeaf>>> {
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok(None);
     };
     let mut leaves = Vec::new();
     collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
@@ -2058,6 +2083,61 @@ agent: pi
         assert_eq!(
             config_patch_keys(&overrides).unwrap(),
             Some(vec!["dispatch.lane_quiet".to_string()])
+        );
+    }
+
+    /// A config file's keys come out as the dotted keys `config list` names
+    /// them by, however the file writes them: under a `[table]` heading, in
+    /// an inline table, under a quoted model glob, or by a name the load
+    /// still accepts. No file reads as `None`.
+    #[test]
+    fn config_file_keys_reads_every_spelling_as_the_listed_key() {
+        let dir = crate::scratch::root("overrides-config-file-keys");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.toml");
+        assert_eq!(config_file_keys(&path).unwrap(), None);
+
+        // Each key is one the list shows, so its row is not dimmed.
+        let listed = |raw: &str| -> Vec<String> {
+            let config: Config = toml::from_str(raw).unwrap();
+            crate::confkv::all_settings(&config)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.key)
+                .collect()
+        };
+        for (raw, want) in [
+            (
+                "[dispatch]\nlane_quiet = \"5m\"\n\n\
+                 [agents]\nclaude = { kind = \"claude\", concurrency = 2 }\n\n\
+                 [models.\"claude-*\"]\ninput = 3.0\ncache_ttl = \"1h\"\n",
+                &[
+                    "agents.claude.concurrency",
+                    "agents.claude.kind",
+                    "dispatch.lane_quiet",
+                    "models.claude-*.input",
+                    "models.claude-*.prompt_cache_ttl",
+                ][..],
+            ),
+            (
+                "[pricing.\"gpt-*\"]\ncache_write = 1.0\n",
+                &["models.gpt-*.cache_write_5m"][..],
+            ),
+        ] {
+            crate::task::write_atomic(&path, raw).unwrap();
+            let keys = config_file_keys(&path).unwrap().unwrap();
+            assert_eq!(keys.iter().map(String::as_str).collect::<Vec<_>>(), want);
+            let listed = listed(raw);
+            for key in want {
+                assert!(listed.iter().any(|l| l == key), "{key}: {listed:#?}");
+            }
+        }
+
+        // The layer's retired `keep_finished_lanes` sets `visible_lanes`.
+        crate::task::write_atomic(&path, "[dispatch]\nkeep_finished_lanes = true\n").unwrap();
+        assert_eq!(
+            config_file_keys(&path).unwrap(),
+            Some(BTreeSet::from(["dispatch.visible_lanes".to_string()]))
         );
     }
 
