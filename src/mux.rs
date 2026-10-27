@@ -305,6 +305,30 @@ pub trait Mux: Sync {
         false
     }
 
+    /// Bring the pane `pane_id` in front of the person and maximize it, for
+    /// whatever runs in it: an agent's pane and a command step's pane alike,
+    /// which is why this goes by pane id rather than through
+    /// [`Mux::focus_lane`], whose herdr call needs a live agent in the pane.
+    ///
+    /// The default refuses, the same way [`Mux::open_command`] does: a
+    /// backend gets this only by implementing it, and headless has no pane to
+    /// bring forward.
+    // Nothing in the binary calls this yet: the board's `focus` item is the
+    // caller, and it lands separately. Without the allow the dead-code lint
+    // fails the build until it does.
+    #[allow(dead_code)]
+    fn focus_pane(&self, _pane_id: &str) -> Result<()> {
+        bail!("this backend has no pane to focus")
+    }
+
+    /// Whether [`Mux::focus_pane`] works on this backend, so a caller can
+    /// hide the action instead of offering one that refuses. A backend that
+    /// implements `focus_pane` overrides this to `true`.
+    #[allow(dead_code)]
+    fn can_focus_pane(&self) -> bool {
+        false
+    }
+
     /// Every tab this backend currently has open on a checkout of ours,
     /// with just enough about each to judge
     /// [`crate::dispatch::sweep_anchor_tabs`]'s four conditions — never a
@@ -1960,6 +1984,16 @@ impl Mux for Herdr {
         self.pane_run(&workspace.pane_id, command)
     }
 
+    fn can_focus_pane(&self) -> bool {
+        true
+    }
+
+    fn focus_pane(&self, pane_id: &str) -> Result<()> {
+        let argv = pane_zoom_argv(pane_id);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        self.call_ignoring_result(&argv)
+    }
+
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
         let workspaces: WorkspaceList = self.call(&["workspace", "list"])?;
         let panes: PaneList = self.call(&["pane", "list"])?;
@@ -2820,6 +2854,22 @@ fn tab_create_argv(workspace_id: &str, cwd: &str, label: &str) -> Vec<String> {
         cwd.to_string(),
         "--label".to_string(),
         label.to_string(),
+    ]
+}
+
+/// The call that brings a pane forward by id. herdr's `pane focus` only moves
+/// to a neighbour by direction, so it cannot do this; `pane zoom --on` takes
+/// any pane id, switches to that pane's workspace and tab, gives it focus and
+/// maximizes it.
+///
+/// Pulled out on its own, like [`tab_create_argv`], so the shape of the call
+/// is checkable without a real herdr to send it to.
+fn pane_zoom_argv(pane_id: &str) -> Vec<String> {
+    vec![
+        "pane".to_string(),
+        "zoom".to_string(),
+        pane_id.to_string(),
+        "--on".to_string(),
     ]
 }
 
@@ -4395,6 +4445,16 @@ mod tests {
             ]
         );
         assert!(!argv.iter().any(|arg| arg.contains("focus")));
+    }
+
+    /// A pane is focused by id through `pane zoom --on`, the one herdr call
+    /// that takes any pane id and brings it forward.
+    #[test]
+    fn a_pane_is_focused_by_zooming_it_on() {
+        assert_eq!(
+            pane_zoom_argv("w5S:p31"),
+            ["pane", "zoom", "w5S:p31", "--on"]
+        );
     }
 
     /// `tab create` answers the tab and the bare pane it opened with; the
