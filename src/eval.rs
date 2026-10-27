@@ -4706,9 +4706,10 @@ fn export_rows(
     }
 }
 
-/// The `by` the table on screen is grouped by — what its title, its export's
-/// file name and the export confirmation all name it as. The trials table
-/// has no `by`: it is always one row per trial, which is what this names.
+/// The `by` the table on screen is grouped by — what the top border's right
+/// side, the filter panel's `by` row, its export's file name and the export
+/// confirmation all name it as. The trials table has no `by`: it is always
+/// one row per trial, which is what this names.
 fn by_label(filters: &Filters, table: TableKind) -> &'static str {
     match table {
         TableKind::Lanes => filters.by.label(),
@@ -4717,14 +4718,16 @@ fn by_label(filters: &Filters, table: TableKind) -> &'static str {
     }
 }
 
-/// `by <by>` and which figures are drawn, such as `by pipeline · totals`, or
-/// plain `trials` for the table that has no `by` to name and no figures to
-/// switch — what the export confirmation names a table by. The top border's
-/// right side opens with it on the two tables that have a `by`.
-fn frame_title(filters: &Filters, table: TableKind) -> String {
+/// `by <by>` and which figures are drawn, such as `by pipeline · totals`:
+/// what the top border's right side opens with and what the export
+/// confirmation names a table by. Only the lanes and directory tables have
+/// one; the trials table has no `by` to name and no figures to switch.
+fn view_title(filters: &Filters, table: TableKind) -> String {
     match table {
-        TableKind::Trials => "trials".to_string(),
-        _ => format!(
+        TableKind::Trials => {
+            unreachable!("the trials table has no view: its border and `e` never ask for one")
+        }
+        TableKind::Lanes | TableKind::Dirs => format!(
             "by {} · {}",
             by_label(filters, table),
             filters.figures.label(table)
@@ -4846,13 +4849,13 @@ fn frame_rows(height: Option<usize>, key_rows: usize) -> Option<usize> {
 }
 
 /// The right side of the top border: the grouping and view from
-/// [`frame_title`] first, since they say how the rows are cut as a filter
+/// [`view_title`] first, since they say how the rows are cut as a filter
 /// does, then `filters`, joined by ` · `. The trials table has no grouping,
 /// so its right side is `filters` alone.
 fn view_label(filters: &Filters, table: TableKind, filters_label: &str) -> String {
     let view = match table {
         TableKind::Trials => None,
-        TableKind::Lanes | TableKind::Dirs => Some(frame_title(filters, table)),
+        TableKind::Lanes | TableKind::Dirs => Some(view_title(filters, table)),
     };
     view.into_iter()
         .chain((!filters_label.is_empty()).then(|| filters_label.to_string()))
@@ -5902,7 +5905,7 @@ fn run_screen_with(
                                         body: format!(
                                             "{}, {}\n{}",
                                             plural(rows, "row"),
-                                            frame_title(&state.filters, state.table),
+                                            view_title(&state.filters, state.table),
                                             display_relative(&path, &repo.root),
                                         ),
                                         keys: None,
