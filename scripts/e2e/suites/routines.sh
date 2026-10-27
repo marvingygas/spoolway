@@ -50,7 +50,7 @@ task_doc .spoolway/routines/nightly/audit-docs.md audit-docs "$BODY" \
   "group: nightly" "depends_on: [audit-deps]"
 task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: maintenance"
 
-# `→` moves from the queue tab, where the screen opens, to the routines tab;
+# `→` moves from the queue tab `on_screen` hands over to the routines tab;
 # `j` moves the cursor off `maintenance` (alphabetically first) onto
 # `nightly`; `space` ticks it; `enter` queues both its documents as one batch
 # — starting a dispatcher is the dispatch tab's `enter`, not this one's; the

@@ -327,7 +327,7 @@ says "while the entry beside it in the same file is still listed as applying" \
   "$SPOOLWAY" override list
 
 # Bare `spoolway` says nothing about the ignored override: it prints no note
-# before the screen, and the queue tab opens with no popup. The override
+# before the screen, and the screen opens with no popup. The override
 # shows up where a person starts dispatching instead (the overrides gate).
 # The typescript from `script` merges stderr into the screen, so a note
 # printed anywhere would be found by reading the whole file. `frame N`
@@ -347,8 +347,8 @@ IGNORED_SCREEN="$LIVE/ignored-screen.txt"
 git commit -qm "settle config.toml the way sync writes it" -- .spoolway/config.toml >/dev/null 2>&1 || true
 on_screen '\r' "$IGNORED_SCREEN"
 frame "$IGNORED_SCREEN" 1 >"$IGNORED_SCREEN.first"
-has "bare spoolway opens on the queue tab" \
-  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$IGNORED_SCREEN.first"
+has "bare spoolway opens on the dispatch tab" \
+  "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$IGNORED_SCREEN.first"
 lacks "with no override ignored popup over it" \
   "override ignored" "$IGNORED_SCREEN.first"
 lacks "and no ignored-override note anywhere in the session's output" \
