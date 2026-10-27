@@ -978,7 +978,7 @@ that value, any override already in the layer included, or `not set`.
 ╰──────────────────────────────────────────────────╯
 ```
 
-`enter` in the popup writes the key to the layer's `config.toml`, exactly as typed, and the
+`enter` in the popup writes the typed value under its key in the layer's `config.toml`, and the
 list shows the new value. Text that reads as a TOML number, boolean or array is written as one,
 and anything else is written as a string: `5`, `true` and `["a", "b"]` keep their type, and
 `5m`, `010` and `group first` are written as strings. `enter` on an empty field writes nothing.
@@ -990,9 +990,8 @@ that failed and the first line of its error, and gives the command to fix it: `s
 edit` for the tracked file, `spoolway config override` for the layer. The note stays in view
 while the list scrolls and goes once the file loads again.
 
-The tab does not check the key or the value. A value the config cannot hold, or a key this
-spoolway does not know, is still written, and `spoolway override list` reports it as ignored
-with the reason. A write that fails, such as on a layer file that does not parse, opens a
+The tab does not check the value. A value the config cannot hold is still written, and
+`spoolway override list` reports it as ignored with the reason. A write that fails, such as on a layer file that does not parse, opens a
 `not written` popup naming the key and the error, closed by `enter`.
 
 ### The pipeline section
