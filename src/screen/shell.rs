@@ -458,7 +458,11 @@ const TO_QUEUE: &str = "\x1b[C";
 #[cfg(test)]
 pub(crate) fn drive_frames(repo: &Repo, input: &str) -> Vec<String> {
     let mut frames = drive_from_start(repo, &format!("{TO_QUEUE}{input}"));
-    frames.remove(0);
+    let opening = frames.remove(0);
+    assert!(
+        opening.contains("[DISPATCH]"),
+        "the frame dropped ahead of the queue tab is the dispatch tab's: {opening}"
+    );
     frames
 }
 
@@ -1592,15 +1596,15 @@ mod tests {
         assert!(first.contains("dispatcher stopped"), "{first}");
     }
 
-    /// [`drive_host`] with the same queue-tab start, keeping each frame's own
-    /// bytes whole — colour codes,
-    /// cursor moves and all — with its own start code put back on the front
-    /// (`split` throws the delimiter it matched away). A frame's own bytes
-    /// can never hold another frame's text — a fresh write replaces the
-    /// whole picture — so a check for stale text has to read it off the
-    /// *screen* an emulator paints these bytes onto instead, the same way a
-    /// person watching a real terminal would see whatever a skipped write
-    /// left behind.
+    /// [`drive_host`] with the same queue-tab start, dropping the opening
+    /// dispatch frame as [`drive_frames`] does. Keeps each frame's own bytes
+    /// whole — colour codes, cursor moves and all — with its own start code
+    /// put back on the front (`split` throws the delimiter it matched away).
+    /// A frame's own bytes can never hold another frame's text — a fresh
+    /// write replaces the whole picture — so a check for stale text has to
+    /// read it off the *screen* an emulator paints these bytes onto instead,
+    /// the same way a person watching a real terminal would see whatever a
+    /// skipped write left behind.
     fn drive_host_raw_frames(repo: &Repo, input: &str) -> Vec<String> {
         let mut input = std::io::Cursor::new(format!("{TO_QUEUE}{input}").into_bytes());
         let mut out = Vec::new();
@@ -1613,12 +1617,16 @@ mod tests {
         )
         .unwrap();
         let drawn = String::from_utf8(out).unwrap();
-        drawn
+        let mut frames = drawn
             .split("\x1b[?2026h\x1b[H")
             .skip(1)
             .map(|body| format!("\x1b[?2026h\x1b[H{body}"))
-            .skip(1)
-            .collect()
+            .collect::<Vec<_>>();
+        assert!(
+            frames[0].contains("[DISPATCH]"),
+            "the frame dropped ahead of the queue tab is the dispatch tab's"
+        );
+        frames.split_off(1)
     }
 
     /// Round every tab both ways and require that, after each switch, no
@@ -1637,7 +1645,7 @@ mod tests {
     #[test]
     fn every_tab_forgets_the_last_one_going_round_and_back() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-tab-cycle");
-        // Queue (open) → Dispatch → Queue → Routines → Overrides → Eval →
+        // Queue (where the driver starts) → Dispatch → Queue → Routines → Overrides → Eval →
         // Overrides → Routines → Queue → Dispatch → Queue: forward through
         // all five, then back through all five, both with a real switch
         // behind every arrow.
@@ -1692,7 +1700,7 @@ mod tests {
         crate::status::testutil::add(&repo, "wire", &[], None);
         let (width, height) = (100, 24);
         let _terminal = crate::screen::test_terminal((width, height));
-        // Queue (open) → Dispatch → Queue → Routines → Overrides → Eval.
+        // Queue (where the driver starts) → Dispatch → Queue → Routines → Overrides → Eval.
         let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C");
         let names = [
             "queue",

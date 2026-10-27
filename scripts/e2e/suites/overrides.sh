@@ -327,7 +327,7 @@ says "while the entry beside it in the same file is still listed as applying" \
   "$SPOOLWAY" override list
 
 # Bare `spoolway` says nothing about the ignored override: it prints no note
-# before the screen, and the queue tab opens with no popup. The override
+# before the screen, and the screen opens with no popup. The override
 # shows up where a person starts dispatching instead (the overrides gate).
 # The typescript from `script` merges stderr into the screen, so a note
 # printed anywhere would be found by reading the whole file. `frame N`

@@ -486,6 +486,8 @@ screen_start() {
   local fifo="$1.keys" pidfile="$1.pid"
   _screen_ready
   touch "$E2E_SCREEN_LOG"
+  local mark
+  mark=$(wc -l < "$E2E_SCREEN_LOG")
   rm -f "$fifo" "$pidfile"
   mkfifo "$fifo" || { echo "no fifo" >&2; exit 2; }
   # Read-write, so this open returns without waiting for the screen to open
@@ -509,9 +511,17 @@ screen_start() {
     exit 2
   }
   E2E_SCREEN_PID=$(cat "$pidfile")
-  # The screen opens on the dispatch tab. One `→` hands every caller the
-  # queue tab, which is where each counts its keys from.
+  # The screen opens on the dispatch tab, and its board says `dispatcher
+  # stopped` as `screen_board` waits for. One `→` hands every caller the queue
+  # tab, which is where each counts its keys from, and the wait for its
+  # `groups` pane keeps that opening board from standing in for a frame the
+  # caller's own keys draw.
   screen_press $'\x1b[C'
+  poll_until 10 screen_drew_since "$mark" "─ groups" || {
+    printf '  \033[31mSETUP\033[0m the screen never drew the queue tab\n' >&2
+    tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
+    exit 2
+  }
 }
 
 # One keystroke, or several, into the open screen. `\x1b` for esc, `\r` for

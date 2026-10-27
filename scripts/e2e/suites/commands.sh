@@ -1248,6 +1248,11 @@ works "it never touched the pending directory" \
 # "nothing to list", so long as the queue itself still holds a group. The
 # queue tab never lists a queued group, so not even `h` draws its row.
 on_screen 'h' "$LIVE/queue-screen-only.out"
+# The screen opens on the dispatch tab, whose board does list a queued group,
+# so the check for the group's name reads only the frames drawn after it:
+# the preamble and that opening frame are the first two pieces of the split.
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR > 2' "$LIVE/queue-screen-only.out" \
+  >"$LIVE/queue-screen-only.queue"
 if grep -q "nothing to list" "$LIVE/queue-screen-only.out"; then
   bad "a group with nothing left in pending still opens the screen"
   sed 's/^/        /' "$LIVE/queue-screen-only.out"
@@ -1255,7 +1260,7 @@ else
   ok "a group with nothing left in pending still opens the screen"
 fi
 lacks "\`h\` never lists a group whose tasks are only in the queue now" \
-  "screen-shipped-group" "$LIVE/queue-screen-only.out"
+  "screen-shipped-group" "$LIVE/queue-screen-only.queue"
 
 # --------------------------------------------------- the archive's own rows
 # `list_groups` reads the archive as a third source, through the line
@@ -1279,8 +1284,8 @@ works "and landed in the archive" \
 # Two key presses of `h`, captured as one session: the shared frame writer
 # (`src/screen/frame_writer.rs`) writes a fresh `\x1b[?2026h\x1b[H` before
 # every frame that differs from the last, so the python snippet below splits
-# the raw output back into the three frames this draws — opening, then one
-# per press — rather than grepping the whole file, which could never tell
+# the raw output back into the frames this draws — the dispatch tab the screen
+# opens on, the queue tab `on_screen` moves to, then one per press — rather than grepping the whole file, which could never tell
 # "shown once, then hidden again" from "never shown".
 on_screen 'hh' "$LIVE/queue-h-cycle.out"
 if python3 - "$LIVE/queue-h-cycle.out" arch-row <<'PY'
@@ -1290,11 +1295,12 @@ data = open(sys.argv[1], "rb").read()
 name = sys.argv[2].encode()
 # `draw` writes `\x1b[?25l` (hide the cursor) once, before the first frame,
 # so the piece ahead of the first real `\x1b[?2026h\x1b[H` is that preamble,
-# not a frame — dropped with `[1:]` rather than filtered for being
+# not a frame — dropped with a slice rather than filtered for being
 # non-empty, since the preamble is itself a few bytes long and would
-# otherwise pass.
-frames = data.split(b"\x1b[?2026h\x1b[H")[1:]
-# frames[0..2] are the opening frame and the two `h` presses, in order —
+# otherwise pass. The opening dispatch frame is dropped with it, so the
+# frames start at the queue tab `on_screen` moved to.
+frames = data.split(b"\x1b[?2026h\x1b[H")[2:]
+# frames[0..2] are the queue tab and the two `h` presses, in order —
 # the first press shows done groups, so the group first appears in frames[1],
 # and the second press hides them again, so the last frame must not carry it.
 ok = len(frames) >= 3 and name not in frames[0] and name in frames[1] and name not in frames[-1]
