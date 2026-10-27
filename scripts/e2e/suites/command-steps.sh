@@ -1444,10 +1444,12 @@ SPOOLWAY_E2E_PANE_BULK=$(head -c 8000 /dev/zero | tr '\0' 'x'); export SPOOLWAY_
 # the suite has read it. `timeout:` is the backstop, so a suite that dies
 # before releasing it does not leave a pane waiting forever.
 CARRY_RELEASE="$LIVE/carry.release"
-rm -f "$CARRY_RELEASE"
+LONG_RELEASE="$LIVE/long.release"
+rm -f "$CARRY_RELEASE" "$LONG_RELEASE"
 
 LONG_PAD=$(head -c 4000 /dev/zero | tr '\0' 'x')
-sed -e "s|@RELEASE@|$CARRY_RELEASE|" -e "s|@PAD@|$LONG_PAD|" > .spoolway/pipelines/herdrpane.yml <<'YML'
+sed -e "s|@RELEASE@|$CARRY_RELEASE|" -e "s|@LONG_RELEASE@|$LONG_RELEASE|" \
+  -e "s|@PAD@|$LONG_PAD|" > .spoolway/pipelines/herdrpane.yml <<'YML'
 description: Two paned command steps, for the environment a pane is handed and a long run line.
 
 steps:
@@ -1459,7 +1461,7 @@ steps:
     on_fail: blocked
   - id: long
     description: A run line of about four kilobytes, which is never typed into the pane.
-    run: ': @PAD@; echo long-run-line-ran-whole'
+    run: ': @PAD@; echo long-run-line-ran-whole; while [ ! -e "@LONG_RELEASE@" ]; do sleep 0.1; done'
     timeout: 120s
     on_pass: done
     on_fail: blocked
@@ -1509,9 +1511,14 @@ fi
 # is a `run:` line of about four kilobytes under the padded home: it runs whole
 # only if the pane was handed a file to run, not the line itself.
 touch "$CARRY_RELEASE"
+#
+# It is held open the same way, for the same race one step later: `long` is
+# the last step before `done`, so its log goes with the archive, and on a
+# loaded runner the archive beat `records` to it.
 records "a four-kilobyte run: line under a full-length home ran whole" \
   "long-run-line-ran-whole" \
   "$SPOOLWAY_PROJECT_HOME/commands/carried · long.log" carried
+touch "$LONG_RELEASE"
 
 # `herdr-stub.sh` keeps every string spoolway typed into a pane, with its
 # length, and refuses one past 512 bytes. The environment is 8KB and the
