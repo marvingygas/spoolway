@@ -131,6 +131,59 @@ pub(super) const OSC8: &str = "\x1b]8;;";
 pub(super) const ST: &str = "\x1b\\";
 
 impl State {
+    /// Every state there is, so the STATE column can be sized to the longest
+    /// word among them rather than to the rows on one board. Kept complete by
+    /// [`State::position`]: a new variant fails to compile there until it is
+    /// given a slot, and `every_state_is_in_all_once` fails until that slot
+    /// is filled here.
+    pub(super) const ALL: [State; 13] = [
+        State::Paused,
+        State::HookFailed,
+        State::Running,
+        State::Silent,
+        State::Starting,
+        State::Finished,
+        State::Blocked,
+        State::Unknown,
+        State::Prompt,
+        State::Queued,
+        State::Waiting,
+        State::Held,
+        State::Done,
+    ];
+
+    /// Where this state sits in [`State::ALL`]. The match has no wildcard on
+    /// purpose: it is the one place a new variant cannot be left out of, and
+    /// that is what keeps `ALL` from silently missing a longer word.
+    #[cfg(test)]
+    fn position(self) -> usize {
+        match self {
+            State::Paused => 0,
+            State::HookFailed => 1,
+            State::Running => 2,
+            State::Silent => 3,
+            State::Starting => 4,
+            State::Finished => 5,
+            State::Blocked => 6,
+            State::Unknown => 7,
+            State::Prompt => 8,
+            State::Queued => 9,
+            State::Waiting => 10,
+            State::Held => 11,
+            State::Done => 12,
+        }
+    }
+
+    /// The width of the longest [`State::word`], in characters: what the
+    /// STATE column is on every frame, whatever the rows are in.
+    pub(super) fn widest_word() -> usize {
+        State::ALL
+            .iter()
+            .map(|s| s.word().chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// What the state reads as, with nothing invisible in it. The dot is part
     /// of the word: it is what carries the colour, and a plain-text table wants
     /// the same column width as a coloured one.
@@ -1378,10 +1431,12 @@ pub(super) fn table_laid_out(
     // same as any other shed column, and STEP returns to `step_w_bare`.
     let step_w_bare = width(&|r| r.stage.chars().count(), 4);
     let step_w_loop = width(&|r| step_text(r).chars().count(), 4);
-    // Wide enough for the widest state *on the board*, and no wider. Sized to
-    // the widest word there is instead, a queue of running tasks holds seven
-    // columns open for a state nothing is in.
-    let state_w = width(&|r| state_cell_text(r).chars().count(), 5);
+    // As wide as the longest state word there is, on every frame. Sized to
+    // the states on the board instead, every column to its right moved each
+    // time a task was queued, started, ran or stopped. A STATE cell is the
+    // word alone, so no row draws wider than this, and the narrow-pane loop
+    // below never sheds it: other columns go a little sooner instead.
+    let state_w = State::widest_word().max("STATE".len());
     let ctx_w = width(
         &|r| figure(r.ctx.map(|pct| format!("{pct}%"))).chars().count(),
         3,
@@ -2513,9 +2568,8 @@ pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -
     let events: Vec<&RecentEvent> = recent.iter().rev().take(shown).collect();
 
     // The name column sized to the rows about to be drawn, not to a fixed
-    // guess — the same reason the table's own STATE column is only as wide
-    // as the states actually on the board (see
-    // `the_state_column_is_only_as_wide_as_the_states_on_the_board`).
+    // guess: a task name has no longest value to fix it at, and the block is
+    // redrawn whole on every move, so nothing to its right is left to shift.
     let name_width = events
         .iter()
         .map(|event| event.name().chars().count())
@@ -2819,6 +2873,128 @@ mod tests {
         assert_eq!(state_cell_text(&hidden), "● running");
         let painted = Style::board(120).paint_state(&hidden);
         assert_eq!(painted, format!("{GREEN}● running{RESET}"));
+    }
+
+    /// `State::ALL` names each state once, in the slot `State::position`
+    /// gives it, so the STATE column is sized against every word there is.
+    #[test]
+    fn every_state_is_in_all_once() {
+        for (slot, state) in State::ALL.iter().enumerate() {
+            assert_eq!(state.position(), slot, "{}", state.word());
+        }
+    }
+
+    /// No state word is wider than the STATE column, so no row pushes the
+    /// columns to its right out. The column is measured off a table of
+    /// queued rows alone, the narrowest it was ever drawn for.
+    #[test]
+    fn no_state_word_is_wider_than_the_state_column() {
+        let rows = vec![Row {
+            next: "→ review".into(),
+            ..row("queued-task")
+        }];
+        let plain = plain_table(&rows);
+        let header = plain.lines().find(|l| l.contains("STATE")).unwrap();
+        let column = header.find("NEXT").unwrap() - header.find("STATE").unwrap() - GUTTER.len();
+
+        assert_eq!(State::widest_word(), "● hook failed".chars().count());
+        assert_eq!(column, State::widest_word(), "{plain}");
+        for state in State::ALL {
+            assert!(
+                state.word().chars().count() <= column,
+                "{} is wider than the {column}-character STATE column",
+                state.word()
+            );
+        }
+    }
+
+    /// The same tasks in different states put CTX and NEXT at the same
+    /// column, on the board and in `queue list`: a task starting is no
+    /// reason for every column to its right to move.
+    #[test]
+    fn ctx_and_next_stay_put_when_a_row_changes_state() {
+        let task = |id: &str, state: State| Row {
+            state,
+            next: "→ review".into(),
+            ..row(id)
+        };
+        let queued = vec![
+            task("fix-login", State::Queued),
+            task("add-cache", State::Queued),
+        ];
+        let starting = vec![
+            task("fix-login", State::Starting),
+            task("add-cache", State::Queued),
+        ];
+        let failed = vec![
+            task("fix-login", State::HookFailed),
+            task("add-cache", State::Queued),
+        ];
+
+        // Where `word` starts on the line that holds `on`, in characters.
+        let at = |frame: &str, on: &str, word: &str| {
+            let line = frame.lines().find(|l| l.contains(on)).unwrap();
+            line[..line.find(word).unwrap()].chars().count()
+        };
+        let board = |rows: &[Row]| strip(&table(rows, Style::board(200), &BTreeMap::new(), None));
+        for frame in [board(&starting), board(&failed)] {
+            assert_eq!(
+                at(&frame, "STATE", "CTX"),
+                at(&board(&queued), "STATE", "CTX"),
+                "{frame}"
+            );
+            assert_eq!(
+                at(&frame, "fix-login", "→ review"),
+                at(&board(&queued), "fix-login", "→ review"),
+                "{frame}"
+            );
+        }
+        for frame in [plain_table(&starting), plain_table(&failed)] {
+            let before = plain_table(&queued);
+            assert_eq!(
+                at(&frame, "STATE", "NEXT"),
+                at(&before, "STATE", "NEXT"),
+                "{frame}"
+            );
+            assert_eq!(
+                at(&frame, "add-cache", "→ review"),
+                at(&before, "add-cache", "→ review"),
+                "{frame}"
+            );
+        }
+    }
+
+    /// On a narrow pane STATE keeps its full width: the columns after it
+    /// shed instead, and every line still fits on one row of the pane.
+    #[test]
+    fn a_narrow_pane_keeps_the_state_column_whole() {
+        let running = |id: &str| Row {
+            state: State::Running,
+            ctx: Some(41),
+            out: Some(12_000),
+            cost: Some(0.84),
+            lane_time: Some(190),
+            next: "→ review".into(),
+            ..row(id)
+        };
+        let rows = vec![running("fix-login"), running("slow-job")];
+        let full = State::widest_word() + GUTTER.len();
+        for pane in (60..=120).rev() {
+            let frame = strip(&table(&rows, Style::board(pane), &BTreeMap::new(), None));
+            for line in frame.lines() {
+                assert!(line.chars().count() <= pane, "{pane}: {line}");
+            }
+            let header = frame.lines().find(|l| l.contains("STATE")).unwrap();
+            let state_at = header.find("STATE").unwrap();
+            // Whatever header follows STATE at this width, it starts a full
+            // column after it.
+            if let Some(gap) = header[state_at + "STATE".len()..].find(|c: char| c != ' ') {
+                let next_at = state_at + "STATE".len() + gap;
+                // CTX is right-aligned, so its header may sit further in.
+                assert!(next_at - state_at >= full, "{pane}: {header}");
+            }
+            assert!(frame.contains("● running"), "{pane}: {frame}");
+        }
     }
 
     /// The outer order is the group's name and nothing else, so a group

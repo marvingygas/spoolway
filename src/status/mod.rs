@@ -10604,12 +10604,13 @@ mod tests {
         assert_eq!(cost, None);
     }
 
-    /// The STATE column is sized to the board, not to the widest word there
-    /// is: a queue with nothing waiting on a person should not hold seven
-    /// columns open in front of CTX for a state nothing is in. The gutter is
-    /// what gives the columns room, and it is three.
+    /// The STATE column is as wide as the longest state word there is, even
+    /// on a board where every row is queued: CTX starts where it would with
+    /// a `● hook failed` row on the board, so it never moves when a row
+    /// changes state. The gutter is what gives the columns room, and it is
+    /// three.
     #[test]
-    fn the_state_column_is_only_as_wide_as_the_states_on_the_board() {
+    fn the_state_column_is_as_wide_as_the_longest_state_word() {
         let (repo, _root_guard) = fixture("state-column");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -10633,12 +10634,12 @@ mod tests {
             .expect("a header row");
         let row = frame.lines().find(|l| l.contains("login")).unwrap();
 
-        // `○ queued` is the widest state here, so CTX starts right after it
-        // rather than out where a longer state like `● running` would end.
+        // `○ queued` is the only state here, yet CTX starts out where the
+        // longest word, `● hook failed`, would end.
         let ctx_at = header.find("CTX").unwrap() - header.find("STATE").unwrap();
         assert_eq!(
             ctx_at,
-            "○ queued".chars().count() + GUTTER.len(),
+            "● hook failed".chars().count() + GUTTER.len(),
             "{header}"
         );
         assert!(row.contains("○ queued"), "{row}");
