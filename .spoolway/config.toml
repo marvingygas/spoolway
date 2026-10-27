@@ -19,7 +19,7 @@
 # unattended.blocked_prompt               prompt name            Which prompt it is given.
 # housekeeping.update_check               true, false            Tell you when a newer spoolway release is out.
 # housekeeping.calibrate_window           time, e.g. 14d         How far back spoolway-calibrate looks at finished tasks.
-# housekeeping.retention_days             days                   Delete old logs and temporary files after this many days. 0 = keep forever.
+# housekeeping.retention_days             days                   Delete old logs, the problem log's old lines and temporary files after this many days. 0 = keep forever.
 # housekeeping.archive_retention_days     days                   Delete finished tasks from the archive after this many days. 0 = keep forever.
 # watch.dirs                              folders                Extra folders whose agent sessions count toward this project's cost. The project folder always counts.
 # issue_tracking.hook                     file name, or blank    Script in the hooks folder that updates your issue tracker as tasks move. Blank = none.
