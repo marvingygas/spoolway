@@ -177,7 +177,7 @@ fn state_label(state: crate::status::State) -> &'static str {
         Paused => "paused",
         HookFailed => "hook_failed",
         Running => "running",
-        Silent { .. } => "silent",
+        Silent => "silent",
         Starting => "starting",
         Finished => "finished",
         Blocked => "blocked",
@@ -12110,14 +12110,14 @@ mod tests {
     }
 
     /// A silent lane's row is `"state": "silent"` — a plain identifier like
-    /// every other state, with none of the time the table draws after it.
+    /// every other state.
     #[test]
     fn queue_json_calls_a_silent_lane_silent() {
         use crate::status::State;
         use crate::status::testutil::row;
 
         let mut silent = row("quiet");
-        silent.state = State::Silent { secs: 1864 };
+        silent.state = State::Silent;
         let json = QueueRowJson::from(&silent);
         assert_eq!(json.state, "silent");
     }

@@ -130,26 +130,56 @@ const ORANGE: &str = "\x1b[38;5;208m";
 pub(super) const OSC8: &str = "\x1b]8;;";
 pub(super) const ST: &str = "\x1b\\";
 
-impl State {
-    /// What the state reads as, with nothing invisible in it. The dot is part
-    /// of the word: it is what carries the colour, and a plain-text table wants
-    /// the same column width as a coloured one.
-    pub fn word(self) -> &'static str {
-        match self {
-            State::Paused => "● paused",
-            State::HookFailed => "● hook failed",
-            State::Running => "● running",
-            State::Silent { .. } => "● silent",
-            State::Starting => "◌ starting",
-            State::Finished => "✓ finished",
-            State::Blocked => "● blocked",
-            State::Unknown => "● unknown",
-            State::Prompt => "● prompt",
-            State::Queued => "○ queued",
-            State::Waiting => "○ waiting",
-            State::Held => "○ held",
-            State::Done => "● done",
+/// Writes [`State::word`] and [`State::ALL`] from one list of `Variant =>
+/// "word"` pairs. `word` is a match with no wildcard, so a new state does not
+/// compile until it is given a word here, and that same line is what puts it
+/// in `ALL`. Two hand-kept lists could drift apart: a state with a word but no
+/// place in `ALL` is a word the STATE column is not sized for, and its row
+/// would push every column to its right out.
+macro_rules! state_words {
+    ($($state:ident => $word:literal,)*) => {
+        impl State {
+            /// Every state there is, so the STATE column can be sized to the
+            /// longest word among them rather than to the rows on one board.
+            pub(super) const ALL: &'static [State] = &[$(State::$state),*];
+
+            /// What the state reads as, with nothing invisible in it. The dot
+            /// is part of the word: it is what carries the colour, and a
+            /// plain-text table wants the same column width as a coloured one.
+            pub fn word(self) -> &'static str {
+                match self {
+                    $(State::$state => $word,)*
+                }
+            }
         }
+    };
+}
+
+state_words! {
+    Paused => "● paused",
+    HookFailed => "● hook failed",
+    Running => "● running",
+    Silent => "● silent",
+    Starting => "◌ starting",
+    Finished => "✓ finished",
+    Blocked => "● blocked",
+    Unknown => "● unknown",
+    Prompt => "● prompt",
+    Queued => "○ queued",
+    Waiting => "○ waiting",
+    Held => "○ held",
+    Done => "● done",
+}
+
+impl State {
+    /// The width of the longest [`State::word`], in characters: what the
+    /// STATE column is on every frame, whatever the rows are in.
+    pub(super) fn widest_word() -> usize {
+        State::ALL
+            .iter()
+            .map(|s| s.word().chars().count())
+            .max()
+            .unwrap_or(0)
     }
 
     fn dot(self) -> String {
@@ -168,7 +198,7 @@ impl State {
             // them: a silent lane may be a usage limit that clears by
             // itself, so it is something to look at rather than a stop
             // that waits on a key.
-            State::Silent { .. } => format!("{AMBER}{word}{RESET}"),
+            State::Silent => format!("{AMBER}{word}{RESET}"),
             // Running's own colour: the dispatcher is working this task, it
             // is only that the agent is not up yet. The hollow dot is what
             // tells the two apart.
@@ -1378,10 +1408,12 @@ pub(super) fn table_laid_out(
     // same as any other shed column, and STEP returns to `step_w_bare`.
     let step_w_bare = width(&|r| r.stage.chars().count(), 4);
     let step_w_loop = width(&|r| step_text(r).chars().count(), 4);
-    // Wide enough for the widest state *on the board*, and no wider. Sized to
-    // the widest word there is instead, a queue of running tasks holds seven
-    // columns open for a state nothing is in.
-    let state_w = width(&|r| state_cell_text(r).chars().count(), 5);
+    // As wide as the longest state word there is, on every frame. Sized to
+    // the states on the board instead, every column to its right moved each
+    // time a task was queued, started, ran or stopped. A STATE cell is the
+    // word alone, so no row draws wider than this, and the narrow-pane loop
+    // below never sheds it: other columns go a little sooner instead.
+    let state_w = State::widest_word().max("STATE".len());
     let ctx_w = width(
         &|r| figure(r.ctx.map(|pct| format!("{pct}%"))).chars().count(),
         3,
@@ -1984,53 +2016,18 @@ pub(super) fn table_window(
     shown
 }
 
-/// The full text of a row's STATE cell: the state's own word, and for a
-/// `Silent` row how long the lane has been silent after it, in
-/// [`state_age`]'s clock — `● silent · 31m`. A running hidden command step
-/// draws how long its run has gone instead, in [`human_secs`]'s —
-/// `● running 9m 12s`. Kept as its own function, rather than a direct call
-/// to [`State::word`] at each of its call sites, for the plain-text and
-/// coloured cells to stay the same shape.
+/// The full text of a row's STATE cell: the state's own word and nothing
+/// after it, so the column is never wider than its longest word. Kept as its
+/// own function, rather than a direct call to [`State::word`] at each of its
+/// call sites, for the plain-text and coloured cells to stay the same shape.
 fn state_cell_text(row: &Row) -> String {
-    format!("{}{}", row.state.word(), state_suffix(row))
-}
-
-/// What a STATE cell draws after the state's word: ` · <time>` on a
-/// `Silent` row, ` <time>` on a `Running` row with [`Row::hidden_run`] set,
-/// nothing on any other. Drawn uncoloured, so the word alone carries the
-/// state's colour as it does on every other row.
-///
-/// A hidden run's time is the TIME column's own figure, drawn in the same
-/// [`human_secs`] clock, so the two cells of one row always agree. It is the
-/// clock the restart panel shows a command's run in too. Asked of `Running`
-/// alone, so a row [`super::finish_settled`] has since called finished draws
-/// no time.
-fn state_suffix(row: &Row) -> String {
-    match (row.state, row.hidden_run) {
-        (State::Silent { secs }, _) => format!(" · {}", state_age(secs)),
-        (State::Running, Some(ran)) => format!(" {}", human_secs(ran)),
-        _ => String::new(),
-    }
-}
-
-/// An age drawn in the STATE column: seconds under a minute, whole minutes
-/// under an hour, then hours and minutes — `42s`, `31m`, `1h 04m`. Coarser
-/// than [`human_secs`] below the hour on purpose: an age in the STATE column
-/// is read at a glance, not timed, so it keeps the whole-minute shape the
-/// board's ages are drawn in rather than the TIME column's seconds.
-fn state_age(total: i64) -> String {
-    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
-    match (h, m) {
-        (0, 0) => format!("{s}s"),
-        (0, _) => format!("{m}m"),
-        _ => format!("{h}h {m:02}m"),
-    }
+    row.state.word().to_string()
 }
 
 impl Style {
     fn paint_state(&self, row: &Row) -> String {
         match self.colour {
-            true => format!("{}{}", row.state.dot(), state_suffix(row)),
+            true => row.state.dot(),
             false => state_cell_text(row),
         }
     }
@@ -2548,9 +2545,9 @@ pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -
     let events: Vec<&RecentEvent> = recent.iter().rev().take(shown).collect();
 
     // The name column sized to the rows about to be drawn, not to a fixed
-    // guess — the same reason the table's own STATE column is only as wide
-    // as the states actually on the board (see
-    // `the_state_column_is_only_as_wide_as_the_states_on_the_board`).
+    // guess: a task name has no longest value to fix it at, and the block is
+    // redrawn whole on every move, so its lines always line up with one
+    // another even as the sentences after the names move.
     let name_width = events
         .iter()
         .map(|event| event.name().chars().count())
@@ -2785,15 +2782,12 @@ mod tests {
         assert_eq!(State::Running.dot(), format!("{GREEN}● running{RESET}"));
         assert_eq!(State::Queued.dot(), format!("{DIM}○ queued{RESET}"));
         assert_eq!(State::Starting.dot(), format!("{GREEN}◌ starting{RESET}"));
-        assert_eq!(
-            State::Silent { secs: 60 }.dot(),
-            format!("{AMBER}● silent{RESET}")
-        );
+        assert_eq!(State::Silent.dot(), format!("{AMBER}● silent{RESET}"));
         for state in [
             State::Paused,
             State::HookFailed,
             State::Running,
-            State::Silent { secs: 60 },
+            State::Silent,
             State::Starting,
             State::Finished,
             State::Blocked,
@@ -2807,19 +2801,18 @@ mod tests {
         }
     }
 
-    /// A silent row draws how long its lane has been silent after the word,
-    /// in whole minutes below the hour, in `spoolway queue list` and on the
-    /// board alike — and the column widens for it, so NEXT still lines up
-    /// with the row above.
+    /// A silent row draws the word alone, with no age after it, in
+    /// `spoolway queue list` and on the board alike, so NEXT lines up with a
+    /// running row's.
     #[test]
-    fn a_silent_row_draws_its_silent_time_after_the_word() {
+    fn a_silent_row_draws_the_bare_word() {
         let running = Row {
             state: State::Running,
             next: "→ review".into(),
             ..row("running-task")
         };
         let silent = Row {
-            state: State::Silent { secs: 1864 },
+            state: State::Silent,
             next: "→ review".into(),
             ..row("silent-task")
         };
@@ -2832,9 +2825,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("no line for {id}: {plain}"))
                 .to_string()
         };
-        assert!(line("silent-task").contains("● silent · 31m "), "{plain}");
-        assert!(!line("running-task").contains(" · "), "{plain}");
-        // By column, not byte: the `·` is two bytes wide in UTF-8.
+        assert!(line("silent-task").contains("● silent  "), "{plain}");
+        assert!(!line("silent-task").contains(" · "), "{plain}");
         let next_column = |id: &str| line(id).split("→ review").next().unwrap().chars().count();
         assert_eq!(
             next_column("silent-task"),
@@ -2842,51 +2834,137 @@ mod tests {
             "{plain}"
         );
 
+        assert_eq!(state_cell_text(&rows[1]), "● silent");
         let painted = Style::board(120).paint_state(&rows[1]);
-        assert_eq!(painted, format!("{AMBER}● silent{RESET} · 31m"));
-        assert_eq!(strip_ansi(&painted), state_cell_text(&rows[1]));
-
-        // Seconds only under a minute, hours and minutes past the hour.
-        let at = |secs| {
-            state_cell_text(&Row {
-                state: State::Silent { secs },
-                ..row("silent-task")
-            })
-        };
-        assert_eq!(at(42), "● silent · 42s");
-        assert_eq!(at(8 * 60 + 5), "● silent · 8m");
-        assert_eq!(at(3840), "● silent · 1h 04m");
+        assert_eq!(painted, format!("{AMBER}● silent{RESET}"));
     }
 
-    /// A running hidden command step's time is drawn after the word in
-    /// `human_secs`'s clock, uncoloured, on the board as in plain text. A row
-    /// that is no longer `Running` draws no time, whatever it carries.
+    /// A running hidden command step draws the bare word, on the board as in
+    /// plain text: its run's time is the TIME column's to show.
     #[test]
-    fn a_hidden_run_draws_its_time_after_the_running_word() {
+    fn a_hidden_run_draws_the_bare_running_word() {
         let hidden = Row {
             state: State::Running,
-            hidden_run: Some(552),
+            lane_time: Some(552),
             ..row("hidden-task")
         };
-        assert_eq!(state_cell_text(&hidden), "● running 9m 12s");
+        assert_eq!(state_cell_text(&hidden), "● running");
         let painted = Style::board(120).paint_state(&hidden);
-        assert_eq!(painted, format!("{GREEN}● running{RESET} 9m 12s"));
-        assert_eq!(strip_ansi(&painted), state_cell_text(&hidden));
-        assert_eq!(
-            state_cell_text(&Row {
-                hidden_run: Some(3840),
-                ..hidden
-            }),
-            "● running 1h 04m"
-        );
-        assert_eq!(
-            state_cell_text(&Row {
-                state: State::Finished,
-                hidden_run: Some(552),
-                ..row("hidden-task")
-            }),
-            "✓ finished"
-        );
+        assert_eq!(painted, format!("{GREEN}● running{RESET}"));
+    }
+
+    /// No state word is wider than the STATE column, so no row pushes the
+    /// columns to its right out. The column is measured off a table of
+    /// queued rows alone, which a column sized to its rows would draw
+    /// narrowest.
+    #[test]
+    fn no_state_word_is_wider_than_the_state_column() {
+        let rows = vec![Row {
+            next: "→ review".into(),
+            ..row("queued-task")
+        }];
+        let plain = plain_table(&rows);
+        let header = plain.lines().find(|l| l.contains("STATE")).unwrap();
+        let column = header.find("NEXT").unwrap() - header.find("STATE").unwrap() - GUTTER.len();
+
+        assert_eq!(State::widest_word(), "● hook failed".chars().count());
+        assert_eq!(column, State::widest_word(), "{plain}");
+        for state in State::ALL {
+            assert!(
+                state.word().chars().count() <= column,
+                "{} is wider than the {column}-character STATE column",
+                state.word()
+            );
+        }
+    }
+
+    /// The same tasks in different states put CTX and NEXT at the same
+    /// column, on the board and in `queue list`: a task starting is no
+    /// reason for every column to its right to move.
+    #[test]
+    fn ctx_and_next_stay_put_when_a_row_changes_state() {
+        let task = |id: &str, state: State| Row {
+            state,
+            next: "→ review".into(),
+            ..row(id)
+        };
+        let queued = vec![
+            task("fix-login", State::Queued),
+            task("add-cache", State::Queued),
+        ];
+        let starting = vec![
+            task("fix-login", State::Starting),
+            task("add-cache", State::Queued),
+        ];
+        let failed = vec![
+            task("fix-login", State::HookFailed),
+            task("add-cache", State::Queued),
+        ];
+
+        // Where `word` starts on the line that holds `on`, in characters.
+        let at = |frame: &str, on: &str, word: &str| {
+            let line = frame.lines().find(|l| l.contains(on)).unwrap();
+            line[..line.find(word).unwrap()].chars().count()
+        };
+        let board = |rows: &[Row]| strip(&table(rows, Style::board(200), &BTreeMap::new(), None));
+        for frame in [board(&starting), board(&failed)] {
+            assert_eq!(
+                at(&frame, "STATE", "CTX"),
+                at(&board(&queued), "STATE", "CTX"),
+                "{frame}"
+            );
+            assert_eq!(
+                at(&frame, "fix-login", "→ review"),
+                at(&board(&queued), "fix-login", "→ review"),
+                "{frame}"
+            );
+        }
+        for frame in [plain_table(&starting), plain_table(&failed)] {
+            let before = plain_table(&queued);
+            assert_eq!(
+                at(&frame, "STATE", "NEXT"),
+                at(&before, "STATE", "NEXT"),
+                "{frame}"
+            );
+            assert_eq!(
+                at(&frame, "add-cache", "→ review"),
+                at(&before, "add-cache", "→ review"),
+                "{frame}"
+            );
+        }
+    }
+
+    /// On a narrow pane STATE keeps its full width: the columns after it
+    /// shed instead, and every line still fits on one row of the pane.
+    #[test]
+    fn a_narrow_pane_keeps_the_state_column_whole() {
+        let running = |id: &str| Row {
+            state: State::Running,
+            ctx: Some(41),
+            out: Some(12_000),
+            cost: Some(0.84),
+            lane_time: Some(190),
+            next: "→ review".into(),
+            ..row(id)
+        };
+        let rows = vec![running("fix-login"), running("slow-job")];
+        let full = State::widest_word() + GUTTER.len();
+        for pane in (60..=120).rev() {
+            let frame = strip(&table(&rows, Style::board(pane), &BTreeMap::new(), None));
+            for line in frame.lines() {
+                assert!(line.chars().count() <= pane, "{pane}: {line}");
+            }
+            let header = frame.lines().find(|l| l.contains("STATE")).unwrap();
+            let state_at = header.find("STATE").unwrap();
+            // Whatever header follows STATE at this width, it starts a full
+            // column after it.
+            if let Some(gap) = header[state_at + "STATE".len()..].find(|c: char| c != ' ') {
+                let next_at = state_at + "STATE".len() + gap;
+                // CTX is right-aligned, so its header may sit further in.
+                assert!(next_at - state_at >= full, "{pane}: {header}");
+            }
+            assert!(frame.contains("● running"), "{pane}: {frame}");
+        }
     }
 
     /// The outer order is the group's name and nothing else, so a group

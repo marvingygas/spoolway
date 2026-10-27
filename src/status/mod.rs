@@ -110,15 +110,16 @@ pub enum State {
     Running,
     /// A live lane that has not answered the last reminder the dispatcher
     /// sent it, read off its record in `lanes.json` — see
-    /// [`crate::dispatch::LaneRecord::silent_since`]. `secs` is how long ago
-    /// it last spoke, as of the frame that drew it.
+    /// [`crate::dispatch::LaneRecord::silent_since`]. It carries no age: the
+    /// STATE cell draws the word alone, so the column stays as wide as its
+    /// longest word.
     ///
     /// The task has not moved: a silent lane is reminded again and never
     /// escalated, because a usage limit looks exactly like a dead lane. This
     /// row is the only notice a person gets of the dead kind, which nothing
     /// clears but a restart. It reads `Running` again once the lane writes a
     /// turn.
-    Silent { secs: i64 },
+    Silent,
     /// The dispatcher has claimed a slot for the task and is booting its
     /// lane, which herdr does not list until the boot is well along — or is
     /// cutting a command step's worktree and starting its run, which may
@@ -297,14 +298,6 @@ pub struct Row {
     /// why a paused row's own figures stop moving the moment it lands there
     /// — see gh-378 / issue #380.
     pub lane_time: Option<i64>,
-    /// How long a running hidden command step's run has gone, in seconds,
-    /// which the STATE cell draws after `● running`. A hidden step has no
-    /// pane, so this row is the only sign it is still working, and without
-    /// the time a two-hour run reads the same as a stalled one. `None` on
-    /// every other row: an agent lane and a command shown in a pane have a
-    /// pane to look at, and a run that has exited or not started has nothing
-    /// to time.
-    pub hidden_run: Option<i64>,
     /// What happens to this task next: the step it goes to, or — when it is
     /// stuck — what has to happen before it goes anywhere.
     pub next: String,
@@ -3311,7 +3304,6 @@ fn opening_rows(repo: &Repo, tasks: &[crate::task::Task]) -> Vec<Row> {
             out: None,
             cost: None,
             lane_time: None,
-            hidden_run: None,
             next: format!(
                 "opening ticket {} (stopped at {})",
                 crate::tracking::minutes(ran),
@@ -5408,16 +5400,14 @@ fn rows_on(
                 // An `Unknown` lane may be at work too, and the dispatcher
                 // refreshes the flag only for a settled one, so for it the
                 // flag is stale.
-                let silent_since = live_lane
+                let silent = live_lane
                     .filter(|l| l.status.is_settled())
                     .and_then(|_| lane_records.get(&lane))
-                    .and_then(|record| record.silent_since());
-                let state = match (silent_since, live || command_run.is_some() || mid_handoff) {
-                    (Some(since), _) => State::Silent {
-                        secs: (chrono::Utc::now().timestamp() - since).max(0),
-                    },
-                    (None, true) => State::Running,
-                    (None, false) => State::Queued,
+                    .is_some_and(|record| record.silent_since().is_some());
+                let state = match (silent, live || command_run.is_some() || mid_handoff) {
+                    (true, _) => State::Silent,
+                    (false, true) => State::Running,
+                    (false, false) => State::Queued,
                 };
                 // A command that already exited non-zero is only waiting for
                 // a slot to land its `on_fail` destination, so that is where
@@ -5512,16 +5502,6 @@ fn rows_on(
                 None => cost_at(ledger, task.id(), origin),
             },
             lane_time,
-            // The TIME figure itself, not a second read of the pid file: a
-            // read of its own would land on a later instant, and a redraw
-            // across a second boundary would draw STATE and TIME a second
-            // apart. Only while the step hides its command: a shown run has
-            // a pane of its own, so its row stays as it was.
-            hidden_run: command_run
-                .filter(|_| {
-                    step.is_some_and(|step| step.hides_command(repo.config.dispatch.hide_commands))
-                })
-                .and(lane_time),
             next,
             resumable,
         });
@@ -5629,7 +5609,7 @@ fn finish_settled(
     for row in rows.iter_mut() {
         if !matches!(
             row.state,
-            State::Running | State::Silent { .. } | State::Prompt | State::Queued
+            State::Running | State::Silent | State::Prompt | State::Queued
         ) {
             continue;
         }
@@ -5946,7 +5926,6 @@ fn unroutable_row(
         out: None,
         cost: None,
         lane_time: None,
-        hidden_run: None,
         next: refusal.to_string(),
         resumable: false,
     }
@@ -6058,7 +6037,6 @@ fn done_rows(repo: &Repo, pipelines: &Pipelines, live: &[Row]) -> Result<Vec<Row
                 out: None,
                 cost: None,
                 lane_time: None,
-                hidden_run: None,
                 next: String::new(),
                 resumable: false,
             })
@@ -8572,13 +8550,13 @@ mod tests {
     }
 
     /// A settled lane whose record in `lanes.json` holds an unanswered
-    /// reminder reads `Silent`, timed from the model's last turn. The same
+    /// reminder reads `Silent`, with or without a model turn on it. The same
     /// lane reads `Running` with no record, with its reminder answered, the
     /// moment herdr sees it working again — before any pass has rewritten
     /// the record — and while herdr cannot tell. A stopped board finishes it
     /// like any other settled lane.
     #[test]
-    fn a_lane_with_an_unanswered_reminder_reads_silent_from_its_last_turn() {
+    fn a_lane_with_an_unanswered_reminder_reads_silent() {
         let (repo, _root_guard) = fixture("silent-lane");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -8613,29 +8591,18 @@ mod tests {
             .unwrap();
             rows.into_iter().find(|r| r.id == "login").unwrap()
         };
-        let silent_secs = |row: &Row| match row.state {
-            State::Silent { secs } => secs,
-            _ => panic!("not silent: {}", row.state.word()),
-        };
         let idle = crate::mux::LaneStatus::Idle;
 
         // No record at all: a lane never reminded.
         assert!(matches!(state(idle).state, State::Running));
 
         record(true, Some(now - 1860));
-        let secs = silent_secs(&state(idle));
-        assert!((1860..1870).contains(&secs), "{secs}");
+        assert!(matches!(state(idle).state, State::Silent));
 
-        // No model turn on the record: it counts from the last write before
-        // the first reminder that drew no answer, not from `last_progress`,
-        // which every reminder sent again moves.
+        // No model turn on the record: still silent, the reminder being
+        // what makes it so.
         record(true, None);
-        let mut records: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(repo.lanes_file()).unwrap()).unwrap();
-        records["login · implement"]["quiet_since"] = (now - 1500).into();
-        std::fs::write(repo.lanes_file(), records.to_string()).unwrap();
-        let secs = silent_secs(&state(idle));
-        assert!((1500..1510).contains(&secs), "{secs}");
+        assert!(matches!(state(idle).state, State::Silent));
 
         // Back at work: the record still says silent, herdr does not.
         record(true, Some(now - 1860));
@@ -9567,13 +9534,12 @@ mod tests {
         assert!(row.lane_time.is_some(), "a run in flight answers with one");
     }
 
-    /// A hidden command step has no pane, so its row draws how long its run
-    /// has gone after `● running`, in `queue list`'s table as on the board,
-    /// and a run past the hour still leaves NEXT in line with the row above.
-    /// A command shown in a pane, an agent lane, a run not started and a run
-    /// that has exited all keep the bare word.
+    /// A running hidden command step reads the bare `● running` in
+    /// `queue list`'s table, like an agent lane and a command shown in a
+    /// pane, and its run's time is the row's TIME figure. A run not started
+    /// and a run that has exited have no time to show.
     #[test]
-    fn a_running_hidden_command_step_draws_its_elapsed_time() {
+    fn a_running_hidden_command_step_reads_running_and_times_its_run() {
         let (mut repo, _root_guard) = fixture("command-step-hidden-elapsed");
         let mut pipelines = Pipelines::builtin();
         // The project hides its commands, and `bugfix`'s own step is shown
@@ -9650,32 +9616,24 @@ mod tests {
         let rows = build();
         let hidden = rows.iter().find(|r| r.id == "a-hidden").unwrap();
         assert!(matches!(hidden.state, State::Queued));
-        assert_eq!(hidden.hidden_run, None);
+        assert_eq!(hidden.lane_time, None);
 
         let hidden_key = start("handover", "a-hidden", 3840);
         start(&shown_step, "c-shown", 3840);
         let rows = build();
         let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
         assert!(matches!(row("a-hidden").state, State::Running));
-        let ran = row("a-hidden").hidden_run.expect("a hidden run answers");
+        let ran = row("a-hidden").lane_time.expect("a hidden run answers");
         assert!((3840..=3845).contains(&ran), "{ran}");
-        // One figure for STATE and TIME, so the board never draws the two a
-        // second apart.
-        assert_eq!(Some(ran), row("a-hidden").lane_time);
         for id in ["b-agent", "c-shown"] {
             assert!(matches!(row(id).state, State::Running), "{id}");
-            assert_eq!(row(id).hidden_run, None, "{id}");
         }
         let table = plain_table(&rows);
-        assert!(
-            line(&table, "a-hidden").contains("● running 1h 04m "),
-            "{table}"
-        );
-        for id in ["b-agent", "c-shown"] {
+        for id in ["a-hidden", "b-agent", "c-shown"] {
             assert!(line(&table, id).contains("● running  "), "{table}");
             assert!(!line(&table, id).contains("1h 04m"), "{table}");
         }
-        // NEXT starts in one column on every row, the widened one included.
+        // NEXT starts in one column on every row.
         let next_at = |id: &str| {
             let line = line(&table, id);
             let next = &row(id).next;
@@ -9684,12 +9642,11 @@ mod tests {
         assert_eq!(next_at("a-hidden"), next_at("b-agent"), "{table}");
         assert_eq!(next_at("a-hidden"), next_at("c-shown"), "{table}");
 
-        // Exited: the run is over, so the row stops timing it.
+        // Exited: the run is over, so the row no longer reads running.
         runs.record_exit(&hidden_key, 0).unwrap();
         let rows = build();
         let hidden = rows.iter().find(|r| r.id == "a-hidden").unwrap();
         assert!(!matches!(hidden.state, State::Running));
-        assert_eq!(hidden.hidden_run, None);
     }
 
     /// A task held on a `serial:` step reads `○ waiting` and names the task
@@ -10759,12 +10716,13 @@ mod tests {
         assert_eq!(cost, None);
     }
 
-    /// The STATE column is sized to the board, not to the widest word there
-    /// is: a queue with nothing waiting on a person should not hold seven
-    /// columns open in front of CTX for a state nothing is in. The gutter is
-    /// what gives the columns room, and it is three.
+    /// The STATE column is as wide as the longest state word there is, even
+    /// on a board where every row is queued: CTX starts where it would with
+    /// a `● hook failed` row on the board, so it never moves when a row
+    /// changes state. The gutter is what gives the columns room, and it is
+    /// three.
     #[test]
-    fn the_state_column_is_only_as_wide_as_the_states_on_the_board() {
+    fn the_state_column_is_as_wide_as_the_longest_state_word() {
         let (repo, _root_guard) = fixture("state-column");
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
@@ -10788,12 +10746,12 @@ mod tests {
             .expect("a header row");
         let row = frame.lines().find(|l| l.contains("login")).unwrap();
 
-        // `○ queued` is the widest state here, so CTX starts right after it
-        // rather than out where a longer state like `● running` would end.
+        // `○ queued` is the only state here, yet CTX starts out where the
+        // longest word, `● hook failed`, would end.
         let ctx_at = header.find("CTX").unwrap() - header.find("STATE").unwrap();
         assert_eq!(
             ctx_at,
-            "○ queued".chars().count() + GUTTER.len(),
+            "● hook failed".chars().count() + GUTTER.len(),
             "{header}"
         );
         assert!(row.contains("○ queued"), "{row}");
