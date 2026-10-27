@@ -12363,8 +12363,8 @@ mod tests {
     /// A multiplexer for the options menu's `focus`: it answers
     /// [`crate::mux::Mux::can_focus_pane`] with `can`, lists `lanes`, and
     /// writes down every pane it is asked to focus, refusing each with
-    /// `refuse` when that is set. Every other call panics, since `focus`
-    /// must make none.
+    /// `refuse` when that is set. A call that opens, closes or types into a
+    /// pane panics, since `focus` must make none.
     #[derive(Default)]
     struct FocusMux {
         can: bool,
