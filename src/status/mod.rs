@@ -787,7 +787,8 @@ impl Board {
     /// the row it sits on — see [`Board::open_options`]. The menu lists only
     /// what that row can do right now, in a fixed order: `open task` opens
     /// its task file, `open plan` opens the page its `plan:` names, `pause`
-    /// pauses it, `restart` restarts its step from scratch, or `unqueue`
+    /// pauses it, `focus` brings the pane of the step it is running forward,
+    /// maximized, `restart` restarts its step from scratch, or `unqueue`
     /// sends it back to pending with every still-queued task that depends
     /// on it. Two row actions keep a key of their own. `r` opens a picker of
     /// the cursor's task's steps if its own resume key is live — see
@@ -808,8 +809,8 @@ impl Board {
     /// `q`, or any other key it does not read is ignored, the same as it is
     /// while browsing. A pause panel's second answer leaves every named abort
     /// running and schedules its task's `gate_at` on the step it is on
-    /// instead. A refused open's popup has no answers and closes on `enter`
-    /// alone.
+    /// instead. A refused open's or focus's popup has no answers and closes
+    /// on `enter` alone.
     ///
     /// Reads the queue fresh rather than trusting the last frame drawn: a key
     /// can land in the gap between two redraws, and moving the cursor — or
@@ -885,7 +886,7 @@ impl Board {
         let Some(id) = self.cursor.clone() else {
             return Ok(());
         };
-        let items = row_actions(repo, pipelines, &id)?;
+        let items = row_actions(repo, pipelines, &id, &*crate::mux::backend(repo)?)?;
         // A task neither the queue nor the archive has still opens the
         // menu, so its title falls back to the id the cursor carries.
         let name = repo
@@ -928,6 +929,12 @@ impl Board {
                     }
                 }
                 Some(RowAction::Pause) => self.begin_pause(repo, pipelines, menu.id)?,
+                Some(RowAction::Focus) => {
+                    let mux = crate::mux::backend(repo)?;
+                    if let Some(notice) = focus_step(repo, pipelines, &menu.id, &*mux) {
+                        self.mode = BoardMode::Outcome(notice);
+                    }
+                }
                 Some(RowAction::Restart) => self.begin_restart(repo, pipelines, menu.id)?,
                 Some(RowAction::Unqueue) => self.begin_unqueue(repo, menu.id)?,
                 // An empty menu offers nothing to confirm; it stays open
@@ -1544,6 +1551,81 @@ fn plan_page(task: &crate::task::Task) -> Option<&str> {
     (!plan.is_empty()).then_some(plan)
 }
 
+/// The options menu's `focus`: bring the pane of the step task `id` is
+/// running right now in front of the person, maximized, through
+/// [`crate::mux::Mux::focus_pane`]. Nothing unzooms it again; that stays the
+/// person's, in herdr.
+///
+/// The pane is looked up again here rather than trusted from when the menu
+/// opened: the lane or the run can end in between, and a step with no pane
+/// left gets nothing done and no popup, the same as every other item asks
+/// its own check again. A herdr refusal comes back as the popup
+/// [`BoardMode::Outcome`] draws, for the reason [`open_task`] gives, with
+/// what to do about it: a pane that is gone most likely went with the step,
+/// and `restart` is the item that starts the step again in a new one.
+fn focus_step(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    id: &str,
+    mux: &dyn crate::mux::Mux,
+) -> Option<crate::screen::Notice> {
+    let tasks = repo.tasks().ok()?;
+    let pane = step_pane(repo, pipelines, &tasks, id, mux)?;
+    mux.focus_pane(&pane).err().map(|err| {
+        crate::screen::Notice::new(
+            "focus",
+            format!(
+                "o: {err:#}\n\n\
+                 The step's pane may have been closed. restart in this menu \
+                 starts the step again in a new pane."
+            ),
+        )
+    })
+}
+
+/// The pane of the step task `id` is running right now, when `mux` can bring
+/// one forward: whether the options menu lists `focus`, and what
+/// [`focus_step`] focuses.
+///
+/// An agent step's pane is its live lane's, found by the rule
+/// [`live_agent_lane_tasks`] answers on, so a lane waiting on a person counts
+/// and a kept one does not. A command step's is the pane its run recorded,
+/// while [`running_command_steps`] still has the run going; a run that never
+/// landed in a pane has none. A paused or queued task, a finished step and a
+/// task the queue no longer has find nothing.
+///
+/// The capability check comes first, and the lane list is only read for a
+/// task on an agent step, so headless and every other row cost no
+/// multiplexer call when the menu opens.
+fn step_pane(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+    id: &str,
+    mux: &dyn crate::mux::Mux,
+) -> Option<String> {
+    if !mux.can_focus_pane() {
+        return None;
+    }
+    let i = tasks.iter().position(|t| t.id() == id)?;
+    let task = &tasks[i];
+    let step = pipelines.for_task(task).ok()?.step(task.stage())?;
+    match step.kind() {
+        crate::pipeline::StepKind::Agent => {
+            let lanes = mux.list_lanes().ok()?;
+            live_agent_lanes(repo, tasks, pipelines, &lanes)
+                .into_iter()
+                .find(|(at, _)| *at == i)
+                .map(|(_, lane)| lane.pane_id.clone())
+        }
+        crate::pipeline::StepKind::Command => {
+            running_command_steps(repo, std::slice::from_ref(task), pipelines).first()?;
+            crate::command_step::Runs::new(&repo.commands_dir())
+                .pane(&crate::command_step::Runs::key(task.stage(), task.id()))
+        }
+    }
+}
+
 /// What an `o`, `r` or `k` keypress is waiting to be answered — a menu or panel
 /// drawn over the table, and the one thing standing between an accidental
 /// press and the run it would otherwise change. Every panel here is
@@ -1594,10 +1676,10 @@ enum BoardMode {
     /// hook the way `spoolway resume --skip-hook` does, and `esc` leaves the
     /// task held.
     ConfirmSkipHook(SkipHookConfirm),
-    /// The options menu's `open task` or `open plan` was refused — see
-    /// [`open_task`] and [`open_plan`]. Held until `enter` closes it, with no
-    /// other answer to pick. The pass loop keeps running under it, as it
-    /// does under every panel here.
+    /// The options menu's `open task`, `open plan` or `focus` was refused —
+    /// see [`open_task`], [`open_plan`] and [`focus_step`]. Held until `enter`
+    /// closes it, with no other answer to pick. The pass loop keeps running
+    /// under it, as it does under every panel here.
     Outcome(crate::screen::Notice),
 }
 
@@ -1649,6 +1731,7 @@ enum RowAction {
     Open,
     OpenPlan,
     Pause,
+    Focus,
     Restart,
     Unqueue,
 }
@@ -1661,6 +1744,7 @@ impl RowAction {
             RowAction::Open => "open task",
             RowAction::OpenPlan => "open plan",
             RowAction::Pause => "pause",
+            RowAction::Focus => "focus",
             RowAction::Restart => "restart",
             RowAction::Unqueue => "unqueue",
         }
@@ -1680,11 +1764,21 @@ fn options_panel(menu: &OptionsMenu) -> Vec<String> {
 /// `open task` reads the task from the queue or the archive, as
 /// [`open_task`] does; `open plan` needs [`plan_page`] to find a `plan:` on
 /// it, as [`open_plan`] does; `pause` needs it in the queue and
-/// [`pausable`]; `restart` needs [`restartable_step`] to accept it on
-/// [`restart_graph`]'s graph, the one [`Board::begin_restart`] opens its
-/// panel on; `unqueue` needs it in the queue and [`not_started`]. Resume is
-/// never listed: it stays on the board's `r`.
-fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAction>> {
+/// [`pausable`]; `focus` needs [`step_pane`] to find the pane of the step it
+/// is running, as [`focus_step`] does; `restart` needs [`restartable_step`]
+/// to accept it on [`restart_graph`]'s graph, the one
+/// [`Board::begin_restart`] opens its panel on; `unqueue` needs it in the
+/// queue and [`not_started`]. Resume is never listed: it stays on the board's
+/// `r`.
+///
+/// `mux` is the backend `focus` would go through, asked here so a backend
+/// that cannot focus a pane — headless — never lists it.
+fn row_actions(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    id: &str,
+    mux: &dyn crate::mux::Mux,
+) -> Result<Vec<RowAction>> {
     let tasks = repo.tasks()?;
     let queued = tasks.iter().find(|t| t.id() == id);
     let task = repo.task(id).ok();
@@ -1692,6 +1786,7 @@ fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAc
         RowAction::Open => task.is_some(),
         RowAction::OpenPlan => task.as_ref().and_then(plan_page).is_some(),
         RowAction::Pause => queued.is_some_and(pausable),
+        RowAction::Focus => step_pane(repo, pipelines, &tasks, id, mux).is_some(),
         RowAction::Restart => task.as_ref().is_some_and(|task| {
             restartable_step(task, &restart_graph(repo, pipelines, id).0).is_ok()
         }),
@@ -1701,6 +1796,7 @@ fn row_actions(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<Vec<RowAc
         RowAction::Open,
         RowAction::OpenPlan,
         RowAction::Pause,
+        RowAction::Focus,
         RowAction::Restart,
         RowAction::Unqueue,
     ]
@@ -1875,6 +1971,7 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
                     RowAction::Open,
                     RowAction::OpenPlan,
                     RowAction::Pause,
+                    RowAction::Focus,
                     RowAction::Restart,
                 ],
                 cursor: 0,
@@ -3031,6 +3128,21 @@ pub(crate) fn live_agent_lane_tasks(
     pipelines: &Pipelines,
     lanes: &[crate::mux::Lane],
 ) -> Vec<usize> {
+    live_agent_lanes(repo, tasks, pipelines, lanes)
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// [`live_agent_lane_tasks`], with the lane each task was found by: the one
+/// rule both answer on, so the options menu's `focus` brings forward exactly
+/// the lane `pause` would interrupt — see [`step_pane`].
+fn live_agent_lanes<'a>(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    pipelines: &Pipelines,
+    lanes: &'a [crate::mux::Lane],
+) -> Vec<(usize, &'a crate::mux::Lane)> {
     let mine = crate::dispatch::our_checkouts(repo, tasks);
     let kept = crate::dispatch::kept_lane_names(repo);
     let mut out = Vec::new();
@@ -3048,10 +3160,10 @@ pub(crate) fn live_agent_lane_tasks(
             continue;
         }
         let name = crate::mux::lane_name(task.stage(), task);
-        if lanes.iter().any(|l| {
+        if let Some(lane) = lanes.iter().find(|l| {
             l.name == name && !kept.contains(&name) && crate::dispatch::owns_cwd(&mine, &l.cwd)
         }) {
-            out.push(i);
+            out.push((i, lane));
         }
     }
     out
@@ -12246,6 +12358,334 @@ mod tests {
             let items = menu_items(&mut board, &repo, &pipelines);
             assert!(items.contains(&RowAction::Restart), "{id}: {items:?}");
         }
+    }
+
+    /// A multiplexer for the options menu's `focus`: it answers
+    /// [`crate::mux::Mux::can_focus_pane`] with `can`, lists `lanes`, and
+    /// writes down every pane it is asked to focus, refusing each with
+    /// `refuse` when that is set. Every other call panics, since `focus`
+    /// must make none.
+    #[derive(Default)]
+    struct FocusMux {
+        can: bool,
+        lanes: Vec<crate::mux::Lane>,
+        refuse: Option<&'static str>,
+        focused: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FocusMux {
+        fn with(lanes: Vec<crate::mux::Lane>) -> FocusMux {
+            FocusMux {
+                can: true,
+                lanes,
+                ..FocusMux::default()
+            }
+        }
+        fn focused(&self) -> Vec<String> {
+            self.focused.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::mux::Mux for FocusMux {
+        fn name(&self) -> &'static str {
+            "herdr"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn unavailable(&self) -> String {
+            unimplemented!()
+        }
+        fn resident_while_waiting(&self) -> bool {
+            true
+        }
+        fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            Ok(self.lanes.clone())
+        }
+        fn can_focus_pane(&self) -> bool {
+            self.can
+        }
+        fn focus_pane(&self, pane_id: &str) -> Result<()> {
+            self.focused.lock().unwrap().push(pane_id.to_string());
+            match self.refuse {
+                Some(why) => anyhow::bail!("{why}"),
+                None => Ok(()),
+            }
+        }
+        fn create_workspace(
+            &self,
+            _cwd: &Path,
+            _branch: &str,
+            _base: &str,
+            _label: &str,
+        ) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn remove_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_workspace(&self, _workspace_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _tab_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn create_pane(&self, _cwd: &Path, _label: &str) -> Result<crate::mux::Workspace> {
+            unimplemented!()
+        }
+        fn split_pane(&self, _tab_id: &str, _cwd: &Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn start_lane(
+            &self,
+            _spec: &crate::mux::LaneSpec<'_>,
+            _tick: &mut dyn FnMut(),
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn prompt(&self, _name: &str, _text: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn read(&self, _name: &str, _lines: usize) -> Result<String> {
+            unimplemented!()
+        }
+        fn interrupt_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn stop_lane(&self, _name: &str, _pane_id: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn focus_lane(&self, _name: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _pane_id: &str, _label: &str) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    /// Task `id`'s live lane on step `step`, in pane `pane`, in a checkout
+    /// of ours: the lane [`live_agent_lane_tasks`] counts.
+    fn lane_in(repo: &Repo, id: &str, step: &str, pane: &str) -> crate::mux::Lane {
+        crate::mux::Lane {
+            pane_id: pane.to_string(),
+            ..lane(&format!("{id} · {step}"), &repo.root)
+        }
+    }
+
+    /// `focus` is labelled as such and sits between `pause` and `restart`
+    /// on a running agent row whose lane is live, and picks out that lane's
+    /// pane, not another task's beside it.
+    #[test]
+    fn the_options_menu_lists_focus_on_a_live_agent_row() {
+        let (repo, _root_guard) = fixture("options-focus-agent");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "running", &[], Some("implement"), Some("running"));
+        add_to(&repo, "other", &[], Some("implement"), Some("other"));
+        let mux = FocusMux::with(vec![
+            lane_in(&repo, "other", "implement", "w2:p9"),
+            lane_in(&repo, "running", "implement", "w2:p3"),
+        ]);
+
+        assert_eq!(RowAction::Focus.label(), "focus");
+        assert_eq!(
+            row_actions(&repo, &pipelines, "running", &mux).unwrap(),
+            [
+                RowAction::Open,
+                RowAction::Pause,
+                RowAction::Focus,
+                RowAction::Restart
+            ]
+        );
+        let tasks = repo.tasks().unwrap();
+        assert_eq!(
+            step_pane(&repo, &pipelines, &tasks, "running", &mux).as_deref(),
+            Some("w2:p3")
+        );
+    }
+
+    /// `focus` is left off wherever it would bring nothing forward: a
+    /// backend that cannot focus a pane, headless included, a kept lane, a
+    /// lane left on a step the task has since moved past, a paused row and a
+    /// queued one.
+    #[test]
+    fn the_options_menu_lists_focus_only_with_a_pane_to_bring_forward() {
+        let (repo, _root_guard) = fixture("options-focus-none");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "running", &[], Some("implement"), Some("running"));
+        add_to(&repo, "moved", &[], Some("review"), Some("moved"));
+        add_to(&repo, "waiting", &[], None, Some("waiting"));
+        add_to(&repo, "held", &[], Some("implement"), Some("held"));
+        let mut held = repo.task("held").unwrap();
+        held.front.parked_from = Some("implement".into());
+        held.set_stage(crate::pipeline::PAUSED, Some("parked by hand"));
+        held.save().unwrap();
+        let lanes = vec![
+            lane_in(&repo, "running", "implement", "w2:p3"),
+            lane_in(&repo, "moved", "implement", "w2:p4"),
+            lane_in(&repo, "held", "implement", "w2:p5"),
+        ];
+        let lists = |mux: &dyn crate::mux::Mux, id: &str| {
+            row_actions(&repo, &pipelines, id, mux)
+                .unwrap()
+                .contains(&RowAction::Focus)
+        };
+
+        let cannot = FocusMux {
+            can: false,
+            ..FocusMux::with(lanes.clone())
+        };
+        assert!(!lists(&cannot, "running"), "a backend that cannot focus");
+        crate::mux::force_headless_for_test();
+        assert!(
+            !lists(&*crate::mux::backend(&repo).unwrap(), "running"),
+            "headless"
+        );
+
+        let mux = FocusMux::with(lanes);
+        assert!(lists(&mux, "running"));
+        for id in ["moved", "waiting", "held"] {
+            assert!(!lists(&mux, id), "{id}");
+        }
+        write_kept_record(&repo, "running · implement", true);
+        assert!(!lists(&mux, "running"), "a kept lane");
+    }
+
+    /// A command step's row lists `focus` while its run is going and
+    /// recorded the pane it landed in, and focuses that pane. A run that
+    /// never landed in a pane lists no `focus`, and neither does a run that
+    /// has ended with its pane still on record.
+    #[test]
+    fn the_options_menu_lists_focus_on_a_paned_command_row() {
+        let (repo, _root_guard) = fixture("options-focus-command");
+        let pipelines = Pipelines::builtin();
+        // `handover` is the default pipeline's command step.
+        add_to(&repo, "paned", &[], Some("handover"), Some("paned"));
+        add_to(&repo, "bare", &[], Some("handover"), Some("bare"));
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let paned = crate::command_step::Runs::key("handover", "paned");
+        let bare = crate::command_step::Runs::key("handover", "bare");
+        for key in [&paned, &bare] {
+            runs.start(key, "sleep 30", &repo.root, &BTreeMap::new())
+                .unwrap();
+        }
+        runs.record_pane(&paned, "w4:p2").unwrap();
+        let mux = FocusMux::with(Vec::new());
+        let lists = |id: &str| {
+            row_actions(&repo, &pipelines, id, &mux)
+                .unwrap()
+                .contains(&RowAction::Focus)
+        };
+
+        assert!(lists("paned"));
+        assert!(!lists("bare"), "a run with no pane");
+        assert!(focus_step(&repo, &pipelines, "paned", &mux).is_none());
+        assert_eq!(mux.focused(), ["w4:p2"]);
+
+        runs.stop(&paned);
+        runs.stop(&bare);
+        assert_ne!(runs.state(&paned), crate::command_step::RunState::Running);
+        assert!(!lists("paned"), "an ended run");
+    }
+
+    /// The menu on a running row with a `plan:` and a live lane draws
+    /// `focus` straight under `pause` and over `restart`.
+    #[test]
+    fn the_options_menu_draws_focus_between_pause_and_restart() {
+        let (repo, _root_guard) = fixture("options-focus-drawn");
+        let pipelines = Pipelines::builtin();
+        add_to(
+            &repo,
+            "state-word-only",
+            &[],
+            Some("implement"),
+            Some("board"),
+        );
+        set_plan(&repo, "state-word-only", Some("/plans/board.html"));
+        let mux = FocusMux::with(vec![lane_in(
+            &repo,
+            "state-word-only",
+            "implement",
+            "w2:p3",
+        )]);
+        let menu = OptionsMenu {
+            id: "state-word-only".to_string(),
+            name: "state-word-only".to_string(),
+            items: row_actions(&repo, &pipelines, "state-word-only", &mux).unwrap(),
+            cursor: 0,
+        };
+        let rows: Vec<String> = options_panel(&menu)
+            .iter()
+            .map(|line| line.trim_end_matches('│').trim_end().to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                format!("{TOP_LEFT}─ state-word-only {}{TOP_RIGHT}", "─".repeat(15)),
+                "│  > open task".to_string(),
+                "│    open plan".to_string(),
+                "│    pause".to_string(),
+                "│    focus".to_string(),
+                "│    restart".to_string(),
+                "│".to_string(),
+                "│  [enter] confirm   [esc] close".to_string(),
+                format!("{BOTTOM_LEFT}{}{BOTTOM_RIGHT}", "─".repeat(33)),
+            ]
+        );
+    }
+
+    /// A herdr refusal of the zoom comes back as a popup titled `focus`:
+    /// the error on an `o:` line, then what to do instead. A lane that has
+    /// ended since the menu opened gets nothing focused and no popup.
+    #[test]
+    fn a_refused_focus_names_the_error_and_restart() {
+        let (repo, _root_guard) = fixture("focus-refused");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "running", &[], Some("implement"), Some("running"));
+        let refusing = FocusMux {
+            refuse: Some("herdr pane zoom w2:p3 --on: pane not found"),
+            ..FocusMux::with(vec![lane_in(&repo, "running", "implement", "w2:p3")])
+        };
+
+        let notice = focus_step(&repo, &pipelines, "running", &refusing).unwrap();
+        assert_eq!(refusing.focused(), ["w2:p3"]);
+        assert_eq!(notice.title, "focus");
+        assert_eq!(
+            notice.text,
+            "o: herdr pane zoom w2:p3 --on: pane not found\n\n\
+             The step's pane may have been closed. restart in this menu \
+             starts the step again in a new pane."
+        );
+
+        let gone = FocusMux::with(Vec::new());
+        assert!(focus_step(&repo, &pipelines, "running", &gone).is_none());
+        assert!(gone.focused().is_empty());
+    }
+
+    /// `enter` on `focus` closes the menu, and asks for the pane again
+    /// rather than trusting the menu's list: with nothing found — here
+    /// headless, which has no pane to focus — it does nothing more and opens
+    /// no popup.
+    #[test]
+    fn focus_with_no_pane_found_closes_the_menu_and_does_nothing() {
+        let (repo, _root_guard) = fixture("focus-nothing-found");
+        crate::mux::force_headless_for_test();
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "running", &[], Some("implement"), Some("running"));
+
+        let mut board = Board::for_test();
+        board.mode = BoardMode::Options(OptionsMenu {
+            id: "running".to_string(),
+            name: "running".to_string(),
+            items: vec![RowAction::Focus],
+            cursor: 0,
+        });
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
     }
 
     /// The menu is a popup titled with the task's id, its items named by

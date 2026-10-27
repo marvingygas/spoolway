@@ -313,10 +313,6 @@ pub trait Mux: Sync {
     /// The default refuses, the same way [`Mux::open_command`] does: a
     /// backend gets this only by implementing it, and headless has no pane to
     /// bring forward.
-    // Nothing in the binary calls this yet: the board's `focus` item is the
-    // caller, and it lands separately. Without the allow the dead-code lint
-    // fails the build until it does.
-    #[allow(dead_code)]
     fn focus_pane(&self, _pane_id: &str) -> Result<()> {
         bail!("this backend has no pane to focus")
     }
@@ -324,7 +320,6 @@ pub trait Mux: Sync {
     /// Whether [`Mux::focus_pane`] works on this backend, so a caller can
     /// hide the action instead of offering one that refuses. A backend that
     /// implements `focus_pane` overrides this to `true`.
-    #[allow(dead_code)]
     fn can_focus_pane(&self) -> bool {
         false
     }
