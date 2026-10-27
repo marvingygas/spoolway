@@ -930,7 +930,8 @@ at normal brightness, even when the file gives it its default value. A key a fil
 empty list or an empty string, such as `watch.dirs = []`, reads `empty`. `spoolway init` writes
 almost every key, so few rows dim in a typical project: an `agents.<profile>.concurrency` the
 profile leaves out, and the price and limit fields a `[models]` glob leaves out. While a note
-above the list says the tracked file or the layer no longer loads, no row is dimmed.
+above the list says the tracked file or the layer no longer loads, no row is dimmed. Every key
+with an empty value then reads `empty`, whether or not a file holds it.
 
 The list holds only keys that exist. A key it does not show, such as a `[models]` glob the config
 has no entry for yet, is written by hand: `w` opens the overrides folder, or
