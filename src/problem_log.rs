@@ -1,5 +1,6 @@
 //! One line per problem, and one per dispatcher stop, per project, kept for
-//! the window a person could plausibly still want it.
+//! as many days as `housekeeping.retention_days` says, and for ever when it
+//! is `0`.
 //!
 //! The board used to carry a pass's own trouble as an amber ticker line —
 //! see the removed `RecentEvent::Note` in `src/status.rs`. That line pushed
@@ -18,9 +19,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::repo::Repo;
-
-/// How long a line survives before [`open`] drops it.
-const WINDOW_DAYS: i64 = 30;
 
 /// Where one project's problems accumulate: `<repo.home's own
 /// parent>/logs/<home's own directory name>.log` — `~/.spoolway/logs/…` for
@@ -142,14 +140,15 @@ fn keep_command_log_at(
     unreachable!("the attempt counter does not end")
 }
 
-/// Trims a project's log to the last thirty days. Called once, at the start
-/// of a run — never on a write, so a pass that hits a dozen problems is a
-/// dozen appends, not a dozen rewrites of everything already there.
+/// Trims a project's log to the last `housekeeping.retention_days` days, and
+/// leaves it whole when that is `0`. Called once, at the start of a run —
+/// never on a write, so a pass that hits a dozen problems is a dozen appends,
+/// not a dozen rewrites of everything already there.
 ///
 /// A write that fails is swallowed: a run that could not tidy its own
 /// postmortem is not a run that should stop for it.
 pub fn open(repo: &Repo) {
-    let _ = trim(&path(repo));
+    let _ = trim(&path(repo), repo.config.housekeeping.retention_days);
 }
 
 /// Appends one problem, timestamped now. Swallowed the same way [`open`] is
@@ -188,19 +187,29 @@ fn write_line(path: &Path, message: &str) -> Result<()> {
     Ok(())
 }
 
-/// Drops every line whose own timestamp is more than [`WINDOW_DAYS`] old,
-/// leaving everything else byte for byte — including a line whose timestamp
-/// cannot be parsed, which is kept rather than guessed away: a parser a
-/// future version gets wrong must never be what deletes someone's history.
+/// Drops every line whose own timestamp is more than `days` old, leaving
+/// everything else byte for byte — including a line whose timestamp cannot be
+/// parsed, which is kept rather than guessed away: a parser a future version
+/// gets wrong must never be what deletes someone's history.
 ///
-/// A no-op, not an error, when there is nothing to trim yet.
-fn trim(path: &Path) -> Result<()> {
+/// `0` days is a no-op: it means keep everything, the same as for every other
+/// retention key, and must never read as a window of nothing that wipes the
+/// log. A no-op, not an error, when there is nothing to trim yet.
+fn trim(path: &Path, days: u64) -> Result<()> {
+    if days == 0 {
+        return Ok(());
+    }
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
     };
-    let cutoff = chrono::Local::now().timestamp() - WINDOW_DAYS * 24 * 3600;
+    // Saturating: `days` has no upper bound, and an overflow must fall toward
+    // keeping lines, not toward a cutoff in the future that drops them all.
+    let window = i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(24 * 3600);
+    let cutoff = chrono::Local::now().timestamp().saturating_sub(window);
     let lines: Vec<&str> = raw.lines().collect();
     let kept: Vec<&str> = lines
         .iter()
@@ -305,7 +314,7 @@ mod tests {
         );
     }
 
-    /// A file spanning both sides of the thirty-day window: two lines older
+    /// A file spanning both sides of a thirty-day window: two lines older
     /// than it, one right at the edge, one well inside it, and one whose
     /// timestamp cannot be parsed at all. Only the two old ones go.
     #[test]
@@ -325,7 +334,7 @@ mod tests {
         );
         std::fs::write(&path, &seed).unwrap();
 
-        trim(&path).unwrap();
+        trim(&path, 30).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(!after.contains("ancient problem"), "{after}");
@@ -334,13 +343,54 @@ mod tests {
         assert!(after.contains("kept, unreadable"), "{after}");
     }
 
+    /// `0` keeps every line, however old, and a longer window keeps what a
+    /// shorter one drops.
+    #[test]
+    fn trim_follows_the_given_days_and_zero_keeps_everything() {
+        let dir = crate::scratch::root("problem-log-days");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proj.log");
+        let now = chrono::Local::now();
+        let old = (now - chrono::Duration::days(45)).to_rfc3339();
+        let seed = format!("{old}  forty-five days old\n");
+
+        std::fs::write(&path, &seed).unwrap();
+        trim(&path, 0).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), seed);
+
+        trim(&path, 90).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), seed);
+
+        trim(&path, 7).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    }
+
+    /// `open` reads the window from the repo's own config.
+    #[test]
+    fn open_trims_by_the_repos_retention_days() {
+        let (mut repo, base) = kept_fixture("problem-log-open-days");
+        let old = (chrono::Local::now() - chrono::Duration::days(45)).to_rfc3339();
+        let log = path(&repo);
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, format!("{old}  old\n")).unwrap();
+
+        repo.config.housekeeping.retention_days = 0;
+        open(&repo);
+        assert!(std::fs::read_to_string(&log).unwrap().contains("old"));
+
+        repo.config.housekeeping.retention_days = 30;
+        open(&repo);
+        assert!(!std::fs::read_to_string(&log).unwrap().contains("old"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// No file yet is not an error — a fresh project's first problem should
     /// not have to survive a spurious failure on the way in.
     #[test]
     fn trim_is_a_no_op_when_there_is_nothing_to_trim() {
         let dir = crate::scratch::root("problem-log-missing");
         let path = dir.join("proj.log");
-        assert!(trim(&path).is_ok());
+        assert!(trim(&path, 30).is_ok());
     }
 
     /// Issue #188: `path` names the right basename but joins it onto

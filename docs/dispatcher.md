@@ -507,7 +507,8 @@ A panel's body still names a file by the task's id.
 ### The problem log
 
 Errors from a pass go to `~/.spoolway/logs/<project>.log`. The same file gets one line for every
-stop of a dispatcher. Each line starts with the time and the dispatcher's pid.
+stop of a dispatcher. Each line starts with the time and the dispatcher's pid. When a dispatcher
+starts, it deletes the lines older than `housekeeping.retention_days` days, and `0` keeps them all.
 
 | Who writes it | When | The line reads |
 |---|---|---|
