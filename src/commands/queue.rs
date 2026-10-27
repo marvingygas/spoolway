@@ -9236,7 +9236,7 @@ struct Panes<'a> {
 
 /// The search box's keys, on the line under the frame while a query is
 /// typed.
-const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "leave search"), ("esc", "cancel")];
+const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "search"), ("esc", "cancel")];
 
 /// The save panel's keys, in its popup and on the line under the frame.
 const SAVE_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "cancel")];
@@ -21748,10 +21748,7 @@ mod tests {
 
         let last = last_frame(&drawn);
         assert!(last.contains("search: ▏"), "{last}");
-        assert!(
-            last.contains("[enter] leave search   [esc] cancel"),
-            "{last}"
-        );
+        assert!(last.contains("[enter] search   [esc] cancel"), "{last}");
         assert!(!last.contains("[f] search"), "{last}");
         assert!(!last.contains("esc back"), "{last}");
         assert!(!last.contains("type to narrow"), "{last}");
