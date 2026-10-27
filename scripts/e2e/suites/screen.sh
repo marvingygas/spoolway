@@ -425,7 +425,7 @@ has "and the routines tab" "QUEUE       [ROUTINES]       OVERRIDES" "$ALL_TABS.p
 has "and the overrides tab" "ROUTINES       [OVERRIDES]       EVAL" "$ALL_TABS.plain"
 has "and the eval tab, → from overrides" "OVERRIDES       [EVAL]" "$ALL_TABS.plain"
 lacks "with no JOBS label left on the strip" "JOBS" "$ALL_TABS.plain"
-has "and the eval tab" "╭─ eval ·" "$ALL_TABS.plain"
+has "and the eval tab" "╭─ [eval]   directories   trials " "$ALL_TABS.plain"
 
 # `→` twice from the dispatch tab, where the screen opens, reaches the routines tab
 # past the queue tab, between queue and overrides, listing the one routine under `.spoolway/routines/`.

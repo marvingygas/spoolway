@@ -47,7 +47,7 @@ work while it shows.
 | `[a]` | Open the sort popup, ascending |
 | `[d]` | Open the sort popup, descending |
 | `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |
-| `[tab]` | Cycle to the next table |
+| `[tab]` | Move to the next section |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the table on screen, in the view drawn, to a CSV file |
 | `[r]` | Re-read the ledger |
@@ -66,20 +66,31 @@ that frame is drawn before the next key is read.
 
 The lanes and directory tables open on totals. `[t]` switches the lanes table to per-task
 figures and the directory table to per-session figures, and pressing it again switches back.
-The frame title names the view, and the key line names the view `[t]` switches to.
+The frame title names the three sections, `[eval]   directories   trials`, with the open one
+bracketed. The top border's right side starts with the grouping and the view, and the key line
+names the view `[t]` switches to.
 
-| View | Frame title | Key line |
+| View | Border's right side | Key line |
 |---|---|---|
-| Totals | `eval · by pipeline · totals` | `[d] descending   [t] per task   [tab] dirs` |
-| Per task | `eval · by pipeline · per task` | `[d] descending   [t] totals   [tab] dirs` |
+| Totals | `by pipeline · totals` | `[d] descending   [t] per task   [tab] section` |
+| Per task | `by pipeline · per task` | `[d] descending   [t] totals   [tab] section` |
 
-On the directory table the same view is named `per session`, as in `eval · by dir · per session`.
+On the directory table the same view is named `per session`, as in `by dir · per session`.
 
 The view survives `[tab]`, `[r]`, a change of `by` and the filter panel. Every new visit to the
 eval tab opens on totals. The trials table has no `[t]`.
 
-The top border's right side names the scope only for `--project` and `--all`. It lists the
-filters in force. With nothing to show, it has no label.
+After the grouping and the view, the top border's right side names the scope only for
+`--project` and `--all`, then lists the filters in force. The trials table has no grouping, so
+with nothing else to show its right side has no label.
+
+When the right side is wider than the room the terminal leaves, it drops whole parts from its end
+and a final `…` stands in for them. The section names on the left are always drawn whole. The
+grouping is the first part, so it is the last to drop. For example, in an 80-column terminal:
+
+```
+╭─ [eval]   directories   trials ───── by pipeline · totals · step review · … ─╮
+```
 
 ### The sort popup
 
@@ -387,7 +398,7 @@ rather than `195.8k`, and `2244` seconds rather than `37m 24s`. Every row also s
 `.spoolway/evals/eval-by-<by>-<view>-<date>-<time>.csv`. `<view>` is `totals`, `per-task` or
 `per-session`. The confirmation names the rows, the `by` and the view, such as
 `11 rows, by pipeline · per task`. A second export in the same minute gets a `-2` suffix rather
-than overwriting the first. The file name follows the frame title's view. Under `by session` the
+than overwriting the first. The file name follows the view on the top border's right side. Under `by session` the
 only view is the session table, and `[t]` names it `per-session`, so the file is
 `eval-by-session-per-session-<date>-<time>.csv`.
 
