@@ -940,7 +940,7 @@ mod tests {
             ]
         );
         assert_eq!(inside(&state)[3], "");
-        assert_eq!(key_line(&state), " [enter] leave search   [esc] cancel");
+        assert_eq!(key_line(&state), " [enter] search   [esc] cancel");
         type_keys(&repo, &mut state, "x");
         assert!(text(&state).contains("no branches match this search"));
         type_keys(&repo, &mut state, "\x1b");

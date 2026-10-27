@@ -957,7 +957,7 @@ On `+ new key` the key line reads `[enter] new key` instead.
 
 The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set, or `+ new key`, shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
 
-While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
+While the `search:` row is open the key line reads `[enter] search   [esc] cancel`. What is
 typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
 every key with no value. `enter` keeps the results, and `esc` clears the search. A list taller than
 the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,

@@ -902,7 +902,7 @@ const SET_KEYS: &[(&str, &str)] = &[("enter", "save"), ("esc", "back")];
 const NEW_KEY_KEYS: &[(&str, &str)] = &[("tab", "next field"), ("enter", "save"), ("esc", "back")];
 
 /// The search row's keys, the same the queue tab's search names.
-const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "leave search"), ("esc", "cancel")];
+const SEARCH_KEYS: &[(&str, &str)] = &[("enter", "search"), ("esc", "cancel")];
 
 /// `w`, as the key line of every section it opens the overrides folder on
 /// names it.
@@ -1209,10 +1209,7 @@ mod tests {
         type_keys(&repo, &mut state, "fnot set");
         let drawn = lines(&state);
         assert!(drawn[1].starts_with("│ search: not set▏"), "{drawn:?}");
-        assert_eq!(
-            drawn.last().unwrap(),
-            " [enter] leave search   [esc] cancel"
-        );
+        assert_eq!(drawn.last().unwrap(), " [enter] search   [esc] cancel");
         assert!(state.matches().iter().all(|s| s.value.is_empty()));
         assert!(state.matches().iter().any(|s| s.key() == "watch.dirs"));
 

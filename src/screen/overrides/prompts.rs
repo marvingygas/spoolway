@@ -409,7 +409,7 @@ mod tests {
         assert!(lines(&state)[1].starts_with("│ search: review▏"));
         assert_eq!(
             lines(&state).last().unwrap(),
-            " [enter] leave search   [esc] cancel"
+            " [enter] search   [esc] cancel"
         );
         type_keys(&repo, &mut state, "\x1b");
         type_keys(&repo, &mut state, "foverrid\r");
