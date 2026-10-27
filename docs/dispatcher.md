@@ -922,7 +922,15 @@ a branch. On every section `w` opens the overrides folder. See [Opening the over
 
 The config section lists every key `spoolway config list` prints, grouped under its table. Each
 key shows the value in use now, which is the tracked `config.toml` with the layer merged onto it.
-A key with no value, such as `watch.dirs`, reads `not set`. The cursor starts on the first key.
+The cursor starts on the first key.
+
+A key that neither the tracked `config.toml` nor `overrides/config.toml` holds is drawn dimmed
+and reads `not set`, whatever built-in default it falls back to. A key either file holds is drawn
+at normal brightness, even when the file gives it its default value. A key a file sets to an
+empty list or an empty string, such as `watch.dirs = []`, reads `empty`. `spoolway init` writes
+almost every key, so few rows dim in a typical project: an `agents.<profile>.concurrency` the
+profile leaves out, and the price and limit fields a `[models]` glob leaves out. While a note
+above the list says the tracked file or the layer no longer loads, no row is dimmed.
 
 The list holds only keys that exist. A key it does not show, such as a `[models]` glob the config
 has no entry for yet, is written by hand: `w` opens the overrides folder, or
@@ -936,12 +944,13 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 │   agents.claude                                                              │
 │ >   concurrency                 5                                            │
 │     permission_mode             auto                                         │
+│   agents.pi                                                                  │
+│     concurrency                 not set                                      │
 │   dispatch                                                                   │
 │     lane_quiet                  15m                                          │
 │     visible_lanes               3                                            │
 │   watch                                                                      │
-│     dirs                        not set                                      │
-│                                                                              │
+│     dirs                        empty                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
@@ -959,13 +968,14 @@ The options menu is titled with the key. It offers `delete override` when the la
 
 While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
 typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
-every key with no value. `enter` keeps the results, and `esc` clears the search. A search that
+exactly the dimmed keys. `enter` keeps the results, and `esc` clears the search. A search that
 leaves no key leaves nothing for `enter` or `o` to open. A list taller than
 the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,
 such as `↑ 3 keys above · ↓ 6 keys below`.
 
-`enter` on a key opens its one-line field, filled with the value in use now. The `current` row shows
-that value, any override already in the layer included, or `not set`.
+`enter` on a key opens its one-line field, filled with the value in use now. On a dimmed key the
+field opens empty. The `current` row reads what the list reads: the value, any override already
+in the layer included, `empty`, or `not set`.
 
 ```
 ╭─ set dispatch.lane_quiet ────────────────────────╮

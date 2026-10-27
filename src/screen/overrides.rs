@@ -10,11 +10,11 @@
 //! grouped under its table, with the value in use now: the tracked config
 //! with the layer merged onto it. A key neither the tracked `config.toml` nor
 //! the layer holds is drawn dimmed and reads `not set`, whatever default it
-//! falls back to; a key a file sets empty reads `empty`. A key
-//! the list does not show, such as a `[models]` glob the config has no entry
-//! for yet, is written by hand in the folder `w` opens, or by `spoolway
-//! config override --set`. The pipeline section
-//! sets one step field on many pipeline steps at once — see [`pipeline`].
+//! falls back to; a key a file sets empty reads `empty`. A key the list does
+//! not show, such as a `[models]` glob the config has no entry for yet, is
+//! written by hand in the folder `w` opens, or by `spoolway config override
+//! --set`. The pipeline section sets one step field on many pipeline steps at
+//! once — see [`pipeline`].
 //! The prompts section copies a prompt into the layer — see [`prompts`].
 //! The active section lists everything the layer holds, deletes any of it,
 //! and promotes whole files onto a branch you pick — see [`active`] and
@@ -80,11 +80,11 @@ struct Setting {
     table: String,
     /// The key's last part, such as `concurrency`.
     name: String,
-    /// The value in use now, empty for a key with none.
+    /// The value in use now, empty for an empty list or string.
     value: String,
-    /// Whether the tracked `config.toml` or the layer holds the key. Also
-    /// `true` for every key while the list is stale: which file holds what
-    /// is then read off files that do not load, so no row is dimmed.
+    /// Whether the tracked `config.toml` or the layer holds the key. `true`
+    /// for every key while the list is stale: one of those files does not
+    /// load then, so it cannot say which keys it holds, and no row dims.
     set: bool,
 }
 

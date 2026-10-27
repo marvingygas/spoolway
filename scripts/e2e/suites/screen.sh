@@ -18,12 +18,12 @@
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
-# menu removes its page after one popup. On the overrides tab a listed config
-# key and a new one are each set through their popup, and both land in the
-# overrides layer, one step field is set on steps in two pipelines, one
-# prompt is copied into the layer, and the active section deletes one config
-# key from it, then promotes one pipeline onto a local branch with no
-# checkout, into a worktree it makes beside the project.
+# menu removes its page after one popup. On the overrides tab a config key no
+# file sets is drawn dimmed, two listed config keys are each set through their
+# popup, and both land in the overrides layer, one step field is set on steps
+# in two pipelines, one prompt is copied into the layer, and the active
+# section deletes one config key from it, then promotes one pipeline onto a
+# local branch with no checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
 # help.
@@ -580,6 +580,12 @@ has "it opens on config, its sections named in the box title" \
 has "enter on a key opens its field" "╭─ set dispatch.lane_quiet ─" "$OVERRIDES_TAB.plain"
 has "and on the second key opens its own" "╭─ set dispatch.visible_lanes ─" "$OVERRIDES_TAB.plain"
 lacks "the list draws no + new key row" "+ new key" "$OVERRIDES_TAB.plain"
+# The fixture's `[agents.pi]` profile leaves `concurrency` out, and the layer
+# does not set it either, so its row, the one under the table's heading, is
+# drawn with the dim code and reads `not set`.
+works "a concurrency no file sets is dimmed and reads not set" bash -c \
+  'grep -A1 -F "│   agents.pi " "$1" | grep -qF "$2"' _ "$OVERRIDES_TAB" \
+  "$(printf '\033[2m    concurrency                 not set\033[0m')"
 CONFIG_LAYER="$SPOOLWAY_PROJECT_HOME/overrides/config.toml"
 has "the listed key is in the layer as typed" 'lane_quiet = "5m"' "$CONFIG_LAYER"
 has "and so is the second, written as a number" "visible_lanes = 4" "$CONFIG_LAYER"
