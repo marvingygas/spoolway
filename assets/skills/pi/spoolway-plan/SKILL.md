@@ -19,8 +19,8 @@ not this session.
 Not the source you just read to understand it, not the typo you noticed, not this skill. Read
 anything; change nothing else — a fix made here is an unreviewed change on whatever branch the
 session sits on, landing under a task describing a starting state the code is no longer in. What
-you found while reading becomes a decision, a line of context, or a sentence to the human —
-never an edit, and no request lifts this.
+you found while reading becomes a decision, a line of context, or a question. Print that question in chat before the cut, and end the turn there.
+The person makes it a task or rules it out of scope. It never becomes an edit, and no request lifts this.
 
 ## Understand the intent, then settle every question
 
@@ -202,3 +202,6 @@ list of its own.
    reads the skeleton, writes the tasks, verifies the chain and proves the set with
    `spoolway task contract` — the whole of the procedure and its guardrails live there now, so
    that a second caller cutting a breakdown shares it rather than drifting from it.
+
+   The closing line of `spoolway-tasks` is the session's last word. Add nothing before it or
+   after it: no plan summary, no decision, no summary of the tasks, no finding.
