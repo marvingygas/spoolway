@@ -390,7 +390,7 @@ rather than `195.8k`, and `2244` seconds rather than `37m 24s`. Every row also s
 `.spoolway/evals/eval-by-<by>-<view>-<date>-<time>.csv`. `<view>` is `totals`, `per-task` or
 `per-session`. The confirmation names the rows, the `by` and the view, such as
 `11 rows, by pipeline · per task`. A second export in the same minute gets a `-2` suffix rather
-than overwriting the first. The file name follows the frame title's view. Under `by session` the
+than overwriting the first. The file name follows the view on the top border's right side. Under `by session` the
 only view is the session table, and `[t]` names it `per-session`, so the file is
 `eval-by-session-per-session-<date>-<time>.csv`.
 
