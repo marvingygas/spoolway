@@ -922,20 +922,22 @@ a branch. On every section `w` opens the overrides folder. See [Opening the over
 
 The config section lists every key `spoolway config list` prints, grouped under its table. Each
 key shows the value in use now, which is the tracked `config.toml` with the layer merged onto it.
-A key with no value, such as `watch.dirs`, reads `not set`. `+ new key` at the top takes any
-dotted key the list does not show, such as a `[models]` glob the config has no entry for yet.
+A key with no value, such as `watch.dirs`, reads `not set`. The cursor starts on the first key.
+
+The list holds only keys that exist. A key it does not show, such as a `[models]` glob the config
+has no entry for yet, is written by hand: `w` opens the overrides folder, or
+`spoolway config override --set models.qwen3-coder.input=0.4` writes one key from the command line.
 
 ```
     ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
 
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
 │                                                                              │
-│   + new key                                                                  │
 │   agents.claude                                                              │
-│     concurrency                 5                                            │
+│ >   concurrency                 5                                            │
 │     permission_mode             auto                                         │
 │   dispatch                                                                   │
-│ >   lane_quiet                  15m                                          │
+│     lane_quiet                  15m                                          │
 │     visible_lanes               3                                            │
 │   watch                                                                      │
 │     dirs                        not set                                      │
@@ -944,22 +946,21 @@ dotted key the list does not show, such as a `[models]` glob the config has no e
  [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
-On `+ new key` the key line reads `[enter] new key` instead.
-
 | Key | What it does |
 |---|---|
-| `↑` `↓` | Move the cursor over `+ new key` and the keys. Table headings are skipped. |
-| `enter` | Open the value field of the key under the cursor, or the `new key` popup on `+ new key`. |
+| `↑` `↓` | Move the cursor over the keys. Table headings are skipped. |
+| `enter` | Open the value field of the key under the cursor. |
 | `f` | Open the `search:` row at the top of the list. |
 | `o` | Open the options menu of the key under the cursor. |
 | `w` | Open the overrides folder. |
 | `tab` | Move to the next section. |
 
-The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set, or `+ new key`, shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
+The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
 
 While the `search:` row is open the key line reads `[enter] leave search   [esc] cancel`. What is
 typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
-every key with no value. `enter` keeps the results, and `esc` clears the search. A list taller than
+every key with no value. `enter` keeps the results, and `esc` clears the search. A search that
+leaves no key leaves nothing for `enter` or `o` to open. A list taller than
 the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,
 such as `↑ 3 keys above · ↓ 6 keys below`.
 
@@ -977,27 +978,11 @@ that value, any override already in the layer included, or `not set`.
 ╰──────────────────────────────────────────────────╯
 ```
 
-`enter` on `+ new key` opens the `new key` popup, with a key field and a value field. `tab` moves
-between the two, and the `▏` marks the field that takes what is typed. Its `current` row reads
-the typed key's value in the list, or `not set` for a key the list does not show.
-
-```
-╭─ new key ────────────────────────────────────────╮
-│                                                  │
-│  key:     models.qwen3-coder.input               │
-│  value:   0.4▏                                   │
-│                                                  │
-│  current   not set                               │
-│                                                  │
-│  [tab] next field   [enter] save   [esc] back    │
-╰──────────────────────────────────────────────────╯
-```
-
-`enter` in either popup writes the key to the layer's `config.toml`, exactly as typed, and the
+`enter` in the popup writes the key to the layer's `config.toml`, exactly as typed, and the
 list shows the new value. Text that reads as a TOML number, boolean or array is written as one,
 and anything else is written as a string: `5`, `true` and `["a", "b"]` keep their type, and
-`5m`, `010` and `group first` are written as strings. `enter` on an empty field, or a popup with
-an empty key, writes nothing. `esc` closes either popup with nothing written.
+`5m`, `010` and `group first` are written as strings. `enter` on an empty field writes nothing.
+`esc` closes the popup with nothing written.
 
 When the tracked `config.toml` or `overrides/config.toml` stops loading while the screen is open,
 the list keeps the config the screen started with. A note at the top of the box names the file
