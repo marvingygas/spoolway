@@ -3896,6 +3896,7 @@ mod tests {
             .find(|(report, _)| report.contains("this spoolway has and the file did not"))
             .unwrap_or_else(|| panic!("no note naming the added settings: {notes:?}"));
         assert!(report.contains("dispatch.lane_layout"), "{report}");
+        assert!(report.contains("dispatch.autofocus_panes"), "{report}");
         assert!(panel.starts_with("added "), "{panel}");
 
         let body = panel_body(&[], &wrote, &notes, &removed);

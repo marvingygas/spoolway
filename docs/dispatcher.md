@@ -1768,7 +1768,8 @@ A lane is banked when its step moves on, and again when the task is done. The se
 counts only what was added since the first, so rounds you ran in a finished pane are counted.
 
 A task whose pane is parked for you, on `paused` or on a `blocked` step nobody staffs, is still
-focused once. Its pane stays open when the task moves on. `spoolway resume` closes only the
+focused once when `dispatch.autofocus_panes` is on. It is off by default, and then the pane is
+kept open but your focus stays where it was. Its pane stays open when the task moves on. `spoolway resume` closes only the
 settled lane on the step it sends the task to. Every pane closes with the task's workspace when
 the task is done.
 

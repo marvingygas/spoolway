@@ -3204,9 +3204,9 @@ impl<'a> Dispatcher<'a> {
     /// With two more exceptions. The first is what a person sees when a task stops:
     /// a lane whose task has landed on `blocked` or `paused` —
     /// `held_for_block`, set by `hold_for_block` and by
-    /// `tear_down_and_escalate` alike — is focused once, and while the task
-    /// stays parked a person's rounds in it are committed as they end. A stage
-    /// change and fifteen lines of tail do not tell anybody what the session
+    /// `tear_down_and_escalate` alike — is focused once when
+    /// `dispatch.autofocus_panes` is on, and while the task stays parked a
+    /// person's rounds in it are committed as they end. A stage change and fifteen lines of tail do not tell anybody what the session
     /// was doing when it stopped, and by the time they come to look the only
     /// copy of that is the pane. It becomes a kept lane like any other on the
     /// pass after the task moves on.
@@ -3448,12 +3448,15 @@ impl<'a> Dispatcher<'a> {
 
         // Failing to focus is a pane somebody has to find themselves, not a
         // reason to spoil the pass — the notification named it either way.
-        if let Err(err) = self.mux.focus_lane(&lane.name) {
+        // `dispatch.autofocus_panes` off leaves a person's focus where it is.
+        let autofocus = self.repo.config.dispatch.autofocus_panes;
+        if autofocus && let Err(err) = self.mux.focus_lane(&lane.name) {
             report.problems.push(format!("{}: {err:#}", lane.name));
         }
         let stage = task.map(|t| t.stage()).unwrap_or(crate::pipeline::BLOCKED);
+        let and_focused = if autofocus { " and focused" } else { "" };
         report.actions.push(format!(
-            "{task_id}: {stage} at `{step_id}` — its pane `{}` is left open and focused",
+            "{task_id}: {stage} at `{step_id}` — its pane `{}` is left open{and_focused}",
             lane.name
         ));
     }
@@ -4007,7 +4010,7 @@ impl<'a> Dispatcher<'a> {
         {
             record.busy_s = 0;
         }
-        if hold {
+        if hold && self.repo.config.dispatch.autofocus_panes {
             let _ = self.mux.focus_lane(&lane.name);
         }
         Ok(record)
@@ -20220,6 +20223,81 @@ mod tests {
         );
     }
 
+    /// A lane the reminder ceiling gives up on is stopped and banked with its
+    /// pane held open. It is brought to the front only when
+    /// `dispatch.autofocus_panes` is on; either way the pane stays.
+    #[test]
+    fn a_lane_given_up_on_is_focused_only_when_autofocus_is_on() {
+        for (autofocus, name) in [(false, "give-up-quiet"), (true, "give-up-focus")] {
+            let (mut repo, _root_guard) = fixture(name);
+            repo.config.dispatch.autofocus_panes = autofocus;
+            let path = add_task_with(&repo, "demo", "implement", |f| {
+                f.workspace_id = Some("w1".into());
+                f.worktree_path = Some(stand_in_checkout(&repo));
+                f.tab_id = Some("w1:t1".into());
+                f.pane_id = Some("w1:p1".into());
+            });
+            let mux = FakeMux::new(vec![lane_in(
+                &repo,
+                "demo · implement",
+                LaneStatus::Done,
+                "w1:p2",
+            )]);
+            run_to_the_reminder_ceiling(&repo, &mux, "demo · implement", || run_pass(&repo, &mux));
+            assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+            assert!(mux.did("stop").is_empty(), "the pane was taken away");
+            assert_eq!(
+                !mux.did("focus").is_empty(),
+                autofocus,
+                "autofocus_panes = {autofocus}: {:?}",
+                mux.calls()
+            );
+        }
+    }
+
+    /// A task already parked for a person has its lane held on the first
+    /// pass that finds it, and that pass reports the pane as left open. The
+    /// report says "and focused" only when the pane really was brought
+    /// forward, which `dispatch.autofocus_panes` decides.
+    #[test]
+    fn a_pane_held_for_a_person_is_focused_only_when_autofocus_is_on() {
+        for (autofocus, name) in [(false, "hold-quiet"), (true, "hold-focus")] {
+            let (mut repo, _root_guard) = fixture(name);
+            repo.config.dispatch.autofocus_panes = autofocus;
+            let path = add_task_with(&repo, "demo", "implement", |f| {
+                f.workspace_id = Some("w1".into());
+                f.worktree_path = Some(stand_in_checkout(&repo));
+                f.tab_id = Some("w1:t1".into());
+                f.pane_id = Some("w1:p1".into());
+            });
+            let mut task = reload(&path);
+            task.front.parked_from = Some("implement".into());
+            task.set_stage_unbanked(crate::pipeline::PAUSED, "paused at a gate");
+            task.save().unwrap();
+
+            let mux = FakeMux::new(vec![lane_in(
+                &repo,
+                "demo · implement",
+                LaneStatus::Done,
+                "w1:p2",
+            )]);
+            let report = run_pass(&repo, &mux);
+            assert!(mux.did("stop").is_empty(), "the pane was taken away");
+            assert_eq!(
+                !mux.did("focus").is_empty(),
+                autofocus,
+                "autofocus_panes = {autofocus}: {:?}",
+                mux.calls()
+            );
+            let held = report
+                .actions
+                .iter()
+                .find(|a| a.contains("is left open"))
+                .unwrap_or_else(|| panic!("the hold was not reported: {:?}", report.actions));
+            assert_eq!(held.ends_with("left open and focused"), autofocus, "{held}");
+        }
+    }
+
     /// A paused task's pane is the only account of what the session was doing,
     /// so it is kept for as long as the pause is — and no longer. The pass that
     /// finds the task resumed closes it, and has to do so *before* the step
@@ -23313,6 +23391,7 @@ mod tests {
     #[test]
     fn a_live_lane_past_its_ctx_ceiling_is_stopped_and_escalated() {
         let (mut repo, _root_guard) = fixture("ctx-ceiling-live");
+        repo.config.dispatch.autofocus_panes = true;
         repo.config.models.insert(
             "test-model".into(),
             crate::usage::ModelPrice {
@@ -23369,10 +23448,10 @@ mod tests {
         assert!(log.contains("uncommitted"), "{log}");
         assert!(log.contains("conversation is gone"), "{log}");
         // Attended, so the pane is kept for a person to read rather than
-        // closed — `tear_down_and_escalate`'s own `hold` — and the lane is
-        // brought to the front instead of stopped. But it was busy, and
-        // holding the pane must not mean leaving it running past the
-        // ceiling: an interrupt ends its turn in place.
+        // closed — `tear_down_and_escalate`'s own `hold` — and, with
+        // `dispatch.autofocus_panes` on, brought to the front. But it was
+        // busy, and holding the pane must not mean leaving it running past
+        // the ceiling: an interrupt ends its turn in place.
         assert!(
             mux.did("focus")
                 .iter()

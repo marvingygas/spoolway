@@ -80,6 +80,13 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Run command steps without opening a pane.",
     },
     Reference {
+        key: "dispatch.autofocus_panes",
+        values: "true, false",
+        sentence: "Bring a pane to the front on its own: a task paused at a gate, a task \
+                    waiting for you on blocked or hook_failed, and a lane that was stopped \
+                    and given up on.",
+    },
+    Reference {
         key: "dispatch.lane_layout",
         values: "panes, tabs",
         sentence: "Show a task's steps as panes in one tab, or give each step its own tab.",
@@ -1440,6 +1447,31 @@ mod tests {
             "{err}"
         );
         assert!(set(&config, "dispatch.visible_lanes", "lots").is_err());
+    }
+
+    /// `autofocus_panes` is a bool, off by default, and refuses anything else.
+    #[test]
+    fn autofocus_panes_is_readable_and_writable_at_its_default() {
+        let config = Config::default();
+        assert_eq!(get(&config, "dispatch.autofocus_panes").unwrap(), "false");
+
+        let on = set(&config, "dispatch.autofocus_panes", "true").unwrap();
+        assert!(on.dispatch.autofocus_panes);
+        assert_eq!(get(&on, "dispatch.autofocus_panes").unwrap(), "true");
+        assert!(
+            toml::to_string(&on)
+                .unwrap()
+                .contains("autofocus_panes = true")
+        );
+
+        let back = set(&on, "dispatch.autofocus_panes", "false").unwrap();
+        assert!(!back.dispatch.autofocus_panes);
+        assert!(
+            toml::to_string(&back)
+                .unwrap()
+                .contains("autofocus_panes = false")
+        );
+        assert!(set(&config, "dispatch.autofocus_panes", "sometimes").is_err());
     }
 
     /// `hide_commands` is a bool, written even while it is `false`.

@@ -655,6 +655,15 @@ pub struct DispatchConfig {
     /// direction; a step with no `hide:` follows it.
     pub hide_commands: bool,
 
+    /// Whether the dispatcher may bring a lane's pane to the front on its own.
+    ///
+    /// Off by default, so a running task never takes your focus. The pane is
+    /// still kept open and the notification still fires; only the focus call
+    /// is skipped. On, a pane comes forward in three cases: a task paused at
+    /// a gate, a task waiting for a person on `blocked` or `hook_failed`, and
+    /// a lane that was stopped and given up on.
+    pub autofocus_panes: bool,
+
     /// Where a task's lanes are placed in its workspace: as panes of one tab,
     /// or one tab to a step. See [`LaneLayout`].
     pub lane_layout: LaneLayout,
@@ -720,6 +729,7 @@ impl Default for DispatchConfig {
             priority: Priority::default(),
             visible_lanes: VisibleLanes::default(),
             hide_commands: false,
+            autofocus_panes: false,
             lane_layout: LaneLayout::default(),
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
@@ -4137,6 +4147,7 @@ mod tests {
             "lane_child_ceiling = \"1h\"",
             "visible_lanes = 3",
             "hide_commands = false",
+            "autofocus_panes = false",
             "lane_layout = \"panes\"",
         ] {
             assert!(body.contains(line), "{line} missing from {body}");
