@@ -3939,7 +3939,8 @@ impl<'a> Dispatcher<'a> {
 
     /// Stop a lane that is being given up on, bank what it spent, and keep
     /// its pane where the backend keeps one, bringing it forward when
-    /// `dispatch.autofocus_panes` is on. Answers the lane's record, which says where the branch stood when the lane began.
+    /// `dispatch.autofocus_panes` is on. Answers the lane's record, which says
+    /// where the branch stood when the lane began.
     ///
     /// The one place a torn-down lane is stopped, for
     /// [`Dispatcher::tear_down_and_escalate`] and
