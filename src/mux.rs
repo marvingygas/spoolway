@@ -1983,10 +1983,10 @@ impl Mux for Herdr {
         true
     }
 
-    /// Run rather than [`Herdr::call_ignoring_result`]'d, because a refusal
-    /// here is read by a person, in the board's `focus` popup: `repo::run`'s
-    /// message carries herdr's whole JSON envelope, and [`herdr_refusal`]
-    /// carries only the sentence inside it.
+    /// Spawned here rather than through [`Herdr::call_ignoring_result`],
+    /// because a person reads this refusal, in the board's `focus` popup:
+    /// `repo::run`'s message carries herdr's whole JSON envelope, and
+    /// [`herdr_refusal`] carries only the sentence inside it.
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
         let argv = pane_zoom_argv(pane_id);
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
