@@ -445,16 +445,8 @@ pub(crate) fn apply_config_patch(
     config: Config,
     overrides: &Path,
 ) -> Result<(Config, Vec<Ignored>)> {
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((config, Vec::new())),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok((config, Vec::new()));
     };
     let mut ignored = Vec::new();
     let config = apply_config_table(config, &table, &mut ignored);
@@ -911,16 +903,8 @@ pub(crate) fn config_patch_leaves_for(overrides: &Path, key: &str) -> Result<Vec
     let key = crate::confkv::split_models_key(key)
         .map(|parts| parts.join("."))
         .unwrap_or_else(|| key.to_string());
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok(Vec::new());
     };
     let mut found = Vec::new();
     collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {
@@ -935,20 +919,27 @@ pub(crate) fn config_patch_leaves_for(overrides: &Path, key: &str) -> Result<Vec
     Ok(found)
 }
 
-/// The dotted leaf keys `overrides/config.toml` carries, sorted — `None`
-/// when there is no patch. For `override list`, which shows what a config
-/// patch overrides the same way it shows a pipeline patch's step keys.
-pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>> {
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
+/// The config file at `path` as a TOML table, `None` when there is no file:
+/// what every reader of a config file here starts from, so a missing file,
+/// a read error and a parse error read the same in each. A TOML document is
+/// a table at its top, so it parses straight into one.
+fn read_config_table(path: &Path) -> Result<Option<toml::Table>> {
+    let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    toml::from_str(&raw)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
+/// The dotted leaf keys `overrides/config.toml` carries, sorted — `None`
+/// when there is no patch. For `override list`, which shows what a config
+/// patch overrides the same way it shows a pipeline patch's step keys.
+pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>> {
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok(None);
     };
     let mut keys = Vec::new();
     collect_leaf_keys(&table, &mut String::new(), &mut keys);
@@ -966,15 +957,8 @@ pub(crate) fn config_patch_keys(overrides: &Path) -> Result<Option<Vec<String>>>
 /// the layer holds. An old spelling the load still accepts is read as the
 /// key it sets: left as written, a row the file does set would dim.
 pub(crate) fn config_file_keys(path: &Path) -> Result<Option<BTreeSet<String>>> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(path)? else {
+        return Ok(None);
     };
     let mut keys = Vec::new();
     collect_leaf_keys(&table, &mut String::new(), &mut keys);
@@ -1196,16 +1180,8 @@ fn config_patch_after_removing(overrides: &Path, keys: &[String]) -> Result<Opti
 /// For the OVERRIDES tab, which shows each key's value beside the setup's
 /// and says when the two are the same.
 pub(crate) fn config_patch_inputs(overrides: &Path) -> Result<Option<Vec<ConfigLeaf>>> {
-    let path = config_patch_path(overrides);
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    let toml::Value::Table(table) = parsed else {
-        bail!("{} must be a table of settings", path.display());
+    let Some(table) = read_config_table(&config_patch_path(overrides))? else {
+        return Ok(None);
     };
     let mut leaves = Vec::new();
     collect_config_leaves(&table, &mut String::new(), &mut |leaf, input| {

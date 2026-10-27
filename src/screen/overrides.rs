@@ -42,7 +42,7 @@ use std::io::Write;
 use anyhow::Result;
 
 use super::shell::{self, Leave};
-use super::{Key, Notice, PollableRead, keys, pad_to};
+use super::{Key, Notice, PollableRead, keys, pad_to, pad_visible};
 use crate::config::Config;
 use crate::repo::Repo;
 use crate::status::{DIM, RESET};
@@ -114,8 +114,9 @@ impl Setting {
     }
 }
 
-/// What a value with nothing in it reads as, in the pipeline section, in a
-/// popup's `current` row, and on a config key no file holds.
+/// What a value with nothing in it reads as in the pipeline section, in the
+/// active section's rows and in a pipeline key's set popup, and what a
+/// config key no file holds reads as in the config section and its popup.
 const NOT_SET: &str = "not set";
 
 /// What a config key a file sets to an empty list or string reads as. Kept
@@ -680,7 +681,9 @@ fn frame(state: &State) -> Vec<String> {
     let mut frame = vec![top_border(state, width)];
     frame.extend(
         body.iter()
-            .map(|line| format!("│ {}│", pad_styled(line, inner.saturating_sub(1)))),
+            // A dimmed key's escape codes take no column, and `pad_to`
+            // would count each of them.
+            .map(|line| format!("│ {}│", pad_visible(line, inner.saturating_sub(1)))),
     );
     frame.push(format!(
         "{}{}{}",
@@ -689,104 +692,12 @@ fn frame(state: &State) -> Vec<String> {
         super::corner::BOTTOM_RIGHT
     ));
     if let Some(popup) = popup {
-        overlay_styled(&mut frame, &popup);
+        super::overlay(&mut frame, &popup);
     }
     let mut out = shell::strip();
     out.extend(frame);
     out.extend(footer);
     out
-}
-
-/// `line` cut or padded to `width` columns as a reader counts them, where an
-/// escape code takes no column. [`pad_to`] counts every character, so the
-/// codes of a dimmed key would pull the row's right border in by eight
-/// columns. A line cut before the code that ends its colour gets [`RESET`]
-/// in its place, so the colour stops short of the border.
-fn pad_styled(line: &str, width: usize) -> String {
-    if !line.contains('\x1b') {
-        return pad_to(line, width);
-    }
-    let (cells, tail) = cells(line);
-    let mut out: String = cells
-        .iter()
-        .take(width)
-        .flat_map(|(codes, ch)| codes.chars().chain(std::iter::once(*ch)))
-        .collect();
-    match cells.len() > width {
-        true => out.push_str(RESET),
-        false => out.push_str(&tail),
-    }
-    out.push_str(&" ".repeat(width.saturating_sub(cells.len())));
-    out
-}
-
-/// [`super::overlay`] for a frame whose rows may carry escape codes: `panel`
-/// lands on the same columns a reader sees, wherever a dimmed key's codes
-/// sit. A colour open where the panel starts is closed there and opened
-/// again where it ends, so the panel is never drawn dimmed and the row's
-/// text to the right of it still is.
-fn overlay_styled(frame: &mut [String], panel: &[String]) {
-    let Some((x, y)) = super::overlay_origin(frame, panel) else {
-        return;
-    };
-    for (i, line) in panel.iter().enumerate() {
-        let Some(row) = frame.get_mut(y + i) else {
-            break;
-        };
-        let (cells, tail) = cells(row);
-        let over: Vec<char> = line.chars().collect();
-        let end = x + over.len();
-        // The codes in force at the current column, cleared by a reset.
-        let mut open = String::new();
-        let mut out = String::new();
-        for (j, (codes, ch)) in cells.iter().enumerate() {
-            let before = open.clone();
-            for code in codes.split_inclusive(|c: char| c.is_ascii_alphabetic()) {
-                match code == RESET {
-                    true => open.clear(),
-                    false => open.push_str(code),
-                }
-            }
-            if (x..end).contains(&j) {
-                if j == x && !before.is_empty() {
-                    out.push_str(RESET);
-                }
-                out.push(over[j - x]);
-                continue;
-            }
-            if j == end {
-                out.push_str(&before);
-            }
-            out.push_str(codes);
-            out.push(*ch);
-        }
-        out.push_str(&tail);
-        *row = out;
-    }
-}
-
-/// `row` as a reader sees it: each visible character with the escape codes
-/// drawn just before it, then the codes after the last one. A code is a CSI
-/// sequence, `ESC [` up to its final letter, the only kind the tab draws.
-fn cells(row: &str) -> (Vec<(String, char)>, String) {
-    let mut cells = Vec::new();
-    let mut codes = String::new();
-    let mut chars = row.chars();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            cells.push((std::mem::take(&mut codes), c));
-            continue;
-        }
-        codes.push(c);
-        // `[` is not a letter, so the code runs on past it to its last one.
-        for c in chars.by_ref() {
-            codes.push(c);
-            if c.is_ascii_alphabetic() {
-                break;
-            }
-        }
-    }
-    (cells, codes)
 }
 
 /// The box's top border, its title naming every section with the open one
@@ -1646,7 +1557,7 @@ mod tests {
 
     // The set popup over a box of dimmed keys: once the escape codes are
     // taken out, every row's right border sits in the frame's last column,
-    // and no column the popup covers is drawn dimmed.
+    // and each popup row is drawn whole with no dim left open before it.
     #[test]
     fn a_popup_over_dimmed_keys_keeps_every_border_in_its_column() {
         let (repo, _guard) = project("dim-popup");
@@ -1655,40 +1566,48 @@ mod tests {
         cursor_on(&mut state, "dispatch.visible_lanes");
         type_keys(&repo, &mut state, "\r");
         let popup = popup(&state, None).unwrap();
-        let boxed = box_rows(&state);
-        let (x, y) = super::super::overlay_origin(&boxed, &popup).unwrap();
-        let mut under = 0;
-        for (at, row) in boxed.iter().enumerate() {
-            let plain: Vec<char> = shell::plain(row).chars().collect();
+        let mut dimmed_beside = 0;
+        let mut popup_rows = 0;
+        for row in box_rows(&state) {
+            let plain: Vec<char> = shell::plain(&row).chars().collect();
             assert_eq!(plain.len(), 80, "{row:?}");
             assert!(matches!(plain[79], '│' | '╮' | '╯'), "{row:?}");
-            if !(y..y + popup.len()).contains(&at) {
+            let Some(at) = popup.iter().find_map(|line| row.find(line.as_str())) else {
                 continue;
-            }
-            // The codes in force at each column, as `overlay_styled` keeps
-            // them.
-            let mut open = String::new();
-            for (column, (codes, _)) in cells(row).0.iter().enumerate() {
-                match codes.as_str() {
-                    "" => {}
-                    RESET => open.clear(),
-                    code => open.push_str(code),
-                }
-                let covered = (x..x + popup[0].chars().count()).contains(&column);
-                assert!(!covered || open.is_empty(), "{column}: {row:?}");
-                under += usize::from(column < x && !open.is_empty());
-            }
+            };
+            popup_rows += 1;
+            // The dim before the popup row, if any, is closed before it.
+            let before = &row[..at];
+            let open = before
+                .rfind(DIM)
+                .is_some_and(|dim| before.rfind(RESET).is_none_or(|reset| reset < dim));
+            assert!(!open, "{row:?}");
+            dimmed_beside += usize::from(before.contains(DIM));
         }
-        assert!(under > 0, "no dimmed key under the popup: {boxed:#?}");
+        assert_eq!(popup_rows, popup.len());
+        assert!(dimmed_beside > 0, "no dimmed key under the popup");
     }
 
-    // A colour open where a panel starts is closed before it and opened
-    // again after it, so the text on either side keeps its dim.
+    // On a terminal too narrow for a dimmed key's row, the row is cut at
+    // the box's edge with its dim closed there, and every row of the list
+    // keeps its right border in the frame's last column. The top border is
+    // left out: its title is wider than 30 columns whatever the rows hold.
     #[test]
-    fn a_panel_over_a_dimmed_row_closes_the_dim_and_opens_it_again() {
-        let mut frame = vec!["──────────".to_string(), format!("│{DIM}abcdefgh{RESET}│")];
-        overlay_styled(&mut frame, &["XY".to_string()]);
-        assert_eq!(frame[1], format!("│{DIM}abc{RESET}XY{DIM}fgh{RESET}│"));
+    fn a_dimmed_key_cut_by_a_narrow_box_closes_its_dim_before_the_border() {
+        let (repo, _guard) = project("dim-narrow");
+        let _terminal = crate::screen::test_terminal((30, 60));
+        let state = State::new(&repo);
+        let rows = box_rows(&state);
+        let cut = rows
+            .iter()
+            .find(|row| shell::plain(row).starts_with("│     visible_lanes"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(cut.ends_with(&format!("{RESET}│")), "{cut:?}");
+        for row in rows.iter().filter(|row| row.starts_with('│')) {
+            let plain: Vec<char> = shell::plain(row).chars().collect();
+            assert_eq!(plain.len(), 30, "{row:?}");
+            assert_eq!(plain[29], '│', "{row:?}");
+        }
     }
 
     // A layer that no longer merges is named at the top of the box, and
