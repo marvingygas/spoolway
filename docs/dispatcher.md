@@ -617,6 +617,7 @@ item:
 │  > open task                    │
 │    open plan                    │
 │    pause                        │
+│    focus                        │
 │    restart                      │
 │                                 │
 │  [enter] confirm   [esc] close  │
@@ -628,10 +629,12 @@ item:
 | `open task` | Every row, `done` ones included. | Open the task file in your editor. See [Editor](#editor). |
 | `open plan` | A row whose task sets `plan:` to a value that is not empty. | Open the plan page `plan:` names in your default browser. |
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
+| `focus` | A row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. Never under the headless backend, and never for a kept pane, a finished step or a queued or paused row. | Bring that pane in front of you, maximized, with `herdr pane zoom <pane> --on`. The pane stays zoomed until you unzoom it in herdr. |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
 | `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A copy of a routine is deleted instead, when its routine file still exists. Asks first. For such a copy the panel is titled with the routine's name, says the copy is deleted, names the routine file that stays (relative to the repository root), and says the routines tab queues it again. When several tasks go, the panel lists the ones going back to the pending directory apart from the routine copies being deleted, each group with its own closing line. |
 
-So a running row lists `open task`, `pause` and `restart`. A paused row that can be resumed
+So a running row lists `open task`, `pause` and `restart`, and `focus` between `pause` and
+`restart` when its step's pane can be found. A paused row that can be resumed
 lists `open task` and `restart`, and is resumed with `r`. A queued row lists `open task`, `pause`
 and `unqueue`, and a done row lists `open task` alone. A row whose task sets `plan:` also lists
 `open plan`, directly under `open task`. A row whose task file is gone opens the menu with
@@ -642,6 +645,12 @@ page exists. Picking it starts the browser in the background, so the board keeps
 nothing waits on the browser. macOS uses `open`, WSL uses `wslview` or else `explorer.exe`, and
 any other Linux uses `xdg-open`. When the page is gone, or the platform's program is not on
 `PATH`, a popup titled `open plan` says what went wrong and what to do, and `enter` closes it.
+
+`focus` looks the pane up again when you press `enter`. When the lane or the run has ended since
+the menu opened, it does nothing. When herdr refuses the zoom, a popup titled `focus` shows
+herdr's error on an `o:` line and says that `restart` in this menu starts the step again in a new
+pane. `enter` closes it.
+
 On the queue screen, a group lists `open plan` when any of its tasks sets `plan:`. Picking it opens every distinct page the group's tasks name, in task order. A task on that screen does not list it. A plan row lists it too, and opens its own page. The routines pane does not list it.
 
 `enter` runs exactly what the item names, through the same check that decided the list. A row
