@@ -1208,10 +1208,10 @@ copy replaces the whole file, so its row reads `whole file`.
  [space] select   [a] select all   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
-A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints,
-wrapped under itself, and takes no other row. A whole file the merge leaves out, such as a patch on a
-pipeline the checkout no longer has, carries the reason on its own row. A file that does not read
-says so on its row, lists no keys, and can still be deleted as a whole.
+A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints. The
+reason wraps under the key and takes no other row. A whole file the merge leaves out, such as a
+patch on a pipeline the checkout no longer has, carries the reason on its own row. A file that
+does not read says so on its row, lists no keys, and can still be deleted as a whole.
 
 ```
 │   [ ] config.toml                                                            │
@@ -1275,9 +1275,10 @@ them and `esc` closes the popup with nothing deleted.
 
 `delete selected` removes the selected keys from each file with one write, and a file left with
 no keys leaves the layer. A selected prompt copy goes as a whole. To empty the layer, press `a`
-to select everything, then `delete selected`. A delete that fails on one file stops there. The files before it are
-already changed, so a `deleted in part` popup names them and the files left as they were. A
-delete that fails on its first file opens a `not deleted` popup instead. `enter` closes either.
+to select everything, then `delete selected`. A delete that fails on one file stops there. The
+files before it are already changed, so a `deleted in part` popup names them and the files left
+as they were. A delete that fails on its first file opens a `not deleted` popup instead. `enter`
+closes either.
 
 `edit` on a config key opens the same value field the config section opens. `edit` on a
 pipeline key opens a `set <key> in <pipeline>` field, filled with the value in use now, and
