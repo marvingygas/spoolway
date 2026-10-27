@@ -445,9 +445,9 @@ stateDiagram-v2
 |---|---|
 | `queued` | Waiting for its dependencies and a free slot. Also a task back on a step whose old lane is still open and idle, until a new lane starts. |
 | `starting` | The dispatcher is booting the lane, or cutting the worktree and starting the run of a command step. herdr does not list a lane until the boot is well along. The logo turns the same as it does for `running`. |
-| `running` | A lane is working the current step. Every running step reads `● running`, with nothing after the word. That includes a command step that runs with no pane: how long it has run is in TIME. |
+| `running` | A lane is working the current step. The row reads `● running`. For a command step that runs with no pane, TIME shows how long it has run. |
 | `prompt` | A live lane's pane is holding a permission prompt. Read fresh off the lane list every redraw, and gone the instant the prompt is answered. Not resumable: the task has not stopped. |
-| `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent`, with no time after the word. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
+| `silent` | A live lane has not answered the last reminder the dispatcher sent it. Drawn `● silent`. The task stays on its step and the lane is reminded again. A usage limit clears by itself, and the row reads `running` once the lane writes a turn. A lane that will never answer, such as a dead pane, stays silent: restart the step with `restart` in the board's options menu. See [A lane that settles without reporting](#a-lane-that-settles-without-reporting). |
 | `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
 | `hook_failed` | The task's own stage is `hook_failed`: an issue-tracking hook failed on `queued`, `started` or `done`. Drawn `● hook failed`. NEXT reads `[r] rerun hook  [k] skip hook`. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
@@ -1581,7 +1581,7 @@ nothing is sent to it. The task's own stage does not move. Answer the prompt and
 `running` again on the next redraw.
 
 A lane whose last reminder is unanswered is silent. The board and `spoolway queue list` read
-this from the lane's record in `lanes.json` and draw `● silent`, with no time after the word.
+this from the lane's record in `lanes.json` and draw `● silent`.
 The task's own stage does not move. A usage limit clears by itself, and the row
 reads `running` again once the lane writes a turn. A lane that will never answer, such as a
 dead pane or an out-of-date harness, stays silent. Nothing escalates it, so restart the step
