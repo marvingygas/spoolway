@@ -130,51 +130,48 @@ const ORANGE: &str = "\x1b[38;5;208m";
 pub(super) const OSC8: &str = "\x1b]8;;";
 pub(super) const ST: &str = "\x1b\\";
 
-impl State {
-    /// Every state there is, so the STATE column can be sized to the longest
-    /// word among them rather than to the rows on one board. A state missing
-    /// here is a word the column is not sized for. [`State::position`] has no
-    /// wildcard, so a new variant does not compile until it is given a slot
-    /// there, and `every_state_is_in_all_once` holds each slot to the entry
-    /// here at that index: give it the next one, `ALL.len()`, and add it.
-    pub(super) const ALL: [State; 13] = [
-        State::Paused,
-        State::HookFailed,
-        State::Running,
-        State::Silent,
-        State::Starting,
-        State::Finished,
-        State::Blocked,
-        State::Unknown,
-        State::Prompt,
-        State::Queued,
-        State::Waiting,
-        State::Held,
-        State::Done,
-    ];
+/// Writes [`State::word`] and [`State::ALL`] from one list of `Variant =>
+/// "word"` pairs. `word` is a match with no wildcard, so a new state does not
+/// compile until it is given a word here, and that same line is what puts it
+/// in `ALL`. Two hand-kept lists could drift apart: a state with a word but no
+/// place in `ALL` is a word the STATE column is not sized for, and its row
+/// would push every column to its right out.
+macro_rules! state_words {
+    ($($state:ident => $word:literal,)*) => {
+        impl State {
+            /// Every state there is, so the STATE column can be sized to the
+            /// longest word among them rather than to the rows on one board.
+            pub(super) const ALL: &'static [State] = &[$(State::$state),*];
 
-    /// Where this state sits in [`State::ALL`]. The match has no wildcard on
-    /// purpose: it is the one place a new variant cannot be left out of, so
-    /// whoever adds one is sent to `ALL` before a longer word goes unsized.
-    #[cfg(test)]
-    fn position(self) -> usize {
-        match self {
-            State::Paused => 0,
-            State::HookFailed => 1,
-            State::Running => 2,
-            State::Silent => 3,
-            State::Starting => 4,
-            State::Finished => 5,
-            State::Blocked => 6,
-            State::Unknown => 7,
-            State::Prompt => 8,
-            State::Queued => 9,
-            State::Waiting => 10,
-            State::Held => 11,
-            State::Done => 12,
+            /// What the state reads as, with nothing invisible in it. The dot
+            /// is part of the word: it is what carries the colour, and a
+            /// plain-text table wants the same column width as a coloured one.
+            pub fn word(self) -> &'static str {
+                match self {
+                    $(State::$state => $word,)*
+                }
+            }
         }
-    }
+    };
+}
 
+state_words! {
+    Paused => "● paused",
+    HookFailed => "● hook failed",
+    Running => "● running",
+    Silent => "● silent",
+    Starting => "◌ starting",
+    Finished => "✓ finished",
+    Blocked => "● blocked",
+    Unknown => "● unknown",
+    Prompt => "● prompt",
+    Queued => "○ queued",
+    Waiting => "○ waiting",
+    Held => "○ held",
+    Done => "● done",
+}
+
+impl State {
     /// The width of the longest [`State::word`], in characters: what the
     /// STATE column is on every frame, whatever the rows are in.
     pub(super) fn widest_word() -> usize {
@@ -183,27 +180,6 @@ impl State {
             .map(|s| s.word().chars().count())
             .max()
             .unwrap_or(0)
-    }
-
-    /// What the state reads as, with nothing invisible in it. The dot is part
-    /// of the word: it is what carries the colour, and a plain-text table wants
-    /// the same column width as a coloured one.
-    pub fn word(self) -> &'static str {
-        match self {
-            State::Paused => "● paused",
-            State::HookFailed => "● hook failed",
-            State::Running => "● running",
-            State::Silent => "● silent",
-            State::Starting => "◌ starting",
-            State::Finished => "✓ finished",
-            State::Blocked => "● blocked",
-            State::Unknown => "● unknown",
-            State::Prompt => "● prompt",
-            State::Queued => "○ queued",
-            State::Waiting => "○ waiting",
-            State::Held => "○ held",
-            State::Done => "● done",
-        }
     }
 
     fn dot(self) -> String {
@@ -2570,7 +2546,8 @@ pub(super) fn ticker(recent: &VecDeque<RecentEvent>, pane: usize, rows: usize) -
 
     // The name column sized to the rows about to be drawn, not to a fixed
     // guess: a task name has no longest value to fix it at, and the block is
-    // redrawn whole on every move, so nothing to its right is left to shift.
+    // redrawn whole on every move, so its lines always line up with one
+    // another even as the sentences after the names move.
     let name_width = events
         .iter()
         .map(|event| event.name().chars().count())
@@ -2876,18 +2853,10 @@ mod tests {
         assert_eq!(painted, format!("{GREEN}● running{RESET}"));
     }
 
-    /// `State::ALL` names each state once, in the slot `State::position`
-    /// gives it, so the STATE column is sized against every word there is.
-    #[test]
-    fn every_state_is_in_all_once() {
-        for (slot, state) in State::ALL.iter().enumerate() {
-            assert_eq!(state.position(), slot, "{}", state.word());
-        }
-    }
-
     /// No state word is wider than the STATE column, so no row pushes the
     /// columns to its right out. The column is measured off a table of
-    /// queued rows alone, the narrowest it was ever drawn for.
+    /// queued rows alone, which a column sized to its rows would draw
+    /// narrowest.
     #[test]
     fn no_state_word_is_wider_than_the_state_column() {
         let rows = vec![Row {
