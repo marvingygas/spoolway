@@ -1,6 +1,6 @@
 ---
 name: spoolway-calibrate
-description: Review real spoolway runs to explain review failures, blocked sessions, loops, context pressure and spend. Compare lane-written task records with the prompts, pipelines, settings, skills, scripts and code that produced them, then present every finding in tables, one per kind of fix and apply the ones the person picks. Use when someone wants to learn from finished work and tune how spoolway runs.
+description: Review real spoolway runs to explain review failures, blocked sessions, loops, context pressure and spend. Compare lane-written task records with the prompts, pipelines, settings, skills, scripts and code that produced them. Present every finding in tables, one per kind of fix, and apply the ones the person picks. Use when someone wants to learn from finished work and tune how spoolway runs.
 disable-model-invocation: true
 ---
 
@@ -66,8 +66,8 @@ Never propose:
 - more knowledge in the prompt of the step that does the main work, usually the longest-running
   one. Move the fix to a cheaper step, a gate or a skill, or leave it out.
 
-A review sending work back is expected. A low review pass rate is a finding only with a cause
-behind it that another file could remove.
+A review sending work back is expected. A low review pass rate is a finding only when another
+file could remove its cause.
 
 Trace each finding from the task record to whatever caused or failed to prevent it: a prompt, a
 setting, a skill, a script, a test or the source. Separate evidence from inference. Cite the task and the relevant
@@ -97,7 +97,7 @@ after rows are applied is described under "Make improvements".
   is easy to undo. Use `--` when several steps or pipelines read the file. Use `---` when every
   lane reads it, or it changes what reaches main.
 - Order the rows in each table by reward first, highest on top. Break a tie by lowest risk.
-- Where a finding has two honest fixes, keep both in the Proposed fix cell and name the one to
+- Where a finding has two workable fixes, keep both in the Proposed fix cell and name the one to
   take.
 
 Make prompt fixes exact and short. Add only what is needed to stop the issue from happening
@@ -118,8 +118,9 @@ with the file kind's own care:
   code is written. Run the project's own checks for what you touched — its tests, its formatter,
   the gate a command step runs.
 
-A fix too large to make well here — a refactor, a feature — says so in its Proposed fix cell, and the person
-chooses between a direct edit now and a task to queue. Do not hand a change to another skill
-unless the person asks. Do not edit archived task records.
+Some fixes are too large to make well here, such as a refactor or a feature. Say so in that
+row's Proposed fix cell. The person then chooses between a direct edit now and a task to queue.
+Do not hand a change to another skill unless the
+person asks. Do not edit archived task records.
 
 Report what changed, what evidence led to it, and how to undo an override.

@@ -1,7 +1,7 @@
 <!--
 The shape every calibration report takes. Copy it, fill every <placeholder>, and delete these
 comments. The report is tables only: print nothing above the first table and nothing below the
-last. Keep the columns exactly as they are, because the person reading this is choosing rows.
+last. Keep the columns exactly as they are.
 One table per kind of fix, in this order, each only when it has a row:
 pipeline, prompt, config, template, skill, script, test, source, docs.
 Row numbers run on across the tables. Rows in a table go by reward first, then lowest risk.
