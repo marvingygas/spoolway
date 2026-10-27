@@ -585,6 +585,7 @@ covers: the reminder ceiling — `quiet` never reports, and its own pane shows a
 covers: agents.pi.session_reuse_ctx — `loops` resumes one conversation until a real turn crosses 5% of the window, then opens fresh
 covers: step.session — the resumed lane is told it is continuing, not briefed again; read its first line
 covers: herdr focus — the pane of a blocked lane is brought to the front
+config: dispatch.autofocus_panes true
 covers: the one-turn `blocked` step — `staffed` reports `--pause` on its only turn there, and the task lands on `paused` rather than looping back
 config: agents.pi.session_reuse_ctx 5
 </pre>
