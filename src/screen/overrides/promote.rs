@@ -816,6 +816,20 @@ mod tests {
             .collect()
     }
 
+    /// The confirm popup's folder, joined back from however many rows it
+    /// wrapped over, and the rows after it. The folder lives under the
+    /// system temporary directory, whose length differs by platform.
+    fn folder_and_rest(state: &State) -> (String, Vec<String>) {
+        let rows = inside(state);
+        let ends = rows
+            .iter()
+            .skip(2)
+            .position(|l| !l.starts_with("    "))
+            .map_or(rows.len(), |n| n + 2);
+        let folder = rows[2..ends].iter().map(|l| l.trim()).collect();
+        (folder, rows[ends..].to_vec())
+    }
+
     /// The popup's text as one line, for a notice wrapped over rows.
     fn text(state: &State) -> String {
         inside(state)
@@ -1082,12 +1096,10 @@ mod tests {
         type_keys(&repo, &mut state, &down_enter(3));
         let rows = inside(&state);
         assert_eq!(rows[1], "  main is checked out at");
+        let (folder, rest) = folder_and_rest(&state);
+        assert_eq!(folder, crate::repo::shorten_home(&repo.root));
         assert_eq!(
-            rows[2],
-            format!("    {}", crate::repo::shorten_home(&repo.root))
-        );
-        assert_eq!(
-            rows[3],
+            rest[0],
             "  and this writes .spoolway/pipelines/impl.yml there,"
         );
         type_keys(&repo, &mut state, "\r");
@@ -1202,8 +1214,9 @@ mod tests {
         assert!(popup(&state)[0].starts_with("╭─ promote 2 files ─"));
         let rows = inside(&state);
         assert_eq!(rows[1], "  main is checked out at");
+        let (_, rest) = folder_and_rest(&state);
         assert_eq!(
-            rows[3..],
+            rest,
             [
                 "  and this writes 2 files there,",
                 "  not committed",
