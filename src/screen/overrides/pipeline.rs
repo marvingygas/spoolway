@@ -4,10 +4,10 @@
 //! The layer keeps one patch per pipeline, keyed by step id, but a person
 //! thinks "every step on this model uses that one now", whatever the steps
 //! are called. So the section lists step fields, not pipelines. `enter` on a
-//! field opens every tracked pipeline with a step that takes it, each closed
-//! to one row. The person selects steps across as many pipelines as they
-//! like, types one value, and it lands as a step patch in every pipeline
-//! with a selected step.
+//! field lists every tracked pipeline with a step that takes it, each
+//! followed by those steps, so one key selects any one step. The person
+//! selects steps across as many pipelines as they like, types one value, and
+//! it lands as a step patch in every pipeline with a selected step.
 //!
 //! A step that leaves the field out reads `not set` and is selected the same
 //! way as any other, since overriding often means setting what a pipeline
@@ -247,29 +247,25 @@ struct Selection {
     searching: bool,
     /// Which of [`picking_rows`] the cursor is on.
     cursor: usize,
-    /// The pipelines drawn open, their steps listed under them.
-    open: BTreeSet<String>,
     /// Every selected step, as (pipeline, step id).
     selected: BTreeSet<(String, String)>,
 }
 
 impl Selection {
     /// A selection on `field` with the steps whose patch already sets it
-    /// selected, and their pipelines open.
+    /// selected.
     fn new(field: Field, pipelines: &[PipelineRows]) -> Selection {
         let mut selection = Selection {
             field,
             filter: String::new(),
             searching: false,
             cursor: 0,
-            open: BTreeSet::new(),
             selected: BTreeSet::new(),
         };
         for pipeline in pipelines {
             for at in pipeline.taking(field) {
                 let step = &pipeline.steps[at];
                 if step.overridden.contains(field.name) {
-                    selection.open.insert(pipeline.name.clone());
                     selection
                         .selected
                         .insert((pipeline.name.clone(), step.id.clone()));
@@ -335,7 +331,8 @@ fn visible_steps(pipeline: &PipelineRows, selection: &Selection) -> Vec<usize> {
 }
 
 /// The picking list's rows: every pipeline with a step the search leaves,
-/// followed by those steps when it is open.
+/// followed by those steps. Nothing opens or closes, so only a search
+/// changes which rows there are.
 fn picking_rows(pipelines: &[PipelineRows], selection: &Selection) -> Vec<Row> {
     let mut rows = Vec::new();
     for (p, pipeline) in pipelines.iter().enumerate() {
@@ -344,9 +341,7 @@ fn picking_rows(pipelines: &[PipelineRows], selection: &Selection) -> Vec<Row> {
             continue;
         }
         rows.push(Row::Pipeline(p));
-        if selection.open.contains(&pipeline.name) {
-            rows.extend(steps.into_iter().map(|s| Row::Step(p, s)));
-        }
+        rows.extend(steps.into_iter().map(|s| Row::Step(p, s)));
     }
     rows
 }
@@ -586,8 +581,9 @@ impl PipelineSection {
     }
 
     /// Keep the cursor on the row it was on before a key changed the rows,
-    /// or on that row's pipeline when the row itself is gone, as when `a`
-    /// closes the pipeline a step was in.
+    /// or on that row's pipeline when the row itself is gone, as when a
+    /// search edit leaves out the step the cursor was on. Every other key
+    /// leaves the rows as they were, and the cursor with them.
     fn refocus(&self, selection: &mut Selection, before: Option<Row>) {
         let rows = picking_rows(&self.pipelines, selection);
         let pipeline_of = |row: Row| match row {
@@ -603,19 +599,16 @@ impl PipelineSection {
         selection.cursor = selection.cursor.min(rows.len().saturating_sub(1));
     }
 
-    /// `space` on a pipeline: one with a selected step closes and clears
-    /// them all, and any other opens with every step the search leaves
-    /// selected.
+    /// `space` on a pipeline: one with a selected step has them all
+    /// cleared, and any other has every step the search leaves selected.
     fn toggle_pipeline(&self, selection: &mut Selection, p: usize) {
         let pipeline = &self.pipelines[p];
         if selection.selected_in(&pipeline.name) > 0 {
             selection
                 .selected
                 .retain(|(name, _)| *name != pipeline.name);
-            selection.open.remove(&pipeline.name);
             return;
         }
-        selection.open.insert(pipeline.name.clone());
         for s in visible_steps(pipeline, selection) {
             selection
                 .selected
@@ -623,8 +616,8 @@ impl PipelineSection {
         }
     }
 
-    /// `a`: every pipeline and step the search leaves is selected, opening
-    /// them all, unless they already are, and then the selection is cleared.
+    /// `a`: every step the search leaves is selected, unless they already
+    /// are, and then the selection is cleared.
     /// With no step left by the search it does nothing.
     fn toggle_all(&self, selection: &mut Selection) {
         let visible: Vec<(String, String)> = self
@@ -644,13 +637,9 @@ impl PipelineSection {
         }
         if visible.iter().all(|id| selection.selected.contains(id)) {
             selection.selected.clear();
-            selection.open.clear();
             return;
         }
-        for (pipeline, step) in visible {
-            selection.open.insert(pipeline.clone());
-            selection.selected.insert((pipeline, step));
-        }
+        selection.selected.extend(visible);
     }
 
     /// Write `value` onto every selected step, then show what was written,
@@ -761,8 +750,8 @@ impl PipelineSection {
             .sum()
     }
 
-    /// The picking list: each pipeline on one row with its step count, and
-    /// an open one's steps under it with their values.
+    /// The picking list: each pipeline on one row with only its box and
+    /// name, and its steps under it with their values.
     fn selection_lines(
         &self,
         selection: &Selection,
@@ -797,17 +786,11 @@ impl PipelineSection {
             match *row {
                 Row::Pipeline(p) => {
                     let pipeline = &self.pipelines[p];
-                    let total = pipeline.taking(selection.field).count();
-                    let picked = selection.selected_in(&pipeline.name);
-                    let count = match selection.open.contains(&pipeline.name) {
-                        true => format!("{picked} of {total} selected"),
-                        false => plural(total, "step"),
-                    };
                     starts.push(lines.len());
                     lines.push(format!(
-                        "{mark}{} {}{count}",
-                        tick(picked > 0),
-                        column(&pipeline.name, PIPELINE_NAME)
+                        "{mark}{} {}",
+                        tick(selection.selected_in(&pipeline.name) > 0),
+                        pipeline.name
                     ));
                 }
                 Row::Step(p, s) => {
@@ -927,11 +910,6 @@ const SELECT_KEYS: &[(&str, &str)] = &[
 /// field's name.
 const FIELD_NAME: usize = 21;
 
-/// The column a pipeline's step count starts at, counted from its name. A
-/// name of 49 characters or more pushes only its own count along, one
-/// space past its end.
-const PIPELINE_NAME: usize = 49;
-
 /// The column a step's value starts at, counted from its id. The shipped
 /// ids run to 15 characters. Room for a longer one on every row would push
 /// every value right for one rare id, so an id of 21 characters or more
@@ -943,9 +921,9 @@ const STEP_ID: usize = 21;
 const CURRENT_LABEL: usize = 10;
 
 /// `s` padded to `width` columns, or followed by one space when it is
-/// that long or longer. [`pad_to`] would cut a long pipeline name or step
-/// id to the width instead, and glue what is left of it to the count or
-/// value after it.
+/// that long or longer. [`pad_to`] would cut a long step id or file name
+/// to the width instead, and glue what is left of it to the value or note
+/// after it.
 pub(super) fn column(s: &str, width: usize) -> String {
     pad_to(s, width.max(s.chars().count() + 1))
 }
@@ -1308,7 +1286,7 @@ mod tests {
     }
 
     // `enter` on a field lists only the pipelines with a step that takes it,
-    // each closed to one row with its step count.
+    // each followed by those steps, and with no count on its own row.
     #[test]
     fn enter_on_a_field_lists_the_pipelines_with_a_step_that_takes_it() {
         let (repo, _guard) = pipelines_project("select");
@@ -1323,11 +1301,16 @@ mod tests {
         );
         let rows = rows_of(&state);
         assert_eq!(
-            &rows[..3],
+            &rows[..8],
             [
                 "",
-                "> [ ] alpha                                            3 steps",
-                "  [ ] beta                                             2 steps",
+                "> [ ] alpha",
+                "        [ ] implement            claude-sonnet-5-5",
+                "        [ ] review               claude-sonnet-5-5",
+                "        [ ] create-pr            claude-haiku-5-5",
+                "  [ ] beta",
+                "        [ ] fix                  claude-sonnet-5-5",
+                "        [ ] create-pr            claude-haiku-5-5",
             ]
         );
         assert!(!rows.iter().any(|r| r.contains("gamma")), "{rows:#?}");
@@ -1348,8 +1331,7 @@ mod tests {
     }
 
     // A step that leaves the field out, or leaves it blank, reads `not set`,
-    // and a pipeline whose steps the layer already sets the field on starts
-    // open, with those steps selected.
+    // and the steps the layer already sets the field on start selected.
     #[test]
     fn overridden_steps_start_selected_and_a_missing_field_reads_not_set() {
         let (repo, _guard) = pipelines_project("preselected");
@@ -1359,20 +1341,22 @@ mod tests {
         type_keys(&repo, &mut state, "\x1b[B\r");
         let rows = rows_of(&state);
         assert_eq!(
-            &rows[..5],
+            &rows[..8],
             [
                 "",
-                "> [ ] alpha                                            3 steps",
-                "  [x] beta                                             1 of 2 selected",
+                "> [ ] alpha",
+                "        [ ] implement            high",
+                "        [ ] review               high",
+                "        [ ] create-pr            not set",
+                "  [x] beta",
                 "        [x] fix                  low",
                 "        [ ] create-pr            not set",
             ]
         );
     }
 
-    // `space` on a pipeline opens it with every step selected, and again
-    // closes it with them cleared. `a` selects every pipeline and step, and
-    // a second `a` clears the selection.
+    // `space` on a pipeline selects every step under it, and again clears
+    // them. `a` selects every step, and a second `a` clears the selection.
     #[test]
     fn space_selects_a_pipeline_and_a_selects_everything() {
         let (repo, _guard) = pipelines_project("space");
@@ -1383,24 +1367,28 @@ mod tests {
         assert_eq!(
             &rows[1..6],
             [
-                "> [x] alpha                                            3 of 3 selected",
+                "> [x] alpha",
                 "        [x] implement            claude-sonnet-5-5",
                 "        [x] review               claude-sonnet-5-5",
                 "        [x] create-pr            claude-haiku-5-5",
-                "  [ ] beta                                             2 steps",
+                "  [ ] beta",
             ]
         );
-        // A step is unselected on its own, and the pipeline stays open.
+        // A step is unselected on its own, and its pipeline's box stays
+        // ticked while any of its steps is selected.
         type_keys(&repo, &mut state, "\x1b[B\x1b[B ");
-        assert!(rows_of(&state)[1].ends_with("2 of 3 selected"));
+        assert_eq!(rows_of(&state)[1], "  [x] alpha");
         assert!(rows_of(&state)[3].starts_with(">       [ ] review"));
 
         type_keys(&repo, &mut state, "\x1b[A\x1b[A ");
         assert_eq!(
-            &rows_of(&state)[1..3],
+            &rows_of(&state)[1..6],
             [
-                "> [ ] alpha                                            3 steps",
-                "  [ ] beta                                             2 steps",
+                "> [ ] alpha",
+                "        [ ] implement            claude-sonnet-5-5",
+                "        [ ] review               claude-sonnet-5-5",
+                "        [ ] create-pr            claude-haiku-5-5",
+                "  [ ] beta",
             ]
         );
 
@@ -1409,26 +1397,96 @@ mod tests {
             panic!("still picking");
         };
         assert_eq!(selection.selected.len(), 5);
-        assert!(
-            rows_of(&state)
-                .iter()
-                .any(|r| r
-                    == "  [x] beta                                             2 of 2 selected")
-        );
+        assert!(rows_of(&state).iter().any(|r| r == "  [x] beta"));
         type_keys(&repo, &mut state, "a");
         let View::Select(selection) = &state.pipeline.view else {
             panic!("still picking");
         };
-        assert!(selection.selected.is_empty() && selection.open.is_empty());
+        assert!(selection.selected.is_empty());
         assert!(rows_of(&state)[1].starts_with("> [ ] alpha"), "on alpha");
     }
 
-    // A pipeline name or step id as long as its column, or longer, is drawn
-    // whole with a space before the count or value after it.
+    // `space` on a step selects that step alone, with nothing to open
+    // first, and ticks its pipeline's box.
     #[test]
-    fn a_long_name_or_step_id_keeps_a_space_before_what_follows() {
+    fn space_on_a_step_selects_that_step_alone() {
+        let (repo, _guard) = pipelines_project("one-step");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B ");
+        let View::Select(selection) = &state.pipeline.view else {
+            panic!("still picking");
+        };
+        assert_eq!(
+            selection.selected.iter().collect::<Vec<_>>(),
+            [&("beta".to_string(), "fix".to_string())]
+        );
+        assert_eq!(
+            &rows_of(&state)[1..9],
+            [
+                "  [ ] alpha",
+                "        [ ] implement            claude-sonnet-5-5",
+                "        [ ] review               claude-sonnet-5-5",
+                "        [ ] create-pr            claude-haiku-5-5",
+                "  [x] beta",
+                ">       [x] fix                  claude-sonnet-5-5",
+                "        [ ] create-pr            claude-haiku-5-5",
+                "",
+            ]
+        );
+    }
+
+    // Neither `space` nor `a` changes which rows are listed, so the cursor
+    // stays on the row it was on, a step or a pipeline.
+    #[test]
+    fn space_and_a_leave_the_cursor_on_its_row() {
+        let (repo, _guard) = pipelines_project("cursor");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = on_pipeline(&repo);
+        let cursor_row = |state: &State| -> String {
+            rows_of(state)
+                .into_iter()
+                .find(|r| r.starts_with('>'))
+                .expect("a cursor row")
+        };
+        type_keys(&repo, &mut state, "\r\x1b[B\x1b[B");
+        for key in ["a", " ", "a", "a"] {
+            type_keys(&repo, &mut state, key);
+            assert!(cursor_row(&state).starts_with(">       ["), "{key:?}");
+            assert!(cursor_row(&state).contains(" review "), "{key:?}");
+        }
+        type_keys(&repo, &mut state, "\x1b[B\x1b[B");
+        for key in [" ", " ", "a", " "] {
+            type_keys(&repo, &mut state, key);
+            assert!(cursor_row(&state).ends_with("] beta"), "{key:?}");
+        }
+    }
+
+    // A list taller than the screen keeps the cursor's own row in view
+    // when it sits far below the first row of its pipeline.
+    #[test]
+    fn a_step_far_below_its_pipeline_is_drawn_when_the_cursor_is_on_it() {
+        let (repo, _guard) = pipelines_project("deep-step");
+        let _terminal = crate::screen::test_terminal((80, 8));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\r");
+        type_keys(&repo, &mut state, &"\x1b[B".repeat(6));
+        let rows = rows_of(&state);
+        assert!(
+            rows.iter()
+                .any(|r| r == ">       [ ] create-pr            claude-haiku-5-5"),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("[ ] alpha")), "{rows:#?}");
+    }
+
+    // A step id as long as its column, or longer, is drawn whole with a
+    // space before the value after it, and a long pipeline name whole with
+    // nothing after it.
+    #[test]
+    fn a_long_name_or_step_id_is_drawn_whole() {
         let (repo, _guard) = pipelines_project("long-id");
-        let name = "a-pipeline-whose-name-runs-past-the-count-column-x";
+        let name = "a-pipeline-whose-name-runs-on-past-fifty-columns-xy";
         std::fs::write(
             Pipelines::file_in(&repo.checkout, name),
             "steps:\n  - id: a-step-id-past-its-column\n    agent: claude\n    \
@@ -1441,7 +1499,7 @@ mod tests {
         assert_eq!(
             &rows_of(&state)[1..3],
             [
-                "> [x] a-pipeline-whose-name-runs-past-the-count-column-x 1 of 1 selected",
+                "> [x] a-pipeline-whose-name-runs-on-past-fifty-columns-xy",
                 "        [x] a-step-id-past-its-column claude-opus-5-5",
             ]
         );
@@ -1463,7 +1521,7 @@ mod tests {
             panic!("still picking");
         };
         assert!(
-            selection.is_selected("beta", "fix") && selection.open.contains("beta"),
+            selection.is_selected("beta", "fix"),
             "{:?}",
             selection.selected
         );
@@ -1494,9 +1552,9 @@ mod tests {
         assert_eq!(
             &rows[2..6],
             [
-                "> [x] alpha                                            1 of 3 selected",
+                "> [x] alpha",
                 "        [x] create-pr            not set",
-                "  [x] beta                                             1 of 2 selected",
+                "  [x] beta",
                 "        [x] create-pr            not set",
             ]
         );
@@ -1609,7 +1667,9 @@ mod tests {
             "{:?}",
             rows_of(&state)
         );
-        type_keys(&repo, &mut state, "\r \x1b[B\x1b[B\x1b[B");
+        // beta's create-pr is the seventh row under the blank one.
+        type_keys(&repo, &mut state, "\r");
+        type_keys(&repo, &mut state, &"\x1b[B".repeat(6));
         assert!(
             rows_of(&state)
                 .iter()
@@ -1647,7 +1707,9 @@ mod tests {
         let (repo, _guard) = pipelines_project("keeps");
         write_patch(&repo, "beta", "steps:\n  fix:\n    effort: low\n");
         let mut state = on_pipeline(&repo);
-        type_keys(&repo, &mut state, "\r\x1b[B \rclaude-opus-5-5\r");
+        // beta's row is the fifth, under alpha's three steps.
+        let down = "\x1b[B".repeat(4);
+        type_keys(&repo, &mut state, &format!("\r{down} \rclaude-opus-5-5\r"));
         let parsed = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "beta")
             .unwrap()
             .unwrap();
