@@ -1032,8 +1032,7 @@ The pipeline section sets one step field on many pipeline steps at once. It list
 not pipelines. Every step key but `id` is listed, under three headers. `all steps` holds the
 fields every step takes, such as a route or a description. `agent steps` holds the fields only
 agent steps take, and `command steps` the fields only command steps take. A field under one of
-those two goes only on that kind of step, because the merge refuses anything else. `id` is left
-out because the merge refuses a rename.
+those two goes only on that kind of step, because the merge refuses anything else.
 Each row names the field. A field the layer already overrides also shows `N overridden`, the
 number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are used. The
 `blocked` step is left out, because every pipeline takes it from `[unattended]` in config.
