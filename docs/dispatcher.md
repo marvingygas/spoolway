@@ -1029,8 +1029,11 @@ The tab does not check the value. A value the config cannot hold is still writte
 ### The pipeline section
 
 The pipeline section sets one step field on many pipeline steps at once. It lists step fields,
-not pipelines, under two headers: the fields agent steps take, and the fields command steps take.
-A field goes only on the kind of step listed above it, because the merge refuses anything else.
+not pipelines. Every step key but `id` is listed, under three headers. `all steps` holds the
+fields every step takes, such as a route or a description. `agent steps` holds the fields only
+agent steps take, and `command steps` the fields only command steps take. A field under one of
+those two goes only on that kind of step, because the merge refuses anything else. `id` is left
+out because the merge refuses a rename.
 Each row names the field. A field the layer already overrides also shows `N overridden`, the
 number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are used. The
 `blocked` step is left out, because every pipeline takes it from `[unattended]` in config.
@@ -1038,17 +1041,28 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 ```
 ╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
 │                                                                              │
+│   all steps                                                                  │
+│ >   description                                                              │
+│     on_pass                                                                  │
+│     on_fail                                                                  │
+│     loop                                                                     │
+│     last                                                                     │
+│     first                                                                    │
 │   agent steps                                                                │
-│ >   model                                                                    │
+│     model                                                                    │
 │     effort                                                                   │
 │     agent                                                                    │
 │     prompt                                                                   │
 │     session                                                                  │
 │     skills                                                                   │
+│     slot                                                                     │
+│     gate                                                                     │
 │   command steps                                                              │
 │     run                                                                      │
 │     timeout              1 overridden                                        │
 │     hide                                                                     │
+│     background                                                               │
+│     serial                                                                   │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
@@ -1058,7 +1072,8 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 `w` opens the overrides folder.
 `o` opens the options menu of the field under the cursor. It offers `delete override` when a pipeline patch sets the field. That removes the field from every step of every patch that sets it, after one confirm popup that names each file and key. A patch left with no keys leaves the layer.
 `enter` on a field opens its step selection. It lists every pipeline with a step that takes the
-field, and under each pipeline's row all of those steps. Nothing opens or closes, so `space` on a
+field, and under each pipeline's row all of those steps. A field under `all steps` lists agent
+steps and command steps together. Nothing opens or closes, so `space` on a
 step selects it with one key. A pipeline's row shows only its box and its name. The box reads
 `[x]` when any of its steps is selected, and `[ ]` otherwise. Each step shows the value in use now:
 the tracked step with the layer merged onto it. A step that leaves the field out, or leaves it
