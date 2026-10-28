@@ -4619,7 +4619,7 @@ fn view_lines(
         TableKind::Lanes => {
             let entries = scoped_entries(loaded, filters);
             if entries.is_empty() {
-                return vec![Line::Text("nothing to compare in this window.".to_string())];
+                return vec![Line::Text("no data.".to_string())];
             }
             let (rows, sort) = screen_lane_rows(loaded, filters, pipelines, &entries);
             let total = LaneTotal::of(&entries, &loaded.fallback, &loaded.models);
@@ -4637,17 +4637,13 @@ fn view_lines(
                 DirBy::Dir => {
                     let (rows, sort) = screen_dir_rows(loaded, filters, &entries);
                     if rows.is_empty() {
-                        return vec![Line::Text(
-                            "nothing outside the lanes in this window.".to_string(),
-                        )];
+                        return vec![Line::Text("no data.".to_string())];
                     }
                     table_lines(dirs_table(&rows, sort.as_ref(), filters.figures))
                 }
                 DirBy::Session => {
                     if entries.is_empty() {
-                        return vec![Line::Text(
-                            "no sessions outside the lanes in that window.".to_string(),
-                        )];
+                        return vec![Line::Text("no data.".to_string())];
                     }
                     let (rows, sort) = screen_sessions(loaded, filters, &entries);
                     table_lines(sessions_table(&rows, sort.as_ref()))
@@ -4657,7 +4653,7 @@ fn view_lines(
         TableKind::Trials => {
             let (rows, sort) = screen_trial_rows(loaded, filters);
             if rows.is_empty() {
-                return vec![Line::Text("no trials in this window.".to_string())];
+                return vec![Line::Text("no data.".to_string())];
             }
             trials_table(&rows, sort)
         }
@@ -10180,7 +10176,7 @@ mod screen_tests {
     fn an_empty_ledger_says_so_and_the_screen_ends_when_input_runs_out() {
         let (repo, _root_guard) = fixture("screen-empty");
         let text = screen(&repo, "");
-        assert!(text.contains("nothing to compare"), "{text}");
+        assert!(text.contains("no data."), "{text}");
     }
 
     /// Every table's key line starts on its first letter key, the way every
@@ -10228,6 +10224,34 @@ mod screen_tests {
         );
     }
 
+    /// Every empty table says `no data.`, whatever left it empty: the lanes,
+    /// the directories by dir (no watched roots), the directories by session
+    /// and the trials. The label names no cause because the same empty table
+    /// can come from the window, the filters or an empty ledger.
+    #[test]
+    fn every_empty_table_says_no_data() {
+        let loaded = loaded(Vec::new());
+        let pipelines = Pipelines::builtin();
+        let by_session = Filters {
+            dir_by: DirBy::Session,
+            ..no_filters()
+        };
+        let cases = [
+            (TableKind::Lanes, no_filters()),
+            (TableKind::Dirs, no_filters()),
+            (TableKind::Dirs, by_session),
+            (TableKind::Trials, no_filters()),
+        ];
+        for (table, filters) in cases {
+            let lines = view_lines(&loaded, &filters, &pipelines, table);
+            assert!(
+                matches!(lines.as_slice(), [Line::Text(t)] if t == "no data."),
+                "{table:?} by {:?}",
+                filters.dir_by
+            );
+        }
+    }
+
     /// `tab` cycles the tasks, the directories and the trials and back,
     /// nothing else.
     #[test]
@@ -10246,7 +10270,7 @@ mod screen_tests {
 
         let trials = last_frame(&screen(&repo, "\t\t")).to_string();
         assert!(has_top(&trials, TableKind::Trials, ""), "{trials}");
-        assert!(trials.contains("no trials in this window."), "{trials}");
+        assert!(trials.contains("no data."), "{trials}");
         assert!(
             trials.contains(
                 "[enter] open   [a] ascending   [d] descending   [tab] section   [f] filters   [r] refresh   [q] quit"
