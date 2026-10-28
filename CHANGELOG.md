@@ -21,15 +21,50 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
-## Unreleased
+## 0.16.0
 
-### Changed
-- The overrides tab's pipeline section no longer shows how many steps in how many pipelines take each field. A row names the field, followed by `N overridden` where the layer already sets it, and the step picker's key line reads `[a] select all` where it read `[a] all`.
-- Every row of the overrides tab's active section is edited through `o`, then `edit`, the first item of its menu. A key opens its value field, and a file or prompt copy opens in your editor. `enter` on the list no longer does anything, and an ignored key no longer spends a row under its reason naming the keys to press.
-- The active section's key line reads `[a] select all` where it read `[a] all`.
+### Highlights
+- An `OVERRIDES` tab sits between `ROUTINES` and `EVAL`, and edits the private overrides layer without opening a file. Its config section sets any listed key and dims the ones no file sets. Its pipeline section sets one step field, such as `model`, on many steps across pipelines in one write. Its prompts section copies a prompt into the layer, `w` opens the overrides folder, and its active section edits, deletes or promotes what the layer holds onto a branch you pick. A home-mode project has no overrides tab. (#1329, #1330, #1331, #1332, #1333, #1334, #1370, #1375, #1380, #1381)
+- The overrides layer has command-line forms to match: `spoolway config override --set <key>=<value>` writes one checked config key, and `spoolway override drop <target> <key>` removes one key from a patch. `override promote` keeps the entry in the layer, so the dispatcher keeps the new values until the branch that carries them merges. (#1328, #1333)
+- The dispatcher no longer pulls a pane to the front on its own. A new `dispatch.autofocus_panes` setting, off by default, brings it back, and the board's options menu gains `focus`, which brings a running step's herdr pane forward and zooms it. (#1367, #1371, #1379)
+- A failed command step's log outlives its task. When a command step fails and sends its task anywhere but `done`, its log is copied beside the problem log in `~/.spoolway/logs/<project>/`, and the task's status line names that copy. `housekeeping.retention_days` now decides how long both the copies and the problem log's lines are kept. (#1349, #1372)
+- The board holds still while it works. Bare `spoolway` opens on the dispatch tab, the STATE cell shows the state word alone, and the STATE column is always 13 characters wide, so a row changing state no longer moves the columns beside it. (#1348, #1364, #1374)
 
-### Removed
-- `delete all overrides` is gone from the active section's menu. Press `a` to select everything, then `delete selected`.
+### Breaking changes and migration
+- `dispatch.autofocus_panes` is `false` by default, so a task paused at a gate, a task waiting on `blocked` or `hook_failed`, and a lane given up on keep their pane open and still notify you, but no longer take focus. 0.15.0 always focused them. `spoolway sync` adds `autofocus_panes = false` under `[dispatch]`. Set it to `true` to keep the 0.15.0 behaviour. (#1371)
+- `spoolway override promote` keeps the entry in the layer, where 0.15.0 cleared it, and its last line reads `kept <file> in the layer until you drop it` where it read `cleared <file> from the layer`. Once the branch that carries the promote has merged, run `spoolway override drop <target>`, or the layer keeps shadowing the tracked file. Update scripts that match the old line. (#1328)
+- Bare `spoolway` opens on the `DISPATCH` tab, where 0.15.0 opened on `QUEUE`, and the tab strip is `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES`, `EVAL` outside home mode. A pty or tmux script that drove the queue tab from the start must press `→` first, and one that counts tabs must count the new one. (#1330, #1374)
+- The STATE cell is the state word alone. A silent lane reads `● silent` where it read `● silent · <time>`, and a command step with no pane reads `● running` where it read `● running 9m 12s`. `spoolway queue list` no longer prints a run time for that step, because it has no TIME column. The board's TIME column still shows it. Update scripts that read the age from STATE. (#1348)
+- A popup with exactly one answer draws no answer row and ends on `[enter] confirm   [esc] close`, and `enter` runs that answer. This covers the routine, pending task and plan delete popups, the issue tracking gate, and the restart, skip hook, unqueue and command-step pause popups. The queue tab's find is now search: the row reads `search:`, the key reads `[f] search`, and every search footer reads `[enter] search   [esc] cancel`. Update pty scripts that pick an answer row or match `find`. (#1329, #1376)
+- The problem log keeps as many days as `housekeeping.retention_days` says, where it always kept 30. A project that sets `0` now keeps every line, and one that sets fewer days trims it sooner. A project that leaves the key out still keeps 30 days. (#1372)
+- A failed command step's status line names its copy's absolute path under `~/.spoolway/logs/<project>/`, where it named the `commands/` path that archiving deletes. A lane given up on at the kill ceiling still names the `commands/` path. Update scripts that read the log path from the status line. (#1349)
+- The eval tab's top border names its sections on the left, as `[eval]   directories   trials`, with the open one in brackets, where it read `eval · by pipeline · totals`. The grouping and view move to the right side, and the key line reads `[tab] section`. Update pty scripts that match the old title. (#1377)
+
+### Features
+- The overrides config section lists every config key under its table, with search and scrolling, and writes a typed value as its TOML type, so `5m` and `010` keep their text. A key no file sets is dimmed and reads `not set`, a key set to an empty value reads `empty`, and a key the list does not show is set with `w` or `config override --set`. (#1330, #1370, #1381)
+- The overrides pipeline section lists agent and command fields under their own headers, with `N overridden` where the layer already sets a field. Its step picker opens the pipelines that already override the field, `[a] select all` selects every visible step, and every patch is built before any file is written. (#1331, #1375)
+- The overrides active section lists every overridden file with its keys and why an ignored key is ignored. `o` offers `edit` first on every row, which opens a key's value field or a file in your editor, then `promote selected` and `delete selected`. Each delete and promote names every file and key in one confirm popup first. A promote writes into the checkout that holds the picked branch, or makes a worktree beside the checkout when none does. (#1333, #1334, #1380)
+- `w` on the overrides tab opens the overrides folder in Finder, `explorer.exe` on WSL or `xdg-open`, and splits the board's herdr pane into the folder when no opener can start. (#1332)
+- `config set` names one `override drop config.toml <key>` for each layer entry that shadows the value it just set, and `override drop <pipeline> description` and `task_template` now work. (#1328, #1333)
+- The eval tab's right border label drops whole ` · ` parts behind `…` in a narrow terminal, keeping the grouping to the last. (#1378)
+- A failed command step keeps one copy per failed run, named `<task> · <step> · <YYYY-MM-DDTHH-MM>.log`, and a second failure in the same minute adds ` · 2`. A copy that cannot be made is reported to the problem log, and the task still routes. (#1349)
+- The shipped `spoolway-calibrate` skill reports one table per kind of fix, with evidence, risk and reward on each row, reads the problem log and the failed command logs, and no longer proposes permission changes. `spoolway-tasks` ends a cut on one fixed line and asks about a finding no task covers before it cuts. `spoolway-config` points agents at `config override --set`. Run `spoolway sync` to take them. (#1328, #1347, #1373)
+
+### Fixes
+- Leaving the Eval tab gives its memory back on glibc 2.39, where its load could leave about 30 MB resident in one arena. spoolway now holds glibc's mmap and trim thresholds at their starting values. (#1335)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- The upgrade suite runs a project the released 0.15.0 binary wrote through the new binary. (#1319)
+- The nightly command-steps suite holds its last command step open until it has read the step's log, where archiving could delete the log first. (#1346)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.16.0`, run it without installing via `npx spoolway@0.16.0`, install it with `brew install marvingygas/tap/spoolway`, or download it with `curl -fsSL https://github.com/marvingygas/spoolway/releases/download/v0.16.0/install.sh | sh`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl, darwin-arm64 and darwin-x64; the GitHub release carries four bare executables, `install.sh` and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, set `dispatch.autofocus_panes = true` if panes should still come forward, drop each promoted override once its branch merges, update pty scripts that drive the opening tab, one-answer popups, search or the eval title, and scripts that read STATE ages or the failed log path, and restart the dispatcher. The 0.15.0 to 0.16.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.16.0
 
 ## 0.15.0
 

@@ -1,8 +1,32 @@
 {
   "source": "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json",
   "license": "MIT",
-  "generated": "2026-10-26",
+  "generated": "2026-10-28",
   "models": {
+    "abliteration/abliterated-model": {
+      "context_window": 262144,
+      "input": 1.0,
+      "output": 3.0,
+      "cache_read": 0.1
+    },
+    "abliteration/abliterated-model-large": {
+      "context_window": 1000000,
+      "input": 3.0,
+      "output": 5.0,
+      "cache_read": 0.3
+    },
+    "abliteration/abliterated-model-large-flash": {
+      "context_window": 1048576,
+      "input": 1.0,
+      "output": 2.0,
+      "cache_read": 0.1
+    },
+    "abliteration/abliterated-model-large-v2": {
+      "context_window": 1000000,
+      "input": 3.0,
+      "output": 5.0,
+      "cache_read": 0.3
+    },
     "ai21.j2-mid-v1": {
       "context_window": 8191,
       "input": 12.5,
@@ -9246,7 +9270,7 @@
       "cache_write_5m": 3.75
     },
     "global.openai.gpt-5.4": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.5,
       "output": 15.0,
       "cache_read": 0.25,
@@ -9257,7 +9281,7 @@
       }
     },
     "global.openai.gpt-5.5": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 5.0,
       "output": 30.0,
       "cache_read": 0.5,
@@ -9268,7 +9292,7 @@
       }
     },
     "global.openai.gpt-5.6-luna": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 0.2,
       "output": 1.2,
       "cache_read": 0.02,
@@ -9281,7 +9305,7 @@
       }
     },
     "global.openai.gpt-5.6-sol": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 4.0,
       "output": 20.0,
       "cache_read": 0.4,
@@ -9294,7 +9318,7 @@
       }
     },
     "global.openai.gpt-5.6-terra": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.0,
       "output": 12.0,
       "cache_read": 0.2,
@@ -9307,7 +9331,7 @@
       }
     },
     "global.openai.gpt-6-astra": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 10.0,
       "output": 50.0,
       "cache_read": 1.0,
@@ -9320,7 +9344,7 @@
       }
     },
     "global.openai.gpt-6-luna": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 0.1,
       "output": 0.5,
       "cache_read": 0.01,
@@ -9333,7 +9357,7 @@
       }
     },
     "global.openai.gpt-6-sol": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.0,
       "output": 10.0,
       "cache_read": 0.2,
@@ -9356,6 +9380,19 @@
         "output": 15.0,
         "cache_read": 0.2,
         "cache_write_5m": 5.0
+      }
+    },
+    "global.openai.gpt-6.1-terra": {
+      "context_window": 922000,
+      "input": 1.0,
+      "output": 5.0,
+      "cache_read": 0.05,
+      "cache_write_5m": 1.25,
+      "above_272k_tokens": {
+        "input": 2.0,
+        "output": 7.5,
+        "cache_read": 0.1,
+        "cache_write_5m": 2.5
       }
     },
     "global.xai.grok-4.6": {
@@ -9922,6 +9959,19 @@
         "output": 15.0,
         "cache_read": 0.2,
         "cache_write_5m": 5.0
+      }
+    },
+    "gpt-6.1-terra": {
+      "context_window": 922000,
+      "input": 1.0,
+      "output": 5.0,
+      "cache_read": 0.05,
+      "cache_write_5m": 1.25,
+      "above_272k_tokens": {
+        "input": 2.0,
+        "output": 7.5,
+        "cache_read": 0.1,
+        "cache_write_5m": 2.5
       }
     },
     "gpt-audio": {
@@ -11350,6 +11400,54 @@
       "cache_read": 0.33,
       "cache_write_5m": 4.125
     },
+    "morph/morph-dsv41flash": {
+      "context_window": 1048576,
+      "input": 0.12,
+      "output": 0.8,
+      "cache_read": 0.008
+    },
+    "morph/morph-dsv41flash-1017": {
+      "context_window": 1048576,
+      "input": 0.12,
+      "output": 0.8,
+      "cache_read": 0.008
+    },
+    "morph/morph-dsv41flash-abliterated": {
+      "context_window": 1048576,
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.03
+    },
+    "morph/morph-dsv4flash": {
+      "context_window": 1048576,
+      "input": 0.141953,
+      "output": 0.399625,
+      "cache_read": 0.035938
+    },
+    "morph/morph-glm53-744b": {
+      "context_window": 1048576,
+      "input": 1.19,
+      "output": 6.0,
+      "cache_read": 0.1955
+    },
+    "morph/morph-glm53flash": {
+      "context_window": 1048576,
+      "input": 0.2,
+      "output": 0.7,
+      "cache_read": 0.04
+    },
+    "morph/morph-kimik3": {
+      "context_window": 1048576,
+      "input": 2.5,
+      "output": 14.0,
+      "cache_read": 0.29
+    },
+    "morph/morph-kimik3-fast": {
+      "context_window": 1048576,
+      "input": 6.0,
+      "output": 22.5,
+      "cache_read": 0.6
+    },
     "morph/morph-v3-fast": {
       "context_window": 16000,
       "input": 0.8,
@@ -12766,7 +12864,7 @@
       "context_window": 262144
     },
     "openai.gpt-6-luna": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 0.1,
       "output": 0.5,
       "cache_read": 0.01,
@@ -12779,7 +12877,7 @@
       }
     },
     "openai.gpt-6-sol": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.0,
       "output": 10.0,
       "cache_read": 0.2,
@@ -13531,6 +13629,36 @@
       "context_window": 98304,
       "input": 0.8,
       "output": 2.4
+    },
+    "refuseless/deepseek-v4.1-flash-abliterated": {
+      "context_window": 1048576,
+      "input": 0.22,
+      "output": 0.75,
+      "cache_read": 0.045
+    },
+    "refuseless/deepseek-v4.1-flash-fast": {
+      "context_window": 1048576,
+      "input": 0.05,
+      "output": 0.15,
+      "cache_read": 0.003
+    },
+    "refuseless/glm-5.3-abliterated": {
+      "context_window": 1048576,
+      "input": 1.25,
+      "output": 2.25,
+      "cache_read": 0.25
+    },
+    "refuseless/glm-5.3-flash-abliterated": {
+      "context_window": 1048576,
+      "input": 0.25,
+      "output": 0.8,
+      "cache_read": 0.15
+    },
+    "refuseless/minimax-m3.1-flash": {
+      "context_window": 1048576,
+      "input": 0.05,
+      "output": 0.25,
+      "cache_read": 0.002
     },
     "replicate/anthropic/claude-3.5-haiku": {
       "input": 1.0,
@@ -15057,7 +15185,7 @@
       "cache_write_5m": 4.125
     },
     "us.openai.gpt-5.4": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.75,
       "output": 16.5,
       "cache_read": 0.275,
@@ -15068,7 +15196,7 @@
       }
     },
     "us.openai.gpt-5.5": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 5.5,
       "output": 33.0,
       "cache_read": 0.55,
@@ -15079,7 +15207,7 @@
       }
     },
     "us.openai.gpt-5.6-luna": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 0.22,
       "output": 1.32,
       "cache_read": 0.022,
@@ -15092,7 +15220,7 @@
       }
     },
     "us.openai.gpt-5.6-sol": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 4.4,
       "output": 22.0,
       "cache_read": 0.44,
@@ -15105,7 +15233,7 @@
       }
     },
     "us.openai.gpt-5.6-terra": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.2,
       "output": 13.2,
       "cache_read": 0.22,
@@ -15118,7 +15246,7 @@
       }
     },
     "us.openai.gpt-6-astra": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 11.0,
       "output": 55.0,
       "cache_read": 1.1,
@@ -15131,7 +15259,7 @@
       }
     },
     "us.openai.gpt-6-luna": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 0.11,
       "output": 0.55,
       "cache_read": 0.011,
@@ -15144,7 +15272,7 @@
       }
     },
     "us.openai.gpt-6-sol": {
-      "context_window": 1050000,
+      "context_window": 922000,
       "input": 2.2,
       "output": 11.0,
       "cache_read": 0.22,
@@ -15167,6 +15295,19 @@
         "output": 16.5,
         "cache_read": 0.22,
         "cache_write_5m": 5.5
+      }
+    },
+    "us.openai.gpt-6.1-terra": {
+      "context_window": 922000,
+      "input": 1.1,
+      "output": 5.5,
+      "cache_read": 0.055,
+      "cache_write_5m": 1.375,
+      "above_272k_tokens": {
+        "input": 2.2,
+        "output": 8.25,
+        "cache_read": 0.11,
+        "cache_write_5m": 2.75
       }
     },
     "us.writer.palmyra-x4-v1:0": {
