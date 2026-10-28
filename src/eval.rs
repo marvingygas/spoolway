@@ -10176,7 +10176,7 @@ mod screen_tests {
     fn an_empty_ledger_says_so_and_the_screen_ends_when_input_runs_out() {
         let (repo, _root_guard) = fixture("screen-empty");
         let text = screen(&repo, "");
-        assert!(text.contains("nothing to compare"), "{text}");
+        assert!(text.contains("no data."), "{text}");
     }
 
     /// Every table's key line starts on its first letter key, the way every
