@@ -32,6 +32,9 @@ The screen holds three tables. The lanes table groups dispatched lanes. The dire
 groups sessions run by hand in a watched directory. The trials table lists every trial. `tab`
 cycles through them, lanes to directories to trials and back.
 
+A table with no rows shows the single line `no data.`, whatever left it empty. The directory
+table shows it under both `by dir` and `by session`.
+
 Opening the tab, pressing `[r]`, or applying the filter panel shows a small `loading…` popup
 while spoolway rereads the ledger. It reads a session's transcript again only if the
 transcript's size or modification time changed since the last read. The same read prices every
