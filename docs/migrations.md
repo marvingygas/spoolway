@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.15.0 to 0.16.0 | The dispatcher no longer brings a pane to the front unless `dispatch.autofocus_panes` is on; `override promote` keeps the entry in the layer; bare `spoolway` opens on the dispatch tab and the strip gains `OVERRIDES`; the STATE cell is the state word alone; one-answer popups have no answer row and find is search; the problem log follows `housekeeping.retention_days`; a failed command step's status line names a kept copy of its log; the eval tab's title names its sections. | Run `spoolway sync` and commit what it writes, set `autofocus_panes = true` to keep panes coming forward, drop each promoted override once its branch merges, and update scripts that drive the opening tab, one-answer popups, search or the eval title, read STATE ages, match the promote line or read the failed log path. |
 | 0.14.1 to 0.15.0 | `dispatch.backend` is retired; `gate:` is `on_pass`, `on_fail` or `always`, allowed only on an agent step, and older binaries refuse those values; a `gate_at:` that names a command step is refused; JSON prints `gate` as a string; a report a gate holds needs a `--handoff`; `~/.spoolway/editor.toml` is no longer read; a job runs one whole routine and a routine holds one active job; the jobs tab is gone; home-mode plan pages live in the workspace; a resume onto a step without `session: true` opens a fresh conversation; TUI text and shared messages are lowercase; releases carry bare executables in place of archives; a binary npm did not install never checks for updates. | Run `spoolway sync` in each project and home-mode clone and commit what it writes, upgrade CI and teammates to the same release, move each `gate:` off a command step, set `VISUAL` or `EDITOR`, clear what `spoolway doctor` fails for your jobs, set `session: true` where a resume should continue, and update scripts that set `dispatch.backend`, read `gate` in JSON, report on a gated step, drive the jobs tab, match messages by case or fetch release archives. |
 | 0.13.0 to 0.14.0 | A step's `headless:` key is now `hide:` and older binaries refuse `hide:`; a new project keeps three lanes and shows command steps; `housekeeping.price_max_age_days` is retired; tasks are cut from `origin/<base>`; a lane never runs in the main checkout; matching `[models]` rows merge value by value; `eval` adds TURNS and COMPLEXITY; `queue list --json` lists `opening ticket` rows; `pipeline check` and `doctor` fail a stale `gate_at:` and a routine id held twice; `spoolway stack` runs only in its task's worktree; lanes cannot write the private overrides layer. | Run `spoolway sync` and commit what it writes, upgrade CI and teammates to the same release, set `visible_lanes` and `hide_commands` for the new defaults, push a task's base before queueing it, read `spoolway models` for merged rows, update scripts that read `eval` exports or `queue list --json`, and clear what `spoolway doctor` fails. |
 | 0.12.0 to 0.13.0 | The shipped pipelines end at a `create-pr` agent step and `spoolway stack` is deprecated; the shipped tracker hooks close a ticket with no pull request; a failing issue hook stops its task on `hook_failed` instead of `paused`; `eval --per-run` is `--per-task` and its export keys and columns change; unqueuing a routine copy deletes it; `sync` writes every `[dispatch]` key. | Run `spoolway sync` and `spoolway sync --replace` on your tracker hook, replace each `spoolway stack` step with a `create-pr` agent step, and update scripts that read `eval` exports, `--per-run`, held tasks' `state` or unqueued routine drafts. |
@@ -55,6 +56,62 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.15.0 to 0.16.0
+
+Run `spoolway sync` in each project and commit what it writes. It adds `autofocus_panes = false`
+under `[dispatch]` in `config.toml` with its row in the reference header, rewords the
+`housekeeping.retention_days` row, and rewrites the shipped `spoolway-calibrate`,
+`spoolway-config`, `spoolway-plan` and `spoolway-tasks` skills. Then restart the dispatcher.
+
+- The dispatcher no longer brings a pane to the front on its own. A task paused at a gate, a task
+  waiting for you on `blocked` or `hook_failed`, and a lane that was stopped and given up on keep
+  their pane open and still notify you, but your focus stays where it was. 0.15.0 always focused
+  them. Set `dispatch.autofocus_panes = true` to keep that behaviour. To bring one running step's
+  pane forward by hand, pick `focus` in the board's options menu. See
+  [`[dispatch]`](configuration.md#dispatch--the-run-loop).
+- `spoolway override promote` keeps the entry in the layer, where 0.15.0 cleared it. The
+  dispatcher keeps using the overridden values until you remove the entry, so run
+  `spoolway override drop <target>` once the branch that carries the promote has merged. The
+  promote's last line reads `kept <file> in the layer until you drop it` where it read
+  `cleared <file> from the layer`. Update scripts that match the old line. See
+  [`spoolway override`](cli-reference.md#spoolway-override-list--promote--drop).
+- Bare `spoolway` opens on the `DISPATCH` tab, where 0.15.0 opened on `QUEUE`. Outside home mode
+  the tab strip is `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES`, `EVAL`. A pty or tmux script that
+  drove the queue tab from the start presses `→` first, and one that walks the tabs by count takes
+  the new tab into account. A home-mode project has no `OVERRIDES` tab.
+- The STATE cell shows the state word alone, and the STATE column is always 13 characters wide.
+
+  | 0.15.0 | 0.16.0 |
+  |---|---|
+  | `● silent · <time>` | `● silent` |
+  | `● running 9m 12s` on a command step with no pane | `● running` |
+  | a run time for that step in `spoolway queue list` | no run time |
+
+  The board's TIME column still shows how long a step has run. Update scripts that read an age or
+  a run time from STATE.
+- A popup with exactly one answer draws no answer row. It ends on its text and
+  `[enter] confirm   [esc] close`, and `enter` runs that one answer. This covers the routine,
+  pending task and plan delete popups, the issue tracking gate, and the restart, skip hook,
+  unqueue and command-step pause popups. Pickers that can narrow to one entry keep their rows.
+  Update pty scripts that move to an answer row before pressing `enter`.
+- The queue tab's find is now search. Its row reads `search:`, its key reads `[f] search`, and
+  every search footer reads `[enter] search   [esc] cancel` where it read
+  `[enter] leave search   [esc] cancel`. Update pty scripts that match the old words.
+- The problem log keeps as many days as `housekeeping.retention_days` says, where it always kept
+  30. A project that sets `retention_days = 0` now keeps every line, and one that sets fewer days
+  trims sooner. A config that leaves the key out still keeps 30 days. See
+  [`[housekeeping]`](configuration.md#housekeeping--everything-spoolway-does-for-its-own-upkeep).
+- When a command step fails and sends its task anywhere but `done`, its log is copied to
+  `~/.spoolway/logs/<project>/` as `<task> · <step> · <YYYY-MM-DDTHH-MM>.log`, and the task's
+  status line names that copy's absolute path where it named the `commands/` path. The copies are
+  deleted after `retention_days`. A lane given up on at the kill ceiling still names the
+  `commands/` path. Update scripts that read the log path from the status line.
+- The eval tab's top border names its three sections on the left, as
+  `[eval]   directories   trials`, with the open one in brackets. It read
+  `eval · by pipeline · totals`. The grouping and view move to the right side, which drops whole
+  parts behind `…` in a narrow terminal, and the key line reads `[tab] section`. The export file
+  name is unchanged. Update pty scripts that match the old title. See [Eval](eval.md).
 
 ## 0.14.1 to 0.15.0
 
