@@ -27,52 +27,75 @@ use crate::pipeline::{Pipelines, StepKind};
 use crate::repo::Repo;
 use crate::screen::{Key, Notice, keys, pad_to, plural};
 
-/// A step field the section lists, and the kind of step that takes it.
+/// A step field the section lists, and the kind of step that takes it:
+/// `None` for a field every step takes, whichever kind it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Field {
     name: &'static str,
-    kind: StepKind,
+    kind: Option<StepKind>,
 }
 
-/// The fields the section lists, agent fields first, in the order they are
-/// drawn. Only the fields that say how a step runs: the ones that route a
-/// task (`on_pass`, `on_fail`, `loop`, `gate`) differ per step by design,
-/// so one value across many pipelines is not something to offer for them.
-/// Agent fields go only on agent steps and command fields only on command
-/// steps, because the merge refuses anything else.
-const FIELDS: [Field; 9] = [
+/// The fields the section lists, in the order they are drawn: the ones
+/// every step takes first, then agent fields, then command fields. Every
+/// step key but `id`, which the merge refuses because a patch is keyed by
+/// it. Agent fields go only on agent steps and command fields only on
+/// command steps, because `pipeline check` refuses anything else: `slot`
+/// is an agent field since a command step takes no worker slot, and
+/// `gate` one since a command has no lane to tell a person what it did.
+const FIELDS: [Field; 19] = [
+    Field::every("description"),
+    Field::every("on_pass"),
+    Field::every("on_fail"),
+    Field::every("loop"),
+    Field::every("last"),
+    Field::every("first"),
     Field::agent("model"),
     Field::agent("effort"),
     Field::agent("agent"),
     Field::agent("prompt"),
     Field::agent("session"),
     Field::agent("skills"),
+    Field::agent("slot"),
+    Field::agent("gate"),
     Field::command("run"),
     Field::command("timeout"),
     Field::command("hide"),
+    Field::command("background"),
+    Field::command("serial"),
 ];
 
 impl Field {
+    const fn every(name: &'static str) -> Field {
+        Field { name, kind: None }
+    }
+
     const fn agent(name: &'static str) -> Field {
         Field {
             name,
-            kind: StepKind::Agent,
+            kind: Some(StepKind::Agent),
         }
     }
 
     const fn command(name: &'static str) -> Field {
         Field {
             name,
-            kind: StepKind::Command,
+            kind: Some(StepKind::Command),
         }
+    }
+
+    /// Whether a step of `kind` takes this field.
+    fn takes(self, kind: StepKind) -> bool {
+        self.kind.is_none_or(|own| own == kind)
     }
 }
 
-/// The header each kind's fields are listed under.
-fn kind_header(kind: StepKind) -> &'static str {
+/// The header each kind's fields are listed under, `None` being the fields
+/// every step takes.
+fn kind_header(kind: Option<StepKind>) -> &'static str {
     match kind {
-        StepKind::Agent => "agent steps",
-        StepKind::Command => "command steps",
+        None => "all steps",
+        Some(StepKind::Agent) => "agent steps",
+        Some(StepKind::Command) => "command steps",
     }
 }
 
@@ -107,7 +130,7 @@ impl PipelineRows {
         self.steps
             .iter()
             .enumerate()
-            .filter(move |(_, step)| step.kind == field.kind)
+            .filter(move |(_, step)| field.takes(step.kind))
             .map(|(at, _)| at)
     }
 }
@@ -162,7 +185,7 @@ fn load(repo: &Repo, config: &Config) -> (Vec<PipelineRows>, Option<String>) {
                     let kind = step.kind();
                     let values = FIELDS
                         .iter()
-                        .filter(|field| field.kind == kind)
+                        .filter(|field| field.takes(kind))
                         .map(|field| (field.name, step_value(step, field.name)))
                         .collect();
                     let overridden = patch
@@ -1186,11 +1209,19 @@ mod tests {
         (repo, guard)
     }
 
-    /// The overrides tab, opened on its pipeline section.
+    /// The overrides tab, opened on its pipeline section with the cursor
+    /// on `model`, the field most of these tests set.
     fn on_pipeline(repo: &Repo) -> State {
         let mut state = State::new(repo);
         type_keys(repo, &mut state, "\t");
+        type_keys(repo, &mut state, &"\x1b[B".repeat(at_field("model")));
         state
+    }
+
+    /// Where the field `name` sits in the field list, so a test reaches it
+    /// with that many `↓` from the top.
+    fn at_field(name: &str) -> usize {
+        FIELDS.iter().position(|field| field.name == name).unwrap()
     }
 
     /// `pipeline`'s patch as the file holds it, or empty with none.
@@ -1245,31 +1276,44 @@ mod tests {
         type_keys(repo, state, "\x1b");
     }
 
-    // The field list as the mockup draws it: each kind's fields under its
-    // own header, with how many steps the layer already sets it on, and no
-    // count of the steps and pipelines that take it.
+    // The field list as the mockup draws it: the fields every step takes,
+    // then each kind's own, each under its header, with how many steps the
+    // layer already sets it on, and no count of the steps and pipelines
+    // that take it. Every step key but `id` is listed.
     #[test]
     fn the_section_lists_step_fields_under_a_header_per_kind() {
         let (repo, _guard) = pipelines_project("fields");
         write_patch(&repo, "gamma", "steps:\n  build:\n    timeout: 5m\n");
         let _terminal = crate::screen::test_terminal((80, 40));
-        let state = on_pipeline(&repo);
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
         let rows = rows_of(&state);
         assert_eq!(
-            &rows[..14],
+            &rows[..25],
             [
                 "",
+                "  all steps",
+                ">   description",
+                "    on_pass",
+                "    on_fail",
+                "    loop",
+                "    last",
+                "    first",
                 "  agent steps",
-                ">   model",
+                "    model",
                 "    effort",
                 "    agent",
                 "    prompt",
                 "    session",
                 "    skills",
+                "    slot",
+                "    gate",
                 "  command steps",
                 "    run",
                 "    timeout              1 overridden",
                 "    hide",
+                "    background",
+                "    serial",
                 "",
                 "",
             ]
@@ -1434,6 +1478,113 @@ mod tests {
                 "",
             ]
         );
+    }
+
+    // A field every step takes lists the steps of both kinds, a command
+    // step under the same pipeline as its agent steps, and a field only
+    // command steps take lists those alone.
+    #[test]
+    fn a_field_under_all_steps_lists_every_kind_of_step() {
+        let (repo, _guard) = pipelines_project("all-steps");
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        let down = "\x1b[B".repeat(at_field("on_pass"));
+        type_keys(&repo, &mut state, &format!("{down}\r"));
+        assert_eq!(
+            &rows_of(&state)[..11],
+            [
+                "",
+                "> [ ] alpha",
+                "        [ ] implement            review",
+                "        [ ] review               check",
+                "        [ ] check                create-pr",
+                "        [ ] create-pr            done",
+                "  [ ] beta",
+                "        [ ] fix                  create-pr",
+                "        [ ] create-pr            done",
+                "  [ ] gamma",
+                "        [ ] build                done",
+            ]
+        );
+
+        esc(&repo, &mut state);
+        let down = "\x1b[B".repeat(at_field("background") - at_field("on_pass"));
+        type_keys(&repo, &mut state, &format!("{down}\r"));
+        assert_eq!(
+            &rows_of(&state)[..6],
+            [
+                "",
+                "> [ ] alpha",
+                "        [ ] check                not set",
+                "  [ ] gamma",
+                "        [ ] build                not set",
+                "",
+            ]
+        );
+    }
+
+    // A routing key set to a step one pipeline does not have is written as
+    // typed, since the tab checks no value. The merge then leaves it out,
+    // `override list` names it as ignored, and the pipeline still loads on
+    // its tracked route.
+    #[test]
+    fn a_route_to_a_missing_step_is_written_and_reported_as_ignored() {
+        let (repo, _guard) = pipelines_project("missing-route");
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        let down = "\x1b[B".repeat(at_field("on_pass"));
+        let erase = "\x7f".repeat(20);
+        type_keys(
+            &repo,
+            &mut state,
+            &format!("{down}\r\x1b[B \r{erase}nowhere\r\r"),
+        );
+        assert!(
+            patch(&repo, "alpha").contains("steps:\n  implement:\n    on_pass: nowhere\n"),
+            "{}",
+            patch(&repo, "alpha")
+        );
+
+        let rows = crate::commands::collect_override_rows(&repo).unwrap();
+        let alpha = rows
+            .iter()
+            .find(|row| row.target == "pipelines/alpha.yml")
+            .unwrap();
+        assert_eq!(alpha.ignored.len(), 1, "{:?}", alpha.ignored);
+        assert_eq!(alpha.ignored[0].fields, "implement.on_pass");
+        assert!(state.pipeline.stale.is_none(), "{:?}", state.pipeline.stale);
+        let implement = &state.pipeline.pipelines[0].steps[0];
+        assert_eq!(implement.value(FIELDS[at_field("on_pass")]), "review");
+    }
+
+    // A field under `all steps` counts the steps of both kinds the layer
+    // sets it on, and `o`'s `delete override` takes it off all of them.
+    #[test]
+    fn a_field_under_all_steps_is_counted_and_deleted_on_both_kinds() {
+        let (repo, _guard) = pipelines_project("all-steps-count");
+        write_patch(
+            &repo,
+            "alpha",
+            "steps:\n  implement:\n    description: writes it\n  check:\n    description: \
+             tests it\n",
+        );
+        let _terminal = crate::screen::test_terminal((80, 40));
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        assert_eq!(rows_of(&state)[2], ">   description          2 overridden");
+
+        type_keys(&repo, &mut state, "o\r");
+        assert!(
+            popup_rows(&state)
+                .iter()
+                .any(|row| row.contains("2 keys in 1 file")),
+            "{:#?}",
+            popup_rows(&state)
+        );
+        type_keys(&repo, &mut state, "\r");
+        assert!(!patch(&repo, "alpha").contains("description"));
+        assert_eq!(rows_of(&state)[2], ">   description");
     }
 
     // Neither `space` nor `a` changes which rows are listed, so the cursor
@@ -1663,7 +1814,7 @@ mod tests {
         type_keys(&repo, &mut state, "\r");
         assert!(state.pipeline.at_rest());
         assert!(
-            rows_of(&state)[3].ends_with("2 overridden"),
+            rows_of(&state).contains(&">   effort               2 overridden".to_string()),
             "{:?}",
             rows_of(&state)
         );
@@ -1684,7 +1835,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("yaml");
         let mut state = on_pipeline(&repo);
         // hide, then timeout, on alpha's check.
-        let down = "\x1b[B".repeat(8);
+        let down = "\x1b[B".repeat(at_field("hide") - at_field("model"));
         type_keys(&repo, &mut state, &format!("{down}\r \rtrue\r\r"));
         type_keys(&repo, &mut state, "\x1b[A\r \r\x7f\x7f\x7f\x7f5m\r\r");
         let text = patch(&repo, "alpha");
@@ -1857,7 +2008,10 @@ mod tests {
         );
         assert!(stale.contains("`spoolway override drop alpha`"), "{stale}");
         let beta = &state.pipeline.pipelines[1];
-        assert_eq!(beta.steps[0].value(FIELDS[0]), "claude-opus-5-5");
+        assert_eq!(
+            beta.steps[0].value(FIELDS[at_field("model")]),
+            "claude-opus-5-5"
+        );
         assert!(lines(&state).join(" ").contains("no longer merges"));
     }
 

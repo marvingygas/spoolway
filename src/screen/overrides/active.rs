@@ -1759,7 +1759,7 @@ mod tests {
             "steps:\n  implement:\n    model: claude-opus-5-5\n  test:\n    timeout: 90m\n",
         );
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\to\r");
+        type_keys(&repo, &mut state, "\tfmodel\ro\r");
         let drawn = popup(&state);
         assert!(
             drawn.iter().any(|l| l.contains("3 keys in 2 files")),
