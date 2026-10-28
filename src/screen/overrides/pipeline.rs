@@ -39,9 +39,10 @@ pub(super) struct Field {
 /// every step takes first, then agent fields, then command fields. Every
 /// step key but `id`, which the merge refuses because a patch is keyed by
 /// it. Agent fields go only on agent steps and command fields only on
-/// command steps, because `pipeline check` refuses anything else: `slot`
-/// is an agent field since a command step takes no worker slot, and
-/// `gate` one since a command has no lane to tell a person what it did.
+/// command steps. `pipeline check` refuses each of them on the other kind,
+/// except `slot`: a command step takes no worker slot, so the key means
+/// nothing there and is listed under agent steps. `gate` is an agent field
+/// because a command has no lane to tell a person what it did.
 const FIELDS: [Field; 19] = [
     Field::every("description"),
     Field::every("on_pass"),
