@@ -21,6 +21,36 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.17.0
+
+### Highlights
+- The overrides tab's pipeline section offers every step key but `id`, under three headers: `all steps`, `agent steps` and `command steps`. A route, a description, `first`, `last`, `loop`, `slot`, `gate`, `background` or `serial` can now be set on many steps across pipelines in one write, the way `model` could. (#1396)
+- The overrides step picker lists every pipeline's steps under its row, all the time. Nothing opens or closes, so one `space` selects one step, and a pipeline's row shows only its box and its name. (#1394)
+- Every empty table on the eval screen shows the one line `no data.`, whatever left it empty, where each table named a cause that could be wrong. (#1390)
+- The shipped `spoolway-plan` skill no longer adds requirements nobody asked for. A plan carries only what the person said or picked, asks about any behaviour they did not name, and traces every decision to their words before it is written. (#1389)
+
+### Breaking changes and migration
+- The overrides pipeline section opens with the `all steps` header, and its cursor starts on `description`, where it started on `model`. `model` is now six rows down and `effort` seven, and the list holds 19 fields under three headers. A pty script that pressed `↓` to reach a field must count the new rows, or search for the field with `f`. (#1396)
+- The overrides step picker draws every pipeline's steps under its row, and a pipeline row no longer shows `N steps` or `N of M selected`. `space` on a pipeline row and `a` select or clear steps but no longer open or close anything. A pty script that opened a pipeline before moving to its steps, or matched the counts, must follow the new rows. (#1394)
+- The eval screen's empty tables read `no data.` where they read `nothing to compare in this window.`, `nothing outside the lanes in this window.`, `no sessions outside the lanes in that window.` and `no trials in this window.`. `spoolway eval --csv` still prints `Nothing to compare in <scope> yet.`. Update pty scripts that match the old lines. (#1390)
+
+### Features
+- A field under `all steps` lists agent steps and command steps together in the step picker, and saving writes the typed value into each selected step's patch. The `N overridden` count and `delete override` work for every key. A route to a step a pipeline does not have is still written, and `spoolway override list` reports that entry as ignored while the pipeline keeps loading. (#1396)
+- The step picker keeps the cursor on its row after `space` and `a`. (#1394)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- The upgrade suite runs a project the released 0.16.0 binary wrote through the new binary. (#1384)
+- A release deletes its own scratch branches from origin once it ships. A branch is deleted only when its name carries the released tag, no pull request from it is open, and every commit on it is on `main`. (#1395)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.17.0`, run it without installing via `npx spoolway@0.17.0`, install it with `brew install marvingygas/tap/spoolway`, or download it with `curl -fsSL https://github.com/marvingygas/spoolway/releases/download/v0.17.0/install.sh | sh`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl, darwin-arm64 and darwin-x64; the GitHub release carries four bare executables, `install.sh` and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, update pty scripts that walk the overrides pipeline section, its step picker or the eval screen's empty tables, and restart the dispatcher. The 0.16.0 to 0.17.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.17.0
+
 ## 0.16.0
 
 ### Highlights

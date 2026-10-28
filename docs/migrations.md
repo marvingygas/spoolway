@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.16.0 to 0.17.0 | The overrides pipeline section lists every step key but `id` under three headers and its cursor starts on `description`; the step picker lists every pipeline's steps and its pipeline rows draw no counts; every empty eval table reads `no data.`. | Run `spoolway sync` and commit what it writes, and update pty scripts that walk the overrides pipeline section or its step picker, or match the eval screen's empty-table lines. |
 | 0.15.0 to 0.16.0 | The dispatcher no longer brings a pane to the front unless `dispatch.autofocus_panes` is on; `override promote` keeps the entry in the layer; bare `spoolway` opens on the dispatch tab and the strip gains `OVERRIDES`; the STATE cell is the state word alone; one-answer popups have no answer row and find is search; the problem log follows `housekeeping.retention_days`; a failed command step's status line names a kept copy of its log; the eval tab's title names its sections. | Run `spoolway sync` and commit what it writes, set `autofocus_panes = true` to keep panes coming forward, drop each promoted override once its branch merges, and update scripts that drive the opening tab, one-answer popups, search or the eval title, read STATE ages, match the promote line or read the failed log path. |
 | 0.14.1 to 0.15.0 | `dispatch.backend` is retired; `gate:` is `on_pass`, `on_fail` or `always`, allowed only on an agent step, and older binaries refuse those values; a `gate_at:` that names a command step is refused; JSON prints `gate` as a string; a report a gate holds needs a `--handoff`; `~/.spoolway/editor.toml` is no longer read; a job runs one whole routine and a routine holds one active job; the jobs tab is gone; home-mode plan pages live in the workspace; a resume onto a step without `session: true` opens a fresh conversation; TUI text and shared messages are lowercase; releases carry bare executables in place of archives; a binary npm did not install never checks for updates. | Run `spoolway sync` in each project and home-mode clone and commit what it writes, upgrade CI and teammates to the same release, move each `gate:` off a command step, set `VISUAL` or `EDITOR`, clear what `spoolway doctor` fails for your jobs, set `session: true` where a resume should continue, and update scripts that set `dispatch.backend`, read `gate` in JSON, report on a gated step, drive the jobs tab, match messages by case or fetch release archives. |
 | 0.13.0 to 0.14.0 | A step's `headless:` key is now `hide:` and older binaries refuse `hide:`; a new project keeps three lanes and shows command steps; `housekeeping.price_max_age_days` is retired; tasks are cut from `origin/<base>`; a lane never runs in the main checkout; matching `[models]` rows merge value by value; `eval` adds TURNS and COMPLEXITY; `queue list --json` lists `opening ticket` rows; `pipeline check` and `doctor` fail a stale `gate_at:` and a routine id held twice; `spoolway stack` runs only in its task's worktree; lanes cannot write the private overrides layer. | Run `spoolway sync` and commit what it writes, upgrade CI and teammates to the same release, set `visible_lanes` and `hide_commands` for the new defaults, push a task's base before queueing it, read `spoolway models` for merged rows, update scripts that read `eval` exports or `queue list --json`, and clear what `spoolway doctor` fails. |
@@ -56,6 +57,37 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.16.0 to 0.17.0
+
+Run `spoolway sync` in each project and commit what it writes. It rewrites the shipped
+`spoolway-plan` skill. Then restart the dispatcher.
+
+- The overrides tab's pipeline section lists every step key but `id`, under three headers:
+  `all steps`, `agent steps` and `command steps`. It opens with `all steps`, and its cursor starts
+  on `description`, where it started on `model`.
+
+  | Field | 0.16.0 | 0.17.0 |
+  |---|---|---|
+  | `model` | the first row | six `↓` down |
+  | `effort` | one `↓` down | seven `↓` down |
+
+  A pty script that pressed `↓` to reach a field counts the new rows, or searches for the field
+  with `f`. See [The pipeline section](dispatcher.md#the-pipeline-section).
+- The step picker lists every pipeline's steps under its row, and nothing opens or closes. A
+  pipeline row shows only its box and its name, without `N steps` or `N of M selected`. `space` on
+  a pipeline row and `a` still select or clear steps, but no longer open a pipeline. Update pty
+  scripts that open a pipeline before moving to its steps, or that match the counts.
+- Every empty table on the eval screen shows `no data.`. `spoolway eval --csv` still prints
+  `Nothing to compare in <scope> yet.`. Update pty scripts that match the old lines. See
+  [Eval](eval.md).
+
+  | Table | 0.16.0 | 0.17.0 |
+  |---|---|---|
+  | lanes | `nothing to compare in this window.` | `no data.` |
+  | directories by dir | `nothing outside the lanes in this window.` | `no data.` |
+  | directories by session | `no sessions outside the lanes in that window.` | `no data.` |
+  | trials | `no trials in this window.` | `no data.` |
 
 ## 0.15.0 to 0.16.0
 
