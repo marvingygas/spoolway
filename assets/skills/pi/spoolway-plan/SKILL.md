@@ -43,8 +43,17 @@ assumed answer.
 - **Nothing is deferred silently.** Raise every topic you would leave aside, and get a clear
   decision on it. The page never says something will be done later: a thing is decided, or
   the person puts it out of scope explicitly.
-- **Ask only what the code cannot answer** — read what the codebase settles; where one option is
-  plainly better, take it and say so in a line. Ask what is left, if it would change the shape.
+- **Never add a requirement.** The plan carries only what the person said, or picked as an answer
+  of its own. Any behaviour they did not name is a question, never a line saying it is decided.
+  That includes a new marker, a changed key, a rule tightened "while we're here", or a preferred
+  default. Print it as a numbered question and end the turn. Read what the codebase settles. Where
+  one option is plainly better, take it and say so in a line. Take the better option only for how
+  something is built, never for what it does.
+- **One requirement per option.** A rule tucked into an option's description is not confirmed by
+  picking that option. It is asked on its own as a printed question.
+- **Trace before writing.** Check this before the step that asks whether to write the page. Every
+  decision and every changed mockup line must trace to the person's words or to a specific answer.
+  Anything that traces to neither is asked, or removed.
 - **2–3 concrete options per question**, each a real route with its own consequence — "What do
   you think?" is a delay, not a question. **Ask in batches**, up to four per turn.
 - **A choice between two shapes gets drawn** — print the two figures in the output, one under
