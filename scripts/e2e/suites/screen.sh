@@ -596,22 +596,30 @@ has "active counts both keys" "active (2)" "$LAST"
 
 # The overrides tab's pipeline section sets one step field on steps in two
 # pipelines. bugfix's steps leave `effort` out, with its lines deleted here,
-# and default's carry it blank. `tab` moves onto the section, `↓` onto
-# effort, and `enter` lists both pipelines, where `a` selects every step.
+# and default's carry it blank. `tab` moves onto the section, seven `↓`
+# past the six fields every step takes and model onto effort, and `enter`
+# lists both pipelines with their steps under them, where `a` selects every
+# step.
 # `enter` opens the value field, `low` is typed and saved, and `enter`
 # closes the popup the save opened.
 sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
 lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
 PIPELINE_TAB="$LIVE/overrides-pipeline.txt"
-on_screen '\x1b[C\x1b[C\t\x1b[B\ra\rlow\r\r' "$PIPELINE_TAB"
+on_screen '\x1b[C\x1b[C\t\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\ra\rlow\r\r' \
+  "$PIPELINE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PIPELINE_TAB" >"$PIPELINE_TAB.plain"
 has "tab moves onto the pipeline section" \
   "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
+has "it lists the fields every step takes first" "all steps" "$PIPELINE_TAB.plain"
 has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
 has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
 has "the step picker's key line names a as select all" \
   "[space] select   [a] select all   [enter] set value   [esc] back" "$PIPELINE_TAB.plain"
+has "every pipeline lists its steps before any is selected" \
+  "[ ] reproduce            not set" "$PIPELINE_TAB.plain"
 has "a step that leaves effort out reads not set" "[x] reproduce            not set" \
+  "$PIPELINE_TAB.plain"
+lacks "a pipeline row draws no count of its selected steps" " selected " \
   "$PIPELINE_TAB.plain"
 has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE_TAB.plain"
 PATCHES="$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
