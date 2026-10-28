@@ -11,7 +11,7 @@ flowchart LR
 | Step | What it does |
 |---|---|
 | `prepare` | An agent. It runs the local gate and fixes anything red, walks an upgrade from the last release, refreshes the vendored model price table, picks the version, writes the changelog section, and opens one `release/v<version>` pull request with the release commit last. |
-| `ship` | `scripts/release-ship.sh`. Waits for the pull request's checks, rehearses the release workflow on its head, merges it by rebase, tags the release commit, watches the tag's workflow publish it, and runs `scripts/release-verify.sh`. |
+| `ship` | `scripts/release-ship.sh`. Waits for the pull request's checks, rehearses the release workflow on its head, merges it by rebase, tags the release commit, watches the tag's workflow publish it, runs `scripts/release-verify.sh`, and then `scripts/release-sweep.sh`, which deletes the release's scratch branches from origin. |
 | `fixture` | `scripts/release-fixture.sh`. Scaffolds the released version's upgrade fixture from its own tag and opens its pull request with auto-merge on. |
 
 `ship` and `fixture` are command steps on purpose. Claude Code's auto mode refused both the merge
@@ -140,7 +140,10 @@ A failed step blocks the task with the script's own message. Fix the cause and r
 the step that failed.
 
 - Red checks or a red rehearsal before the merge: fix it on the `release/v<version>` branch, then
-  resume on `ship`. Nothing is on `main` yet.
+  resume on `ship`. Nothing is on `main` yet. A fix rehearsed on a branch of its own needs the
+  tag in that branch's name, such as `release-fix/v<version>-macos`. The sweep at the end of `ship`
+  then deletes it once its commits are on `main` and no pull request from it is open. It keeps any
+  other branch and names it, so delete those by hand.
 - A tag workflow that failed partway: rerun its failed jobs with `gh run rerun <run-id> --failed`,
   then resume on `ship`. Published npm versions are never replaced.
 - A fix that needs the tag on a different commit: move it by hand, then resume on `ship`.

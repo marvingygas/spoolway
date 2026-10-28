@@ -178,3 +178,4 @@ require_green "$tag_run"
 say "tag run $tag_run on $tag is green"
 
 "$here/release-verify.sh" "$version"
+"$here/release-sweep.sh" "$version"
