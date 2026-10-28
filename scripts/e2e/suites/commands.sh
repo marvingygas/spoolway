@@ -226,7 +226,7 @@ works "eval --json with no rows prints the object with empty rows and nothing el
 works "eval --csv with no rows prints the header and no prose" \
   bash -c 'out=$("$0" eval --pipeline no-such-pipeline --csv 2>/dev/null) &&
     [ "$(wc -l <<<"$out")" -le 2 ] && head -n 1 <<<"$out" | grep -q "," &&
-    ! grep -qi "no data" <<<"$out"' "$SPOOLWAY"
+    ! grep -qi "nothing to compare" <<<"$out"' "$SPOOLWAY"
 if [ "$LEDGER_HAD" = 1 ]; then cp "$LIVE/usage.jsonl.keep" "$LEDGER"; else rm -f "$LEDGER"; fi
 # A claude session banks Claude Code's own `cost-state` total. The claude
 # stand-in's transcript writer appends one for a turn whose model nothing
