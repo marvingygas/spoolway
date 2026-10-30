@@ -2128,4 +2128,198 @@ mod tests {
         let rows = rows_of(&state);
         assert_eq!(rows.last().unwrap(), "  ↓ 1 pipeline below", "{rows:#?}");
     }
+
+    /// One agent step that leaves `effort` out, so on that field the
+    /// pipeline has no step to show until `h` shows the not-set ones.
+    const DELTA: &str = "steps:
+  - id: plan
+    agent: claude
+    model: claude-sonnet-5-5
+    on_pass: done
+";
+
+    /// The picker's key line with `h` naming `which` way it goes next.
+    fn select_line(which: &str) -> String {
+        format!(
+            " [space] select   [a] select all   [enter] set value   [h] {which} not set   [esc] back"
+        )
+    }
+
+    /// The selected steps, as `pipeline.step`.
+    fn picked(state: &State) -> Vec<String> {
+        let View::Select(selection) = &state.pipeline.view else {
+            panic!("still picking");
+        };
+        selection
+            .selected
+            .iter()
+            .map(|(p, s)| format!("{p}.{s}"))
+            .collect()
+    }
+
+    // The picker opens on the steps that set the field, with `h` on the key
+    // line before `esc`. `h` shows the not-set steps and its label turns to
+    // `hide`, and a second `h` hides them again.
+    #[test]
+    fn the_picker_opens_with_not_set_steps_hidden_and_h_shows_them() {
+        let (repo, _guard) = pipelines_project("hidden");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = on_pipeline(&repo);
+        let hidden = [
+            "",
+            "> [ ] alpha",
+            "        [ ] implement            high",
+            "        [ ] review               high",
+            "  [ ] beta",
+            "        [ ] fix                  medium",
+            "",
+        ];
+        type_keys(&repo, &mut state, "\x1b[B\r");
+        assert_eq!(&rows_of(&state)[..7], hidden);
+        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+
+        type_keys(&repo, &mut state, "h");
+        assert_eq!(
+            &rows_of(&state)[..9],
+            [
+                "",
+                "> [ ] alpha",
+                "        [ ] implement            high",
+                "        [ ] review               high",
+                "        [ ] create-pr            not set",
+                "  [ ] beta",
+                "        [ ] fix                  medium",
+                "        [ ] create-pr            not set",
+                "",
+            ]
+        );
+        assert_eq!(lines(&state).last().unwrap(), &select_line("hide"));
+
+        type_keys(&repo, &mut state, "h");
+        assert_eq!(&rows_of(&state)[..7], hidden);
+        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+    }
+
+    // `h` hiding the not-set steps deselects every one that was selected,
+    // keeps the others selected, and moves the cursor off a step it hid
+    // onto that step's pipeline, the same as a search edit.
+    #[test]
+    fn hiding_deselects_not_set_steps_and_moves_the_cursor_to_their_pipeline() {
+        let (repo, _guard) = pipelines_project("hide-deselects");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = on_pipeline(&repo);
+        // implement, then alpha's create-pr three rows below alpha.
+        type_keys(&repo, &mut state, "\x1b[B\rh\x1b[B \x1b[B\x1b[B ");
+        assert_eq!(picked(&state), ["alpha.create-pr", "alpha.implement"]);
+
+        type_keys(&repo, &mut state, "h");
+        assert_eq!(picked(&state), ["alpha.implement"]);
+        assert_eq!(rows_of(&state)[1], "> [x] alpha");
+
+        // Shown again, the hidden step comes back unselected.
+        type_keys(&repo, &mut state, "h");
+        assert!(
+            rows_of(&state).contains(&"        [ ] create-pr            not set".to_string()),
+            "{:#?}",
+            rows_of(&state)
+        );
+    }
+
+    // A patch that sets the field blank leaves its step overridden but
+    // reading `not set`, so it starts hidden and, with it, unselected.
+    #[test]
+    fn a_step_overridden_blank_starts_hidden_and_unselected() {
+        let (repo, _guard) = pipelines_project("blank-override");
+        write_patch(
+            &repo,
+            "beta",
+            "steps:\n  fix:\n    effort: low\n  create-pr:\n    effort: \"\"\n",
+        );
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\r");
+        assert_eq!(picked(&state), ["beta.fix"]);
+    }
+
+    // `h` is not remembered: `esc` and `enter` open the picker with the
+    // not-set steps hidden again.
+    #[test]
+    fn a_picker_opened_again_starts_with_not_set_steps_hidden() {
+        let (repo, _guard) = pipelines_project("reopen");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\rh");
+        assert_eq!(lines(&state).last().unwrap(), &select_line("hide"));
+        esc(&repo, &mut state);
+        type_keys(&repo, &mut state, "\r");
+        assert!(
+            !rows_of(&state).iter().any(|r| r.contains("not set")),
+            "{:#?}",
+            rows_of(&state)
+        );
+        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+    }
+
+    // On a field no step sets, hiding would leave nothing to pick, so the
+    // picker lists every step, its key line has no `h`, and `h` does
+    // nothing there.
+    #[test]
+    fn a_field_no_step_sets_lists_every_step_with_no_h() {
+        let (repo, _guard) = pipelines_project("nobody-sets");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        let down = "\x1b[B".repeat(at_field("background"));
+        type_keys(&repo, &mut state, &format!("{down}\r"));
+        let all = [
+            "",
+            "> [ ] alpha",
+            "        [ ] check                not set",
+            "  [ ] gamma",
+            "        [ ] build                not set",
+            "",
+        ];
+        assert_eq!(&rows_of(&state)[..6], all);
+        let line = " [space] select   [a] select all   [enter] set value   [esc] back";
+        assert_eq!(lines(&state).last().unwrap(), line);
+
+        type_keys(&repo, &mut state, "h");
+        assert_eq!(&rows_of(&state)[..6], all);
+        assert_eq!(lines(&state).last().unwrap(), line);
+    }
+
+    // A pipeline whose every step leaves the field out has nothing to show
+    // while they are hidden, so it is hidden too until `h`.
+    #[test]
+    fn a_pipeline_with_only_not_set_steps_is_hidden_with_them() {
+        let (repo, _guard) = pipelines_project("empty-pipeline");
+        std::fs::write(Pipelines::file_in(&repo.checkout, "delta"), DELTA).unwrap();
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\r");
+        assert!(
+            !rows_of(&state).iter().any(|r| r.contains("delta")),
+            "{:#?}",
+            rows_of(&state)
+        );
+        type_keys(&repo, &mut state, "h");
+        let rows = rows_of(&state);
+        let at = rows.iter().position(|r| r == "  [ ] delta").expect("delta");
+        assert_eq!(rows[at + 1], "        [ ] plan                 not set");
+    }
+
+    // A cut list counts only the pipelines it shows out of sight, not the
+    // ones hidden for having no step that sets the field: alpha, cut after
+    // its first step, and beta, where delta and epsilon would make it four.
+    #[test]
+    fn a_cut_list_counts_only_the_pipelines_it_shows() {
+        let (repo, _guard) = pipelines_project("cut-hidden");
+        for name in ["delta", "epsilon"] {
+            std::fs::write(Pipelines::file_in(&repo.checkout, name), DELTA).unwrap();
+        }
+        let _terminal = crate::screen::test_terminal((90, 8));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\r");
+        let rows = rows_of(&state);
+        assert_eq!(rows.last().unwrap(), "  ↓ 2 pipelines below", "{rows:#?}");
+    }
 }
