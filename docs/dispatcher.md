@@ -1080,9 +1080,9 @@ blank, reads `not set`. Steps the layer already overrides the field on start sel
 
 The list opens with the `not set` steps hidden, so the steps that have a value come first. A
 pipeline with no step left to show is hidden too. `h` shows the hidden steps and hides them
-again. Hiding them unselects every `not set` step that was selected. When no step sets the field,
-the list shows every step and has no `h` key. Each time the step selection opens, the `not set`
-steps are hidden.
+again. Hiding them unselects every `not set` step that was selected. A search shows the hidden
+steps it matches. When no step sets the field, the list shows every step and has no `h` key. Each
+time the step selection opens, the `not set` steps are hidden.
 
 ```
 ╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
@@ -1113,8 +1113,9 @@ steps are hidden.
 | `esc` | Go back to the field list. |
 
 The search matches pipeline names, step ids and the values shown, `not set` included, so `not
-set` finds every listed step that leaves the field out. While those steps are hidden, it finds
-none until `h` shows them. A pipeline whose name matches lists all its
+set` finds every step that leaves the field out. It finds them while they are hidden too. When
+`h` has them hidden, clearing the search, with `esc` or by deleting its text, hides them again and
+unselects them. A step that has a value stays selected when a search leaves it out. A pipeline whose name matches lists all its
 steps, and any other lists only the steps that match. `space` and `a` select only the steps the
 search leaves. After `enter` leaves the search, the `search:` row stays at the top of the list
 while the search narrows it.
