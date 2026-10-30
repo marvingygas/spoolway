@@ -74,7 +74,7 @@ Every plan is written on the same spine, in this order:
 
 | Section | What goes in it |
 |---|---|
-| **Context** | One block of at most three sentences. It opens on the outcome this plan means to produce, in a sentence a person can approve or reject. Then it says what is true today and the pressure on it. Below it, a list of every path the plan touches. It is the page's lead, with nothing above it but the name, the tagline and the path. |
+| **Context** | One block of at most three sentences. It opens on the outcome this plan means to produce, in a sentence a person can approve or reject. Then it says what is true today and the pressure on it. Below it, a folder tree of every path the plan touches. It is the page's lead, with nothing above it but the name, the tagline and the path. |
 | **Decisions** | One record per decision: a heading, one paragraph, one figure and a change line. The paragraph says why this is a choice and what to look at in the figure, in at most four sentences. The change line is one highlighted sentence, prefixed "After implementation:", stating the change that will now happen. |
 | **Mockup** | The finished thing, drawn: the walkthrough, or the run end to end. One heading and figure per step, no prose. |
 **The page ends at the Mockup.** The breakdown is not on it: a task is written into
@@ -131,8 +131,8 @@ task written later, not this page: terse here, complete in the task.
 
 **Reference, never restate.** A paragraph explaining how the system works today is stale the
 day it changes; a path stays true. Name the file that already holds the ground needed, in the
-path list under Context. Every path the plan touches is listed there once. No record has a
-list of its own.
+path tree under Context. Every path the plan touches is drawn there once. No record has a
+tree of its own.
 
 ## Procedure
 
@@ -205,7 +205,9 @@ list of its own.
    Invoke the **spoolway-tasks** skill to do it: the shape it cuts into tasks is the
    page's Decisions and Mockup, or — where no page was written — what step 2 settled. Every
    task gets `plan:` set to the page's own absolute path, whenever a page exists. Where step 1
-   read an issue, a pull request or a Jira item, its URL is the `source:` each task gets. A
+   read an issue, a pull request or a Jira item, its URL is the `source:` each task gets. The
+   page links the same URL on its SOURCE line, but only for an item read through
+   `spoolway issue show`. A
    page's path never goes into `source:`. Neither key is set when neither exists.
    `spoolway-tasks` decomposes, offers the shape, settles the pipeline,
    reads the skeleton, writes the tasks, verifies the chain and proves the set with

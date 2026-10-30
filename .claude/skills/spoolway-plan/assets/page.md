@@ -106,13 +106,22 @@ the page that buys nothing.
   as the heading.
 - `.tagline` — what is being built, in five words.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
-  question for the person.
+  question for the person. Its second line, `.source`, takes the `url` from `spoolway issue
+  show` as both the `href` and the link text. Delete the whole line when step 1 read no item
+  through `spoolway issue show`.
 - Context's `.standfirst` — one block of at most three sentences. It opens on the outcome this
   plan means to produce, in a sentence a person can approve or reject. Then it says what is true
   today and the pressure on it. It is the page's lead, and nothing stands above Context but the
   name, the tagline and the path.
-- Context's `.refs` list — every path the plan touches, once, each a `<code>path</code>` and what
-  it already explains. Records carry no list of their own.
+- Context's `.tree` block — every path the plan touches, drawn once as a folder tree. Draw it
+  with `├──`, `└──` and `│`, the way the `tree` command prints it. Sort each
+  folder's entries as `tree` does. Write each folder once. A folder that holds only one folder
+  is joined with it on one line, such as `.github/workflows/`. The repo gets no top line. Each
+  file keeps its note on the same line, in a `<span class="note">`. Pad the file names with
+  spaces so every note in the block starts in one column, across folders and trees. A file
+  outside the checkout goes in a second tree below the first, headed by its folder written from
+  `~`, such as `~/.spoolway/`. The block scrolls sideways and never wraps. Records carry no tree
+  of their own.
 - Each decision's `<h3>` — the decision stated as a decision, not a component.
 - The decision's paragraph — at most four sentences: why this is a choice at all, and what to
   look at in the figure.
