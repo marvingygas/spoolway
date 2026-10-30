@@ -113,8 +113,8 @@ the page that buys nothing.
   plan means to produce, in a sentence a person can approve or reject. Then it says what is true
   today and the pressure on it. It is the page's lead, and nothing stands above Context but the
   name, the tagline and the path.
-- Context's `.tree` block — every path the plan touches, once, drawn as a folder tree with the
-  box-drawing characters `├──`, `└──` and `│`, the way the `tree` command prints it. Sort each
+- Context's `.tree` block — every path the plan touches, drawn once as a folder tree. Draw it
+  with `├──`, `└──` and `│`, the way the `tree` command prints it. Sort each
   folder's entries as `tree` does. Write each folder once. A folder that holds only one folder
   is joined with it on one line, such as `.github/workflows/`. The repo gets no top line. Each
   file keeps its note on the same line, in a `<span class="note">`. Pad the file names with
