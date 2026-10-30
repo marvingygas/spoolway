@@ -571,7 +571,7 @@ impl PipelineSection {
             }
             View::Failed { selection, notice } => {
                 self.view = match key {
-                    Key::Enter => View::Select(selection),
+                    Key::Enter => self.after_failure(selection),
                     _ => View::Failed { selection, notice },
                 };
             }
@@ -650,6 +650,29 @@ impl PipelineSection {
             _ => {}
         }
         self.refocus(&mut selection, before);
+        View::Select(selection)
+    }
+
+    /// The picking list again after a failed write, with every selected
+    /// step on screen. A write that stopped partway reloads the pipelines,
+    /// and a field no step set before can now have a value on the steps it
+    /// reached. Hiding then turns on under the open selection and would hide
+    /// the selected steps it did not reach, the ones a retry writes to, so
+    /// the not-set steps are shown instead. The rows changed with the
+    /// reload, so the cursor is kept inside them.
+    fn after_failure(&self, mut selection: Selection) -> View {
+        let field = selection.field;
+        let hides_selected = selection.hiding(&self.pipelines)
+            && self.pipelines.iter().any(|pipeline| {
+                pipeline.taking(field).any(|at| {
+                    let step = &pipeline.steps[at];
+                    step.value(field).is_empty() && selection.is_selected(&pipeline.name, &step.id)
+                })
+            });
+        if hides_selected {
+            selection.show_not_set = true;
+        }
+        self.refocus(&mut selection, None);
         View::Select(selection)
     }
 
@@ -2323,5 +2346,44 @@ mod tests {
         type_keys(&repo, &mut state, "\x1b[B\r");
         let rows = rows_of(&state);
         assert_eq!(rows.last().unwrap(), "  ↓ 2 pipelines below", "{rows:#?}");
+    }
+
+    // A write that stops partway on a field no step set leaves the steps it
+    // reached with a value, so hiding turns on under the open selection.
+    // `enter` on the failure then shows the not-set steps rather than hide
+    // the selected ones a retry writes to, and keeps the cursor on a row.
+    #[test]
+    fn a_partial_write_keeps_every_selected_step_on_screen() {
+        let (repo, _guard) = pipelines_project("partial-hidden");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        let down = "\x1b[B".repeat(at_field("background"));
+        type_keys(
+            &repo,
+            &mut state,
+            &format!("{down}\ra\x1b[B\x1b[B\x1b[B\x1b[B"),
+        );
+        assert_eq!(picked(&state), ["alpha.check", "gamma.build"]);
+
+        // alpha's patch lands, gamma's does not.
+        write_patch(&repo, "alpha", "steps:\n  check:\n    background: true\n");
+        let View::Select(selection) = state.pipeline.view.clone() else {
+            panic!("still picking");
+        };
+        state.pipeline.view = View::Failed {
+            selection,
+            notice: Notice::new("written in part", "background was set on alpha"),
+        };
+        state.reload(&repo);
+        type_keys(&repo, &mut state, "\r");
+
+        assert_eq!(picked(&state), ["alpha.check", "gamma.build"]);
+        let rows = rows_of(&state);
+        assert_eq!(
+            rows[4], ">       [x] build                not set",
+            "{rows:#?}"
+        );
+        assert_eq!(lines(&state).last().unwrap(), &select_line("hide"));
     }
 }
