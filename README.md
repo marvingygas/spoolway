@@ -114,7 +114,7 @@ Use `/spoolway-plan` if you want help shaping the work first. It writes the agre
 HTML page under `~/.spoolway/<label>-<id>/plans/`. Verify the agent and you have a shared understanding.
 See **[Planning](docs/planning.md)**. This step is optional.
 
-<img src="docs/screenshots/readme/readme/plan.png" alt="a plan page written by /spoolway-plan" width="100%">
+<img src="docs/screenshots/readme/plan.png" alt="a plan page written by /spoolway-plan" width="100%">
 
 ### 3. Create queueable tasks
 
@@ -129,7 +129,7 @@ of work. See **[Tasks](docs/tasks.md)**.
 tasks. Select a group and press `enter` to queue it. The tab strip runs dispatch, queue, routines,
 overrides and eval, and `←` and `→` move between them.
 
-<img src="docs/screenshots/readme/readme/queue.png" alt="the queue tab" width="100%">
+<img src="docs/screenshots/readme/queue.png" alt="the queue tab" width="100%">
 
 ### 5. Dispatch
 
@@ -138,7 +138,7 @@ To start dispatching, spoolway must run in herdr.
 `spoolway` opens on the dispatch tab, and `←` from the queue tab returns to it. Press `enter` there
 to start dispatching.
 
-<img src="docs/screenshots/readme/readme/dispatch.png" alt="the dispatch tab" width="100%">
+<img src="docs/screenshots/readme/dispatch.png" alt="the dispatch tab" width="100%">
 
 See **[The dispatcher](docs/dispatcher.md#states)** for what each state on the board means.
 
@@ -216,7 +216,7 @@ A routine is a saved task or group of tasks that you can queue again. It lives i
 On the queue tab, press `o` on a group and pick `save as routine` to save it there. The
 routines tab lists what is saved. Select a routine and press `enter` to queue it.
 
-<img src="docs/screenshots/readme/readme/routines.png" alt="the routines tab" width="100%">
+<img src="docs/screenshots/readme/routines.png" alt="the routines tab" width="100%">
 
 
 A job runs a routine on a schedule. It has three parts: a cron expression, a pipeline, and a
@@ -342,7 +342,7 @@ compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table 
 `tab` cycles to the directory table and the trials table, `t` switches between totals and per-task
 figures, `f` filters, and `e` exports CSV.
 
-<img src="docs/screenshots/readme/readme/eval.png" alt="the eval tab" width="100%">
+<img src="docs/screenshots/readme/eval.png" alt="the eval tab" width="100%">
 
 ## Documentation
 

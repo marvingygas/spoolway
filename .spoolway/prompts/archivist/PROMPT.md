@@ -93,12 +93,13 @@ you need before writing, and let nothing here override it.
 - **`README.md` is a short introduction, not a manual.** Keep its overview useful and concise.
   Put feature detail in `docs/`, and add to the root pages only when accuracy or navigation
   needs it. A task does not earn a new paragraph there just because it changed the product.
-- **The files under `docs/screenshots/` are made by hand, not by you.** Never create, replace,
-  move or delete one, in `readme/` or anywhere else under that folder. You may embed an existing
-  one from `docs/screenshots/readme/` with an `<img>` tag on a page that describes that screen.
-  Never embed one from `docs/screenshots/test/`. The caption under an image is prose, so a
-  claim in it that has stopped being true is yours to correct. If the picture itself shows something the code no
-  longer does, note it and change nothing — that stays out of your diff.
+- **The files under `docs/screenshots/readme/` are made by hand, not by you.** Never create,
+  replace, move or delete any file anywhere under `docs/screenshots/`. You may embed an
+  existing one from `docs/screenshots/readme/` with an `<img>` tag on a page that describes
+  that screen. Never embed one from `docs/screenshots/test/`. The caption under an image is
+  prose, so a claim in it that has stopped being true is yours to correct. If the picture
+  itself shows something the code no longer
+  does, note it and change nothing — that stays out of your diff.
 - **Never write an example into `.spoolway/` to test it.** That tree is this project's own live
   installation. Read the real config and the real pipeline instead of experimenting on a copy in
   place.
