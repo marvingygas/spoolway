@@ -899,8 +899,9 @@ impl clap::builder::TypedValueParser for RemovedCommand {
     }
 }
 
-/// Where `spoolway init` puts a project's setup — the answer to "Where
-/// should this project's setup live?".
+/// Where `spoolway init` puts a project's setup — the two answers to "Where
+/// should this project's setup live?" that `--setup` can give. The menu's
+/// third entry, workspace only, has no flag and so no variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Setup {
     /// `.spoolway/` in the checkout, tracked by git.
@@ -2572,5 +2573,32 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("key reference"), "{help}");
+    }
+
+    /// `--setup` takes `repo` and `home` and nothing else. The setup menu's
+    /// third entry, workspace only, is reached from the menu alone, so clap
+    /// refuses every spelling of it here.
+    #[test]
+    fn init_setup_takes_only_repo_and_home() {
+        for (value, want) in [("repo", Setup::Repo), ("home", Setup::Home)] {
+            match Cli::try_parse_from(["spoolway", "init", "--setup", value])
+                .unwrap()
+                .command
+            {
+                Command::Init(args) => assert_eq!(args.setup, Some(want)),
+                other => panic!("expected Command::Init, got {other:?}"),
+            }
+        }
+        for value in [
+            "workspace-only",
+            "workspace_only",
+            "workspace only",
+            "workspace",
+        ] {
+            assert!(
+                Cli::try_parse_from(["spoolway", "init", "--setup", value]).is_err(),
+                "--setup {value} must be refused"
+            );
+        }
     }
 }

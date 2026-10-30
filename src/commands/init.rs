@@ -432,7 +432,37 @@ enum Placement {
     /// this folder name, or into a new workspace for `None`; see
     /// [`crate::repo::move_checkout`].
     Move(Option<String>),
+    /// The binding alone — `.git/spoolway-id` and the home's `project.toml`,
+    /// what any first command makes — with no setup written and no skills
+    /// installed; see [`init_workspace_only`]. Reached from the setup menu
+    /// only, never from a flag.
+    WorkspaceOnly,
 }
+
+/// The setup menu, in order: the value shown, the note saying when to use
+/// it, and the `--setup` value it stands for.
+///
+/// Its own list rather than [`Setup`]'s variants, because workspace only
+/// (`None`) has no flag: a third `Setup` variant would quietly add
+/// `--setup workspace-only` too. `repo` stays first, since index 0 is the
+/// menu's default and the answer when nobody is there to pick.
+const SETUP_MENU: [(&str, &str, Option<Setup>); 3] = [
+    (
+        "repo",
+        "add config to this directory, use when working with the team",
+        Some(Setup::Repo),
+    ),
+    (
+        "home",
+        "add config to a local workspace, use when running spoolway without changing the repo",
+        Some(Setup::Home),
+    ),
+    (
+        "workspace only",
+        "only the workspace, use when .spoolway/ is already in the repo",
+        None,
+    ),
+];
 
 impl Placement {
     /// Flags first, then the person, then the default — the same order
@@ -563,15 +593,13 @@ impl Placement {
                 // `repo` first and the default: it is what `init` did before
                 // this question existed, so a script with nobody to answer
                 // gets the same tracked `.spoolway/` it always did.
-                let setups = <Setup as clap::ValueEnum>::value_variants();
-                let menu: Vec<(&str, &str)> = setups
-                    .iter()
-                    .map(|setup| match setup {
-                        Setup::Repo => ("repo", ".spoolway/ in this checkout, tracked by git"),
-                        Setup::Home => ("home", "~/.spoolway/"),
-                    })
-                    .collect();
-                setups[crate::ask::choose("Where should this project's setup live?", &menu, 0)?]
+                let menu = SETUP_MENU.map(|(value, note, _)| (value, note));
+                let picked =
+                    crate::ask::choose("Where should this project's setup live?", &menu, 0)?;
+                match SETUP_MENU[picked].2 {
+                    Some(setup) => setup,
+                    None => return Ok(Self::WorkspaceOnly),
+                }
             }
         };
         if setup == Setup::Repo {
@@ -1010,6 +1038,37 @@ fn place_setup(
     Ok(wrote_any)
 }
 
+/// The rest of a run whose setup-menu pick was workspace only: bind the
+/// checkout, the same binding [`crate::repo::Repo::discover`] makes on any
+/// first command, and say where it went.
+///
+/// Nothing else is written. A checkout whose `.spoolway/` came with the
+/// clone keeps it exactly as the team left it, and one with no `.spoolway/`
+/// yet finds this same home once it arrives, since the home is keyed by the
+/// stamped id rather than by the setup. Not even the usage registry: other
+/// commands add the checkout there on their own first run.
+fn init_workspace_only(root: &Path) -> Result<()> {
+    let home = crate::repo::bind(root)?;
+    // Printed whether this run minted the id or found it already there,
+    // unlike a full run's `stamped` line: here the stamp and the home are
+    // the whole result, and the id is what names the home below.
+    if let Some(path) = crate::repo::id_file_path(root)?.filter(|path| path.exists()) {
+        let id = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        println!(
+            "  stamped  {}{}",
+            pad_to_value_column(&relative(root, &path)),
+            id.trim()
+        );
+    }
+    println!(
+        "{}",
+        report_row("home", &format!("{}/", crate::repo::shorten_home(&home)))
+    );
+    println!("Workspace initialized successfully.");
+    Ok(())
+}
+
 pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Before anything is written or asked, because this is the one command a
     // person runs without knowing yet what they have got hold of.
@@ -1058,6 +1117,12 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     crate::repo::require_utf8_root(root)?;
     crate::repo::require_git_repository(root)?;
     let placement = Placement::choose(root, args)?;
+    // Ahead of every question and write below: the agent, example and
+    // tracker answers, `place_setup`, the `.gitignore` block, the version
+    // marker and the skills all belong to a setup this pick does not want.
+    if matches!(placement, Placement::WorkspaceOnly) {
+        return init_workspace_only(root);
+    }
     // A move is refused here, right after the menu and before any question
     // or write, so a refusal leaves everything as it was.
     if let Placement::Move(to) = &placement {
@@ -1132,7 +1197,8 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
                 ));
             }
         }
-        Placement::Repo | Placement::Listed => {}
+        // `WorkspaceOnly` returned above, before any of this.
+        Placement::Repo | Placement::Listed | Placement::WorkspaceOnly => {}
     }
 
     // A project's home is keyed off an id stamped into its own common git
@@ -1472,6 +1538,88 @@ mod tests {
         crate::scratch::git_init(&root, &["-b", "plan/demo"]);
         run_init(&root, args).expect("init");
         root
+    }
+
+    /// The setup menu lists `repo`, `home` and `workspace only` in that
+    /// order, each with the note saying when to use it. `repo` stays at
+    /// index 0, the default `ask::choose` highlights and takes with nobody
+    /// there, and workspace only is the one entry with no `--setup` value.
+    #[test]
+    fn the_setup_menu_offers_workspace_only_after_repo_and_home() {
+        assert_eq!(
+            SETUP_MENU.map(|(value, note, _)| (value, note)),
+            [
+                (
+                    "repo",
+                    "add config to this directory, use when working with the team"
+                ),
+                (
+                    "home",
+                    "add config to a local workspace, use when running spoolway without \
+                     changing the repo"
+                ),
+                (
+                    "workspace only",
+                    "only the workspace, use when .spoolway/ is already in the repo"
+                ),
+            ]
+        );
+        assert_eq!(
+            SETUP_MENU.map(|(_, _, setup)| setup),
+            [Some(Setup::Repo), Some(Setup::Home), None]
+        );
+    }
+
+    /// A workspace-only pick writes `.git/spoolway-id` and the home's
+    /// `project.toml`, and nothing else: no `.spoolway/`, no skills in the
+    /// checkout or the user folder, no other entry under `~/.spoolway/`, and
+    /// a clean `git status`. A `.spoolway/` arriving afterwards makes it a
+    /// repo-mode project bound to that same home.
+    #[test]
+    fn workspace_only_writes_the_binding_and_nothing_else() {
+        let root = crate::scratch::root("init-workspace-only");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        crate::repo::run(
+            &root,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "seed"],
+        )
+        .unwrap();
+        let home = home_for(&root);
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            init_workspace_only(&root).expect("workspace only");
+
+            let stamp = crate::repo::id_file_path(&root).unwrap().unwrap();
+            assert!(stamp.is_file(), "{} is stamped", stamp.display());
+            let homes: Vec<_> = std::fs::read_dir(home.join(".spoolway"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(homes.len(), 1, "one home and nothing else: {homes:?}");
+            assert!(homes[0].join(crate::repo::BINDING_FILE).is_file());
+            assert!(!root.join(".spoolway").exists(), "no setup in the checkout");
+            for skills in [
+                root.join(".claude"),
+                root.join(".agents"),
+                home.join(".claude"),
+            ] {
+                assert!(!skills.exists(), "no skills at {}", skills.display());
+            }
+            let status = crate::repo::run(&root, "git", &["status", "--porcelain"]).unwrap();
+            assert!(
+                status.trim().is_empty(),
+                "the checkout stays clean: {status}"
+            );
+
+            std::fs::create_dir_all(root.join(".spoolway")).unwrap();
+            assert!(crate::local::is_repo_mode(&root));
+            assert_eq!(crate::mux::project_home(&root).unwrap(), homes[0]);
+        });
     }
 
     /// Acceptance criterion 5: `init` restoring an example pipeline whose
