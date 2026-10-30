@@ -151,8 +151,18 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 | The issue tracker (skipped when joining or moving into an existing workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
 
-On a checkout with a tracked `.spoolway/` that no workspace lists, such as a teammate's clone,
-the setup question offers `repo`, `home` and `workspace only`, with `workspace only` highlighted.
+At a terminal the setup question always offers three entries, each with a note saying when to
+use it. `repo` is highlighted on a fresh checkout. `workspace only` is highlighted on a checkout
+with a tracked `.spoolway/` that no workspace lists, such as a teammate's clone.
+
+```
+Where should this project's setup live?:
+> repo            add config to this directory, use when working with the team
+  home            add config to a local workspace, use when running spoolway without changing the repo
+  workspace only  only the workspace, use when .spoolway/ is already in the repo
+```
+
+On a teammate's clone, the picks mean this:
 
 | Pick | What happens |
 |---|---|
