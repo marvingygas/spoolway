@@ -113,8 +113,13 @@ the page that buys nothing.
   plan means to produce, in a sentence a person can approve or reject. Then it says what is true
   today and the pressure on it. It is the page's lead, and nothing stands above Context but the
   name, the tagline and the path.
-- Context's `.refs` list — every path the plan touches, once, each a `<code>path</code>` and what
-  it already explains. Records carry no list of their own.
+- Context's `.tree` block — every path the plan touches, once, drawn as a folder tree with the
+  box-drawing characters `├──`, `└──` and `│`, the way the `tree` command prints it. Sort each
+  folder's entries as `tree` does. Write each folder once. A folder that holds only one folder
+  is joined with it on one line, such as `.github/workflows/`. The repo gets no top line. Each
+  file keeps its note on the same line, in a `<span class="note">`. A file outside the checkout
+  goes in a second tree below the first, headed by its folder written from `~`, such as
+  `~/.spoolway/`. The block scrolls sideways and never wraps. Records carry no tree of their own.
 - Each decision's `<h3>` — the decision stated as a decision, not a component.
 - The decision's paragraph — at most four sentences: why this is a choice at all, and what to
   look at in the figure.

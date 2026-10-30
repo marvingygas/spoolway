@@ -249,8 +249,8 @@ figcaption { font-size: 0.875rem; color: var(--ink-faint); max-width: var(--meas
 }
 .dec .change::before { content: "After implementation: "; color: var(--ink-faint); font-weight: 400; }
 
-.refs { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1.25rem; font-size: 0.8rem; color: var(--ink-faint); }
-.refs code { font-family: var(--mono); color: var(--ink-soft); }
+.tree { margin: 0 0 0.75rem; overflow-x: auto; font-family: var(--mono); font-size: 0.8rem; line-height: 1.5; color: var(--ink-soft); white-space: pre; }
+.tree .note { color: var(--ink-faint); }
 
 .mockup { display: flex; flex-direction: column; gap: 2rem; margin: 0; }
 .mockup figure { gap: 0.5rem; }
@@ -341,9 +341,12 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
     <p class="standfirst">[[The outcome this plan means to produce, in a sentence a person can
     approve or reject. Then what is true today and the pressure on it. At most three sentences.]]</p>
 
-    <ul class="refs">
-      <li><code>[[path]]</code> — [[what it already explains, so the page need not]]</li>
-    </ul>
+    <pre class="tree">[[the repo's paths as a folder tree, one line per entry, with no top line:
+├── folder/
+│   └── file.ext   <span class="note">what it already explains, so the page need not</span>
+└── file.ext   <span class="note">its note</span>]]
+
+[[a file outside the checkout goes in a second tree below, headed by its folder written from ~; delete this one when no path is outside]]</pre>
 
     <h2 id="decisions">Decisions</h2>
     <p>[[One sentence naming what these records add up to.]]</p>
