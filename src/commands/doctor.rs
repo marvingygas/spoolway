@@ -4253,7 +4253,7 @@ mod tests {
     }
 
     /// A missing prompt `init` ships is met with the `init` that repeats the
-/// setup, here "run `spoolway init --setup repo`";
+    /// setup, here "run `spoolway init --setup repo`";
     /// one it does not ship names the path to write instead, since `init`
     /// would leave the row failing.
     #[test]
