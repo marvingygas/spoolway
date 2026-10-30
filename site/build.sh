@@ -46,7 +46,9 @@ for f in "$SRC"/*.md; do
   } > "$dest"
 done
 
-for d in screenshots logo; do
+# Only the hand-made README images. docs/screenshots/test/ holds task
+# captures, which are not site content.
+for d in screenshots/readme logo; do
   if compgen -G "$SRC/$d/*.png" > /dev/null; then
     mkdir -p "$OUT/$d"
     cp "$SRC/$d"/*.png "$OUT/$d/"
