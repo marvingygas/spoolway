@@ -99,12 +99,13 @@ Platform notes and requirements in full: **[Installation and setup](docs/install
 spoolway init
 ```
 
-`init` asks where the project's setup should live. There are two choices.
+`init` asks where the project's setup should live. There are three choices.
 
 | Setup | Where it lives | Use it when |
 |---|---|---|
 | `repo` | `.spoolway/` in the checkout, tracked by git | The whole team should share the pipelines and prompts. |
 | `home` | A workspace under `~/.spoolway/` | Work with spoolway without touching repo code. |
+| `workspace only` | A workspace under `~/.spoolway/` for a checkout that already tracks `.spoolway/` | You join a teammate's setup. The checkout stays unchanged. |
 
 See **[Home mode](docs/concepts.md#home-mode)**.
 

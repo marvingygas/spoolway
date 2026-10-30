@@ -144,7 +144,7 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 
 | Question | Flag | Default |
 |---|---|---|
-| Where should this project's setup live? | `--setup repo\|home` | `repo`, or `workspace only` on a checkout with a tracked `.spoolway/` |
+| Where should this project's setup live? | `--setup repo\|home` | `repo`. At a terminal, `workspace only` is highlighted on a checkout with a tracked `.spoolway/` that no workspace lists |
 | The workspace menu (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
 | The coding agent you plan in | `--provider claude\|codex\|pi` | `claude` |
 | Install the example setup? (skipped when joining or moving into an existing workspace) | `--examples`/`--no-examples` | yes |
