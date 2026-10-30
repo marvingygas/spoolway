@@ -935,7 +935,7 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
                     pipeline.private_file.is_some(),
                     step.prompt_name(),
                     &format!("`{}`/`{}`", pipeline.name, step.id),
-                    crate::prompt::missing_prompt_fix(step.prompt_name()),
+                    &crate::prompt::missing_prompt_fix(&repo.checkout, step.prompt_name()),
                 ));
             }
 

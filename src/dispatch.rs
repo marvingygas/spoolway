@@ -8628,7 +8628,7 @@ fn prepare_boot(
             pipeline.private_file.is_some(),
             step.prompt_name(),
             &format!("step `{}`", step.id),
-            crate::prompt::missing_prompt_fix(step.prompt_name()),
+            &crate::prompt::missing_prompt_fix(&repo.checkout, step.prompt_name()),
         )
     })?;
 

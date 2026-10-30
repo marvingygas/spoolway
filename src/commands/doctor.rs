@@ -579,7 +579,7 @@ pub fn doctor(
     let unattended = repo.unattended();
     report.record_all(model_health_checks(pipelines, &config, unattended));
     report.record_all(unrouted_model_notes(pipelines, &config));
-    if let Some(sentences) = stack_deprecation(pipelines) {
+    if let Some(sentences) = stack_deprecation(&repo.checkout, pipelines) {
         report.record(Finding::Note(sentences.join(" ")));
     }
     report.record_all(agent_kind_checks(&config));
@@ -1102,9 +1102,10 @@ fn issue_tracking_config_checks(
             match path.exists() {
                 true => Ok(Some(relative(&repo.checkout, &path))),
                 false => Err(anyhow::anyhow!(
-                    "{} does not exist — `spoolway init` writes it, or clear hook to switch \
-                     issue tracking off",
-                    path.display()
+                    "{} does not exist — `{}` writes it, or clear hook to switch issue \
+                     tracking off",
+                    path.display(),
+                    crate::commands::repeat_setup_command(&repo.checkout)
                 )),
             },
         ));
@@ -2172,15 +2173,16 @@ fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
 
 /// The deprecation note for every step that still runs `spoolway stack`, as
 /// its three sentences: the deprecation, the steps by `pipeline · step`, and
-/// the fix. `None` when no step runs it, so a project that has already moved
-/// hears nothing. Kept as sentences rather than one string because `sync`
+/// the fix, which names the `init` that repeats `checkout`'s own setup (see
+/// [`crate::commands::repeat_setup_command`]). `None` when no step runs it,
+/// so a project that has already moved hears nothing. Kept as sentences rather than one string because `sync`
 /// starts each on a line of its own, while `doctor` joins them into one row.
 ///
 /// Recorded in a report only by `doctor()` and printed by `sync::run`, never
 /// by [`cheap_findings`]: the command still works, so the note is worth
 /// reading in a report but not worth stopping a run at the dispatcher's
 /// warnings screen, the same call [`unrouted_model_notes`] makes.
-pub(crate) fn stack_deprecation(pipelines: &Pipelines) -> Option<[String; 3]> {
+pub(crate) fn stack_deprecation(checkout: &Path, pipelines: &Pipelines) -> Option<[String; 3]> {
     let steps = crate::commands::dispatch::stack_steps(pipelines);
     if steps.is_empty() {
         return None;
@@ -2192,9 +2194,11 @@ pub(crate) fn stack_deprecation(pipelines: &Pipelines) -> Option<[String; 3]> {
     Some([
         "`spoolway stack` is deprecated and may be removed in a future release.".into(),
         format!("still run by: {}.", named.join(", ")),
-        "run `spoolway init` to add the `create-pr` prompt, then replace each step \
-         with an agent step on it — see docs/migrations.md"
-            .into(),
+        format!(
+            "run `{}` to add the `create-pr` prompt, then replace each step with an agent \
+             step on it — see docs/migrations.md",
+            crate::commands::repeat_setup_command(checkout)
+        ),
     ])
 }
 
@@ -2586,7 +2590,7 @@ fn prompt_checks(repo: &Repo, pipelines: &Pipelines, unattended: bool) -> Vec<Fi
                 Err(anyhow::anyhow!(
                     "{} is missing, but {steps:?} run it — {}",
                     path.display(),
-                    crate::prompt::missing_prompt_fix(prompt)
+                    crate::prompt::missing_prompt_fix(&repo.checkout, prompt)
                 ))
             },
         ));
@@ -4270,7 +4274,7 @@ mod tests {
                 .collect();
 
         let ours = &reasons[&format!("prompt `{shipped}`")];
-        assert!(ours.contains("run `spoolway init`"), "{ours}");
+        assert!(ours.contains("run `spoolway init --setup repo`"), "{ours}");
         let custom = &reasons["prompt `unblock-v2`"];
         assert!(!custom.contains("run `spoolway init`"), "{custom}");
         assert!(custom.contains("write it yourself"), "{custom}");
@@ -5513,7 +5517,9 @@ mod tests {
     }
 
     /// The deprecation note is one row naming every `pipeline · step` that
-    /// runs `spoolway stack`, not only the first one `stack_step` finds.
+    /// runs `spoolway stack`, not only the first one `stack_step` finds. On a
+    /// checkout no workspace lists, its fix names `--setup repo`, the `init`
+    /// that writes the prompt rather than offering workspace only.
     #[test]
     fn stack_deprecation_names_every_step_that_runs_stack() {
         let mut pipelines =
@@ -5525,11 +5531,13 @@ mod tests {
             .pipelines
             .insert("bugfix".to_string(), bugfix.pipelines["default"].clone());
         assert_eq!(
-            stack_deprecation(&pipelines).unwrap().join(" "),
+            stack_deprecation(Path::new("/work/api"), &pipelines)
+                .unwrap()
+                .join(" "),
             "`spoolway stack` is deprecated and may be removed in a future release. \
              still run by: bugfix · land, default · handover. \
-             run `spoolway init` to add the `create-pr` prompt, then replace each step \
-             with an agent step on it — see docs/migrations.md"
+             run `spoolway init --setup repo` to add the `create-pr` prompt, then replace \
+             each step with an agent step on it — see docs/migrations.md"
         );
     }
 
@@ -5538,7 +5546,7 @@ mod tests {
     #[test]
     fn stack_deprecation_is_silent_without_a_stack_step() {
         let shipped = Pipelines::shipped(&Config::default()).unwrap();
-        assert!(stack_deprecation(&shipped).is_none());
+        assert!(stack_deprecation(Path::new("/work/api"), &shipped).is_none());
     }
 
     /// An agent step on the shipped `create-pr` prompt opens its pull request
@@ -6781,7 +6789,7 @@ mod tests {
         let (repo, _root_guard) = crate::commands::testutil::fixture("doctor-cheap-stack");
         let pipelines = Pipelines::builtin();
         // The built-in fixture runs `spoolway stack`, so `doctor` would note it.
-        assert!(stack_deprecation(&pipelines).is_some());
+        assert!(stack_deprecation(&repo.checkout, &pipelines).is_some());
 
         let warnings = cheap_findings(&repo, &pipelines, &Config::default(), false);
         assert!(

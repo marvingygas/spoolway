@@ -331,7 +331,7 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     if let Some(sentences) = pipelines
         .ok()
         .as_ref()
-        .and_then(crate::commands::stack_deprecation)
+        .and_then(|pipelines| crate::commands::stack_deprecation(&repo.checkout, pipelines))
     {
         for line in stack_note_lines(&sentences) {
             println!("{line}");
@@ -3979,14 +3979,16 @@ mod tests {
             ignored_overrides: Vec::new(),
             clashes: Default::default(),
         };
-        let sentences = crate::commands::stack_deprecation(&pipelines).unwrap();
+        let sentences =
+            crate::commands::stack_deprecation(std::path::Path::new("/work/api"), &pipelines)
+                .unwrap();
         assert_eq!(
             stack_note_lines(&sentences),
             [
                 "note    `spoolway stack` is deprecated and may be removed in a future release.",
                 "        still run by: bugfix · handover, default · handover.",
-                "        run `spoolway init` to add the `create-pr` prompt, then replace each step",
-                "        with an agent step on it — see docs/migrations.md",
+                "        run `spoolway init --setup repo` to add the `create-pr` prompt, then",
+                "        replace each step with an agent step on it — see docs/migrations.md",
             ]
         );
     }

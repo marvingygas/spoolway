@@ -229,7 +229,7 @@ pub fn contract(repo: &Repo, pipelines: &Pipelines, args: &PromptContractArgs) -
         format!(
             "[no prompt at {} — {}]",
             prompt_path.display(),
-            missing_prompt_fix(step.prompt_name())
+            missing_prompt_fix(&repo.checkout, step.prompt_name())
         )
     });
     for line in
@@ -668,11 +668,13 @@ pub(crate) fn missing_prompt_message(
 /// `spoolway init` only writes the prompts in [`crate::assets::PROMPTS`]. A
 /// prompt named anywhere else, such as `unattended.blocked_prompt`, is the
 /// project's own, so advising `init` for it leaves the same failure standing.
-pub(crate) fn missing_prompt_fix(prompt_name: &str) -> &'static str {
+/// The command named is the one that repeats `checkout`'s own setup; see
+/// [`crate::commands::repeat_setup_command`].
+pub(crate) fn missing_prompt_fix(checkout: &Path, prompt_name: &str) -> String {
     if crate::assets::prompt(prompt_name).is_some() {
-        "run `spoolway init`"
+        format!("run `{}`", crate::commands::repeat_setup_command(checkout))
     } else {
-        "`spoolway init` does not ship it, so write it yourself, at a path named here"
+        "`spoolway init` does not ship it, so write it yourself, at a path named here".into()
     }
 }
 
@@ -889,8 +891,9 @@ pub fn list(repo: &Repo, pipelines: &Pipelines) -> Result<()> {
     let entries = entries(repo)?;
     if entries.is_empty() {
         println!(
-            "no prompts in {} — run `spoolway init`",
-            repo.prompts_dir().display()
+            "no prompts in {} — run `{}`",
+            repo.prompts_dir().display(),
+            crate::commands::repeat_setup_command(&repo.checkout)
         );
         return Ok(());
     }
@@ -1425,12 +1428,18 @@ mod tests {
     }
 
     /// `init` is advised only for a prompt it writes; any other name is the
-    /// project's own to write, and `init` would not fix it.
+    /// project's own to write, and `init` would not fix it. On a checkout no
+    /// workspace lists, the advice names `--setup repo`, the `init` that
+    /// writes the prompt rather than offering workspace only.
     #[test]
     fn missing_prompt_fix_advises_init_only_for_shipped_prompts() {
+        let checkout = Path::new("/work/api");
         let shipped = crate::assets::PROMPTS[0].name;
-        assert_eq!(missing_prompt_fix(shipped), "run `spoolway init`");
-        assert!(!missing_prompt_fix("unblock-v2").contains("run `spoolway init`"));
+        assert_eq!(
+            missing_prompt_fix(checkout, shipped),
+            "run `spoolway init --setup repo`"
+        );
+        assert!(!missing_prompt_fix(checkout, "unblock-v2").contains("run `spoolway init"));
     }
 
     /// A private pipeline's own missing prompt is named by both layers —
