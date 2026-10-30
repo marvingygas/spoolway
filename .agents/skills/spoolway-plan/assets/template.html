@@ -161,7 +161,9 @@ h1 {
   letter-spacing: 0.14em; text-transform: uppercase; font-size: 0.86em;
   opacity: 0.7;
 }
+.where .file { flex-basis: 100%; }
 .where .file::before { content: "file"; }
+.where .source::before { content: "source"; }
 
 .standfirst {
   font-size: clamp(1.1rem, 2vw, 1.28rem); line-height: 1.5;
@@ -331,6 +333,7 @@ td code { font-family: var(--mono); font-size: 0.85em; color: var(--accent); }
 
     <p class="where">
       <span class="file">[[the absolute path this page is written to]]</span>
+      <span class="source"><a href="[[the item's full URL]]">[[the item's full URL]]</a></span>
     </p>
 
     <h2 id="context">Context</h2>

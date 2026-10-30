@@ -106,7 +106,9 @@ the page that buys nothing.
   as the heading.
 - `.tagline` — what is being built, in five words.
 - `.where` — the absolute path this page is written to; a fact you already have, never a
-  question for the person.
+  question for the person. Its second line, `.source`, takes the `url` from `spoolway issue
+  show` as both the `href` and the link text. Delete the whole line when step 1 read no item
+  through `spoolway issue show`.
 - Context's `.standfirst` — one block of at most three sentences. It opens on the outcome this
   plan means to produce, in a sentence a person can approve or reject. Then it says what is true
   today and the pressure on it. It is the page's lead, and nothing stands above Context but the

@@ -198,7 +198,9 @@ list of its own.
    Invoke the **spoolway-tasks** skill to do it: the shape it cuts into tasks is the
    page's Decisions and Mockup, or — where no page was written — what step 2 settled. Every
    task gets `plan:` set to the page's own absolute path, whenever a page exists. Where step 1
-   read an issue, a pull request or a Jira item, its URL is the `source:` each task gets. A
+   read an issue, a pull request or a Jira item, its URL is the `source:` each task gets. The
+   page links the same URL on its SOURCE line, but only for an item read through
+   `spoolway issue show`. A
    page's path never goes into `source:`. Neither key is set when neither exists.
    `spoolway-tasks` decomposes, offers the shape, settles the pipeline,
    reads the skeleton, writes the tasks, verifies the chain and proves the set with
