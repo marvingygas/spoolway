@@ -13,10 +13,12 @@
 //! way as any other, since overriding often means setting what a pipeline
 //! leaves out. On most fields most steps leave it out, so those steps start
 //! hidden and `h` shows them, keeping the steps that have a value in view.
-//! The value is written as the YAML it reads as, the same as
-//! `pipeline override --set`, and is not checked here: a value the merge
-//! cannot use stays in the layer, where `override list` reports it as
-//! ignored.
+//! A field no step sets shows them all, since hiding them would leave
+//! nothing to pick.
+//!
+//! The value is written as the YAML it reads as, the same as `pipeline
+//! override --set`, and is not checked here: a value the merge cannot use
+//! stays in the layer, where `override list` reports it as ignored.
 
 use std::collections::{BTreeMap, BTreeSet};
 
