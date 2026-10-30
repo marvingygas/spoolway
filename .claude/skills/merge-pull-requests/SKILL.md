@@ -194,7 +194,7 @@ bindings that no longer exist — `git show main:<file>` and `git show origin/<b
 side by side is how you find out which name survived. Never keep a hunk that mentions a
 binding `grep` cannot find a definition for; it will compile only if you were lucky.
 
-**Screenshots.** When two pull requests replace the same image under `docs/screenshots/`, the
+**Screenshots.** When two pull requests replace the same image under `docs/screenshots/test/`, the
 two binaries cannot be merged. Keep the image from the branch merged last, since it was captured
 against the newer code.
 

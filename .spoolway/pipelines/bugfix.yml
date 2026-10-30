@@ -198,8 +198,8 @@ steps:
 
   - id: create-pr
     description: >-
-      Push the branch and open this fix's pull request with a summary and
-      the screenshots its diff changed. Nothing is merged here; a person lands it.
+      Push the branch and open this fix's pull request with a summary.
+      Nothing is merged here; a person lands it.
     agent: claude
     prompt: create-pr
     model: claude-haiku-5-5

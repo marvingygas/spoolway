@@ -260,7 +260,7 @@ the ten second floor. A pass that moves a task to a new stage, frees a
 lane or archives a task runs the next pass at once instead of waiting for the next one. A long
 run of such passes in a row eventually waits anyway.
 
-<img src="screenshots/dispatch.png" alt="the dispatcher board">
+<img src="screenshots/readme/dispatch.png" alt="the dispatcher board">
 
 The header sits in the top-right corner of the board, on the first line of the wordmark. On a pane too narrow for both, it takes its own right-aligned row above the wordmark. On a pane too narrow for the wordmark, it stays at the left margin. A header wider than the pane is cut short with `…`.
 

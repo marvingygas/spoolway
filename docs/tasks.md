@@ -275,7 +275,7 @@ spoolway queue add --from -                     # a `---`-separated stream on st
 Producers write tasks to `~/.spoolway/<project>/pending/`. The queue screen lists that
 directory and `.spoolway/routines/`. See [Queueing a plan](planning.md#queueing-a-plan).
 
-<img src="screenshots/queue.png" alt="the queue screen">
+<img src="screenshots/readme/queue.png" alt="the queue screen">
 
 A directory skips each editor leftover, such as `.pa.md` or an Emacs lock link `.#pa.md` that
 points nowhere, and names it on standard error. The queue screen does not list these files
