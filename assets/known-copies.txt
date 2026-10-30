@@ -382,12 +382,14 @@ skill claude/spoolway-plan/assets/template.html 3e25629d
 skill claude/spoolway-plan/assets/template.html fd5241e2
 skill claude/spoolway-plan/assets/template.html 15c9028c
 skill claude/spoolway-plan/assets/template.html 3c694b83
+skill claude/spoolway-plan/assets/template.html 3d6d0f36
 skill claude/spoolway-plan/assets/page.md a1e942fe
 skill claude/spoolway-plan/assets/page.md b0f952fd
 skill claude/spoolway-plan/assets/page.md 1c317f6c
 skill claude/spoolway-plan/assets/page.md b32bdfb5
 skill claude/spoolway-plan/assets/page.md 182726d9
 skill claude/spoolway-plan/assets/page.md 84e97db0
+skill claude/spoolway-plan/assets/page.md 73beda49
 skill claude/spoolway-tasks/SKILL.md 3057c9dc
 skill codex/spoolway-tasks/SKILL.md 12131156
 skill pi/spoolway-tasks/SKILL.md c49d25fd

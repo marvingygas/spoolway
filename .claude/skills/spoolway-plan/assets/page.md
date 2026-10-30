@@ -117,9 +117,11 @@ the page that buys nothing.
   box-drawing characters `├──`, `└──` and `│`, the way the `tree` command prints it. Sort each
   folder's entries as `tree` does. Write each folder once. A folder that holds only one folder
   is joined with it on one line, such as `.github/workflows/`. The repo gets no top line. Each
-  file keeps its note on the same line, in a `<span class="note">`. A file outside the checkout
-  goes in a second tree below the first, headed by its folder written from `~`, such as
-  `~/.spoolway/`. The block scrolls sideways and never wraps. Records carry no tree of their own.
+  file keeps its note on the same line, in a `<span class="note">`. Pad the file names with
+  spaces so every note in the block starts in one column, across folders and trees. A file
+  outside the checkout goes in a second tree below the first, headed by its folder written from
+  `~`, such as `~/.spoolway/`. The block scrolls sideways and never wraps. Records carry no tree
+  of their own.
 - Each decision's `<h3>` — the decision stated as a decision, not a component.
 - The decision's paragraph — at most four sentences: why this is a choice at all, and what to
   look at in the figure.
