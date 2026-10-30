@@ -24,8 +24,8 @@
 # The last sections are about the clone's id rather than home mode as such, and
 # run in repo mode: a superproject moved on disk, an `init` cancelled at its
 # first question, an `init` that picks workspace only and writes nothing but
-# the binding, the same pick by Enter alone on a teammate's clone of a
-# committed setup, and several first commands started at once in a fresh clone.
+# the binding, the same pick refused when a flag it cannot use is given, the
+# pick by Enter alone on a teammate's clone of a committed setup, and several first commands started at once in a fresh clone.
 # After them come two about where the project's root sits: a `.spoolway/` below
 # the top of the repo, and a linked worktree whose branch has none.
 set -uo pipefail
@@ -586,6 +586,45 @@ if script -qec true /dev/null >/dev/null 2>&1; then
   else bad "a .spoolway/ arriving later is repo mode in the same home"; sed 's/^/        /' <<<"$out"; fi
 else
   echo "  skip  a workspace-only init (no pseudo-terminal wrapper on this machine)"
+fi
+
+# ------------------------------------------- a workspace-only flag refusal
+# A flag the third entry cannot use stops the run after the pick, with nothing
+# stamped and no home made. `--provider` stands for the six; the unit test
+# names every one. The terminal is set up as for the block above.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  REF="$LIVE/wsrefuse"
+  mkdir -p "$REF"
+  must "the refused checkout" git -C "$REF" init -q -b main
+  must "the refused checkout" git -C "$REF" "${GIT_ID[@]}" commit -q --allow-empty -m seed
+  cd "$REF" || exit 2
+  {
+    for _ in $(seq 1 300); do
+      grep -qF "Where should this project's setup live" "$LIVE/wsrefuse.out" 2>/dev/null && break
+      sleep 0.1
+    done
+    printf '\033[B\033[B\r'
+    for _ in $(seq 1 300); do
+      grep -qF "has nothing to apply to" "$LIVE/wsrefuse.out" 2>/dev/null && break
+      sleep 0.1
+    done
+  } | script -qec "stty rows 40 cols 160; $SPOOLWAY init --provider codex" /dev/null >"$LIVE/wsrefuse.out" 2>&1
+  has "the pick is shown before the refusal" "live?: workspace only" "$LIVE/wsrefuse.out"
+  has "the refusal names the flag" \
+    "workspace only writes no config and installs no skills, so --provider has nothing to apply to" \
+    "$LIVE/wsrefuse.out"
+  has "the refusal says what to run instead" \
+    "run \`spoolway init\` again without --provider to set up the workspace only, or pick repo or home to use it" \
+    "$LIVE/wsrefuse.out"
+  if [ ! -e .git/spoolway-id ] && [ ! -e .spoolway ] && [ ! -e .claude ] \
+    && [ -z "$(git status --porcelain --ignored)" ]; then
+    ok "the refusal leaves the checkout untouched"
+  else bad "the refusal leaves the checkout untouched"; git status --porcelain --ignored | sed 's/^/        /'; fi
+  if ls -d "$HOME"/.spoolway/wsrefuse-* >/dev/null 2>&1; then bad "the refusal makes no home"
+  else ok "the refusal makes no home"; fi
+  cd "$LIVE" || exit 2
+else
+  echo "  skip  a workspace-only flag refusal (no pseudo-terminal wrapper on this machine)"
 fi
 
 # ------------------------------------------------- a teammate's init

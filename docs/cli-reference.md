@@ -1797,7 +1797,24 @@ checkout or its `.git`. On a checkout with a tracked `.spoolway/` that no worksp
 terminal run also offers `workspace only`, highlights it, and Enter gives the checkout its local
 workspace without changing the checkout. Picking `repo` there repeats the repo-mode setup.
 Picking `home` is refused. `--setup repo` and a run with no terminal skip the question and
-repeat the repo-mode setup. See [Scaffolding a project](installation.md#scaffolding-a-project). With no workspace yet, home mode creates one. With workspaces already
+repeat the repo-mode setup. See [Scaffolding a project](installation.md#scaffolding-a-project).
+
+`workspace only` is a menu entry and not a `--setup` value, so `--setup` still takes `repo` or
+`home`. Picking it stamps `.git/spoolway-id` and writes the checkout's local workspace under
+`~/.spoolway/`. It writes no config, installs no skills and asks no further question. It ends
+with `Workspace initialized successfully.` The flags `--provider`, `--examples`,
+`--no-examples`, `--tracker`, `--project-key` and `--force` have nothing to apply to after this
+pick. A run given any of them stops right after the pick with nothing written, and the message
+names every one given:
+
+```
+$ spoolway init --provider codex --force
+Where should this project's setup live?: workspace only  only the workspace, use when .spoolway/ is already in the repo
+spoolway: workspace only writes no config and installs no skills, so --provider and --force have nothing to apply to
+  run `spoolway init` again without --provider and --force to set up the workspace only, or pick repo or home to use them
+```
+
+With no workspace yet, home mode creates one. With workspaces already
 there, `init` asks the workspace menu instead: `Select the spoolway workspace for this
 checkout. Pick an existing workspace or create a new one.` A checkout no workspace lists yet
 sees the workspaces it may join, those of this repository marked `same repository` and listed

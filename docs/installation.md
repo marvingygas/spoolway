@@ -160,6 +160,15 @@ the setup question offers `repo`, `home` and `workspace only`, with `workspace o
 | `repo` | Repeats the repo-mode setup. |
 | `home` | Is refused with nothing written, because `init` does not move a repo-mode project into a home workspace. |
 
+`workspace only` is a menu entry only: `--setup` still takes `repo` or `home`. The pick stamps
+`.git/spoolway-id` and writes the local workspace under `~/.spoolway/`. It writes no config,
+installs no skills and asks nothing more. It prints the stamp, the workspace folder and
+`Workspace initialized successfully.`
+
+`--provider`, `--examples`, `--no-examples`, `--tracker`, `--project-key` and `--force` have
+nothing to apply after that pick. Given any of them, `init` stops right after the pick, writes
+nothing and names each one given. Run it again without them, or pick `repo` or `home`.
+
 With no terminal, or with `--setup repo`, the question is not asked and `init` repeats the
 repo-mode setup.
 

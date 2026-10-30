@@ -733,6 +733,12 @@ pub struct EvalArgs {
         the queue of a checkout of this repository whose folder is gone, when exactly one \
         such checkout is listed there. With nobody to ask and no `--workspace`, a new \
         workspace is started.\n\n\
+        `--setup` takes `repo` or `home` only. At a terminal the menu has a third entry, \
+        `workspace only`, for a checkout whose `.spoolway/` is already tracked: it stamps \
+        the checkout and makes its local workspace, and writes no config and installs no \
+        skills. It is reached from the menu alone. After that pick, `--provider`, \
+        `--examples`, `--no-examples`, `--tracker`, `--project-key` and `--force` stop the \
+        run with nothing written, naming each one given.\n\n\
         Run again in a home-mode checkout, `init` shows the same menu with its current \
         workspace first. Picking another workspace of the same repository, or a new one, \
         moves the checkout and its queue there. A move waits until no task holds a \
@@ -819,7 +825,8 @@ pub struct InitArgs {
     /// Answer `Where should this project's setup live?` without asking:
     /// `repo` for a tracked `.spoolway/` in this checkout, `home` for a
     /// workspace under `~/.spoolway/` that writes nothing into the checkout.
-    /// `repo` is also the answer when there is nobody to ask.
+    /// `repo` is also the answer when there is nobody to ask. The menu has a
+    /// third entry, `workspace only`, that no value of this flag selects.
     #[arg(long, value_enum)]
     pub setup: Option<Setup>,
 

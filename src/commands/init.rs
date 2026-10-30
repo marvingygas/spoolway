@@ -1132,6 +1132,40 @@ fn init_workspace_only(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a workspace-only pick that was given a flag shaping a setup it
+/// does not write.
+///
+/// The pick writes no config and installs no skills, so `--provider`,
+/// `--examples`, `--no-examples`, `--tracker`, `--project-key` and `--force`
+/// have nothing to apply to. Silently ignoring them would leave a person
+/// believing their agent or tracker was set. Run before [`init_workspace_only`]
+/// binds the checkout, so the refusal leaves `.git` and the home untouched.
+/// Every flag given is named, so one rerun fixes them all.
+fn refuse_workspace_only_flags(args: &InitArgs) -> Result<()> {
+    let given: Vec<&str> = [
+        (args.provider.is_some(), "--provider"),
+        (args.examples, "--examples"),
+        (args.no_examples, "--no-examples"),
+        (args.tracker.is_some(), "--tracker"),
+        (args.project_key.is_some(), "--project-key"),
+        (args.force, "--force"),
+    ]
+    .into_iter()
+    .filter_map(|(set, name)| set.then_some(name))
+    .collect();
+    if given.is_empty() {
+        return Ok(());
+    }
+    let names = given.join(" and ");
+    let verb = if given.len() == 1 { "has" } else { "have" };
+    bail!(
+        "workspace only writes no config and installs no skills, so {names} {verb} nothing \
+         to apply to\n  run `spoolway init` again without {names} to set up the workspace \
+         only, or pick repo or home to use {}",
+        if given.len() == 1 { "it" } else { "them" }
+    )
+}
+
 pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Before anything is written or asked, because this is the one command a
     // person runs without knowing yet what they have got hold of.
@@ -1184,6 +1218,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // tracker answers, `place_setup`, the `.gitignore` block, the version
     // marker and the skills all belong to a setup this pick does not want.
     if matches!(placement, Placement::WorkspaceOnly) {
+        refuse_workspace_only_flags(args)?;
         return init_workspace_only(root);
     }
     // A move is refused here, right after the menu and before any question
@@ -1631,6 +1666,107 @@ mod tests {
             SETUP_MENU.map(|(_, _, setup)| setup),
             [Some(Setup::Repo), Some(Setup::Home), None]
         );
+    }
+
+    /// A workspace-only pick given none of the six flags it cannot use goes
+    /// on. Given one, it is refused with the sentence naming that flag. Given
+    /// two, the refusal names both, so a rerun fixes every one. Each of the
+    /// six is refused alone, a bare `--tracker` included. `--yes` and
+    /// `--setup` are not among them. The checkout stays untouched because
+    /// the check runs before `init_workspace_only` binds; the "a
+    /// workspace-only flag refusal" block of `scripts/e2e/suites/home-mode.sh`
+    /// checks that under a terminal.
+    #[test]
+    fn workspace_only_refuses_every_flag_it_cannot_use() {
+        assert!(refuse_workspace_only_flags(&InitArgs::default()).is_ok());
+        assert!(
+            refuse_workspace_only_flags(&InitArgs {
+                yes: true,
+                setup: Some(Setup::Repo),
+                ..InitArgs::default()
+            })
+            .is_ok()
+        );
+
+        let one = refuse_workspace_only_flags(&InitArgs {
+            provider: Some(PlanningAgent::Codex),
+            ..InitArgs::default()
+        })
+        .expect_err("--provider is refused")
+        .to_string();
+        assert_eq!(
+            one,
+            "workspace only writes no config and installs no skills, so --provider has \
+             nothing to apply to\n  run `spoolway init` again without --provider to set up \
+             the workspace only, or pick repo or home to use it"
+        );
+
+        let two = refuse_workspace_only_flags(&InitArgs {
+            provider: Some(PlanningAgent::Codex),
+            force: true,
+            ..InitArgs::default()
+        })
+        .expect_err("two flags are refused")
+        .to_string();
+        assert!(
+            two.contains("--provider and --force have nothing to apply to")
+                && two.contains("again without --provider and --force to set up"),
+            "both flags are named: {two}"
+        );
+
+        let each: [(&str, InitArgs); 6] = [
+            (
+                "--provider",
+                InitArgs {
+                    provider: Some(PlanningAgent::Claude),
+                    ..InitArgs::default()
+                },
+            ),
+            (
+                "--examples",
+                InitArgs {
+                    examples: true,
+                    ..InitArgs::default()
+                },
+            ),
+            (
+                "--no-examples",
+                InitArgs {
+                    no_examples: true,
+                    ..InitArgs::default()
+                },
+            ),
+            (
+                "--tracker",
+                InitArgs {
+                    tracker: Some(String::new()),
+                    ..InitArgs::default()
+                },
+            ),
+            (
+                "--project-key",
+                InitArgs {
+                    project_key: Some("a/b".into()),
+                    ..InitArgs::default()
+                },
+            ),
+            (
+                "--force",
+                InitArgs {
+                    force: true,
+                    ..InitArgs::default()
+                },
+            ),
+        ];
+        for (flag, args) in each {
+            let err = refuse_workspace_only_flags(&args)
+                .expect_err(flag)
+                .to_string();
+            assert!(
+                err.contains(&format!("so {flag} has nothing")),
+                "{flag}: {err}"
+            );
+        }
     }
 
     /// A workspace-only pick writes `.git/spoolway-id` and the home's
