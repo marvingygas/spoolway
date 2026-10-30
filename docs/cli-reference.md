@@ -166,7 +166,7 @@ A child the tab started stays up on an empty queue and the board shows its greet
 a refusal, or a spend ceiling — shows the reason in a popup, closed with `enter`. Ending before
 its first pass, including under the `starting dispatcher` popup, shows that reason there instead.
 
-<img src="screenshots/dispatch.png" alt="the dispatcher board">
+<img src="screenshots/readme/dispatch.png" alt="the dispatcher board">
 
 Bare `spoolway` and the dispatcher its dispatch tab starts print no note on stderr, before,
 during or after the screen. A fatal error, such as no project found, still prints as
@@ -190,7 +190,7 @@ Beside a plan row it says `use /spoolway-tasks`. Each task shows its `pipeline:`
 dependency's id, else the same branch as `lands in:`. `lands in:` is the task's `base:`, else the
 board's branch.
 
-<img src="screenshots/queue.png" alt="the queue screen">
+<img src="screenshots/readme/queue.png" alt="the queue screen">
 
 | Key | What it does |
 |---|---|
@@ -907,7 +907,7 @@ spoolway eval
 
 Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 
-<img src="screenshots/eval.png" alt="the eval screen">
+<img src="screenshots/readme/eval.png" alt="the eval screen">
 
 | Key | What it does |
 |---|---|

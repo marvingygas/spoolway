@@ -26,7 +26,7 @@ each of them divided by the row's tasks. See [Totals and per task](#totals-and-p
 `spoolway eval` always prints the lanes table. Bare `spoolway`'s eval tab draws an interactive
 screen over the same rows.
 
-<img src="screenshots/eval.png" alt="the eval screen">
+<img src="screenshots/readme/eval.png" alt="the eval screen">
 
 The screen holds three tables. The lanes table groups dispatched lanes. The directory table
 groups sessions run by hand in a watched directory. The trials table lists every trial. `tab`

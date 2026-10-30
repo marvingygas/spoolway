@@ -96,7 +96,7 @@ writes a task into the pending directory works too.
 
 ## The plan file
 
-<img src="screenshots/plan.png" alt="a plan page written by /spoolway-plan">
+<img src="screenshots/readme/plan.png" alt="a plan page written by /spoolway-plan">
 
 The plan page is one self-contained HTML file. A person reads it once to approve the shape.
 The binary never reads it. It lives outside the checkout, in the `plans:` folder that
@@ -138,7 +138,7 @@ that block; `/spoolway-tasks` reads it instead of the page around it.
 `~/.spoolway/<label>-<id>/pending/<task-id>.md`. Every task names the same `group:`. It then
 runs `spoolway task contract --from` over the directory to check the set.
 
-<img src="screenshots/queue.png" alt="the queue screen">
+<img src="screenshots/readme/queue.png" alt="the queue screen">
 
 Bare `spoolway` opens the screen on the dispatch tab, and `→` reaches the queue tab. The left
 pane, titled `groups`, lists one row per group in the pending directory, and one per plan page no

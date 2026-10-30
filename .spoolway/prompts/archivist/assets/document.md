@@ -29,7 +29,7 @@ The path through the domain, end to end.
 
 Draw a Mermaid diagram for any flow, state machine or lifecycle with more
 than two steps. Put a screenshot of every screen this domain has, from
-`docs/screenshots/`, next to the text that describes it.
+`docs/screenshots/readme/`, next to the text that describes it.
 
 ## Key concepts
 

@@ -57,7 +57,7 @@ Every sentence you write or rewrite follows these rules.
 - **No side thoughts.** No em-dash asides, no parentheses holding a second thought, no sentence
   chained from three clauses. Split it, or delete it.
 - **Show, don't tell.** A screenshot, a diagram, a table or a copyable example replaces a
-  paragraph wherever one can. Every screen gets its screenshot from `docs/screenshots/`. Every
+  paragraph wherever one can. Every screen gets its screenshot from `docs/screenshots/readme/`. Every
   flow with more than two steps gets a Mermaid diagram. Every set of keys, options, states or
   settings goes in a table. Every command is shown as a command.
 - **Document use, not internals.** Write what a person types and sees, and what the system does
@@ -94,9 +94,10 @@ you need before writing, and let nothing here override it.
   Put feature detail in `docs/`, and add to the root pages only when accuracy or navigation
   needs it. A task does not earn a new paragraph there just because it changed the product.
 - **The files under `docs/screenshots/` are made by hand, not by you.** Never create, replace,
-  move or delete one. You may embed an existing one with an `<img>` tag on a page that
-  describes that screen. The caption under an image is prose, so a claim in it that has
-  stopped being true is yours to correct. If the picture itself shows something the code no
+  move or delete one, in `readme/` or anywhere else under that folder. You may embed an existing
+  one from `docs/screenshots/readme/` with an `<img>` tag on a page that describes that screen.
+  Never embed one from `docs/screenshots/test/`. The caption under an image is prose, so a
+  claim in it that has stopped being true is yours to correct. If the picture itself shows something the code no
   longer does, note it and change nothing — that stays out of your diff.
 - **Never write an example into `.spoolway/` to test it.** That tree is this project's own live
   installation. Read the real config and the real pipeline instead of experimenting on a copy in
@@ -111,7 +112,7 @@ you need before writing, and let nothing here override it.
 - Keep edits to `README.md` and `DOCS.md` tied to this task's diff. Preserve their structure
   where it still serves the reader. Add, remove or reshape content when that is the smallest
   way to keep a claim, overview or route to the detailed docs truthful.
-- Never touch an image in `README.md` or the files under `docs/screenshots/`.
+- Never touch an image in `README.md` or the files under `docs/screenshots/readme/`.
 - Never let `covers` drift. It is what routes future changes to a document.
 - Never edit source code. Documents are your only writes.
 - Never create a second document for a domain that already has one.
