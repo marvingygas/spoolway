@@ -2175,8 +2175,9 @@ fn unrouted_model_notes(pipelines: &Pipelines, config: &Config) -> Vec<Finding> 
 /// its three sentences: the deprecation, the steps by `pipeline · step`, and
 /// the fix, which names the `init` that repeats `checkout`'s own setup (see
 /// [`crate::commands::repeat_setup_command`]). `None` when no step runs it,
-/// so a project that has already moved hears nothing. Kept as sentences rather than one string because `sync`
-/// starts each on a line of its own, while `doctor` joins them into one row.
+/// so a project that has already moved hears nothing. Kept as sentences
+/// rather than one string because `sync` starts each on a line of its own,
+/// while `doctor` joins them into one row.
 ///
 /// Recorded in a report only by `doctor()` and printed by `sync::run`, never
 /// by [`cheap_findings`]: the command still works, so the note is worth
@@ -4251,7 +4252,8 @@ mod tests {
         assert!(err.to_string().contains("holds `..`"), "{err}");
     }
 
-    /// A missing prompt `init` ships is still met with "run `spoolway init`";
+    /// A missing prompt `init` ships is met with the `init` that repeats the
+/// setup, here "run `spoolway init --setup repo`";
     /// one it does not ship names the path to write instead, since `init`
     /// would leave the row failing.
     #[test]
@@ -4276,7 +4278,7 @@ mod tests {
         let ours = &reasons[&format!("prompt `{shipped}`")];
         assert!(ours.contains("run `spoolway init --setup repo`"), "{ours}");
         let custom = &reasons["prompt `unblock-v2`"];
-        assert!(!custom.contains("run `spoolway init`"), "{custom}");
+        assert!(!custom.contains("run `spoolway init"), "{custom}");
         assert!(custom.contains("write it yourself"), "{custom}");
         assert!(custom.contains("unblock-v2"), "{custom}");
     }
