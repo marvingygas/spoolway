@@ -1078,6 +1078,12 @@ step selects it with one key. A pipeline's row shows only its box and its name. 
 the tracked step with the layer merged onto it. A step that leaves the field out, or leaves it
 blank, reads `not set`. Steps the layer already overrides the field on start selected.
 
+The list opens with the `not set` steps hidden, so the steps that have a value come first. A
+pipeline with no step left to show is hidden too. `h` shows the hidden steps and hides them
+again. Hiding them unselects every `not set` step that was selected. When no step sets the field,
+the list shows every step and has no `h` key. Each time the step selection opens, the `not set`
+steps are hidden.
+
 ```
 ╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
 │ search: sonnet                                                               │
@@ -1094,7 +1100,7 @@ blank, reads `not set`. Steps the layer already overrides the field on start sel
 │         [ ] implement            claude-sonnet-5-5                           │
 │   ↓ 4 pipelines below                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] select all   [enter] set value   [esc] back
+ [space] select   [a] select all   [enter] set value   [h] show not set   [esc] back
 ```
 
 | Key | What it does |
@@ -1102,11 +1108,13 @@ blank, reads `not set`. Steps the layer already overrides the field on start sel
 | `space` | On a step, select or unselect that step alone. On a pipeline, select every step listed under it, or, when one of its steps is selected, clear them all. |
 | `a` | Select every listed step. Pressed again once they all are, clear the selection. |
 | `f` | Open the `search:` row. |
+| `h` | Show the `not set` steps, or hide them again. The key line reads `[h] show not set` while they are hidden and `[h] hide not set` while they are shown. |
 | `enter` | Open the value field. With no step selected it does nothing. |
 | `esc` | Go back to the field list. |
 
 The search matches pipeline names, step ids and the values shown, `not set` included, so `not
-set` finds every step that leaves the field out. A pipeline whose name matches lists all its
+set` finds every listed step that leaves the field out. While those steps are hidden, it finds
+none until `h` shows them. A pipeline whose name matches lists all its
 steps, and any other lists only the steps that match. `space` and `a` select only the steps the
 search leaves. After `enter` leaves the search, the `search:` row stays at the top of the list
 while the search narrows it.
