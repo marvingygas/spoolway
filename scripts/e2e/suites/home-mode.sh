@@ -25,7 +25,8 @@
 # run in repo mode: a superproject moved on disk, an `init` cancelled at its
 # first question, an `init` that picks workspace only and writes nothing but
 # the binding, the same pick refused when a flag it cannot use is given, the
-# pick by Enter alone on a teammate's clone of a committed setup, and several first commands started at once in a fresh clone.
+# pick by Enter alone on a teammate's clone of a committed setup, and several
+# first commands started at once in a fresh clone.
 # After them come two about where the project's root sits: a `.spoolway/` below
 # the top of the repo, and a linked worktree whose branch has none.
 set -uo pipefail

@@ -806,7 +806,8 @@ pub struct InitArgs {
 
     /// The project the chosen tracker's tickets open into: `owner/repo` on
     /// github, a project key on jira. Ignored when `--tracker` answers
-    /// `none` or is not given at all.
+    /// `none` or is not given at all, and refused after a `workspace only`
+    /// pick.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
 
