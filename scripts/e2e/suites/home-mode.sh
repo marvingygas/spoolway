@@ -24,7 +24,8 @@
 # The last sections are about the clone's id rather than home mode as such, and
 # run in repo mode: a superproject moved on disk, an `init` cancelled at its
 # first question, an `init` that picks workspace only and writes nothing but
-# the binding, and several first commands started at once in a fresh clone.
+# the binding, the same pick by Enter alone on a teammate's clone of a
+# committed setup, and several first commands started at once in a fresh clone.
 # After them come two about where the project's root sits: a `.spoolway/` below
 # the top of the repo, and a linked worktree whose branch has none.
 set -uo pipefail
@@ -585,6 +586,48 @@ if script -qec true /dev/null >/dev/null 2>&1; then
   else bad "a .spoolway/ arriving later is repo mode in the same home"; sed 's/^/        /' <<<"$out"; fi
 else
   echo "  skip  a workspace-only init (no pseudo-terminal wrapper on this machine)"
+fi
+
+# ------------------------------------------------- a teammate's init
+# A clone of a repository whose `.spoolway/` is committed opens the setup menu
+# with workspace only highlighted, so Enter alone gives the teammate their
+# workspace and changes nothing in the checkout. The team's setup is made by a
+# real `init` with nobody at a terminal, committed, and cloned.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  TEAM="$LIVE/team"
+  MATE="$LIVE/mate"
+  mkdir -p "$TEAM"
+  must "the team's repository" git -C "$TEAM" init -q -b main
+  must "the team's setup" sh -c "cd '$TEAM' && '$SPOOLWAY' init --yes </dev/null >/dev/null 2>&1"
+  must "the team's setup is committed" git -C "$TEAM" add -A
+  must "the team's setup is committed" git -C "$TEAM" "${GIT_ID[@]}" commit -qm "team setup"
+  must "the teammate's clone" git clone -q "$TEAM" "$MATE"
+  cd "$MATE" || exit 2
+  {
+    for _ in $(seq 1 300); do
+      grep -qF "Where should this project's setup live" "$LIVE/mate.out" 2>/dev/null && break
+      sleep 0.1
+    done
+    printf '\r'
+    for _ in $(seq 1 300); do
+      grep -qF "initialized successfully" "$LIVE/mate.out" 2>/dev/null && break
+      sleep 0.1
+    done
+  } | script -qec "stty rows 40 cols 160; $SPOOLWAY init" /dev/null >"$LIVE/mate.out" 2>&1
+  has "a teammate's clone highlights workspace only" \
+    "> workspace only  only the workspace, use when .spoolway/ is already in the repo" "$LIVE/mate.out"
+  has "a teammate's clone still offers repo and home" "  home            add config to a local workspace" \
+    "$LIVE/mate.out"
+  has "Enter picks workspace only" "live?: workspace only" "$LIVE/mate.out"
+  has "a teammate's workspace is made" "Workspace initialized successfully." "$LIVE/mate.out"
+  if grep -qF "Select your agent" "$LIVE/mate.out"; then bad "a teammate's clone asks nothing after the menu"
+  else ok "a teammate's clone asks nothing after the menu"; fi
+  if [ -z "$(git status --porcelain --ignored)" ]; then
+    ok "Enter leaves the teammate's checkout unchanged"
+  else bad "Enter leaves the teammate's checkout unchanged"; git status --porcelain --ignored | sed 's/^/        /'; fi
+  cd "$LIVE" || exit 2
+else
+  echo "  skip  a teammate's init (no pseudo-terminal wrapper on this machine)"
 fi
 
 # ----------------------------------------- parallel first commands

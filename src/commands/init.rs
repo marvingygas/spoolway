@@ -445,7 +445,8 @@ enum Placement {
 /// Its own list rather than [`Setup`]'s variants, because workspace only
 /// (`None`) has no flag: a third `Setup` variant would quietly add
 /// `--setup workspace-only` too. `repo` stays first, since index 0 is the
-/// menu's default and the answer when nobody is there to pick.
+/// menu's default on a fresh checkout and the answer when nobody is there
+/// to pick.
 const SETUP_MENU: [(&str, &str, Option<Setup>); 3] = [
     (
         "repo",
@@ -464,13 +465,31 @@ const SETUP_MENU: [(&str, &str, Option<Setup>); 3] = [
     ),
 ];
 
+/// Workspace only's index in [`SETUP_MENU`]: the entry highlighted on a
+/// checkout that already carries a tracked `.spoolway/`.
+const WORKSPACE_ONLY: usize = 2;
+
+/// The refusal for a home-mode setup on a checkout with a tracked
+/// `.spoolway/`, asked for by flag or picked from the menu: one message for
+/// both, since either way `init` would be moving a repo-mode project.
+fn tracked_home_refusal(root: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} already has a tracked `.spoolway/` — init does not move a repo-mode \
+         project into a home workspace\n  run `spoolway init` without --setup home \
+         or --workspace to repeat the repo-mode setup",
+        root.display()
+    )
+}
+
 impl Placement {
     /// Flags first, then the person, then the default — the same order
     /// [`Answers::gather`] takes.
     ///
-    /// A checkout whose setup already lives somewhere is not asked where
-    /// its setup should live: one a workspace lists stays in home mode, and
-    /// one with a tracked `.spoolway/` stays in repo mode. A flag asking to
+    /// A checkout a workspace lists is not asked where its setup should
+    /// live: it stays in home mode. One with a tracked `.spoolway/` is
+    /// asked at a terminal, with workspace only highlighted, because that
+    /// is a teammate's clone of a repository whose setup is committed;
+    /// with nobody to ask it stays in repo mode. A flag or pick asking to
     /// switch either between the two modes is refused rather than ignored,
     /// because that is not something `init` does, and a silent repeat run
     /// would read as if it had. A listed checkout may still move between
@@ -511,6 +530,18 @@ impl Placement {
             }
         }
         Ok(placement)
+    }
+
+    /// What a pick from the setup menu means on a checkout with a tracked
+    /// `.spoolway/`: `repo` repeats the repo-mode setup, workspace only
+    /// writes the binding alone, and `home` is refused exactly as `--setup
+    /// home` is there, before anything is written.
+    fn on_tracked_checkout(root: &Path, picked: Option<Setup>) -> Result<Self> {
+        match picked {
+            Some(Setup::Repo) => Ok(Self::Repo),
+            Some(Setup::Home) => Err(tracked_home_refusal(root)),
+            None => Ok(Self::WorkspaceOnly),
+        }
     }
 
     /// [`Self::choose`] before the refusals that depend on the mode chosen:
@@ -574,16 +605,30 @@ impl Placement {
                 },
             });
         }
+        // After the workspace check above, never before it: a listed
+        // checkout that also carries `.spoolway/` keeps seeing the workspace
+        // menu rather than this one.
         if crate::config::tracked_setup_dir_in(root).is_dir() {
             if asked_home {
-                bail!(
-                    "{} already has a tracked `.spoolway/` — init does not move a repo-mode \
-                     project into a home workspace\n  run `spoolway init` without --setup home \
-                     or --workspace to repeat the repo-mode setup",
-                    root.display()
-                );
+                return Err(tracked_home_refusal(root));
             }
-            return Ok(Self::Repo);
+            // `--setup repo`, and a run with nobody to ask, repeat the
+            // repo-mode setup without a menu, as they always did. The
+            // menu's own default here is workspace only, so leaving this to
+            // `ask::choose`'s no-terminal default would change what a
+            // script on a teammate's checkout does.
+            if args.setup == Some(Setup::Repo) || !crate::ask::interactive() {
+                return Ok(Self::Repo);
+            }
+            // A teammate's checkout: the team's setup is already tracked
+            // here, so Enter takes the workspace alone.
+            let menu = SETUP_MENU.map(|(value, note, _)| (value, note));
+            let picked = crate::ask::choose(
+                "Where should this project's setup live?",
+                &menu,
+                WORKSPACE_ONLY,
+            )?;
+            return Self::on_tracked_checkout(root, SETUP_MENU[picked].2);
         }
 
         let setup = match args.setup {
@@ -607,7 +652,7 @@ impl Placement {
         }
 
         // The current branch carries no tracked `.spoolway/` — checked
-        // above, or this checkout would already be `Self::Repo` — but a
+        // above, or this checkout would have returned there — but a
         // home-mode setup here still conflicts with one tracked on the
         // project's default branch: switching back finds `.spoolway/`
         // again, and every command run meanwhile wrote its state into
@@ -2997,6 +3042,116 @@ mod tests {
                 !config_dir.is_dir(),
                 "must not write a fresh config/ back into the workspace"
             );
+        });
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// A teammate's checkout: a git repository with a committed
+    /// `.spoolway/`, never set up on this machine, so it has no stamp.
+    fn teammate_checkout(parent: &Path) -> std::path::PathBuf {
+        let root = home_mode_checkout(parent, "api");
+        let setup = crate::config::tracked_setup_dir_in(&root);
+        std::fs::create_dir_all(&setup).unwrap();
+        std::fs::write(setup.join("config.toml"), "").unwrap();
+        crate::repo::run(&root, "git", &["add", "-A"]).unwrap();
+        crate::repo::run(&root, "git", &["commit", "-qm", "setup"]).unwrap();
+        root
+    }
+
+    /// The refusal a home-mode setup gets on a checkout with a tracked
+    /// `.spoolway/`, word for word.
+    fn tracked_home_message(root: &Path) -> String {
+        format!(
+            "{} already has a tracked `.spoolway/` — init does not move a repo-mode project \
+             into a home workspace\n  run `spoolway init` without --setup home or \
+             --workspace to repeat the repo-mode setup",
+            root.display()
+        )
+    }
+
+    /// On a checkout with a tracked `.spoolway/`, the setup menu starts on
+    /// workspace only, and each pick means what the menu says: `repo`
+    /// repeats the repo-mode setup, workspace only writes the binding alone,
+    /// and `home` gets the same refusal `--setup home` gets there.
+    #[test]
+    fn a_tracked_checkout_highlights_workspace_only_and_refuses_home() {
+        let root = Path::new("/work/api");
+        assert_eq!(SETUP_MENU[WORKSPACE_ONLY].0, "workspace only");
+        assert!(matches!(
+            Placement::on_tracked_checkout(root, Some(Setup::Repo)),
+            Ok(Placement::Repo)
+        ));
+        assert!(matches!(
+            Placement::on_tracked_checkout(root, None),
+            Ok(Placement::WorkspaceOnly)
+        ));
+        let err = Placement::on_tracked_checkout(root, Some(Setup::Home))
+            .err()
+            .expect("home is refused on a tracked checkout");
+        assert_eq!(err.to_string(), tracked_home_message(root));
+    }
+
+    /// On a teammate's checkout, a run with nobody to ask and one with
+    /// `--setup repo` show no menu and repeat the repo-mode setup, as they
+    /// did before the menu opened there; `--setup home`, with or without
+    /// `--workspace`, keeps its refusal, word for word, and writes nothing.
+    #[test]
+    fn a_tracked_checkout_with_no_terminal_or_setup_repo_repeats_repo_mode() {
+        let parent = crate::scratch::root("init-teammate-unasked");
+        let home = parent.join("home");
+        let root = teammate_checkout(&parent);
+        let before = listing(&root);
+
+        crate::platform::test_home::with_home(&home, || {
+            for args in [
+                InitArgs::default(),
+                InitArgs {
+                    setup: Some(Setup::Repo),
+                    ..InitArgs::default()
+                },
+            ] {
+                assert!(matches!(
+                    Placement::choose_any(&root, &args),
+                    Ok(Placement::Repo)
+                ));
+            }
+            for args in [home_args(NEW_WORKSPACE), confirmed_home()] {
+                let err = init(&root, &args)
+                    .expect_err("a home-mode setup is refused on a tracked checkout");
+                assert_eq!(err.to_string(), tracked_home_message(&root));
+            }
+        });
+        assert_eq!(listing(&root), before, "the refusal writes nothing");
+        assert!(
+            !home.join(".spoolway").exists(),
+            "the refusal makes no home"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    /// `--setup home --yes` alone, with no `--workspace`.
+    fn confirmed_home() -> InitArgs {
+        InitArgs {
+            setup: Some(Setup::Home),
+            ..confirmed()
+        }
+    }
+
+    /// A checkout a workspace lists is placed by the workspace check before
+    /// the tracked-folder one, so a `.spoolway/` appearing in it leaves it
+    /// listed: it keeps the workspace menu and never sees the setup menu.
+    #[test]
+    fn a_listed_checkout_carrying_spoolway_stays_listed() {
+        let parent = crate::scratch::root("init-listed-tracked");
+        let home = parent.join("home");
+        let root = home_mode_checkout(&parent, "api");
+        crate::platform::test_home::with_home(&home, || {
+            init(&root, &home_args(NEW_WORKSPACE)).expect("first init");
+            std::fs::create_dir_all(crate::config::tracked_setup_dir_in(&root)).unwrap();
+            assert!(matches!(
+                Placement::choose_any(&root, &InitArgs::default()),
+                Ok(Placement::Listed)
+            ));
         });
         let _ = std::fs::remove_dir_all(&parent);
     }
