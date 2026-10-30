@@ -145,14 +145,18 @@ board_stop() { screen_stop; }
 # still be arriving; it is complete once it carries the frame writer's own
 # closing code (`src/screen/frame_writer.rs`'s `FRAME_END`), and until then
 # the one before it is what is on screen. Found by byte offset, for the reason
-# `screen_last_frame` in lib.sh gives.
+# `screen_last_frame` in lib.sh gives. The board keeps drawing between the
+# `grep` and the `tail`, so the read is cut at the next frame start: without
+# that, a frame that landed in between is read joined onto this one, and a
+# check sees the menu's `> restart` and the form it opened as one screen.
 _frame_now() {
   local start=$'\x1b[?2026h\x1b[H' end=$'\x1b[?2026l' offs n from frame
   mapfile -t offs < <(grep -aboF -- "$start" "$BOARD_LOG" 2>/dev/null | cut -d: -f1)
   n=${#offs[@]}
   [ "$n" -gt 0 ] || return 0
   from=${offs[n - 1]}
-  frame=$(tail -c "+$((from + 1))" "$BOARD_LOG")
+  frame=$(tail -c "+$((from + ${#start} + 1))" "$BOARD_LOG")
+  frame=$start${frame%%"$start"*}
   if [[ $frame != *"$end"* ]] && [ "$n" -gt 1 ]; then
     from=${offs[n - 2]}
     frame=$(tail -c "+$((from + 1))" "$BOARD_LOG" | head -c "$((offs[n - 1] - from))")

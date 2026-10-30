@@ -590,7 +590,9 @@ screen_dispatch() {
 
 # The last frame the open screen drew — everything after the last frame start
 # code [`screen_frames`] counts — which is what is on screen now. A frame still
-# being written reads short, and the next poll reads it whole.
+# being written reads short, and the next poll reads it whole. A frame drawn
+# between the `grep` and the `tail` is cut off at its start code, so two
+# frames are never read as one screen.
 #
 # Found by byte offset and read with `tail -c`, never by loading the log into
 # a shell variable and stripping `${log##*"$start"}`. The log is appended to
@@ -603,14 +605,15 @@ screen_dispatch() {
 # and was killed by run.sh's watchdog at the end of the slow ones. `grep -b`
 # names every frame start's offset in one pass, in a few milliseconds.
 screen_last_frame() {
-  local start=$'\x1b[?2026h\x1b[H' at
+  local start=$'\x1b[?2026h\x1b[H' at frame
   at=$(grep -aboF -- "$start" "$E2E_SCREEN_LOG" 2>/dev/null | tail -n 1)
   at=${at%%:*}
   if [ -z "$at" ]; then
     cat "$E2E_SCREEN_LOG" 2>/dev/null
     return 0
   fi
-  tail -c "+$((at + ${#start} + 1))" "$E2E_SCREEN_LOG"
+  frame=$(tail -c "+$((at + ${#start} + 1))" "$E2E_SCREEN_LOG")
+  printf '%s\n' "${frame%%"$start"*}"
 }
 
 # Quit the open screen: `esc` closes whatever panel is up, `q` quits, and
