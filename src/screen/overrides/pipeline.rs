@@ -13,6 +13,8 @@
 //! way as any other, since overriding often means setting what a pipeline
 //! leaves out. On most fields most steps leave it out, so those steps start
 //! hidden and `h` shows them, keeping the steps that have a value in view.
+//! A search reaches them too, showing each one it matches until it is
+//! cleared.
 //! A field no step sets shows them all, since hiding them would leave
 //! nothing to pick.
 //!
@@ -318,19 +320,31 @@ impl Selection {
         !self.show_not_set && can_hide(pipelines, self.field)
     }
 
-    /// Deselect every step that is hidden because it leaves the field out,
-    /// so `enter` never writes to a step that is not on screen.
+    /// Deselect every step that leaves the field out and is not on screen
+    /// while those steps are hidden, so `enter` never writes to a step the
+    /// person cannot see. A search shows the hidden steps it matches, so
+    /// those stay selected until the search no longer matches them. A step
+    /// with a value stays selected out of sight, as a search always left it.
     fn drop_hidden(&mut self, pipelines: &[PipelineRows]) {
         if !self.hiding(pipelines) {
             return;
         }
         let field = self.field;
+        let on_screen: BTreeSet<(&str, &str)> = pipelines
+            .iter()
+            .flat_map(|pipeline| {
+                visible_steps(pipeline, self, true)
+                    .into_iter()
+                    .map(|at| (pipeline.name.as_str(), pipeline.steps[at].id.as_str()))
+            })
+            .collect();
         self.selected.retain(|(name, id)| {
-            pipelines
-                .iter()
-                .find(|pipeline| pipeline.name == *name)
-                .and_then(|pipeline| pipeline.steps.iter().find(|step| step.id == *id))
-                .is_none_or(|step| !step.value(field).is_empty())
+            on_screen.contains(&(name.as_str(), id.as_str()))
+                || pipelines
+                    .iter()
+                    .find(|pipeline| pipeline.name == *name)
+                    .and_then(|pipeline| pipeline.steps.iter().find(|step| step.id == *id))
+                    .is_none_or(|step| !step.value(field).is_empty())
         });
     }
 
@@ -380,13 +394,16 @@ fn can_hide(pipelines: &[PipelineRows], field: Field) -> bool {
 }
 
 /// The steps of `pipeline` that take the selection's field and the search
-/// leaves, less the ones that leave the field out while `hiding`. A
-/// pipeline whose name matches keeps every one. A step matches on its id or
-/// on the value shown beside it, `not set` included, so a search for that
-/// finds every step that leaves the field out once `h` shows them.
+/// leaves, less the ones that leave the field out while `hiding` and no
+/// search is typed. A pipeline whose name matches keeps every one. A step
+/// matches on its id or on the value shown beside it, `not set` included,
+/// so a search for that finds every step that leaves the field out, hidden
+/// or not: a search reaches past `h`, so a person finds a hidden step by
+/// name without showing them all.
 fn visible_steps(pipeline: &PipelineRows, selection: &Selection, hiding: bool) -> Vec<usize> {
     let query = selection.filter.to_lowercase();
     let named = pipeline.name.to_lowercase().contains(&query);
+    let hiding = hiding && query.is_empty();
     pipeline
         .taking(selection.field)
         .filter(|&at| !(hiding && pipeline.steps[at].value(selection.field).is_empty()))
@@ -611,6 +628,9 @@ impl PipelineSection {
                 }
                 other => edit(&mut selection.filter, other),
             }
+            // Every edit, `esc` and a backspace that empties the search
+            // alike, can take a hidden step off screen.
+            selection.drop_hidden(&self.pipelines);
             self.refocus(&mut selection, before);
             return View::Select(selection);
         }
@@ -1765,8 +1785,8 @@ mod tests {
     }
 
     // Search matches pipeline names, step ids, current values and `not
-    // set` once `h` shows the steps that read it, and `a` then selects only
-    // what the search leaves.
+    // set` with `h` showing the steps that read it, and `a` then selects
+    // only what the search leaves.
     #[test]
     fn search_matches_names_ids_values_and_not_set() {
         let (repo, _guard) = pipelines_project("search");
@@ -2385,5 +2405,80 @@ mod tests {
             "{rows:#?}"
         );
         assert_eq!(lines(&state).last().unwrap(), &select_line("hide"));
+    }
+
+    // While the not-set steps are hidden, a search for `not set` lists
+    // each one under its pipeline and `a` selects exactly those. `esc`
+    // clearing the search hides and deselects them again, and a step with
+    // a value selected through an earlier search stays selected.
+    #[test]
+    fn a_search_reaches_hidden_not_set_steps_and_esc_hides_them_again() {
+        let (repo, _guard) = pipelines_project("search-hidden");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = on_pipeline(&repo);
+        // On effort: beta's fix, which has a value, picked by its id.
+        type_keys(&repo, &mut state, "\x1b[B\rffix\r\x1b[B ");
+        assert_eq!(picked(&state), ["beta.fix"]);
+
+        type_keys(&repo, &mut state, "f");
+        esc(&repo, &mut state);
+        type_keys(&repo, &mut state, "fnot set\ra");
+        assert_eq!(
+            picked(&state),
+            ["alpha.create-pr", "beta.create-pr", "beta.fix"]
+        );
+        assert_eq!(
+            &rows_of(&state)[..6],
+            [
+                "search: not set",
+                "",
+                "  [x] alpha",
+                "        [x] create-pr            not set",
+                "> [x] beta",
+                "        [x] create-pr            not set",
+            ]
+        );
+        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+
+        type_keys(&repo, &mut state, "f");
+        esc(&repo, &mut state);
+        assert_eq!(picked(&state), ["beta.fix"]);
+        assert_eq!(
+            &rows_of(&state)[..7],
+            [
+                "",
+                "  [ ] alpha",
+                "        [ ] implement            high",
+                "        [ ] review               high",
+                "> [x] beta",
+                "        [x] fix                  medium",
+                "",
+            ]
+        );
+    }
+
+    // Deleting the search's text with backspace hides and deselects the
+    // not-set steps it showed, the same as `esc`. A search for a
+    // pipeline's name shows its hidden step too, and `a` selects it with
+    // the rest of that pipeline's steps.
+    #[test]
+    fn deleting_a_search_hides_and_deselects_the_not_set_steps_it_showed() {
+        let (repo, _guard) = pipelines_project("search-erase");
+        let _terminal = crate::screen::test_terminal((100, 40));
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "\x1b[B\rfalpha\ra");
+        assert_eq!(
+            picked(&state),
+            ["alpha.create-pr", "alpha.implement", "alpha.review"]
+        );
+
+        type_keys(&repo, &mut state, "f");
+        type_keys(&repo, &mut state, &"\x7f".repeat(5));
+        assert_eq!(picked(&state), ["alpha.implement", "alpha.review"]);
+        assert!(
+            !rows_of(&state).iter().any(|r| r.contains("create-pr")),
+            "{:#?}",
+            rows_of(&state)
+        );
     }
 }
