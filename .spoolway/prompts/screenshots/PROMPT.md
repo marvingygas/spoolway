@@ -5,9 +5,10 @@ Done: each screen the change altered has one current image there, and the folder
 
 ## Domain knowledge
 - the e2e step wrote its captures to `.screenshots/<task>/`, where `<task>` is your task's `id:`; that folder is never committed
+- `docs/screenshots/test/` does not exist until the first capture is filed; run `mkdir -p docs/screenshots/test` before copying, because `cp` onto a missing folder writes a file named `test`
 - list `docs/screenshots/test/` first: it holds one image per screen, and a capture of a name already there replaces that file
 - every popup, menu and state variant of a screen counts as its own screen with its own name, such as `queue-promote-popup.png` beside `queue.png`; never file one over the plain screen's image
-- a capture whose name is not there yet gets a new short name in the same style; this is the only case that adds a file
+- a capture whose name is not there yet is added under the name e2e gave it; this is the only case that adds a file
 - if two captures show the same screen, keep the later one
 - keep each image under 300 KB; shrink one that is larger, for example by cropping empty margin or reducing its colours, and keep it readable
 - commit the images under `docs/screenshots/test/` and nothing from `.screenshots/`
