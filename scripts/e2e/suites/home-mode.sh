@@ -23,7 +23,10 @@
 #
 # The last sections are about the clone's id rather than home mode as such, and
 # run in repo mode: a superproject moved on disk, an `init` cancelled at its
-# first question, and several first commands started at once in a fresh clone.
+# first question, an `init` that picks workspace only and writes nothing but
+# the binding, the same pick refused when a flag it cannot use is given, the
+# pick by Enter alone on a teammate's clone of a committed setup, and several
+# first commands started at once in a fresh clone.
 # After them come two about where the project's root sits: a `.spoolway/` below
 # the top of the repo, and a linked worktree whose branch has none.
 set -uo pipefail
@@ -535,6 +538,136 @@ if script -qec true /dev/null >/dev/null 2>&1; then
   else bad "a cancelled init leaves ~/.spoolway as it was"; ls -A "$HOME/.spoolway" | sed 's/^/        /'; fi
 else
   echo "  skip  a cancelled init (no pseudo-terminal wrapper on this machine)"
+fi
+
+# ------------------------------------------------- a workspace-only init
+# The setup menu's third entry writes the binding a first command makes and
+# nothing else: the stamp, the home's record, no `.spoolway/` and no skills.
+# Picked with two Down arrows and Enter under a pseudo-terminal, the keys sent
+# only once the menu is on screen. Stdin stays open until the run has said it
+# is done, since `script` ends the session when its input closes. The terminal
+# is given a size first: `ask::choose` cuts each row at the terminal's width,
+# `script` starts with none, and the 80 columns read in its place would cut
+# the notes short.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  ONLY="$LIVE/wsonly"
+  mkdir -p "$ONLY"
+  must "the workspace-only checkout" git -C "$ONLY" init -q -b main
+  must "the workspace-only checkout" git -C "$ONLY" "${GIT_ID[@]}" commit -q --allow-empty -m seed
+  cd "$ONLY" || exit 2
+  {
+    for _ in $(seq 1 300); do
+      grep -qF "Where should this project's setup live" "$LIVE/wsonly.out" 2>/dev/null && break
+      sleep 0.1
+    done
+    printf '\033[B\033[B\r'
+    for _ in $(seq 1 300); do
+      grep -qF "initialized successfully" "$LIVE/wsonly.out" 2>/dev/null && break
+      sleep 0.1
+    done
+  } | script -qec "stty rows 40 cols 160; $SPOOLWAY init" /dev/null >"$LIVE/wsonly.out" 2>&1
+  has "the menu offers workspace only" "workspace only  only the workspace, use when .spoolway/ is already in the repo" \
+    "$LIVE/wsonly.out"
+  has "the pick is shown after the question" "live?: workspace only" "$LIVE/wsonly.out"
+  ONLY_ID=$(cat .git/spoolway-id 2>/dev/null)
+  has "workspace only stamps the checkout" "  stamped  .git/spoolway-id       $ONLY_ID" "$LIVE/wsonly.out"
+  has "workspace only names its home" "  home     ~/.spoolway/wsonly-$ONLY_ID/" "$LIVE/wsonly.out"
+  has "workspace only says it is done" "Workspace initialized successfully." "$LIVE/wsonly.out"
+  if grep -qF "Select your agent" "$LIVE/wsonly.out"; then bad "workspace only asks nothing after the menu"
+  else ok "workspace only asks nothing after the menu"; fi
+  has "the home records the checkout" "root = \"$(pwd -P)\"" "$HOME/.spoolway/wsonly-$ONLY_ID/project.toml"
+  if [ -z "$(git status --porcelain)" ] && [ ! -e .spoolway ] && [ ! -e .claude ]; then
+    ok "workspace only leaves the checkout clean, with no setup and no skills"
+  else bad "workspace only leaves the checkout clean, with no setup and no skills"; git status --porcelain | sed 's/^/        /'; fi
+  # The setup arriving later, as a pull would bring it, finds the same home.
+  mkdir .spoolway
+  out=$("$SPOOLWAY" config path 2>&1)
+  if grep -qE '^mode: +repo' <<<"$out" && grep -qF "/.spoolway/wsonly-$ONLY_ID/plans" <<<"$out"; then
+    ok "a .spoolway/ arriving later is repo mode in the same home"
+  else bad "a .spoolway/ arriving later is repo mode in the same home"; sed 's/^/        /' <<<"$out"; fi
+else
+  echo "  skip  a workspace-only init (no pseudo-terminal wrapper on this machine)"
+fi
+
+# ------------------------------------------- a workspace-only flag refusal
+# A flag the third entry cannot use stops the run after the pick, with nothing
+# stamped and no home made. `--provider` stands for the six; the unit test
+# names every one. The terminal is set up as for the block above.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  REF="$LIVE/wsrefuse"
+  mkdir -p "$REF"
+  must "the refused checkout" git -C "$REF" init -q -b main
+  must "the refused checkout" git -C "$REF" "${GIT_ID[@]}" commit -q --allow-empty -m seed
+  cd "$REF" || exit 2
+  {
+    for _ in $(seq 1 300); do
+      grep -qF "Where should this project's setup live" "$LIVE/wsrefuse.out" 2>/dev/null && break
+      sleep 0.1
+    done
+    printf '\033[B\033[B\r'
+    for _ in $(seq 1 300); do
+      grep -qF "has nothing to apply to" "$LIVE/wsrefuse.out" 2>/dev/null && break
+      sleep 0.1
+    done
+  } | script -qec "stty rows 40 cols 160; $SPOOLWAY init --provider codex" /dev/null >"$LIVE/wsrefuse.out" 2>&1
+  has "the pick is shown before the refusal" "live?: workspace only" "$LIVE/wsrefuse.out"
+  has "the refusal names the flag" \
+    "workspace only writes no config and installs no skills, so --provider has nothing to apply to" \
+    "$LIVE/wsrefuse.out"
+  has "the refusal says what to run instead" \
+    "run \`spoolway init\` again without --provider to set up the workspace only, or pick repo or home to use it" \
+    "$LIVE/wsrefuse.out"
+  if [ ! -e .git/spoolway-id ] && [ ! -e .spoolway ] && [ ! -e .claude ] \
+    && [ -z "$(git status --porcelain --ignored)" ]; then
+    ok "the refusal leaves the checkout untouched"
+  else bad "the refusal leaves the checkout untouched"; git status --porcelain --ignored | sed 's/^/        /'; fi
+  if ls -d "$HOME"/.spoolway/wsrefuse-* >/dev/null 2>&1; then bad "the refusal makes no home"
+  else ok "the refusal makes no home"; fi
+  cd "$LIVE" || exit 2
+else
+  echo "  skip  a workspace-only flag refusal (no pseudo-terminal wrapper on this machine)"
+fi
+
+# ------------------------------------------------- a teammate's init
+# A clone of a repository whose `.spoolway/` is committed opens the setup menu
+# with workspace only highlighted, so Enter alone gives the teammate their
+# workspace and changes nothing in the checkout. The team's setup is made by a
+# real `init` with nobody at a terminal, committed, and cloned.
+if script -qec true /dev/null >/dev/null 2>&1; then
+  TEAM="$LIVE/team"
+  MATE="$LIVE/mate"
+  mkdir -p "$TEAM"
+  must "the team's repository" git -C "$TEAM" init -q -b main
+  must "the team's setup" sh -c "cd '$TEAM' && '$SPOOLWAY' init --yes </dev/null >/dev/null 2>&1"
+  must "the team's setup is committed" git -C "$TEAM" add -A
+  must "the team's setup is committed" git -C "$TEAM" "${GIT_ID[@]}" commit -qm "team setup"
+  must "the teammate's clone" git clone -q "$TEAM" "$MATE"
+  cd "$MATE" || exit 2
+  {
+    for _ in $(seq 1 300); do
+      grep -qF "Where should this project's setup live" "$LIVE/mate.out" 2>/dev/null && break
+      sleep 0.1
+    done
+    printf '\r'
+    for _ in $(seq 1 300); do
+      grep -qF "initialized successfully" "$LIVE/mate.out" 2>/dev/null && break
+      sleep 0.1
+    done
+  } | script -qec "stty rows 40 cols 160; $SPOOLWAY init" /dev/null >"$LIVE/mate.out" 2>&1
+  has "a teammate's clone highlights workspace only" \
+    "> workspace only  only the workspace, use when .spoolway/ is already in the repo" "$LIVE/mate.out"
+  has "a teammate's clone still offers repo and home" "  home            add config to a local workspace" \
+    "$LIVE/mate.out"
+  has "Enter picks workspace only" "live?: workspace only" "$LIVE/mate.out"
+  has "a teammate's workspace is made" "Workspace initialized successfully." "$LIVE/mate.out"
+  if grep -qF "Select your agent" "$LIVE/mate.out"; then bad "a teammate's clone asks nothing after the menu"
+  else ok "a teammate's clone asks nothing after the menu"; fi
+  if [ -z "$(git status --porcelain --ignored)" ]; then
+    ok "Enter leaves the teammate's checkout unchanged"
+  else bad "Enter leaves the teammate's checkout unchanged"; git status --porcelain --ignored | sed 's/^/        /'; fi
+  cd "$LIVE" || exit 2
+else
+  echo "  skip  a teammate's init (no pseudo-terminal wrapper on this machine)"
 fi
 
 # ----------------------------------------- parallel first commands

@@ -320,7 +320,7 @@ list, and restart the dispatcher.
 - Replace each step that runs `spoolway stack`. The shipped pipelines now end at a `create-pr`
   agent step, and `spoolway stack` is deprecated and may be removed in a future release.
   `spoolway doctor` and `spoolway sync` note ``Still run by: <pipeline> · <step>`` for each one.
-  `sync` changes no pipeline step, so do it by hand. Run `spoolway init`, which adds only the
+  `sync` changes no pipeline step, so do it by hand. Run `spoolway init --setup repo`, which adds only the
   missing `.spoolway/prompts/create-pr/PROMPT.md`, then change each `handover` step and the
   `on_pass` that leads to it:
 
@@ -989,7 +989,7 @@ Two commands changed shape. The update does not rewrite scripts that call them:
   it loads with a note and drops it the next time spoolway saves the file.
 - Delete `.spoolway/templates/task-log.md`; task status wording is now built in.
 - Remove `[pipeline_gen]` from the config and replace any `spoolway pipeline gen` call. If the
-  project has no pipelines, run `spoolway init` to restore the two shipped samples.
+  project has no pipelines, run `spoolway init --setup repo` to restore the two shipped samples.
 
 The behavior of a staffed `blocked` step also changed. A pass follows that step's `on_pass`;
 a pause, failure or block returns the task to the step that originally blocked after you run

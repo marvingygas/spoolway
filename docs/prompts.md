@@ -44,7 +44,7 @@ report a step whose prompt file is missing. The advice depends on the prompt's n
 
 | The prompt | The advice |
 |---|---|
-| One of the six that `spoolway init` ships | Run `spoolway init`. |
+| One of the six that `spoolway init` ships | Run `spoolway init --setup repo`. On a checkout a workspace lists, run `spoolway init`. |
 | Any other, such as one named by `unattended.blocked_prompt` | `init` does not ship it, so write it yourself at a path the message names. |
 
 ## A prompt is prose, and nothing else

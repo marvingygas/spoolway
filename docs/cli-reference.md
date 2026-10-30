@@ -1793,7 +1793,38 @@ $ spoolway init
 `Where should this project's setup live?` comes next, and `--setup` answers it. `repo`, the
 default and the answer with nobody to ask, scaffolds a tracked `.spoolway/` in the checkout.
 `home` puts the setup in a workspace under `~/.spoolway/` instead, and writes nothing into the
-checkout or its `.git`. With no workspace yet, home mode creates one. With workspaces already
+checkout or its `.git`. At a terminal the question always offers three entries, each with a
+note saying when to use it:
+
+```
+Where should this project's setup live?:
+> repo            add config to this directory, use when working with the team
+  home            add config to a local workspace, use when running spoolway without changing the repo
+  workspace only  only the workspace, use when .spoolway/ is already in the repo
+```
+
+`repo` is highlighted on a fresh checkout. On a checkout with a tracked `.spoolway/` that no
+workspace lists, `workspace only` is highlighted instead, and Enter gives the checkout its local
+workspace without changing the checkout. Picking `repo` there repeats the repo-mode setup.
+Picking `home` is refused. `--setup repo` and a run with no terminal skip the question and
+repeat the repo-mode setup. See [Scaffolding a project](installation.md#scaffolding-a-project).
+
+`workspace only` is a menu entry and not a `--setup` value, so `--setup` still takes `repo` or
+`home`. Picking it stamps `.git/spoolway-id` and writes the checkout's local workspace under
+`~/.spoolway/`. It writes no config, installs no skills and asks no further question. It ends
+with `Workspace initialized successfully.` The flags `--provider`, `--examples`,
+`--no-examples`, `--tracker`, `--project-key` and `--force` have nothing to apply to after this
+pick. A run given any of them stops right after the pick with nothing written, and the message
+names every one given:
+
+```
+$ spoolway init --provider codex --force
+Where should this project's setup live?: workspace only  only the workspace, use when .spoolway/ is already in the repo
+spoolway: workspace only writes no config and installs no skills, so --provider and --force have nothing to apply to
+  run `spoolway init` again without --provider and --force to set up the workspace only, or pick repo or home to use them
+```
+
+With no workspace yet, home mode creates one. With workspaces already
 there, `init` asks the workspace menu instead: `Select the spoolway workspace for this
 checkout. Pick an existing workspace or create a new one.` A checkout no workspace lists yet
 sees the workspaces it may join, those of this repository marked `same repository` and listed
@@ -1873,7 +1904,7 @@ spoolway init --setup home --workspace new --provider claude --examples --tracke
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--setup <repo\|home>` | `repo` | Answer `Where should this project's setup live?` without asking |
+| `--setup <repo\|home>` | `repo`. At a terminal, `workspace only` is highlighted on a checkout with a tracked `.spoolway/` that no workspace lists | Answer `Where should this project's setup live?` without asking |
 | `--workspace <NAME\|new>` | | Answer the workspace menu without asking. Implies `--setup home`. A name joins an unlisted checkout to that workspace, or moves a listed one there; `new` starts a new workspace, or moves a listed checkout into one |
 | `--provider <claude\|codex\|pi>` | the project's own provider, or `claude` on a fresh one | The coding agent whose skills are installed and which becomes the project's agent profile |
 | `--examples` | | Answer `Install the example setup?` yes without asking: write the shipped pipelines, prompts and task templates. Also the answer with nobody to ask |

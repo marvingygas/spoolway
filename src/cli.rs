@@ -733,6 +733,12 @@ pub struct EvalArgs {
         the queue of a checkout of this repository whose folder is gone, when exactly one \
         such checkout is listed there. With nobody to ask and no `--workspace`, a new \
         workspace is started.\n\n\
+        `--setup` takes `repo` or `home` only. At a terminal the menu has a third entry, \
+        `workspace only`, for a checkout whose `.spoolway/` is already tracked: it stamps \
+        the checkout and makes its local workspace, and writes no config and installs no \
+        skills. It is reached from the menu alone. After that pick, `--provider`, \
+        `--examples`, `--no-examples`, `--tracker`, `--project-key` and `--force` stop the \
+        run with nothing written, naming each one given.\n\n\
         Run again in a home-mode checkout, `init` shows the same menu with its current \
         workspace first. Picking another workspace of the same repository, or a new one, \
         moves the checkout and its queue there. A move waits until no task holds a \
@@ -800,7 +806,8 @@ pub struct InitArgs {
 
     /// The project the chosen tracker's tickets open into: `owner/repo` on
     /// github, a project key on jira. Ignored when `--tracker` answers
-    /// `none` or is not given at all.
+    /// `none` or is not given at all, and refused after a `workspace only`
+    /// pick.
     #[arg(long, value_name = "KEY")]
     pub project_key: Option<String>,
 
@@ -819,7 +826,8 @@ pub struct InitArgs {
     /// Answer `Where should this project's setup live?` without asking:
     /// `repo` for a tracked `.spoolway/` in this checkout, `home` for a
     /// workspace under `~/.spoolway/` that writes nothing into the checkout.
-    /// `repo` is also the answer when there is nobody to ask.
+    /// `repo` is also the answer when there is nobody to ask. The menu has a
+    /// third entry, `workspace only`, that no value of this flag selects.
     #[arg(long, value_enum)]
     pub setup: Option<Setup>,
 
@@ -899,8 +907,9 @@ impl clap::builder::TypedValueParser for RemovedCommand {
     }
 }
 
-/// Where `spoolway init` puts a project's setup — the answer to "Where
-/// should this project's setup live?".
+/// Where `spoolway init` puts a project's setup — the two answers to "Where
+/// should this project's setup live?" that `--setup` can give. The menu's
+/// third entry, workspace only, has no flag and so no variant here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Setup {
     /// `.spoolway/` in the checkout, tracked by git.
@@ -2572,5 +2581,32 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("key reference"), "{help}");
+    }
+
+    /// `--setup` takes `repo` and `home` and nothing else. The setup menu's
+    /// third entry, workspace only, is reached from the menu alone, so clap
+    /// refuses every spelling of it here.
+    #[test]
+    fn init_setup_takes_only_repo_and_home() {
+        for (value, want) in [("repo", Setup::Repo), ("home", Setup::Home)] {
+            match Cli::try_parse_from(["spoolway", "init", "--setup", value])
+                .unwrap()
+                .command
+            {
+                Command::Init(args) => assert_eq!(args.setup, Some(want)),
+                other => panic!("expected Command::Init, got {other:?}"),
+            }
+        }
+        for value in [
+            "workspace-only",
+            "workspace_only",
+            "workspace only",
+            "workspace",
+        ] {
+            assert!(
+                Cli::try_parse_from(["spoolway", "init", "--setup", value]).is_err(),
+                "--setup {value} must be refused"
+            );
+        }
     }
 }
