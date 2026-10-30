@@ -11,7 +11,9 @@
 //!
 //! A step that leaves the field out reads `not set` and is selected the same
 //! way as any other, since overriding often means setting what a pipeline
-//! leaves out. The value is written as the YAML it reads as, the same as
+//! leaves out. On most fields most steps leave it out, so those steps start
+//! hidden and `h` shows them, keeping the steps that have a value in view.
+//! The value is written as the YAML it reads as, the same as
 //! `pipeline override --set`, and is not checked here: a value the merge
 //! cannot use stays in the layer, where `override list` reports it as
 //! ignored.
@@ -269,6 +271,9 @@ struct Selection {
     filter: String,
     /// Whether the search row has the keys.
     searching: bool,
+    /// Whether `h` has shown the steps that leave the field out. Starts
+    /// false on every selection, so each field opens with them hidden.
+    show_not_set: bool,
     /// Which of [`picking_rows`] the cursor is on.
     cursor: usize,
     /// Every selected step, as (pipeline, step id).
@@ -283,6 +288,7 @@ impl Selection {
             field,
             filter: String::new(),
             searching: false,
+            show_not_set: false,
             cursor: 0,
             selected: BTreeSet::new(),
         };
@@ -296,7 +302,34 @@ impl Selection {
                 }
             }
         }
+        // A patch that sets the field to a blank string leaves its step
+        // overridden but reading `not set`, and so hidden: selected, `enter`
+        // would write to a step nobody can see.
+        selection.drop_hidden(pipelines);
         selection
+    }
+
+    /// Whether the steps that leave the field out are hidden: until `h`
+    /// shows them, unless no step sets the field at all, when hiding them
+    /// would leave nothing to pick from.
+    fn hiding(&self, pipelines: &[PipelineRows]) -> bool {
+        !self.show_not_set && can_hide(pipelines, self.field)
+    }
+
+    /// Deselect every step that is hidden because it leaves the field out,
+    /// so `enter` never writes to a step that is not on screen.
+    fn drop_hidden(&mut self, pipelines: &[PipelineRows]) {
+        if !self.hiding(pipelines) {
+            return;
+        }
+        let field = self.field;
+        self.selected.retain(|(name, id)| {
+            pipelines
+                .iter()
+                .find(|pipeline| pipeline.name == *name)
+                .and_then(|pipeline| pipeline.steps.iter().find(|step| step.id == *id))
+                .is_none_or(|step| !step.value(field).is_empty())
+        });
     }
 
     fn is_selected(&self, pipeline: &str, step: &str) -> bool {
@@ -334,15 +367,27 @@ enum Row {
     Step(usize, usize),
 }
 
+/// Whether some step that takes `field` sets it, so that hiding the steps
+/// that leave it out still leaves a step to pick.
+fn can_hide(pipelines: &[PipelineRows], field: Field) -> bool {
+    pipelines.iter().any(|pipeline| {
+        pipeline
+            .taking(field)
+            .any(|at| !pipeline.steps[at].value(field).is_empty())
+    })
+}
+
 /// The steps of `pipeline` that take the selection's field and the search
-/// leaves. A pipeline whose name matches keeps every one. A step matches on
-/// its id or on the value shown beside it, `not set` included, so a search
-/// for that finds every step that leaves the field out.
-fn visible_steps(pipeline: &PipelineRows, selection: &Selection) -> Vec<usize> {
+/// leaves, less the ones that leave the field out while `hiding`. A
+/// pipeline whose name matches keeps every one. A step matches on its id or
+/// on the value shown beside it, `not set` included, so a search for that
+/// finds every step that leaves the field out once `h` shows them.
+fn visible_steps(pipeline: &PipelineRows, selection: &Selection, hiding: bool) -> Vec<usize> {
     let query = selection.filter.to_lowercase();
     let named = pipeline.name.to_lowercase().contains(&query);
     pipeline
         .taking(selection.field)
+        .filter(|&at| !(hiding && pipeline.steps[at].value(selection.field).is_empty()))
         .filter(|&at| {
             let step = &pipeline.steps[at];
             named
@@ -354,13 +399,14 @@ fn visible_steps(pipeline: &PipelineRows, selection: &Selection) -> Vec<usize> {
         .collect()
 }
 
-/// The picking list's rows: every pipeline with a step the search leaves,
-/// followed by those steps. Nothing opens or closes, so only a search
-/// changes which rows there are.
+/// The picking list's rows: every pipeline with a step the search and `h`
+/// leave, followed by those steps. Nothing opens or closes, so only a
+/// search and `h` change which rows there are.
 fn picking_rows(pipelines: &[PipelineRows], selection: &Selection) -> Vec<Row> {
+    let hiding = selection.hiding(pipelines);
     let mut rows = Vec::new();
     for (p, pipeline) in pipelines.iter().enumerate() {
-        let steps = visible_steps(pipeline, selection);
+        let steps = visible_steps(pipeline, selection, hiding);
         if steps.is_empty() {
             continue;
         }
@@ -587,6 +633,12 @@ impl PipelineSection {
                 None => {}
             },
             Key::Char('a') => self.toggle_all(&mut selection),
+            // With no step setting the field nothing is hidden, and there is
+            // no `h` on the key line to press.
+            Key::Char('h') if can_hide(&self.pipelines, selection.field) => {
+                selection.show_not_set = !selection.show_not_set;
+                selection.drop_hidden(&self.pipelines);
+            }
             // Nothing selected leaves nothing to set, so `enter` waits for a
             // step, as the trial picker's does for a pipeline.
             Key::Enter if !selection.selected.is_empty() => {
@@ -606,8 +658,8 @@ impl PipelineSection {
 
     /// Keep the cursor on the row it was on before a key changed the rows,
     /// or on that row's pipeline when the row itself is gone, as when a
-    /// search edit leaves out the step the cursor was on. Every other key
-    /// leaves the rows as they were, and the cursor with them.
+    /// search edit or `h` leaves out the step the cursor was on. Every other
+    /// key leaves the rows as they were, and the cursor with them.
     fn refocus(&self, selection: &mut Selection, before: Option<Row>) {
         let rows = picking_rows(&self.pipelines, selection);
         let pipeline_of = |row: Row| match row {
@@ -624,7 +676,7 @@ impl PipelineSection {
     }
 
     /// `space` on a pipeline: one with a selected step has them all
-    /// cleared, and any other has every step the search leaves selected.
+    /// cleared, and any other has every step it lists selected.
     fn toggle_pipeline(&self, selection: &mut Selection, p: usize) {
         let pipeline = &self.pipelines[p];
         if selection.selected_in(&pipeline.name) > 0 {
@@ -633,22 +685,24 @@ impl PipelineSection {
                 .retain(|(name, _)| *name != pipeline.name);
             return;
         }
-        for s in visible_steps(pipeline, selection) {
+        let hiding = selection.hiding(&self.pipelines);
+        for s in visible_steps(pipeline, selection, hiding) {
             selection
                 .selected
                 .insert((pipeline.name.clone(), pipeline.steps[s].id.clone()));
         }
     }
 
-    /// `a`: every step the search leaves is selected, unless they already
+    /// `a`: every step the list shows is selected, unless they already
     /// are, and then the selection is cleared.
     /// With no step left by the search it does nothing.
     fn toggle_all(&self, selection: &mut Selection) {
+        let hiding = selection.hiding(&self.pipelines);
         let visible: Vec<(String, String)> = self
             .pipelines
             .iter()
             .flat_map(|pipeline| {
-                visible_steps(pipeline, selection)
+                visible_steps(pipeline, selection, hiding)
                     .into_iter()
                     .map(|s| (pipeline.name.clone(), pipeline.steps[s].id.clone()))
             })
@@ -907,15 +961,30 @@ impl PipelineSection {
             .concat(),
             View::Search => SEARCH_KEYS.to_vec(),
             View::Select(selection) if selection.searching => SEARCH_KEYS.to_vec(),
-            View::Select(_) => SELECT_KEYS.to_vec(),
+            View::Select(selection) => self.select_keys(selection),
             View::Value { .. } => SET_KEYS.to_vec(),
             View::Written { .. } => vec![("enter", "close")],
             View::Failed { .. } => vec![("enter", "confirm")],
         }
     }
+
+    /// The picking list's keys: `h` before `esc`, naming which way it goes
+    /// next, and left out on a field no step sets, where it does nothing.
+    fn select_keys(&self, selection: &Selection) -> Vec<(&'static str, &'static str)> {
+        let mut keys = SELECT_KEYS.to_vec();
+        if can_hide(&self.pipelines, selection.field) {
+            let toggle = match selection.show_not_set {
+                true => ("h", "hide not set"),
+                false => ("h", "show not set"),
+            };
+            keys.insert(keys.len() - 1, toggle);
+        }
+        keys
+    }
 }
 
-/// The picking list's keys, on the line under the frame.
+/// The picking list's keys, on the line under the frame, less the `h` that
+/// [`PipelineSection::select_keys`] puts before `esc`.
 const SELECT_KEYS: &[(&str, &str)] = &[
     ("space", "select"),
     ("a", "select all"),
@@ -1353,8 +1422,8 @@ mod tests {
         );
         assert!(!rows.iter().any(|r| r.contains("gamma")), "{rows:#?}");
         assert_eq!(
-            drawn.last().unwrap(),
-            " [space] select   [a] select all   [enter] set value   [esc] back"
+            key_line(&state),
+            " [space] select   [a] select all   [enter] set value   [h] show not set   [esc] back"
         );
 
         // `esc` goes back to the fields, and `tab` only then leaves.
@@ -1365,15 +1434,16 @@ mod tests {
         assert_eq!(state.section, super::super::Section::Prompts);
     }
 
-    // A step that leaves the field out, or leaves it blank, reads `not set`,
-    // and the steps the layer already sets the field on start selected.
+    // A step that leaves the field out, or leaves it blank, reads `not set`
+    // once `h` shows it, and the steps the layer already sets the field on
+    // start selected.
     #[test]
     fn overridden_steps_start_selected_and_a_missing_field_reads_not_set() {
         let (repo, _guard) = pipelines_project("preselected");
         write_patch(&repo, "beta", "steps:\n  fix:\n    effort: low\n");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = on_pipeline(&repo);
-        type_keys(&repo, &mut state, "\x1b[B\r");
+        type_keys(&repo, &mut state, "\x1b[B\rh");
         let rows = rows_of(&state);
         assert_eq!(
             &rows[..8],
@@ -1670,7 +1740,8 @@ mod tests {
     }
 
     // Search matches pipeline names, step ids, current values and `not
-    // set`, and `a` then selects only what the search leaves.
+    // set` once `h` shows the steps that read it, and `a` then selects only
+    // what the search leaves.
     #[test]
     fn search_matches_names_ids_values_and_not_set() {
         let (repo, _guard) = pipelines_project("search");
@@ -1687,7 +1758,7 @@ mod tests {
                 .collect()
         };
         // On effort: `not set` finds the two steps that leave it out.
-        type_keys(&repo, &mut state, "\x1b[B\rfnot set\ra");
+        type_keys(&repo, &mut state, "\x1b[B\rhfnot set\ra");
         assert_eq!(picked(&state), ["alpha.create-pr", "beta.create-pr"]);
         let rows = rows_of(&state);
         assert_eq!(rows[0], "search: not set");
@@ -1700,7 +1771,8 @@ mod tests {
                 "        [x] create-pr            not set",
             ]
         );
-        // A value, a step id and a pipeline name.
+        // A value, a step id and a pipeline name. Each `enter` opens the
+        // picker with the not-set steps hidden again, so `h` shows them.
         for (query, expected) in [
             ("medium", vec!["beta.fix"]),
             ("review", vec!["alpha.review"]),
@@ -1708,7 +1780,7 @@ mod tests {
         ] {
             type_keys(&repo, &mut state, "a");
             esc(&repo, &mut state);
-            type_keys(&repo, &mut state, "\rf");
+            type_keys(&repo, &mut state, "\rhf");
             type_keys(&repo, &mut state, query);
             type_keys(&repo, &mut state, "\ra");
             assert_eq!(picked(&state), expected, "{query}");
@@ -1760,7 +1832,7 @@ mod tests {
 
         esc(&repo, &mut state);
         esc(&repo, &mut state);
-        type_keys(&repo, &mut state, "\x1b[B\rfnot set\ra\r");
+        type_keys(&repo, &mut state, "\x1b[B\rhfnot set\ra\r");
         let rows = popup_rows(&state);
         assert_eq!(rows[1], "value: ▏");
         assert_eq!(rows[3], "current   not set");
@@ -1776,7 +1848,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("save");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = on_pipeline(&repo);
-        type_keys(&repo, &mut state, "\x1b[B\rfnot set\ra\rmax\r");
+        type_keys(&repo, &mut state, "\x1b[B\rhfnot set\ra\rmax\r");
         assert_eq!(
             popup_rows(&state),
             [
@@ -2045,11 +2117,12 @@ mod tests {
     }
 
     // A picking list taller than the screen keeps the cursor's row in view
-    // and counts the pipelines out of sight under the rows' indent.
+    // and counts the pipelines out of sight under the rows' indent. Wide
+    // enough for the key line on one row, so the box keeps its height.
     #[test]
     fn a_long_picking_list_scrolls_by_pipeline() {
         let (repo, _guard) = pipelines_project("scroll");
-        let _terminal = crate::screen::test_terminal((80, 10));
+        let _terminal = crate::screen::test_terminal((90, 10));
         let mut state = on_pipeline(&repo);
         type_keys(&repo, &mut state, "\ra");
         let rows = rows_of(&state);
