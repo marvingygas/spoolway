@@ -72,11 +72,13 @@ older release, and run from the worktree it would open this repository's live qu
 a `tmux` server of your own, started with `tmux -L <task>`, and end only that server when you are
 done, never `tmux kill-server` on the default one. Render the pane with `freeze`, for example
 `tmux -L <task> capture-pane -ep | freeze -o .screenshots/<task>/<screen>.png`. Name each file for
-the screen it shows, such as `queue.png`.
+the screen it shows, such as `queue.png`. A popup, a menu and every other state of a screen the
+change altered is its own screen: capture each as its own file, named for the screen and the
+variant, such as `queue-promote-popup.png`, so it is never filed over the plain screen's image.
 
 The folder is gitignored, and the `screenshots` step files the images that belong in
-`docs/screenshots/`. When `freeze` is not installed, capture nothing and say so in your handoff, so
-the `screenshots` step knows why the folder is empty.
+`docs/screenshots/test/`. When `freeze` is not installed, capture nothing and say so in your
+handoff, so the `screenshots` step knows why the folder is empty.
 
 ## The upgrade suite
 

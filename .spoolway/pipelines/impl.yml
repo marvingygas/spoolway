@@ -163,7 +163,7 @@ steps:
     on_fail: e2e
 
   - id: screenshots
-    description: File the screenshots e2e captured into docs/screenshots/, one current image per screen.
+    description: File the screenshots e2e captured into docs/screenshots/test/, one current image per screen.
     agent: claude
     prompt: screenshots
     model: claude-sonnet-5-5

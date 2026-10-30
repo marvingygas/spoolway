@@ -671,7 +671,7 @@ claude` to the profile you pick. Fill in the models before the first run.
 
 This repository's own `.spoolway/pipelines/impl.yml` adds an end-to-end step, a `test` command
 step, a `suite` step with `last: true` and a `screenshots` step that files screen captures into
-`docs/screenshots/`. No pipeline waits on a pull request's hosted checks; the `create-pr` step
+`docs/screenshots/test/`. No pipeline waits on a pull request's hosted checks; the `create-pr` step
 opens it and the task is done. See
 [Local gates and daily CI](testing.md#local-gates-and-daily-ci).
 

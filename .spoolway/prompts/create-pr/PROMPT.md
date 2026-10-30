@@ -13,11 +13,12 @@ Done: the branch is pushed, and one pull request is open for it with a body a re
 - the body ends with `Co-Authored-By: <your own product name>`, such as `Claude Code` or `Codex`
 
 ## Screenshots
-- between the summary and the co-author line, add a `## Screenshots` section with one image per file under `docs/screenshots/` that `git diff --name-status <that branch>...HEAD -- docs/screenshots` shows as added or modified
-- embed each as `![<name>](https://github.com/<owner>/<repo>/blob/<sha>/docs/screenshots/<name>.png?raw=true)`
+- between the summary and the co-author line, add a `## Screenshots` section with one image per file under `docs/screenshots/test/` that `git diff --name-status <that branch>...HEAD -- docs/screenshots/test` shows as added or modified
+- embed each as `![<name>](https://github.com/<owner>/<repo>/blob/<sha>/docs/screenshots/test/<name>.png?raw=true)`
 - `<owner>/<repo>` comes from `gh repo view --json nameWithOwner -q .nameWithOwner`, and `<sha>` from `git rev-parse HEAD` after the push
 - a relative path does not render in a pull request body, and a branch name stops working once the branch is deleted, so always use the full commit sha
-- leave the section out when no image under `docs/screenshots/` was added or changed
+- never embed an image from `docs/screenshots/readme/`, even when the branch changed one
+- leave the section out when no image under `docs/screenshots/test/` was added or changed
 
 ## Never
 - squashing, rebasing or force-pushing
