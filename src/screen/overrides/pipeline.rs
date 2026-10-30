@@ -698,13 +698,6 @@ impl PipelineSection {
         }
     }
 
-    /// The box title in place of the section names, while a field's steps
-    /// are being picked.
-    pub(super) fn title(&self) -> Option<String> {
-        self.selection()
-            .map(|selection| format!("select steps for {}", selection.field.name))
-    }
-
     fn selection(&self) -> Option<&Selection> {
         match &self.view {
             View::Fields | View::Search => None,
@@ -902,7 +895,7 @@ impl PipelineSection {
         match &self.view {
             View::Fields => [
                 [
-                    ("enter", "select steps"),
+                    ("enter", "select"),
                     ("f", "search"),
                     super::OPTIONS,
                     super::OPEN_WORKSPACE,
@@ -1326,7 +1319,7 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section"
+            " [enter] select   [f] search   [o] options   [w] open workspace   [tab] section"
         );
     }
 
@@ -1340,7 +1333,7 @@ mod tests {
         type_keys(&repo, &mut state, "\r");
         let drawn = lines(&state);
         assert!(
-            drawn[0].starts_with("╭─ select steps for model ─"),
+            drawn[0].starts_with("╭─ config   [pipeline]   prompts   active (0) ─"),
             "{:?}",
             drawn[0]
         );
@@ -1366,10 +1359,7 @@ mod tests {
 
         // `esc` goes back to the fields, and `tab` only then leaves.
         type_keys(&repo, &mut state, "\t");
-        assert!(
-            state.pipeline.title().is_some(),
-            "tab does not leave a pick"
-        );
+        assert!(!state.pipeline.at_rest(), "tab does not leave a pick");
         esc(&repo, &mut state);
         type_keys(&repo, &mut state, "\t");
         assert_eq!(state.section, super::super::Section::Prompts);

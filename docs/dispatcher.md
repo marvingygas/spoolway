@@ -1064,7 +1064,7 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 │     serial                                                                   │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] select steps   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+ [enter] select   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
 ```
 
 `↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
@@ -1079,7 +1079,7 @@ the tracked step with the layer merged onto it. A step that leaves the field out
 blank, reads `not set`. Steps the layer already overrides the field on start selected.
 
 ```
-╭─ select steps for model ─────────────────────────────────────────────────────╮
+╭─ config   [pipeline]   prompts   active (3) ─────────────────────────────────╮
 │ search: sonnet                                                               │
 │                                                                              │
 │   [x] bugfix                                                                 │

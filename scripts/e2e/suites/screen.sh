@@ -612,7 +612,10 @@ has "tab moves onto the pipeline section" \
   "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
 has "it lists the fields every step takes first" "all steps" "$PIPELINE_TAB.plain"
 has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
-has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
+has "the field list's key line names enter as select" \
+  "[enter] select   [f] search   [o] options" "$PIPELINE_TAB.plain"
+lacks "the step selection keeps the section names over its box" "select steps for" \
+  "$PIPELINE_TAB.plain"
 has "the step picker's key line names a as select all" \
   "[space] select   [a] select all   [enter] set value   [esc] back" "$PIPELINE_TAB.plain"
 has "every pipeline lists its steps before any is selected" \
