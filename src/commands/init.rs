@@ -1045,8 +1045,8 @@ fn place_setup(
 /// Nothing else is written. A checkout whose `.spoolway/` came with the
 /// clone keeps it exactly as the team left it, and one with no `.spoolway/`
 /// yet finds this same home once it arrives, since the home is keyed by the
-/// stamped id rather than by the setup. Not even the usage registry: other
-/// commands add the checkout there on their own first run.
+/// stamped id rather than by the setup. Not even the usage registry:
+/// `dispatch` adds the checkout there the first time it runs.
 fn init_workspace_only(root: &Path) -> Result<()> {
     let home = crate::repo::bind(root)?;
     // Printed whether this run minted the id or found it already there,
