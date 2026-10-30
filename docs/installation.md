@@ -144,12 +144,24 @@ question. Without a terminal, the defaults apply: a tracked `.spoolway/` in the 
 
 | Question | Flag | Default |
 |---|---|---|
-| Where should this project's setup live? | `--setup repo\|home` | `repo` |
+| Where should this project's setup live? | `--setup repo\|home` | `repo`, or `workspace only` on a checkout with a tracked `.spoolway/` |
 | The workspace menu (home mode, when a workspace already exists) | `--workspace <name>\|new` | starts a new workspace |
 | The coding agent you plan in | `--provider claude\|codex\|pi` | `claude` |
 | Install the example setup? (skipped when joining or moving into an existing workspace) | `--examples`/`--no-examples` | yes |
 | The issue tracker (skipped when joining or moving into an existing workspace) | `--tracker github\|jira\|none` | `none` |
 | The tracker's project | `--project-key <KEY>` | none |
+
+On a checkout with a tracked `.spoolway/` that no workspace lists, such as a teammate's clone,
+the setup question offers `repo`, `home` and `workspace only`, with `workspace only` highlighted.
+
+| Pick | What happens |
+|---|---|
+| `workspace only` | Gives the checkout its local workspace and changes nothing in the checkout. |
+| `repo` | Repeats the repo-mode setup. |
+| `home` | Is refused with nothing written, because `init` does not move a repo-mode project into a home workspace. |
+
+With no terminal, or with `--setup repo`, the question is not asked and `init` repeats the
+repo-mode setup.
 
 The tracker's project is a free-text question. It prints the question, then a line that asks you to
 type the answer. An empty answer keeps the project's existing key, or leaves it blank on a new project.
@@ -384,8 +396,9 @@ spoolway doctor
 
 When a step runs the deprecated stack command, `doctor` prints one `note` line. It says
 the command is deprecated and names each `pipeline · step` that runs it. It also says to run
-`spoolway init` to add the `create-pr` prompt and replace each such step with an agent step on
-it. It prints nothing when no step does. The shipped pipelines run no such step.
+`spoolway init --setup repo` to add the `create-pr` prompt and replace each such step with an
+agent step on it. On a checkout a workspace lists, it says `spoolway init`. It prints nothing
+when no step does. The shipped pipelines run no such step.
 
 Problems set a non-zero exit code. Notes do not. The `spoolway-config` skill's repair section
 reads both.
