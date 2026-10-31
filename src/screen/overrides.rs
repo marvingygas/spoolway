@@ -707,15 +707,10 @@ fn frame(state: &State) -> Vec<String> {
 }
 
 /// The box's top border, its title naming every section with the open one
-/// bracketed, and `active` carrying the layer's key count. While the
-/// pipeline section picks a field's steps, the title names that instead.
+/// bracketed, and `active` carrying the layer's key count. It reads the same
+/// while the pipeline section picks a field's steps.
 fn top_border(state: &State, width: usize) -> String {
-    let picking = match state.section {
-        Section::Pipeline => state.pipeline.title(),
-        _ => None,
-    };
-    let title = picking.unwrap_or_else(|| section_names(state));
-    let head = format!("─ {title} ");
+    let head = format!("─ {} ", section_names(state));
     let dashes = width.saturating_sub(head.chars().count() + 2);
     format!(
         "{}{head}{}{}",

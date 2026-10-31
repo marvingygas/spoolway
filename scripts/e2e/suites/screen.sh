@@ -596,10 +596,11 @@ has "active counts both keys" "active (2)" "$LAST"
 
 # The overrides tab's pipeline section sets one step field on steps in two
 # pipelines. bugfix's steps leave `effort` out, with its lines deleted here,
-# and default's carry it blank. `tab` moves onto the section, seven `↓`
-# past the six fields every step takes and model onto effort, and `enter`
-# lists both pipelines with their steps under them, where `a` selects every
-# step.
+# and default's carry it blank. With no step setting it, hiding the steps
+# that leave it out would leave nothing to pick, so the picker lists them
+# all and offers no `h`. `tab` moves onto the section, seven `↓` past the
+# six fields every step takes and model onto effort, and `enter` lists both
+# pipelines with their steps under them, where `a` selects every step.
 # `enter` opens the value field, `low` is typed and saved, and `enter`
 # closes the popup the save opened.
 sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
@@ -612,10 +613,13 @@ has "tab moves onto the pipeline section" \
   "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
 has "it lists the fields every step takes first" "all steps" "$PIPELINE_TAB.plain"
 has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
-has "enter on effort opens its step selection" "╭─ select steps for effort ─" "$PIPELINE_TAB.plain"
-has "the step picker's key line names a as select all" \
+has "the field list's key line names enter as select" \
+  "[enter] select   [f] search   [o] options" "$PIPELINE_TAB.plain"
+lacks "the step selection keeps the section names over its box" "select steps for" \
+  "$PIPELINE_TAB.plain"
+has "the step picker's key line names a as select all, and no h where no step sets the field" \
   "[space] select   [a] select all   [enter] set value   [esc] back" "$PIPELINE_TAB.plain"
-has "every pipeline lists its steps before any is selected" \
+has "every pipeline lists its not-set steps before any is selected" \
   "[ ] reproduce            not set" "$PIPELINE_TAB.plain"
 has "a step that leaves effort out reads not set" "[x] reproduce            not set" \
   "$PIPELINE_TAB.plain"
@@ -625,6 +629,18 @@ has "the save says what it wrote" "effort on 10 steps in 2 pipelines" "$PIPELINE
 PATCHES="$SPOOLWAY_PROJECT_HOME/overrides/pipelines"
 has "bugfix's patch sets the effort its steps left out" "effort: low" "$PATCHES/bugfix.yml"
 has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
+
+# On a field some step sets, the picker opens with the steps that leave it
+# out hidden. `tab` moves onto the section, two `↓` onto on_fail, and
+# `enter` lists the steps that route a failure. bugfix's reproduce leaves
+# on_fail out, so it is not listed until `h` shows it.
+ON_FAIL_TAB="$LIVE/overrides-on-fail.txt"
+on_screen '\x1b[C\x1b[C\t\x1b[B\x1b[B\r' "$ON_FAIL_TAB"
+sed 's/\x1b\[[0-9;]*m//g' "$ON_FAIL_TAB" >"$ON_FAIL_TAB.plain"
+has "the step picker's key line names h on a field some step sets" \
+  "[space] select   [a] select all   [enter] set value   [h] show not set   [esc] back" \
+  "$ON_FAIL_TAB.plain"
+lacks "a step that leaves on_fail out starts hidden" "[ ] reproduce " "$ON_FAIL_TAB.plain"
 
 # The overrides tab's prompts section copies one prompt into the layer.
 # `tab` twice moves onto the section, `f` searches it down to implementer,
