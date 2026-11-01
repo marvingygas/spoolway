@@ -6532,9 +6532,9 @@ fn run_screen_from(
                     crate::screen::picker::Picked::Chosen(name) => {
                         let mode =
                             set_pipeline(repo, pipelines, &mut groups, &mut state, &menu, &name);
-                        // `groups` was just read again with the new
-                        // pipeline; a reading already in flight could still
-                        // carry the old one back — see
+                        // `set_pipeline` may have read `groups` again or
+                        // patched them; a reading already in flight could
+                        // still carry the old pipeline back — see
                         // `refresh_from_reader`.
                         known_reading = known_reading.max(reader.started_count());
                         mode
@@ -8009,10 +8009,16 @@ fn handle_gate_key(
 /// groups, so a hand edit made while the picker was open is kept, and only
 /// its `pipeline:` line changes — see [`with_frontmatter_field`].
 ///
-/// A screen gate names a step of the old pipeline. It is kept when the new
-/// pipeline has a step of that id and dropped otherwise, since a task
-/// queued with a `gate_at:` its pipeline lacks is parked on `paused` before
-/// it starts.
+/// A screen gate names a step of the old pipeline. It is kept only when the
+/// gate picker would offer that step on the new one — see [`gate_steps`] —
+/// and dropped otherwise. The screen submits a gate as `gate_at:`, and
+/// submission refuses the whole group over a `gate_at:` naming no step of
+/// the pipeline, a command step, or a step the task walks past (see
+/// [`check_gate_at`] and [`check_gate_at_runs`]).
+///
+/// When the groups will not read again, the task's own row is patched in
+/// memory and a notice says so, since the rest of the list may then be
+/// behind until the queue reader's next pass.
 fn set_pipeline(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -8037,35 +8043,49 @@ fn set_pipeline(
     let written = std::fs::read_to_string(&path)
         .map_err(anyhow::Error::from)
         .and_then(|doc| {
-            crate::task::write_atomic(&path, with_frontmatter_field(&doc, "pipeline", name))
+            let doc = with_frontmatter_field(&doc, "pipeline", name);
+            crate::task::write_atomic(&path, &doc).map(|()| doc)
         });
-    if let Err(err) = written {
-        return outcome(
-            "pipeline not changed",
-            format!(
-                "{} was not changed: {err:#}. Fix what stops the file being read or written, \
-                 then pick the pipeline again.",
-                path.display()
-            ),
-        );
-    }
-    let has_step = |step: &str| {
-        pipelines
-            .get(name)
-            .is_ok_and(|pipeline| pipeline.steps.iter().any(|s| s.id == step))
+    let doc = match written {
+        Ok(doc) => doc,
+        Err(err) => {
+            return outcome(
+                "pipeline not changed",
+                format!(
+                    "{} was not changed: {err:#}. Fix what stops the file being read or \
+                     written, then pick the pipeline again.",
+                    path.display()
+                ),
+            );
+        }
+    };
+    // Judged on the text just written, with the dependents counted the way
+    // the gate picker counts them when it opens on this task.
+    let offered = |step: &str| {
+        let dependents = gate_dependents(repo, pipelines, groups, state);
+        highlighted_task(groups, state)
+            .zip(task_pipeline(&doc, pipelines).ok())
+            .is_some_and(|(task, pipeline)| {
+                gate_steps(task, &doc, pipeline, dependents)
+                    .iter()
+                    .any(|s| s.id == step)
+            })
     };
     if state
         .gates
         .get(&menu.row)
-        .is_some_and(|step| !has_step(step))
+        .is_some_and(|step| !offered(step))
     {
         state.gates.remove(&menu.row);
     }
     match super::pending::list_rows(repo) {
-        Ok(rows) => adopt_groups(rows.groups, groups, state),
+        Ok(rows) => {
+            adopt_groups(rows.groups, groups, state);
+            Mode::Browsing
+        }
         // The file is written, so the pane shows what it now says; the
         // queue reader's next pass reads the rest of the list again.
-        Err(_) => {
+        Err(err) => {
             if let Some(task) = groups
                 .iter_mut()
                 .flat_map(|group| &mut group.tasks)
@@ -8073,9 +8093,17 @@ fn set_pipeline(
             {
                 task.pipeline = Some(name.to_string());
             }
+            outcome(
+                "pipeline changed",
+                format!(
+                    "{} now names pipeline `{name}`, but the pending task list would not \
+                     read again: {err:#}. The rest of the list may be behind until the \
+                     screen reads it again.",
+                    path.display()
+                ),
+            )
         }
     }
-    Mode::Browsing
 }
 
 /// Insert or replace a `<key>: <value>` line right after a task's
@@ -9306,9 +9334,10 @@ fn two_pane_frame(
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
-/// [`Mode::DeletePlan`], [`Mode::NewJob`], [`Mode::PickRoutine`] — none
-/// of the ordinary line's keys is read, so this draws the picker's own key
-/// row instead, the same keys its popup names. A notice is different: it
+/// [`Mode::DeletePlan`], [`Mode::NewJob`], [`Mode::PickRoutine`],
+/// [`Mode::EditPipeline`] — none of the ordinary line's keys is read, so
+/// this draws the picker's own key row instead, the same keys its popup
+/// names. A notice is different: it
 /// reads only `enter` to close it, or only `esc` for
 /// [`Mode::PlanNotDeleted`], which its own popup says, and the line
 /// under the frame stays the one the screen will read again once it is
@@ -16545,23 +16574,39 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
-    /// A screen gate stays when the new pipeline has its step, `review` on
-    /// `bugfix`, and is cleared when it does not, `implement`.
+    /// A screen gate stays when the new pipeline has its step as one the gate
+    /// picker offers, `review` on `bugfix`. It is cleared when the step is
+    /// missing, `implement` on `bugfix`, and when the new pipeline runs it as
+    /// a command, `review` on `checked`, since submission refuses a
+    /// `gate_at:` on a command step. Before the gate check went through
+    /// `gate_steps`, the command-step gate was kept.
     #[test]
     fn a_new_pipeline_keeps_a_gate_only_on_a_step_it_has() {
         let (repo, _root_guard) = fixture("screen-edit-pipeline-gate");
-        let pipelines = Pipelines::builtin();
-        for (step, kept) in [("review", true), ("implement", false)] {
+        let yaml = "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    run: scripts/gate.sh\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "checked".into(),
+            crate::pipeline::Pipeline::parse("checked", yaml).unwrap(),
+        );
+        for (step, name, kept) in [
+            ("review", "bugfix", true),
+            ("implement", "bugfix", false),
+            ("review", "checked", false),
+        ] {
             write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
             let mut groups = listed(&repo);
             let mut state = on_pending_task(&groups, "wire");
             let key = highlighted_task_key(&groups, &state).unwrap();
             state.gates.insert(key.clone(), step.to_string());
             let menu = pending_options(&groups, &state).unwrap();
-            let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+            let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, name);
             assert!(matches!(mode, Mode::Browsing), "{mode:?}");
-            assert_eq!(state.gates.contains_key(&key), kept, "{step}");
-            assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some("bugfix"));
+            assert_eq!(state.gates.contains_key(&key), kept, "{step} on {name}");
+            assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some(name));
         }
     }
 
@@ -20994,9 +21039,10 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // Tab onto tasks, space to select, o, down onto gate and enter to
-        // open the gate picker, down onto the pipeline's second step
-        // (`review`), enter to pick it, enter to submit.
+        // Tab onto tasks, space to select, o, down twice onto gate (past
+        // edit pipeline) and enter to open the gate picker, down onto the
+        // pipeline's second step (`review`), enter to pick it, enter to
+        // submit.
         screen(&repo, groups, "\t o\x1b[B\x1b[B\r\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
