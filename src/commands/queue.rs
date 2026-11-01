@@ -4847,9 +4847,10 @@ const EDIT_PICK_TEXT: usize = 44;
 const LANDS_IN_COLUMN: usize = 36;
 
 /// The column the group's name starts at on the edit depends on picker's
-/// rows, counted from the cursor mark. It fits a task id of up to sixteen
+/// rows, counted from the cursor mark. It fits a task id of up to fifteen
 /// characters with two spaces after it, so most groups line up in one
-/// column; a longer id pushes only its own group along.
+/// column; a longer id pushes only its own group along, one space past its
+/// end.
 const DEPENDS_ON_COLUMN: usize = 19;
 
 impl PipelinePick {
@@ -8760,8 +8761,9 @@ fn set_lands_in(
 /// [`check_dependencies_set`]), and the chain must land where its head does.
 /// The branch is the one the tasks pane shows for that group, so a pending
 /// group naming no `base:` gives the board's branch, which queuing it from
-/// this screen gives it too. Only where that is not known either, on a
-/// detached checkout, is the head's `depends_on:` written alone. `none`
+/// this screen gives it too. Only where that is not known either — such a
+/// group on a detached checkout, or a queued or done task recorded with no
+/// `base:` — is the head's `depends_on:` written alone. `none`
 /// leaves every `base:` as it is: the chain still lands where it did.
 ///
 /// The head must still be the highlighted task, still pending and still its
