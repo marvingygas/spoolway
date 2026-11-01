@@ -1350,6 +1350,11 @@ impl<'a> Dispatcher<'a> {
             }
             runs.stop(&key);
         }
+        // A hook run still going is stopped now, while its pid file is on
+        // disk to find it by. Reclaiming the files first would leave the
+        // process running, and it would write its exit code back after the
+        // task is queued again for the gate to read as the next run's answer.
+        crate::tracking::stop(self.repo, task.id());
 
         // A worktree cut that is still going is writing that checkout too.
         if let Err(e) = crate::cut::stop_and_reclaim(

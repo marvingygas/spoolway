@@ -11833,6 +11833,37 @@ mod tests {
         assert!(path.exists(), "carrying the task on is the caller's");
     }
 
+    /// Unqueuing a stopped task removes the session homes made for its lanes,
+    /// a lane that never banked a ledger line included, and no one else's.
+    #[test]
+    fn a_stopped_task_takes_its_session_homes_with_it() {
+        let (repo, _root_guard) = fixture("stopped-teardown-homes");
+        let path = add_task(&repo, "demo", "paused");
+        let home = crate::scratch::root("dispatch-stopped-teardown-homes");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let ours = crate::agent::session_home("codex", "stopped-ours").unwrap();
+            let theirs = crate::agent::session_home("codex", "stopped-theirs").unwrap();
+            std::fs::create_dir_all(&ours).unwrap();
+            std::fs::create_dir_all(&theirs).unwrap();
+            crate::agent::tag_session_home("codex", "stopped-ours", repo.home(), "demo");
+            crate::agent::tag_session_home("codex", "stopped-theirs", repo.home(), "demo-two");
+
+            let mux = FakeMux::new(vec![]);
+            let mut report = Report::default();
+            let gone = Dispatcher::new(&repo, &Pipelines::builtin(), &mux).tear_down_stopped(
+                &mut reload(&path),
+                &[],
+                &mut report,
+            );
+
+            assert!(gone, "{:?}", report.problems);
+            assert!(!ours.exists(), "the task's session home was left behind");
+            assert!(theirs.exists(), "another task's home was removed");
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Acceptance criterion: a trial's archived arms are not removed while a
     /// sibling of the same trial is still active — only once every arm has
     /// settled does the disposal in `a_trial_removes_every_arms_archive_

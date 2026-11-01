@@ -14004,6 +14004,69 @@ mod tests {
         assert!(branch_exists(&repo, "task/solo"));
     }
 
+    /// A forced unqueue stops a hook run still going for the task before its
+    /// files under `tracking/` go, and leaves no run file under `tracking/` or
+    /// `commands/` and no lane alias behind. Fails when the files are reclaimed
+    /// first: the hook then outlives the unqueue and writes an exit code for
+    /// the task's next run.
+    #[test]
+    fn a_forced_unqueue_stops_a_running_hook_and_reclaims_the_task_files() {
+        let (repo, _root_guard) = fixture("unqueue-forced-hook");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "paused".to_string();
+        task.save().unwrap();
+
+        let hooks = crate::command_step::Runs::new(&repo.tracking_dir());
+        let key = crate::command_step::Runs::key("queued", "solo");
+        hooks
+            .start(&key, "sleep 60", &repo.root, &Default::default())
+            .unwrap();
+        let pid = hooks.read_pid(&key).expect("the hook run has a pid");
+        assert!(crate::headless::alive(pid));
+        let commands = repo.commands_dir();
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("solo · check.log"), "output").unwrap();
+        std::fs::write(commands.join("solo-two · check.log"), "not ours").unwrap();
+        crate::lane_alias::reserve(
+            repo.home(),
+            "solo · implement",
+            "w1:p1",
+            &Default::default(),
+        )
+        .unwrap();
+
+        queue_unqueue_forced(&repo, &pipelines, "solo").unwrap();
+
+        assert!(
+            !crate::headless::alive(pid),
+            "the hook outlived the unqueue"
+        );
+        let left = |dir: std::path::PathBuf| -> Vec<String> {
+            std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|name| name.starts_with("solo · "))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert!(left(repo.tracking_dir()).is_empty(), "tracking/ files left");
+        assert!(left(commands.clone()).is_empty(), "commands/ files left");
+        assert!(
+            commands.join("solo-two · check.log").exists(),
+            "another task's file was removed"
+        );
+        assert_eq!(
+            crate::lane_alias::alias_for(repo.home(), "solo · implement").unwrap(),
+            None,
+            "the lane alias was left on record"
+        );
+    }
+
     /// A forced unqueue brings the worktree down, so a process a finished
     /// command step backgrounded — recorded only in a `.group` file — has to
     /// be stopped first, or it keeps its cwd in a directory that is gone.
