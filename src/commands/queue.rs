@@ -15361,9 +15361,9 @@ mod tests {
     #[test]
     fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
         let (baseline_proc, baseline_reads) =
-            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\r");
+            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\x1b[B\r");
         let (measured_proc, measured_reads) =
-            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\rj");
+            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\x1b[B\rj");
 
         assert_eq!(
             measured_proc, baseline_proc,
@@ -15988,7 +15988,8 @@ mod tests {
     }
 
     /// `o` lists what the focused row can do, titled with its name: over
-    /// the tasks pane a pending task offers open task, gate then delete, over
+    /// the tasks pane a pending task offers open task, edit pipeline, gate
+    /// then delete, over
     /// the groups pane a group with a pending task offers trial, save as
     /// routine then delete. A group with no tasks has none of them and opens
     /// the menu with nothing in it, and a pane with no row under its cursor
@@ -16011,7 +16012,12 @@ mod tests {
         assert_eq!(menu.title, "wire");
         assert_eq!(
             menu.items,
-            [RowOption::Open, RowOption::Gate, RowOption::Delete]
+            [
+                RowOption::Open,
+                RowOption::EditPipeline,
+                RowOption::Gate,
+                RowOption::Delete
+            ]
         );
 
         // `list_groups` never hands back an empty group, so one is made by
@@ -16064,7 +16070,12 @@ mod tests {
             let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
             assert_eq!(
                 menu.items,
-                [RowOption::Open, RowOption::Gate, RowOption::Delete],
+                [
+                    RowOption::Open,
+                    RowOption::EditPipeline,
+                    RowOption::Gate,
+                    RowOption::Delete
+                ],
                 "{id}"
             );
         }
@@ -16091,7 +16102,7 @@ mod tests {
     /// The groups pane's menu on a group whose task has a `plan:` draws
     /// `open plan`, `trial`, `save as routine` and `delete`, in that order,
     /// the cursor on the first, and that task's own menu draws `open task`,
-    /// `gate` and `delete` with no `open plan` among them.
+    /// `edit pipeline`, `gate` and `delete` with no `open plan` among them.
     #[test]
     fn the_group_menu_draws_open_plan_first_and_the_task_menu_drops_it() {
         let (repo, _root_guard) = fixture("screen-options-draws-plan");
@@ -16130,6 +16141,7 @@ mod tests {
             [
                 format!("{TOP_LEFT}─ cart-totals {}{TOP_RIGHT}", "─".repeat(19)),
                 "│  > open task                    │".to_string(),
+                "│    edit pipeline                │".to_string(),
                 "│    gate                         │".to_string(),
                 "│    delete                       │".to_string(),
                 "│                                 │".to_string(),
@@ -16348,6 +16360,255 @@ mod tests {
         assert!(matches!(mode, Mode::Browsing), "{mode:?}");
     }
 
+    /// The built-in pipelines and copies of `default` under `names`, so a
+    /// picker has a list long enough to scroll.
+    fn pipelines_named(names: &[&str]) -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        let default = pipelines.pipelines["default"].clone();
+        for name in names {
+            pipelines
+                .pipelines
+                .insert(name.to_string(), default.clone());
+        }
+        pipelines
+    }
+
+    /// `state`'s edit pipeline picker, opened through the menu's own item.
+    fn edit_pipeline_on(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        groups: &[Group],
+        state: &ScreenState,
+    ) -> Box<PipelinePick> {
+        let picked = Picked {
+            repo,
+            pipelines,
+            routines_dir: &repo.routines_dir(),
+        };
+        let menu = pending_options(groups, state).unwrap();
+        match picked.run(groups, &[], state, &menu, RowOption::EditPipeline) {
+            Mode::EditPipeline(pick) => pick,
+            other => panic!("edit pipeline opened {other:?}"),
+        }
+    }
+
+    /// Edit pipeline sits after open task on a pending task's menu, and a
+    /// done task's menu does not offer it, as a queued one's does not —
+    /// see `delete_is_offered_last_exactly_on_rows_with_a_pending_file`.
+    #[test]
+    fn edit_pipeline_is_offered_only_on_a_pending_task() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-offered");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let mut groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items[..2], [RowOption::Open, RowOption::EditPipeline]);
+        assert_eq!(RowOption::EditPipeline.label(), "edit pipeline");
+        groups[0].tasks[0].state = TaskState::Done;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+    }
+
+    /// The picker lists every pipeline but the task's own, in name order,
+    /// titled with the task: scrolled to the last of ten it counts the
+    /// three above, and `f` then `impl` on a picker just opened leaves the
+    /// four names holding it.
+    #[test]
+    fn the_pipeline_picker_lists_the_other_pipelines_and_scrolls_and_searches() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-list");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: a\npipeline: impl\n", BODY),
+        );
+        let pipelines = pipelines_named(&[
+            "impl",
+            "impl_fast",
+            "impl_lite",
+            "impl_tdd",
+            "impl_ui",
+            "probe",
+            "release",
+            "security",
+            "skill",
+        ]);
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+        let pick = edit_pipeline_on(&repo, &pipelines, &groups, &state);
+        let list = (0..9).fold(pick.list, |list, _| match list.handle_key(Key::Down) {
+            crate::screen::picker::Picked::Open(list) => *list,
+            _ => panic!("the picker closed on a down arrow"),
+        });
+        let drawn: Vec<String> = list
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "╭─ pipeline for wire ────────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│    ↑ 3 pipelines above                         │",
+                "│    impl_lite                                   │",
+                "│    impl_tdd                                    │",
+                "│    impl_ui                                     │",
+                "│    probe                                       │",
+                "│    release                                     │",
+                "│    security                                    │",
+                "│  > skill                                       │",
+                "│                                                │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let list = edit_pipeline_on(&repo, &pipelines, &groups, &state).list;
+        let list = "fimpl"
+            .chars()
+            .fold(list, |list, c| match list.handle_key(Key::Char(c)) {
+                crate::screen::picker::Picked::Open(list) => *list,
+                _ => panic!("the picker closed on {c:?}"),
+            });
+        let drawn: Vec<String> = list
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "╭─ pipeline for wire ────────────────────────────╮",
+                "│  search: impl▏                                 │",
+                "│                                                │",
+                "│  > impl_fast                                   │",
+                "│    impl_lite                                   │",
+                "│    impl_tdd                                    │",
+                "│    impl_ui                                     │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+    }
+
+    /// `enter` on the picker writes the pick over the task's `pipeline:`
+    /// and leaves every other line of the file as it was, closes to the
+    /// screen, and the tasks pane shows the new pipeline.
+    #[test]
+    fn enter_on_the_pipeline_picker_writes_the_pending_file() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-enter");
+        let before = task_text(
+            "wire",
+            "group: a\ndepends_on:\n- login\nbase: main\n",
+            "## Goal\n\npipeline: default is body text, kept as it is.\n",
+        );
+        let path = write_pending(&repo, "wire", &before);
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\r\r");
+        let after = std::fs::read_to_string(&path).unwrap();
+        let others = |doc: &str| -> Vec<String> {
+            let mut lines: Vec<String> = doc
+                .lines()
+                .filter(|l| !l.starts_with("pipeline: bugfix"))
+                .filter(|l| *l != "pipeline: default")
+                .map(str::to_string)
+                .collect();
+            lines.sort();
+            lines
+        };
+        assert!(after.lines().any(|l| l == "pipeline: bugfix"), "{after}");
+        assert!(!after.lines().any(|l| l == "pipeline: default"), "{after}");
+        assert_eq!(others(&after), others(&before));
+        assert!(after.ends_with("pipeline: default is body text, kept as it is.\n"));
+        let last = crate::screen::shell::plain(last_frame(&drawn));
+        let pipeline_row = |name: &str| {
+            last.lines().any(|l| {
+                l.split("pipeline:")
+                    .nth(1)
+                    .is_some_and(|rest| rest.trim_start().starts_with(name))
+            })
+        };
+        assert!(pipeline_row("bugfix"), "{last}");
+        assert!(!pipeline_row("default"), "{last}");
+        assert!(!last.contains("pipeline for wire"), "{last}");
+    }
+
+    /// `esc` on the picker goes back to the options menu it was opened from.
+    #[test]
+    fn esc_on_the_pipeline_picker_reopens_the_options_menu() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-esc");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let last = last_frame(&screen(&repo, listed(&repo), "\to\x1b[B\r\x1b")).to_string();
+        assert!(last.contains("> edit pipeline"), "{last}");
+        assert!(!last.contains("pipeline for wire"), "{last}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A screen gate stays when the new pipeline has its step, `review` on
+    /// `bugfix`, and is cleared when it does not, `implement`.
+    #[test]
+    fn a_new_pipeline_keeps_a_gate_only_on_a_step_it_has() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-gate");
+        let pipelines = Pipelines::builtin();
+        for (step, kept) in [("review", true), ("implement", false)] {
+            write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+            let mut groups = listed(&repo);
+            let mut state = on_pending_task(&groups, "wire");
+            let key = highlighted_task_key(&groups, &state).unwrap();
+            state.gates.insert(key.clone(), step.to_string());
+            let menu = pending_options(&groups, &state).unwrap();
+            let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+            assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+            assert_eq!(state.gates.get(&key).is_some(), kept, "{step}");
+            assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some("bugfix"));
+        }
+    }
+
+    /// A pick lands on nothing once its task has moved: with another task
+    /// slid under the cursor, or the pending file gone, a notice names the
+    /// file and nothing is written.
+    #[test]
+    fn a_pipeline_pick_for_a_task_that_moved_writes_nothing() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-moved");
+        let left = task_text("left", "group: one\n", BODY);
+        let right = task_text("right", "group: one\n", BODY);
+        write_pending_two(&repo, "left", &left, "right", &right);
+        let pipelines = Pipelines::builtin();
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "left");
+        let menu = pending_options(&groups, &state).unwrap();
+        let path = repo.pending_dir().join("left.md");
+
+        state.task_cursor = 1 - state.task_cursor;
+        let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert!(
+            notice.text.contains(&path.display().to_string()),
+            "{notice:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), left);
+        assert_eq!(
+            std::fs::read_to_string(repo.pending_dir().join("right.md")).unwrap(),
+            right
+        );
+
+        state.task_cursor = 1 - state.task_cursor;
+        std::fs::remove_file(&path).unwrap();
+        let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert!(
+            notice.text.contains(&path.display().to_string()),
+            "{notice:?}"
+        );
+        assert!(!path.exists());
+    }
+
     /// Two groups where deleting `cart-totals` reaches into the other one:
     /// `cart-discounts` and `checkout-total` both depend on it.
     /// `checkout` is written first, so `cart` lists first either way the
@@ -16414,7 +16675,12 @@ mod tests {
         let menu = pending_options(&groups, &state).unwrap();
         assert_eq!(
             menu.items,
-            [RowOption::Open, RowOption::Gate, RowOption::Delete]
+            [
+                RowOption::Open,
+                RowOption::EditPipeline,
+                RowOption::Gate,
+                RowOption::Delete
+            ]
         );
 
         // Set by hand: what `list_groups` gives a task the queue or the
@@ -20732,7 +20998,7 @@ mod tests {
         // Tab onto tasks, space to select, o, down onto gate and enter to
         // open the gate picker, down onto the pipeline's second step
         // (`review`), enter to pick it, enter to submit.
-        screen(&repo, groups, "\t o\x1b[B\r\x1b[B\r\r");
+        screen(&repo, groups, "\t o\x1b[B\x1b[B\r\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");
