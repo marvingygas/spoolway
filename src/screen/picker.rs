@@ -14,6 +14,7 @@
 //! again. A fetch that fails leaves the list as the last fetch saw it,
 //! under rows giving git's reason.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -22,6 +23,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::mux::{GitCapture, GitWithin};
+use crate::repo::Repo;
 use crate::screen::{Key, Wake, keys, pad_to};
 
 /// How many entries the picker shows at once at most. A list longer than
@@ -342,6 +344,48 @@ impl<T: Clone + Send + 'static> Picker<T> {
         }
         crate::screen::panel(&self.title, &body, &keys(self.look.keys))
     }
+}
+
+/// One branch a branch list offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Branch {
+    pub(crate) name: String,
+    /// Whether only `origin` has it, with no local branch of that name.
+    pub(crate) remote_only: bool,
+}
+
+/// Every local branch and every `origin` branch, in one list sorted by
+/// name, each named once, task branches included. A list that has no use
+/// for some of them leaves them out itself.
+///
+/// `origin`'s branches are the ones the last fetch saw: a picker made
+/// [`Picker::fetching_origin`] fetches before it reads this again, and
+/// this itself fetches nothing. Branches of any other remote are left out,
+/// since the dispatcher looks for a base only locally or on `origin`.
+pub(crate) fn branches(repo: &Repo) -> Result<Vec<Branch>> {
+    let listing = repo.git(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads",
+        "refs/remotes/origin",
+    ])?;
+    // Keyed by name, so a branch both sides have is listed once, as local.
+    let mut found: BTreeMap<String, bool> = BTreeMap::new();
+    for line in listing.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            found.insert(name.to_string(), false);
+        } else if let Some(name) = line.strip_prefix("refs/remotes/origin/")
+            // `origin/HEAD` names the remote's default branch, which is
+            // listed under its own name already.
+            && name != "HEAD"
+        {
+            found.entry(name.to_string()).or_insert(true);
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(name, remote_only)| Branch { name, remote_only })
+        .collect())
 }
 
 /// `offset` moved as little as it takes for a view `view` rows tall to

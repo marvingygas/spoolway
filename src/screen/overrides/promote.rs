@@ -20,7 +20,6 @@
 //! branch carries, so the tab refuses before the picker opens and points at
 //! `override promote` instead.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,14 +30,8 @@ use crate::pipeline::Pipelines;
 use crate::repo::Repo;
 use crate::screen::{Key, Notice, Wake, pad_to, picker, plural};
 
-/// One branch the picker offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Branch {
-    pub(super) name: String,
-    /// Whether only `origin` has it, so promoting onto it first makes a
-    /// local branch tracking `origin`'s.
-    pub(super) remote_only: bool,
-}
+/// One branch the picker offers — see [`picker::Branch`].
+pub(super) use crate::screen::picker::Branch;
 
 /// One file a promote writes, with what the confirm popup lists under it.
 #[derive(Debug, Clone)]
@@ -51,37 +44,15 @@ pub(super) struct Promoted {
     pub(super) keys: Vec<(String, String)>,
 }
 
-/// Every branch the picker offers: the local ones and `origin`'s, in one
-/// list sorted by name, each named once.
+/// Every branch the picker offers: [`picker::branches`], task branches left
+/// out.
 ///
-/// Task branches are left out. Lanes push many of them, and the checkout of
-/// one is a lane's, which [`Repo::tracked_write_root`] refuses. `origin`'s
-/// branches are the ones the last fetch saw: the picker fetches before it
-/// reads this again, and this itself fetches nothing.
+/// Lanes push many task branches, and the checkout of one is a lane's,
+/// which [`Repo::tracked_write_root`] refuses.
 pub(super) fn branches(repo: &Repo) -> Result<Vec<Branch>> {
-    let listing = repo.git(&[
-        "for-each-ref",
-        "--format=%(refname)",
-        "refs/heads",
-        "refs/remotes/origin",
-    ])?;
-    // Keyed by name, so a branch both sides have is listed once, as local.
-    let mut found: BTreeMap<String, bool> = BTreeMap::new();
-    for line in listing.lines().map(str::trim) {
-        if let Some(name) = line.strip_prefix("refs/heads/") {
-            found.insert(name.to_string(), false);
-        } else if let Some(name) = line.strip_prefix("refs/remotes/origin/")
-            // `origin/HEAD` names the remote's default branch, which is
-            // listed under its own name already.
-            && name != "HEAD"
-        {
-            found.entry(name.to_string()).or_insert(true);
-        }
-    }
-    Ok(found
+    Ok(picker::branches(repo)?
         .into_iter()
-        .filter(|(name, _)| !name.starts_with("task/"))
-        .map(|(name, remote_only)| Branch { name, remote_only })
+        .filter(|branch| !branch.name.starts_with("task/"))
         .collect())
 }
 
