@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.17.0 to 0.18.0 | `spoolway queue unqueue <task>` unqueues any stopped task and every task after it, prints what it deleted and moved, and refuses only a running task; `--force` and `--all` are removed; bare `spoolway` opens a tab with its digit, and `←`/`→` no longer switch tabs; the strip numbers every tab and dims all but the open one; `←`/`→` move between sections and panes and `tab` does nothing; `space` on a routine's details ticks the routine, and no key queues one routine task alone. | Replace `unqueue <task> --force` with `queue pause <task>` then `queue unqueue <task>`, replace `unqueue --all` with one `queue unqueue <task>` for each task, update scripts that read its output, and update pty scripts that press `←` or `→` to switch tabs, press `tab` to change section or pane, match the strip or a `[tab]` pair, or press `space` on a routine's task to queue it alone. |
+| 0.17.0 to 0.18.0 | `spoolway queue unqueue <task>` unqueues any stopped task and every task after it, prints what it deleted and moved, and refuses only a running task; `--force` and `--all` are removed; bare `spoolway` opens a tab with its digit, and `←`/`→` no longer switch tabs; the strip numbers every tab and dims all but the open one; `←`/`→` move between sections and panes and `tab` does nothing; `space` on a routine's details ticks the routine, and no key queues one routine task alone; the shipped `create-pr` prompt leads a pull request title with the task's issue; `init` on a tracked checkout at a terminal offers `workspace only` first; the focused pane's title is bracketed; key lines name a key only while it acts; the step picker keeps the section names and hides `not set` steps behind `h`. | Run `spoolway sync` and commit what it writes, run `spoolway sync --replace .spoolway/prompts/create-pr/PROMPT.md`, run `spoolway init --setup repo` to restore missing files, replace `unqueue <task> --force` with `queue pause <task>` then `queue unqueue <task>`, replace `unqueue --all` with one `queue unqueue <task>` for each task, update scripts that read its output, and update pty scripts that press `←` or `→` to switch tabs, press `tab` to change section or pane, match the strip or a `[tab]` pair, press `space` on a routine's task to queue it alone, match plain pane titles or whole key lines, or select `not set` steps in the step picker. |
 | 0.16.0 to 0.17.0 | The overrides pipeline section lists every step key but `id` under three headers and its cursor starts on `description`; the step picker lists every pipeline's steps and its pipeline rows draw no counts; every empty eval table reads `no data.`. | Run `spoolway sync` and commit what it writes, and update pty scripts that walk the overrides pipeline section or its step picker, or match the eval screen's empty-table lines. |
 | 0.15.0 to 0.16.0 | The dispatcher no longer brings a pane to the front unless `dispatch.autofocus_panes` is on; `override promote` keeps the entry in the layer; bare `spoolway` opens on the dispatch tab and the strip gains `OVERRIDES`; the STATE cell is the state word alone; one-answer popups have no answer row and find is search; the problem log follows `housekeeping.retention_days`; a failed command step's status line names a kept copy of its log; the eval tab's title names its sections. | Run `spoolway sync` and commit what it writes, set `autofocus_panes = true` to keep panes coming forward, drop each promoted override once its branch merges, and update scripts that drive the opening tab, one-answer popups, search or the eval title, read STATE ages, match the promote line or read the failed log path. |
 | 0.14.1 to 0.15.0 | `dispatch.backend` is retired; `gate:` is `on_pass`, `on_fail` or `always`, allowed only on an agent step, and older binaries refuse those values; a `gate_at:` that names a command step is refused; JSON prints `gate` as a string; a report a gate holds needs a `--handoff`; `~/.spoolway/editor.toml` is no longer read; a job runs one whole routine and a routine holds one active job; the jobs tab is gone; home-mode plan pages live in the workspace; a resume onto a step without `session: true` opens a fresh conversation; TUI text and shared messages are lowercase; releases carry bare executables in place of archives; a binary npm did not install never checks for updates. | Run `spoolway sync` in each project and home-mode clone and commit what it writes, upgrade CI and teammates to the same release, move each `gate:` off a command step, set `VISUAL` or `EDITOR`, clear what `spoolway doctor` fails for your jobs, set `session: true` where a resume should continue, and update scripts that set `dispatch.backend`, read `gate` in JSON, report on a gated step, drive the jobs tab, match messages by case or fetch release archives. |
@@ -61,8 +61,25 @@ wsl npm install -g spoolway
 
 ## 0.17.0 to 0.18.0
 
-Nothing to sync. Update the scripts that call `spoolway queue unqueue` or drive bare `spoolway`
-on a pty.
+Run `spoolway sync` in each project and commit what it writes. It rewrites the shipped
+`spoolway-plan` skill. Take the shipped `create-pr` prompt with `spoolway sync --replace`, as the
+first item below says. Then update the scripts that call `spoolway queue unqueue` or drive bare
+`spoolway` on a pty, and restart the dispatcher.
+
+- The shipped `create-pr` prompt puts the task's issue in front of the pull request title, read
+  from its `ticket:`. A GitHub issue URL goes in front as `#<number>`, or as `owner/repo#<number>`
+  when the issue is in another repository, and a bare key such as `KAN-11` goes in as it is. When
+  the branch already has an open pull request whose title does not start with the issue, the step
+  edits that title. `spoolway sync` keeps a project's own copy of the prompt. To take the new one,
+  run `spoolway sync --replace .spoolway/prompts/create-pr/PROMPT.md`, then re-apply your own edits
+  from the `.bak` file it saves. See [Prompts](prompts.md).
+- `spoolway init` at a terminal, on a checkout with a committed `.spoolway/` that no workspace
+  lists, opens the setup menu with `workspace only` highlighted. 0.17.0 ran the repo-mode repeat
+  there. `enter` now gives the checkout its local workspace and writes nothing in the checkout. To
+  restore missing shipped files as before, run `spoolway init --setup repo`. The missing-prompt
+  messages, `spoolway doctor` and `spoolway sync` now name that command where they named plain
+  `spoolway init`. With no terminal, `init` runs the repo-mode repeat as before. See
+  [`spoolway init`](cli-reference.md#spoolway-init).
 
 - `spoolway queue unqueue <task>` takes any stopped task, as the board's `unqueue` does, with no
   prompt and with a dispatcher running or not. A stopped task is one on `queued`, or on `paused`,
@@ -126,6 +143,36 @@ on a pty.
 
   A pty script that pressed `space` on a routine's task to queue it alone queues the whole
   routine with `space` and then `enter`. See [Routines](planning.md#routines).
+
+- The queue and routines tabs draw the title of the pane that has focus in square brackets, so
+  the queue tab reads `─ [groups] ─ tasks` with the left pane focused. A pty script that matched
+  `─ groups` or another plain pane title accepts the bracketed spelling too.
+- A key line names a key only while pressing it would act. A pty script that matched a whole key
+  line expects these keys to be missing in the states below.
+
+  | Screen | Key | Shown only when |
+  |---|---|---|
+  | dispatch | `[enter] start dispatching`, `[enter] stop dispatching` | no popup that reads keys is open, and the dispatcher has not been asked to stop |
+  | queue | `[enter] queue` | a group is ticked |
+  | queue | `[space] select` | the cursor is on a group that can be ticked |
+  | queue | `[o] options` | a row is under the cursor |
+  | routines | `[enter] queue` | a routine is ticked and the cursor is off a job row |
+  | routines | `[space] select`, `[o] options` | the row under the cursor takes them |
+  | new job | `[enter] accept` | the schedule's cron text parses |
+  | overrides | `[enter]`, `[o] options` | a config or pipeline search leaves a row |
+  | overrides | `[enter] override` | a prompts search has a match |
+  | overrides | `[enter] set value` | a step is selected in the step picker |
+  | overrides | `[space]`, `[a]`, `[o]` | the active section holds an override |
+  | eval | every key but `[q] quit` | the tab has loaded and no filter, sort or calendar popup is open |
+  | eval | `[enter] open` | the trials table has a row |
+
+- The overrides step picker keeps the section names on its border, `config   [pipeline]
+  prompts   active (n)`, where it read `select steps for <field>`. The field list's key line reads
+  `[enter] select` where it read `[enter] select steps`. The picker opens with the `not set` steps
+  hidden, unless no step sets the field. `h` shows them, and hiding them again deselects them. `a`
+  selects only the steps on screen. A search also lists the hidden `not set` steps it matches. A
+  pty script that selected a `not set` step presses `h` first or searches for it. See
+  [The pipeline section](dispatcher.md#the-pipeline-section).
 
 ## 0.16.0 to 0.17.0
 

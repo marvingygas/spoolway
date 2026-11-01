@@ -21,6 +21,48 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.18.0
+
+### Highlights
+- Tabs open with number keys. The strip reads `[1] DISPATCH` to `[5] EVAL` and dims every tab but the open one, and `←` and `→` now move between a tab's sections and panes, where `tab` did. (#1438, #1445)
+- `unqueue` takes any stopped task, from the board or the command line. The board offers it on every `paused`, `blocked` or `hook_failed` row with nothing running, and `spoolway queue unqueue <task>` follows the same rules. Both tear the task down the way done-cleanup does, so it can be queued again at once, and move every task after it in its group back to pending. (#1460, #1461, #1462)
+- A pending task's options menu edits its chain in place. `edit pipeline` moves the task to another pipeline, and on a chain head `edit lands in` picks the branch its group lands in and `edit depends on` stacks the group onto another task or unstacks it. (#1448, #1452, #1459)
+- `spoolway init` offers a third setup, `workspace only`, which gives a checkout its local workspace and writes nothing in it. It is highlighted on a checkout whose `.spoolway/` is already committed, so a teammate joins a project with one `enter`. (#1414, #1416, #1417)
+- Key lines name a key only while pressing it would act, and the queue and routines tabs bracket the title of the pane that has focus. (#1433, #1449, #1453)
+
+### Breaking changes and migration
+- `spoolway queue unqueue <task>` loses `--force` and `--all`, and passing either is an unknown-argument error. A stopped task is unqueued with no flag, together with every task after it in its group, and a started one has its worktree and local `task/<id>` branch deleted first. A running task is refused with `spoolway queue pause <task>` named as the step to take first. The output names what was deleted and prints one `unqueued` line per task moved, where it printed `removed worktree` or `kept worktree`. Replace `unqueue <task> --force` with `queue pause <task>` then `queue unqueue <task>`, and `unqueue --all` with one `queue unqueue <task>` per task. (#1460, #1462)
+- Digits switch tabs, and `←` and `→` no longer do. The strip shows `[1] DISPATCH` to `[5] EVAL`, or `[4] EVAL` in a home-mode project, with no arrows at its ends, and every label but the open tab's is dimmed, where the open tab was bracketed. A pty script that pressed `←` or `→` to switch tabs presses the tab's digit, and one that matched `[QUEUE]` matches `[2] QUEUE`. (#1438)
+- `←` and `→` move between sections and panes on the queue, routines, overrides and eval tabs, wrapping at either end, and `tab` does nothing. No key line names `[tab]`. A pty script that pressed `tab` presses `→`, and one that matched a `[tab]` pair on a key line matches the line without it. (#1445)
+- `space` on the routines tab's details pane ticks the routine shown, where it queued the highlighted task alone, and `enter` queues the ticked routines from either pane. No key queues one routine task alone any more. (#1447)
+- The shipped `create-pr` prompt puts the task's issue in front of the pull request title, as `#<number>`, `owner/repo#<number>` or a bare key such as `KAN-11`, and fixes the title of an already open pull request that does not lead with it. `spoolway sync` keeps a project's own prompt, so run `spoolway sync --replace .spoolway/prompts/create-pr/PROMPT.md` and re-apply your edits from the `.bak` file it saves. (#1437, #1439)
+- `spoolway init` at a terminal, on a checkout with a committed `.spoolway/` that no workspace lists, opens the setup menu on `workspace only`, where it ran the repo-mode repeat. Run `spoolway init --setup repo` to restore missing shipped files, which is the command `doctor`, `sync` and the missing-prompt messages now name. With no terminal, `init` behaves as before. (#1416)
+- The queue and routines tabs draw the focused pane's title in square brackets, such as `─ [groups] ─ tasks`. A pty script that matched a plain pane title accepts the bracketed spelling. (#1433)
+- A key line leaves out a key that would do nothing, such as `[enter] queue` with nothing ticked, `[o] options` with no row under the cursor, or every eval key but `[q] quit` under a popup. A pty script that matched a whole key line expects those keys to be missing. The 0.17.0 to 0.18.0 section of `docs/migrations.md` lists every case. (#1449, #1453)
+- The overrides step picker keeps the section names on its border, where it read `select steps for <field>`, and the field list's key reads `[enter] select`, where it read `[enter] select steps`. The picker opens with `not set` steps hidden behind `h`, unless no step sets the field, and `a` selects only the steps on screen. A pty script that selected a `not set` step presses `h` first or searches for it. (#1422, #1423, #1424)
+
+### Features
+- The board's `focus` reaches a `paused`, `blocked` or `hook_failed` task's pane, zooming the newest one the task still has open. (#1458)
+- The board's unqueue popup says plainly when a task's branch and worktree will be deleted for good, and names any `last:` step the tasks left behind walk past. `spoolway queue unqueue` prints the same warning. (#1461, #1462)
+- A search in the overrides step picker lists the hidden `not set` steps it matches, and clearing the search hides and deselects them again. (#1424)
+- The promote branch picker fetches `origin` when it opens. It lists at once on a `fetching origin…` row, `esc` closes it while the fetch runs, and a failed fetch lists the branches from the last fetch with git's reason. `edit lands in` uses the same picker. (#1446, #1452)
+- `edit depends on` offers the last task of every other pending group, every queued group, and each done group whose pull request is still open, and refuses a pick that would split a stack. (#1459)
+- A `workspace only` pick is refused before anything is written when `--provider`, `--examples`, `--no-examples`, `--tracker`, `--project-key` or `--force` was given, and the message names each flag. (#1417)
+- The shipped `spoolway-plan` skill shows a plan page's source issue as a link under FILE, and draws the plan's paths as a folder tree. Run `spoolway sync` to take it. (#1411, #1413)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- The upgrade suite runs a project the released 0.17.0 binary wrote through the new binary. (#1400)
+- The README's images live in `docs/screenshots/readme/`, and this repository's own task captures go to `docs/screenshots/test/`, so a capture never replaces a README image. (#1412, #1415)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.18.0`, run it without installing via `npx spoolway@0.18.0`, install it with `brew install marvingygas/tap/spoolway`, or download it with `curl -fsSL https://github.com/marvingygas/spoolway/releases/download/v0.18.0/install.sh | sh`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl, darwin-arm64 and darwin-x64; the GitHub release carries four bare executables, `install.sh` and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, run `spoolway sync --replace .spoolway/prompts/create-pr/PROMPT.md` to take the new `create-pr` prompt, replace `unqueue --force` and `unqueue --all` in scripts, update pty scripts that switch tabs with the arrows, press `tab`, match pane titles or whole key lines, or pick `not set` steps, and restart the dispatcher. The 0.17.0 to 0.18.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.18.0
+
 ## 0.17.0
 
 ### Highlights
