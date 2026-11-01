@@ -319,9 +319,9 @@ wait_for_said() {
 
 # Bare `spoolway` — the one screen — with `keys` typed into it, and every
 # frame it drew written to `out`. The screen opens on the dispatch tab, so
-# one `\033[C` is typed ahead of `keys` and the caller is handed the queue
-# tab, as before: `\033[C` from there is the routines tab, a second one the
-# overrides tab, and `\033[D` the dispatch tab. The first frame in `out` is
+# `2` is typed ahead of `keys` and the caller is handed the queue tab, as
+# before: each tab's digit opens it from there, `1` dispatch, `3` routines,
+# `4` overrides and `5` eval. The first frame in `out` is
 # therefore the dispatch tab's, with the queue tab's after it. The screen
 # draws only with stdout on a terminal, so `script`
 # gives it a pty for stdout while the keys still arrive on an ordinary pipe,
@@ -342,7 +342,7 @@ wait_for_said() {
 on_screen() {
   local keys=$1 out=$2; shift 2
   _screen_ready
-  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="\033[C$keys" E2E_BIN="$SPOOLWAY" \
+  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="2$keys" E2E_BIN="$SPOOLWAY" \
     script -qec 'printf "$E2E_KEYS" | "$E2E_BIN"' "$out" >/dev/null 2>&1
 }
 
@@ -512,11 +512,11 @@ screen_start() {
   }
   E2E_SCREEN_PID=$(cat "$pidfile")
   # The screen opens on the dispatch tab, and its board says `dispatcher
-  # stopped`, the text `screen_board` waits for. One `→` hands every caller the queue
+  # stopped`, the text `screen_board` waits for. `2` hands every caller the queue
   # tab, which is where each counts its keys from, and the wait for its
   # `groups` pane keeps that opening board from standing in for a frame the
   # caller's own keys draw.
-  screen_press $'\x1b[C'
+  screen_press 2
   poll_until 10 queue_tab_drew_since "$mark" || {
     printf '  \033[31mSETUP\033[0m the screen never drew the queue tab\n' >&2
     tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
@@ -549,12 +549,12 @@ queue_tab_drew_since() {
   screen_drew_since "$1" "─ [groups]" || screen_drew_since "$1" "─ groups"
 }
 
-# Onto the dispatch tab, one `←` from the queue tab `screen_start` hands over, and
+# Onto the dispatch tab, `1` from the queue tab `screen_start` hands over, and
 # nothing started there. Fails the suite's setup if the board is never drawn.
 screen_board() {
   local mark
   mark=$(wc -l < "$E2E_SCREEN_LOG")
-  screen_press $'\x1b[D'
+  screen_press 1
   poll_until 10 screen_drew_since "$mark" "dispatcher stopped" || {
     printf '  \033[31mSETUP\033[0m the screen never drew the dispatch tab\n' >&2
     tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2

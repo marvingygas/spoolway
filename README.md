@@ -126,9 +126,9 @@ of work. See **[Tasks](docs/tasks.md)**.
 
 ### 4. Queue
 
-`spoolway` opens on the dispatch tab. `→` from there reaches the queue tab, which groups pending
-tasks. Select a group and press `enter` to queue it. The tab strip runs dispatch, queue, routines,
-overrides and eval, and `←` and `→` move between them.
+`spoolway` opens on the dispatch tab. `2` from there opens the queue tab, which groups pending
+tasks. Select a group and press `enter` to queue it. The tab strip numbers dispatch, queue,
+routines, overrides and eval from `1` to `5`, and each tab's digit opens it.
 
 <img src="docs/screenshots/readme/queue.png" alt="the queue tab" width="100%">
 

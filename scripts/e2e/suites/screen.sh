@@ -6,14 +6,15 @@
 # screen suite scripts its keystrokes.
 #
 # What is asserted is the order of the frames it drew: the first is the dispatch
-# tab's board, `←` from there stays on it and `→` reaches the queue tab. On the
+# tab's board under a strip numbering every tab, the arrows leave it there and
+# `2` reaches the queue tab. On the
 # board `enter` starts a dispatcher and, with no step running and nothing queued, stops it at once
 # with no popup. With a task queued it asks first. `u` there asks the running
 # dispatcher to reload, and the popup it opens closes itself once loaded.
 # While one screen is open, a second `spoolway` or `spoolway dispatch` in
 # the same project refuses. A refusal on the queue tab is drawn in a popup
 # over the tab, and so is what a clean submission queued, ending on whether a
-# dispatcher will pick it up. `→` twice from the opening tab reaches the routines tab.
+# dispatcher will pick it up. `3` from the opening tab reaches the routines tab.
 # Delete off the queue tab's options menu removes a pending group and every
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
@@ -62,11 +63,11 @@ pending_doc cart-totals "$BODY" "group: cart"
 
 # `script -qec` runs the pipeline under a pty and exits with its status. The
 # pty is what makes stdout a terminal; stdin is the `printf` pipe, so the
-# screen reads `←` and then runs out of keys, which ends it. The typescript
+# screen reads `2` and then runs out of keys, which ends it. The typescript
 # `script` writes is everything the screen drew.
 DRAWN="$LIVE/drawn.txt"
 works "bare spoolway opens and ends when its keys run out" \
-  script -qec "printf '\\033[D\\033[C' | '$SPOOLWAY'" "$DRAWN"
+  script -qec "printf '2' | '$SPOOLWAY'" "$DRAWN"
 
 # The real `TermGuard` the screen holds across its whole life enters the
 # alternate screen and turns wheel-as-arrows off before drawing a thing, and
@@ -96,35 +97,58 @@ fi
 
 # Every frame opens with the shared frame writer's own start code
 # (`\x1b[?2026h\x1b[H` — see `src/screen/frame_writer.rs`), so the transcript
-# splits into frames on it. The first one drawn is the dispatch tab's, its label
-# bracketed on the strip. Colour codes are taken out of each frame — the
-# strip's own bold and the colour of the tab drawn under it.
+# splits into frames on it. The first one drawn is the dispatch tab's, the
+# one label on the strip that is not dimmed. Colour codes are taken out of
+# each frame — the strip's own bold and dim and the colour of the tab drawn
+# under it — except in the `.raw` copies the lit-tab checks read.
 FIRST="$LIVE/first.txt"
 LAST="$LIVE/last.txt"
-awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" |
-  sed 's/\x1b\[[0-9;]*m//g' >"$FIRST"
-awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" |
-  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR == 2 { print; exit }' "$DRAWN" >"$FIRST.raw"
+sed 's/\x1b\[[0-9;]*m//g' "$FIRST.raw" >"$FIRST"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DRAWN" >"$LAST.raw"
+sed 's/\x1b\[[0-9;]*m//g' "$LAST.raw" >"$LAST"
 
-has "the strip names all five tabs in order" \
-  "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$FIRST"
+# The strip draws every label bold, and every one but the open tab's dim as
+# well. A dimmed label ends on `ESC[22m`, which ends bold too, so the strip
+# writes its bold again straight after: a lit label past the first is the
+# one that follows that pair and the gap with no dim of its own.
+dimmed() { printf '\033[2m%s' "$1"; }
+lit() { printf '\033[22m\033[1m        %s' "$1"; }
+
+STRIP="[1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] OVERRIDES        [5] EVAL"
+has "the strip numbers all five tabs in order" "$STRIP" "$FIRST"
+works "with no arrow at either end" \
+  bash -c '! grep -F "[1] DISPATCH" "$1" | grep -q "[←→]"' _ "$FIRST"
+lacks "with dispatch the one tab not dimmed" "$(dimmed '[1] DISPATCH')" "$FIRST.raw"
+has "and queue dimmed beside it" "$(dimmed '[2] QUEUE')" "$FIRST.raw"
+has "and eval dimmed at the far end" "$(dimmed '[5] EVAL')" "$FIRST.raw"
 has "it opens on the dispatch tab's board" "dispatcher stopped" "$FIRST"
 lacks "drawn inside a box with no title" "─ dispatch" "$FIRST"
 # Both spellings, since the queue tab brackets whichever pane has focus.
 lacks "not on the queue tab" "─ [groups] ─" "$FIRST"
 lacks "under either spelling of its title" "─ groups ─" "$FIRST"
 
-has "→ reaches the queue tab, its groups pane focused" "─ [groups] ─" "$LAST"
+has "2 reaches the queue tab, its groups pane focused" "─ [groups] ─" "$LAST"
 has "beside the tasks pane's plain title" "─ tasks ─" "$LAST"
 has "with the pending group listed" "cart" "$LAST"
-has "with queue the open tab on the strip" \
-  "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
+has "with queue the open tab on the strip" "$(lit '[2] QUEUE')" "$LAST.raw"
+has "and dispatch dimmed beside it" "$(dimmed '[1] DISPATCH')" "$LAST.raw"
 lacks "which is no longer the dispatch tab" "dispatcher" "$LAST"
+
+# The arrows no longer switch tabs: both of them, in either order, leave the
+# screen on the dispatch tab it opened on.
+ARROWS="$LIVE/arrows.txt"
+works "the arrows on the dispatch tab end when their keys run out" \
+  script -qec "printf '\\033[C\\033[D\\033[C' | '$SPOOLWAY'" "$ARROWS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ARROWS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "the arrows leave the dispatch tab open" "dispatcher stopped" "$LAST"
+lacks "and reach no queue tab" "─ [groups] ─" "$LAST"
 
 # `tab` moves focus, and the brackets with it, onto the tasks pane.
 FOCUS="$LIVE/focus.txt"
 works "tab on the queue tab ends when its keys run out" \
-  script -qec "printf '\\033[C\\t' | '$SPOOLWAY'" "$FOCUS"
+  script -qec "printf '2\\t' | '$SPOOLWAY'" "$FOCUS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FOCUS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "tab brackets the tasks pane's title" "─ [tasks] ─" "$LAST"
@@ -319,7 +343,7 @@ works "a second bare spoolway in the same project ends on its own" \
   script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "dispatcher already running" "$SECOND.plain"
-lacks "without drawing a screen" "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$SECOND.plain"
+lacks "without drawing a screen" "$STRIP" "$SECOND.plain"
 says "spoolway dispatch refuses while the screen is open" \
   "dispatcher already running" "$SPOOLWAY" dispatch
 exit_code "with the lock's own exit code" 4 "$SPOOLWAY" dispatch
@@ -333,7 +357,7 @@ works "a screen opened after it opens as usual" \
   script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "dispatcher already running" "$AFTER.plain"
-has "drawing the strip" "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$AFTER.plain"
+has "drawing the strip" "$STRIP" "$AFTER.plain"
 
 # A refusal on the queue tab is a popup over the tab, not a frame of its own:
 # a group whose document sets a key spoolway reserves is refused at `enter`.
@@ -344,14 +368,14 @@ has "drawing the strip" "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES
 pending_doc bad-stage "$BODY" "group: refused" "stage: taken"
 REFUSED="$LIVE/refused.txt"
 works "a refused submission on the queue tab ends when its keys run out" \
-  script -qec "printf '\\033[C \\r' | '$SPOOLWAY'" "$REFUSED"
+  script -qec "printf '2 \\r' | '$SPOOLWAY'" "$REFUSED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
 has "over the queue tab, still drawn under it" "─ [groups]" "$LAST"
-has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
+has "under the strip" "$STRIP" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # A clean submission lands on the queued popup, which ends by saying whether a
@@ -363,7 +387,7 @@ rm -f "$SPOOLWAY_PROJECT_HOME/pending/bad-stage.md"
 pending_doc billing-export "$BODY" "group: billing"
 QUEUED="$LIVE/queued.txt"
 works "a clean submission on the queue tab ends when its keys run out" \
-  script -qec "printf '\\033[C \\r' | '$SPOOLWAY'" "$QUEUED"
+  script -qec "printf '2 \\r' | '$SPOOLWAY'" "$QUEUED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$QUEUED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the queued popup is drawn over the tab" "╭─ queued " "$LAST"
@@ -412,14 +436,14 @@ rm -f "$TRACKING/billing-export · started.exit" "$TRACKING/billing-export · st
 # Every tab, both directions, on a real pty — the acceptance criterion the
 # task `frames-onto-writer` exists for: no redrawing screen erases the whole
 # terminal any more, all five of them painting through the shared frame
-# writer instead (`src/screen/frame_writer.rs`). `→` four times walks from
+# writer instead (`src/screen/frame_writer.rs`). `2` to `5` walk from
 # dispatch, where the screen opens, through queue, routines and overrides to
-# eval, and `←` four times walks all the way back — every tab
+# eval, and `4` to `1` walk all the way back — every tab
 # this screen has, both ways, with no `enter` anywhere so nothing is started
 # or queued.
 ALL_TABS="$LIVE/all-tabs.txt"
 works "cycling every tab does not crash the screen" \
-  script -qec "printf '\\033[C\\033[C\\033[C\\033[C\\033[D\\033[D\\033[D\\033[D' | '$SPOOLWAY'" "$ALL_TABS"
+  script -qec "printf '23454321' | '$SPOOLWAY'" "$ALL_TABS"
 if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
   bad "no frame drawn while cycling every tab still erases the whole screen"
   tail -30 "$ALL_TABS" | cat -v
@@ -433,24 +457,23 @@ sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
 # proof about frames that were really there.
 has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS.plain"
 has "and the queue tab" "─ [groups]" "$ALL_TABS.plain"
-has "and the routines tab" "QUEUE       [ROUTINES]       OVERRIDES" "$ALL_TABS.plain"
-has "and the overrides tab" "ROUTINES       [OVERRIDES]       EVAL" "$ALL_TABS.plain"
-has "and the eval tab, → from overrides" "OVERRIDES       [EVAL]" "$ALL_TABS.plain"
+has "and the routines tab" "$(lit '[3] ROUTINES')" "$ALL_TABS"
+has "and the overrides tab" "$(lit '[4] OVERRIDES')" "$ALL_TABS"
+has "and the eval tab, 5 from overrides" "$(lit '[5] EVAL')" "$ALL_TABS"
 lacks "with no JOBS label left on the strip" "JOBS" "$ALL_TABS.plain"
 has "and the eval tab" "╭─ [eval]   directories   trials " "$ALL_TABS.plain"
 
-# `→` twice from the dispatch tab, where the screen opens, reaches the routines tab
-# past the queue tab, between queue and overrides, listing the one routine under `.spoolway/routines/`.
+# `3` from the dispatch tab, where the screen opens, reaches the routines tab,
+# between queue and overrides, listing the one routine under `.spoolway/routines/`.
 # Written last, so no check above runs with a routine in the checkout.
 mkdir -p .spoolway/routines/nightly
 task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nightly"
 ROUTINES="$LIVE/routines.txt"
-works "→ twice from the opening tab ends when its keys run out" \
-  script -qec "printf '\\033[C\\033[C' | '$SPOOLWAY'" "$ROUTINES"
-awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" |
-  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "→ twice reaches the routines tab" \
-  "DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL" "$LAST"
+works "3 from the opening tab ends when its keys run out" \
+  script -qec "printf '3' | '$SPOOLWAY'" "$ROUTINES"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" >"$LAST.raw"
+sed 's/\x1b\[[0-9;]*m//g' "$LAST.raw" >"$LAST"
+has "3 reaches the routines tab" "$(lit '[3] ROUTINES')" "$LAST.raw"
 has "titled routines, bracketed while the list has focus" "─ [routines] ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
@@ -473,7 +496,7 @@ works "a full board in a short pane ends when its keys run out" \
   script -qec "stty rows 30 cols 120; printf '' | '$SPOOLWAY'" "$FULL"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FULL" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "the full board is the dispatch tab's" "← [DISPATCH]       QUEUE" "$LAST"
+has "the full board is under the strip" "[1] DISPATCH        [2] QUEUE" "$LAST"
 has "its cursor's row is drawn" "▸ " "$LAST"
 has "its last table row counts the tasks out of view" "tasks below" "$LAST"
 has "the key line is still drawn under it" "[o] options" "$LAST"
@@ -559,11 +582,11 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 # `[f] search` too.
 lacks "the plan row has left the list" "    search " "$LAST"
 
-# Delete routine on the routines tab (`→`, `o`, down, `enter`) asks with one
+# Delete routine on the routines tab (`3`, `o`, down, `enter`) asks with one
 # answer, so its popup draws no `> delete` row: it ends on its body, a blank
 # row and the shared key row, and `enter` still deletes the routine folder.
 ROUTINE_DELETE="$LIVE/routine-delete.txt"
-on_screen '\x1b[Co\x1b[B\r\r' "$ROUTINE_DELETE"
+on_screen '3o\x1b[B\r\r' "$ROUTINE_DELETE"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /delete this routine/ { last = $0 } END { print last }' \
   "$ROUTINE_DELETE" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "delete routine opens its popup" "─ delete this routine " "$LAST"
@@ -574,7 +597,7 @@ works "its body is followed by a blank row and the key row" bash -c \
      grep -qF "and only git can bring it back."' _ "$LAST"
 works "enter deletes the routine" test ! -e .spoolway/routines/nightly
 
-# The overrides tab (`→` twice from the queue tab) opens on its config
+# The overrides tab (`4` from the queue tab) opens on its config
 # section. Two listed keys are set through their fields: `f` searches the
 # list down to `lane_quiet`, which leaves the cursor on it, `enter` leaves
 # the search, and `enter` opens its field filled with the value in use,
@@ -583,11 +606,10 @@ works "enter deletes the routine" test ! -e .spoolway/routines/nightly
 # key, set to `4` the same way. Run after every other screen check, since
 # the layer it leaves would open the overrides gate on the dispatch tab.
 OVERRIDES_TAB="$LIVE/overrides-tab.txt"
-on_screen '\x1b[C\x1b[Cflane_quiet\r\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f5m\rf\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7fvisible_lanes\r\r\x7f\x7f\x7f\x7f4\r' \
+on_screen '4flane_quiet\r\r\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f5m\rf\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7fvisible_lanes\r\r\x7f\x7f\x7f\x7f4\r' \
   "$OVERRIDES_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$OVERRIDES_TAB" >"$OVERRIDES_TAB.plain"
-has "→ twice reaches the overrides tab" \
-  "DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL" "$OVERRIDES_TAB.plain"
+has "4 reaches the overrides tab" "$(lit '[4] OVERRIDES')" "$OVERRIDES_TAB"
 has "it opens on config, its sections named in the box title" \
   "╭─ [config]   pipeline   prompts   active (0) ─" "$OVERRIDES_TAB.plain"
 has "enter on a key opens its field" "╭─ set dispatch.lane_quiet ─" "$OVERRIDES_TAB.plain"
@@ -618,7 +640,7 @@ has "active counts both keys" "active (2)" "$LAST"
 sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
 lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
 PIPELINE_TAB="$LIVE/overrides-pipeline.txt"
-on_screen '\x1b[C\x1b[C\t\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\ra\rlow\r\r' \
+on_screen '4\t\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\ra\rlow\r\r' \
   "$PIPELINE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PIPELINE_TAB" >"$PIPELINE_TAB.plain"
 has "tab moves onto the pipeline section" \
@@ -647,7 +669,7 @@ has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
 # `enter` lists the steps that route a failure. bugfix's reproduce leaves
 # on_fail out, so it is not listed until `h` shows it.
 ON_FAIL_TAB="$LIVE/overrides-on-fail.txt"
-on_screen '\x1b[C\x1b[C\t\x1b[B\x1b[B\r' "$ON_FAIL_TAB"
+on_screen '4\t\x1b[B\x1b[B\r' "$ON_FAIL_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$ON_FAIL_TAB" >"$ON_FAIL_TAB.plain"
 has "the step picker's key line names h on a field some step sets" \
   "[space] select   [a] select all   [enter] set value   [h] show not set   [esc] back" \
@@ -660,7 +682,7 @@ lacks "a step that leaves on_fail out starts hidden" "[ ] reproduce " "$ON_FAIL_
 # opens the popup naming it, which `enter` closes. `w` is left to the unit
 # tests, since it starts a file manager outside this run.
 PROMPTS_TAB="$LIVE/overrides-prompts.txt"
-on_screen '\x1b[C\x1b[C\t\tfimplementer\r\r\r' "$PROMPTS_TAB"
+on_screen '4\t\tfimplementer\r\r\r' "$PROMPTS_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PROMPTS_TAB" >"$PROMPTS_TAB.plain"
 has "tab twice moves onto the prompts section" \
   "╭─ config   pipeline   [prompts]   active (" "$PROMPTS_TAB.plain"
@@ -678,7 +700,7 @@ works "and holds the tracked prompt" cmp -s .spoolway/prompts/implementer/PROMPT
 # menu on `edit`, `↓` moves onto `delete selected`, `enter` there opens the
 # confirm popup naming the file and the key, and `enter` deletes it.
 ACTIVE_TAB="$LIVE/overrides-active.txt"
-on_screen '\x1b[C\x1b[C\t\t\t\x1b[Bo\x1b[B\r\r' "$ACTIVE_TAB"
+on_screen '4\t\t\t\x1b[Bo\x1b[B\r\r' "$ACTIVE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$ACTIVE_TAB" >"$ACTIVE_TAB.plain"
 has "tab three times moves onto the active section" \
   "╭─ config   pipeline   prompts   [active (" "$ACTIVE_TAB.plain"
@@ -707,7 +729,7 @@ has "and keeps the other key" "visible_lanes = 4" "$CONFIG_LAYER"
 # worktree and writes the file.
 must "a local branch with no checkout" git branch feature/promote
 PROMOTE_TAB="$LIVE/overrides-promote.txt"
-on_screen '\x1b[C\x1b[C\t\t\t\x1b[B\x1b[Bo\x1b[B\rffeature/promote\r\r\r' "$PROMOTE_TAB"
+on_screen '4\t\t\t\x1b[B\x1b[Bo\x1b[B\rffeature/promote\r\r\r' "$PROMOTE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PROMOTE_TAB" >"$PROMOTE_TAB.plain"
 has "o on a whole file offers promote selected" "│  > promote selected" \
   "$PROMOTE_TAB.plain"
