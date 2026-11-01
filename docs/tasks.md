@@ -47,7 +47,7 @@ as JSON.
 | Field | Set by | Meaning |
 |---|---|---|
 | `id` | you | The task's name, at most 100 characters. Also the file name and the branch suffix. Required. |
-| `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject and the pull request title. Required. |
+| `title` | you | One Conventional Commits line, such as `feat(queue): add a --dry-run flag`. Becomes the squashed commit subject. The pull request title is this line with the task's issue in front, such as `KAN-11` or `#1410`, when the task has a `ticket:`. Required. |
 | `group` | you | The group of work this task belongs to. Required. |
 | `pipeline` | you | The pipeline this task runs on. Required, and must name a pipeline that exists. |
 | `depends_on` | you | Task ids that must finish (reach `done`, be cleaned up and be archived) before this one starts. See [Expressing order](#expressing-order). |
