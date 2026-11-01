@@ -8406,11 +8406,13 @@ fn set_lands_in(
 
 /// `value` as a YAML scalar that reads back as that same string: bare where
 /// it already would, quoted where YAML would read it as something else. A
-/// branch may be named `1.0` or `yes`, which bare would read back as a
+/// branch may be named `1.0` or `true`, which bare would read back as a
 /// number or a boolean, and `base:` would then hold no string at all.
 fn yaml_scalar(value: &str) -> String {
     serde_norway::to_string(value)
         .map(|text| text.trim_end().to_string())
+        // Serializing a string does not fail; should it ever, a single-quoted
+        // scalar reads back as the string all the same.
         .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "''")))
 }
 
