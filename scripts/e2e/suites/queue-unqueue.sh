@@ -8,9 +8,9 @@
 # does not: `--help` actually listing the word, `queue remove` actually
 # getting nothing but clap's own unknown-subcommand error, a refusal that
 # names two routes which both actually work, and `--force` actually
-# interrupting a real lane, committing real uncommitted work and tearing a
-# real worktree down before the move — not a description of any of that, the
-# thing itself.
+# stopping a real lane and deleting a real worktree and branch before the move,
+# also under a running dispatcher for a stopped task — not a description of any
+# of that, the thing itself.
 #
 # No `covers:` tag — the coverage map enumerates `config.toml` keys and
 # pipeline step keys, and a queue subcommand is neither.
@@ -132,40 +132,74 @@ else bad "and the task really does stop, checkout kept (at \`$(stage_of paused-r
 works "with its checkout still standing" \
   test -n "$(worktree_of paused-route)"
 
-# `--force` refuses outright while the suite's own dispatcher holds the run
-# lock, naming its pid — it re-reads the queue every pass, and a checkout
-# this tears down out from under it is exactly the corruption the lock
-# exists to prevent.
+# While the suite's own dispatcher holds the run lock, `--force` refuses a task
+# that is still running, naming its pid: the dispatcher re-reads the queue
+# every pass and may be moving it right now.
 LOCK_OUT="$LIVE/unqueue-force-locked.out"
 if "$SPOOLWAY" queue unqueue solo --force >"$LOCK_OUT" 2>&1; then
-  bad "\`--force\` refuses while a dispatcher holds the lock"
+  bad "\`--force\` refuses a running task while a dispatcher holds the lock"
   sed 's/^/        /' "$LOCK_OUT"
 else
-  ok "\`--force\` refuses while a dispatcher holds the lock"
+  ok "\`--force\` refuses a running task while a dispatcher holds the lock"
 fi
-has "naming the pid holding it" "already running for this repo (pid " "$LOCK_OUT"
+has "naming the pid holding it" "a dispatcher is running for this repo (pid " "$LOCK_OUT"
+has "and the pause to run first" "spoolway queue pause solo" "$LOCK_OUT"
 works "solo is untouched: still queued, lane still running" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
-# Stopped, so the forced route below is not refused by the very lock it just
-# proved — the same lock a person would `spoolway dispatch` past by stopping
-# their own run first.
+# A stopped task is torn down although the dispatcher still runs: nothing is
+# moving it. Its worktree and branch are deleted, whatever commits the branch
+# holds, with no commit made first, and it lands in pending ready to queue
+# again with no leftover branch to refuse it.
+PAUSED_WORKTREE=$(worktree_of paused-route)
+must "the stopped task's branch holds a commit no remote has" \
+  git -C "$PAUSED_WORKTREE" commit -q --allow-empty -m "work no remote has"
+PAUSED_OUT="$LIVE/unqueue-paused-route.out"
+if "$SPOOLWAY" queue unqueue paused-route --force >"$PAUSED_OUT" 2>&1; then
+  ok "\`--force\` unqueues a stopped task while a dispatcher runs"
+else
+  bad "\`--force\` unqueues a stopped task while a dispatcher runs"
+  sed 's/^/        /' "$PAUSED_OUT"
+fi
+has "it says it unqueued" "unqueued \`paused-route\`" "$PAUSED_OUT"
+lacks "and names no kept branch" "kept branch" "$PAUSED_OUT"
+works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/paused-route.md"
+works "the task reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/paused-route.md"
+if [ -n "$PAUSED_WORKTREE" ] && [ ! -d "$PAUSED_WORKTREE" ]; then
+  ok "its worktree is gone"
+else
+  bad "its worktree is gone (\"$PAUSED_WORKTREE\" still exists)"
+fi
+works "its branch is deleted" test -z "$(git branch --list task/paused-route)"
+git log --all --format=%s >"$LIVE/paused-route.log"
+lacks "no wip commit was made" "wip(paused-route)" "$LIVE/paused-route.log"
+must "the carried task passes the task contract" \
+  "$SPOOLWAY" task contract --from "$SPOOLWAY_PROJECT_HOME/pending/paused-route.md"
+must "and queues again with no leftover branch to refuse it" \
+  "$SPOOLWAY" queue add --from "$SPOOLWAY_PROJECT_HOME/pending/paused-route.md"
+# Not left queued: the running dispatcher would start it again on a fresh lane.
+must "and is unqueued again before the dispatcher can start it" \
+  "$SPOOLWAY" queue unqueue paused-route
+
+# The dispatcher stops, so the running `solo` can be torn down by `--force`
+# as well.
 dispatcher_stop
 
-# The forced route, over `solo`: interrupt, commit, tear down, unqueue — all
-# in one command, and nothing left of the checkout on the document that
-# reaches pending.
+# The forced route, over `solo` and its live lane: stop it, bank it, tear down
+# and unqueue — all in one command, and nothing left of the checkout on the
+# document that reaches pending.
 FORCE_OUT="$LIVE/unqueue-forced.out"
 if "$SPOOLWAY" queue unqueue solo --force >"$FORCE_OUT" 2>&1; then
-  ok "\`--force\` interrupts, commits, tears down and unqueues"
+  ok "\`--force\` stops the lane, tears down and unqueues"
 else
-  bad "\`--force\` interrupts, commits, tears down and unqueues"
+  bad "\`--force\` stops the lane, tears down and unqueues"
   sed 's/^/        /' "$FORCE_OUT"
 fi
-has "it says the lane was interrupted" "interrupted lane implement/solo" "$FORCE_OUT"
+has "it says it removed the worktree" "removed worktree " "$FORCE_OUT"
 has "and that it unqueued" "unqueued \`solo\`" "$FORCE_OUT"
+works "its branch is deleted" test -z "$(git branch --list task/solo)"
 works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
 works "the task reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/solo.md"
 lacks "with no checkout field left on it: worktree_path" \
@@ -227,9 +261,8 @@ fi
 # `--force` tears the copy's checkout down and deletes the copy rather than
 # drafting a duplicate of the routine into pending. Only the routines tab mints
 # a copy, so a queued task is given the `routine:` line it would have carried,
-# once its dispatcher has stopped. A commit is made on its branch first: a
-# branch with nothing beyond what a remote already has is deleted by the
-# teardown, and only one with more is kept.
+# once its dispatcher has stopped. A commit is made on its branch first: the
+# teardown deletes the branch although it holds more than any remote has.
 echo hang > "$CTL/rt-1"
 mkdir -p .spoolway/routines/rt
 task_doc .spoolway/routines/rt/rt.md rt "$BODY" "group: rt"
@@ -251,8 +284,8 @@ else
 fi
 has "it says the copy was deleted" "deleted \`rt-1\`" "$RT_OUT"
 has "naming the routine file" ".spoolway/routines/rt/rt.md" "$RT_OUT"
-has "and names the branch it kept" "kept branch \`task/rt-1\`" "$RT_OUT"
-works "that branch is still there" test -n "$(git branch --list task/rt-1)"
+lacks "and names no kept branch" "kept branch" "$RT_OUT"
+works "its branch is deleted" test -z "$(git branch --list task/rt-1)"
 works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/rt-1.md"
 works "nothing was written to pending" test ! -e "$SPOOLWAY_PROJECT_HOME/pending/rt-1.md"
 works "and the routine file is untouched" test -f .spoolway/routines/rt/rt.md
@@ -320,8 +353,6 @@ refuses "\`--all --force\` is refused" "--all --force" \
   "$SPOOLWAY" queue unqueue --all --force
 refuses "in the other flag order too" "--all --force" \
   "$SPOOLWAY" queue unqueue --force --all
-works "paused-route's checkout is untouched by either refusal" \
-  test -n "$(worktree_of paused-route)"
 
 # ------------------------------------------------- a hook-failed task, requeued
 # A failing `queued` hook moves the task to `hook_failed` and leaves

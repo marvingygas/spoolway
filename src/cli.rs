@@ -1285,9 +1285,10 @@ pub enum QueueCommand {
     /// unchanged.
     ///
     /// A task that has started is refused, naming its stage and both routes
-    /// onward, unless `--force` says to interrupt any live lane, record its
-    /// uncommitted work and tear the checkout down first — the same care
-    /// `Dispatcher::tear_down_checkout` always takes, all or nothing.
+    /// onward, unless `--force` says to tear it down the way done-cleanup
+    /// does: its worktree and its local `task/<id>` branch are deleted
+    /// whatever they hold, with no commit first, all or nothing. The tasks
+    /// after it in its group go back to pending with it.
     ///
     /// A copy of a routine whose file is still under `.spoolway/routines/` is
     /// deleted instead of carried to pending, with or without `--force`: the
@@ -1308,12 +1309,14 @@ pub struct QueueUnqueueArgs {
     #[arg(long)]
     pub all: bool,
 
-    /// Interrupt any live agent lane, record uncommitted work through
-    /// `auto_commit`, and tear the checkout down through
-    /// `Dispatcher::tear_down_checkout` before unqueuing a task that has
-    /// started. Refused while a dispatcher holds the run lock, naming its
-    /// pid. A no-op flag on a task still on `queued` — the bare command
-    /// already unqueues it, with no checkout to tear down.
+    /// Stop the task's lanes and runs, bank what they spent, and delete its
+    /// worktree and local branch through `Dispatcher::tear_down_stopped`
+    /// before unqueuing a task that has started. Work nobody pushed is lost.
+    /// With a dispatcher holding the run lock, only a task stopped on
+    /// `paused`, `blocked` or `hook_failed` with nothing running is accepted;
+    /// anything else is refused with the pause command to run first. A no-op
+    /// flag on a task still on `queued` — the bare command already unqueues
+    /// it, with no checkout to tear down.
     #[arg(long)]
     pub force: bool,
 }

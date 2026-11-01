@@ -2753,6 +2753,49 @@ pub(crate) fn depended_on_by_queued<'a>(
         .find(|t| t.id() != id && not_started(t) && t.front.depends_on.iter().any(|d| d == id))
 }
 
+/// Whether the task `id` is stopped in the sense unqueuing a started task
+/// needs: parked on `paused`, `blocked` or `hook_failed`, with no agent lane
+/// mid-turn on it (an unblocker's included), no command step running for it
+/// and no worktree cut going. Teardown removes its checkout, so only a task
+/// nothing is moving may be torn down while a dispatcher runs.
+///
+/// A task that is not in `tasks` is not stopped.
+pub(crate) fn stopped_for_unqueue(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    pipelines: &Pipelines,
+    lanes: &[crate::mux::Lane],
+    id: &str,
+) -> bool {
+    let Some(idx) = tasks.iter().position(|t| t.id() == id) else {
+        return false;
+    };
+    let parked = [
+        crate::pipeline::PAUSED,
+        crate::pipeline::BLOCKED,
+        crate::pipeline::HOOK_FAILED,
+    ]
+    .contains(&tasks[idx].stage());
+    parked
+        && !live_agent_lane_tasks(repo, tasks, pipelines, lanes).contains(&idx)
+        && !running_command_steps(repo, tasks, pipelines)
+            .iter()
+            .any(|running| running.task == id)
+        && crate::cut::running(repo, id).is_none()
+}
+
+/// The not-started tasks that come after `id` in its group: every one that
+/// reaches it through `depends_on`, however many hops away, in the order
+/// [`unqueue_chain`] lists them. They cannot run without `id`, so unqueuing it
+/// carries them to pending with it.
+pub(crate) fn unqueue_dependents(tasks: &[crate::task::Task], id: &str) -> Vec<String> {
+    unqueue_chain(tasks, id)
+        .into_iter()
+        .skip(1)
+        .map(|entry| entry.id)
+        .collect()
+}
+
 /// One task in a `unqueue`-panel's chain: its id, and — for everything but the
 /// chain's own head — the ids elsewhere in the chain its own `depends_on`
 /// names, for [`view::unqueue_confirm_panel`]'s "(depends on ...)"
@@ -2868,7 +2911,8 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
 /// task that has already started is a different road: `queue unqueue
 /// --force` goes around this function's own `not_started` gate and calls
 /// [`carry_to_pending`] directly, once its own teardown has cleared the
-/// checkout — see `commands::queue::queue_unqueue`.
+/// checkout — see `commands::queue::queue_unqueue_forced`. The tasks after it
+/// that have not started come through this function.
 pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<Unqueued> {
     unqueue_in(repo, id, &[])
 }
@@ -2969,7 +3013,7 @@ pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Un
 ///
 /// The one place that rule is read, so the board's `unqueue` panel cannot
 /// promise a deletion the unqueue it confirms would not make.
-fn deleted_on_unqueue(
+pub(crate) fn deleted_on_unqueue(
     repo: &Repo,
     task: &crate::task::Task,
     drafted: &[String],
@@ -6891,6 +6935,38 @@ mod tests {
         crate::usage::LedgerTotals::from_entries(entries)
     }
     use crate::status::view::{GUTTER, Move, OSC8, RecentEvent, ST, ticker};
+
+    // ---- Unqueuing a started task ----
+
+    /// Only a task parked on `paused`, `blocked` or `hook_failed` counts as
+    /// stopped. One on a step does not, nor does one that is not there.
+    #[test]
+    fn only_a_parked_task_is_stopped_for_unqueue() {
+        let (repo, _root_guard) = fixture("stopped-for-unqueue");
+        let pipelines = Pipelines::builtin();
+        for (id, stage, stopped) in [
+            ("p", "paused", true),
+            ("b", "blocked", true),
+            ("h", "hook_failed", true),
+            ("i", "implement", false),
+        ] {
+            add_to(&repo, id, &[], Some(stage), Some(id));
+            let tasks = repo.tasks().unwrap();
+            assert_eq!(
+                stopped_for_unqueue(&repo, &tasks, &pipelines, &[], id),
+                stopped,
+                "{stage}"
+            );
+        }
+        let tasks = repo.tasks().unwrap();
+        assert!(!stopped_for_unqueue(
+            &repo,
+            &tasks,
+            &pipelines,
+            &[],
+            "ghost"
+        ));
+    }
 
     // ---- Reader: coalescing and shutdown ----
 

@@ -1,7 +1,7 @@
 //! Giving a task's checkout back: panes and workspaces closed, worktrees
 //! removed, its branch deleted.
 //!
-//! Two moments call this now, and they disagree on purpose. The ordinary one
+//! Three moments call this, and they disagree on purpose. The ordinary one
 //! is a task reaching `done`, which has finished, so its branch is spent
 //! litter the moment nothing else still needs it — see
 //! [`Dispatcher::clean_up`]. Stopping the dispatcher itself never reaches
@@ -27,7 +27,14 @@
 //! branch lands where a dependent is not cut from, and one made mid-merge
 //! concludes it with its conflict markers on the task's own branch.
 //!
-//! The other is [`discard_trial`], called from `spoolway eval --discard` for
+//! Another is [`Dispatcher::tear_down_stopped`], which `spoolway queue unqueue
+//! --force` calls for a task that stopped on `paused`, `blocked` or
+//! `hook_failed`. It tears the checkout down as done-cleanup does and banks
+//! the lanes' spend, but commits nothing, archives nothing and deletes the
+//! task's branch whatever it holds, because the task is queued again from
+//! scratch.
+//!
+//! The last is [`discard_trial`], called from `spoolway eval --discard` for
 //! a trial arm that has not finished and never will: a person has seen
 //! enough and wants it gone now. [`Dispatcher::discard_arm`] shares
 //! `tear_down_checkout` with the ordinary path, but nowhere near its care —
@@ -87,10 +94,10 @@ fn task_branch(task: &Task) -> String {
 
 /// What is wrong with `worktree`'s git state, or `None` when it is on the
 /// task's branch with no rebase, merge, cherry-pick or revert under way.
-/// Shared by teardown and `spoolway queue unqueue --force`, the two roads that
-/// commit a worktree's leftovers and then remove it. An operation is named
-/// before the branch: a rebase also leaves HEAD detached, and "rebase in
-/// progress" is the more useful half.
+/// Done-cleanup is the one road that commits a worktree's leftovers and then
+/// removes it. Unqueuing a stopped task commits nothing, so it never asks. An
+/// operation is named before the branch: a rebase also leaves HEAD detached,
+/// and "rebase in progress" is the more useful half.
 ///
 /// A conflicted merge, cherry-pick or revert is refused even on the right
 /// branch, because the sweep's `git add -A` and `git commit` would conclude it
@@ -411,7 +418,7 @@ impl<'a> Dispatcher<'a> {
             //
             // Said here and not in `tear_down_checkout`'s own problem line,
             // because that has other callers that do not hold the task:
-            // `unqueue --force` carries it to pending (or, for a routine
+            // `tear_down_stopped` carries it to pending (or, for a routine
             // copy, deletes it) and `discard_arm` deletes it, and nothing
             // would try again for either.
             report.problems.push(format!(
@@ -635,8 +642,8 @@ impl<'a> Dispatcher<'a> {
     /// [`Dispatcher::branch_keep_reason`].
     ///
     /// Called from [`Dispatcher::clean_up`], once a task has actually
-    /// finished, and from `discard_arm` and `unqueue --force`, which tear a
-    /// checkout down on purpose. Stopping the dispatcher never reaches here
+    /// finished, and from `discard_arm` and [`Dispatcher::tear_down_stopped`],
+    /// which tear a checkout down on purpose. Stopping the dispatcher never reaches here
     /// any more, since [`Dispatcher::sweep_on_stop`] leaves an interrupted
     /// task's checkout exactly where it stood.
     ///
@@ -646,6 +653,22 @@ impl<'a> Dispatcher<'a> {
     /// `false` and leaves the branch alone, since git will not delete a branch
     /// that is still checked out.
     pub(crate) fn tear_down_checkout(&mut self, task: &mut Task, report: &mut Report) -> bool {
+        self.tear_down_checkout_with(task, report, false)
+    }
+
+    /// [`Dispatcher::tear_down_checkout`], with `delete_branch` saying whether
+    /// the task's own local branch goes whatever it holds. Unqueuing a stopped
+    /// task sets it: the task is about to be queued again from scratch, and a
+    /// branch left standing is what `queue add` refuses it over. It skips the
+    /// push check and the dependents check, and a branch it cannot delete turns
+    /// into a `false` answer, so the caller carries nothing to pending while the
+    /// old branch is still there.
+    fn tear_down_checkout_with(
+        &mut self,
+        task: &mut Task,
+        report: &mut Report,
+        delete_branch: bool,
+    ) -> bool {
         // The checkout this task cut for itself, if it cut one. A borrowed
         // checkout is somebody else's and is never removed here, whatever else
         // happens below. Read from what was recorded when the lane was set up,
@@ -810,7 +833,7 @@ impl<'a> Dispatcher<'a> {
         // dependent with nothing to start from; `Dispatcher::sweep_orphaned_branches`
         // is what frees it later, once the last such task has been cut.
         let depended_on = self.branch_still_needed(task.id());
-        let made_its_branch = !task.front.borrowed && !depended_on;
+        let made_its_branch = !task.front.borrowed && (delete_branch || !depended_on);
         if let Some(branch) = task.front.branch.clone().filter(|_| made_its_branch) {
             // `-D` rather than `-d`: the branch may have been squash-merged, so
             // git considers it "not fully merged" even though its content is in
@@ -851,6 +874,15 @@ impl<'a> Dispatcher<'a> {
                 .is_err()
             {
                 // Nothing to delete and nothing to keep.
+            } else if delete_branch {
+                if let Err(e) = self.repo.git(&["branch", "-D", &branch]) {
+                    report.problems.push(format!(
+                        "{}: could not delete branch `{branch}`: {e:#}. it may be checked \
+                         out in another worktree; to do it by hand, run `git branch -D {branch}`",
+                        task.id()
+                    ));
+                    return false;
+                }
             } else if task.front.trial.is_some() {
                 let _ = self.repo.git(&["branch", "-D", &branch]);
             } else if let Some(why) = self.branch_keep_reason(&branch, task.front.base.as_deref()) {
@@ -1263,6 +1295,95 @@ impl<'a> Dispatcher<'a> {
         }
 
         Ok(())
+    }
+
+    /// Tear down a task that stopped partway, the way [`Dispatcher::clean_up`]
+    /// tears down a finished one, and report whether it is gone: every lane it
+    /// ran is stopped and its spend banked, its background runs and panes end,
+    /// the worktree and `task/<id>` come down and its run files and session
+    /// homes are reclaimed. This is what unqueuing a paused, blocked or
+    /// hook-failed task runs.
+    ///
+    /// It leaves out what only a finished task has: no commit first, because
+    /// the work is thrown away on purpose; no removal marker, because nothing
+    /// half-removed is ever committed; and no archive, handover copy, patch or
+    /// trial settling. The branch goes whatever it holds, see
+    /// [`Dispatcher::tear_down_checkout_with`]. A checkout the task borrowed is
+    /// left standing, as `clean_up` leaves it.
+    ///
+    /// `false` leaves the task file untouched and names why in `report`. The
+    /// run files and session homes are then kept too, so the same unqueue can
+    /// be run again once a person has cleared what was in the way.
+    pub(crate) fn tear_down_stopped(
+        &mut self,
+        task: &mut Task,
+        lanes: &[Lane],
+        report: &mut Report,
+    ) -> bool {
+        let pipeline = self
+            .pipelines
+            .for_task(task)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+
+        // Every lane the task has run, the finished ones kept open beside the
+        // one on its current step. Each is banked under its own step, not the
+        // stage the task is sitting on, as `clean_up` banks them.
+        let step_ids = self.pipelines.all_step_ids();
+        for lane in lanes {
+            let Some((step_id, _)) = crate::mux::parse_lane_name(&lane.name, &step_ids) else {
+                continue;
+            };
+            if !crate::mux::lane_of_task(&lane.name, task) {
+                continue;
+            }
+            self.stop_and_bank(task, step_id, lane, &pipeline);
+        }
+
+        // A background command and the pane a failed run left standing both
+        // belong to the checkout about to be removed.
+        let runs = crate::command_step::Runs::new(&self.repo.commands_dir());
+        for key in runs.keys_for_task(task.id()) {
+            if let Some(pane) = runs.pane(&key) {
+                let _ = self.mux.close_pane(&pane);
+                runs.forget_pane(&key);
+            }
+            runs.stop(&key);
+        }
+
+        // A worktree cut that is still going is writing that checkout too.
+        if let Err(e) = crate::cut::stop_and_reclaim(
+            self.repo,
+            task.id(),
+            "run the unqueue again once it has stopped",
+        ) {
+            report.problems.push(format!("{e:#}"));
+            return false;
+        }
+
+        if !self.tear_down_checkout_with(task, report, true) {
+            return false;
+        }
+
+        runs.reclaim_task(task.id());
+        crate::tracking::reclaim(self.repo, task.id());
+        self.forget_lane_names(task, report);
+
+        // The session homes hold a copied `auth.json` that would outlive every
+        // credential rotation, so they go with the task as they do at `done`.
+        self.reclaim_freed_session_homes(task.id());
+        let stale: Vec<String> = self
+            .lanes
+            .keys()
+            .filter(|name| crate::mux::lane_of_task(name, task))
+            .cloned()
+            .collect();
+        for name in stale {
+            if let Some(record) = self.lanes.remove(&name) {
+                record.reclaim_session_home();
+            }
+        }
+        true
     }
 
     /// Take one trial arm apart, with none of the care [`Dispatcher::clean_up`]
