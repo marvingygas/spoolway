@@ -806,11 +806,12 @@ pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> 
 /// id even when it is a copy whose routine is gone, since that id is the file
 /// it lands under.
 ///
-/// `height` is [`pane_height`]'s. A panel taller than the pane leaves room
-/// for, the three spare rows [`resume_picker_panel`] keeps included, folds:
-/// first the lists of tasks, from the last entry up, under a `… and n more`
-/// line, then whole lists, then the blank lines between its paragraphs. The
-/// counts, the warnings and the key line stay. `None` folds nothing.
+/// `height` is [`pane_height`]'s. When the panel is taller than the pane
+/// leaves room for, counting the three spare rows [`resume_picker_panel`]
+/// keeps, it folds: first the lists of tasks, from the last entry up, under
+/// a `… and n more` line, then whole lists, then the blank lines between its
+/// paragraphs. The counts, the warnings and the key line stay. `None` folds
+/// nothing.
 pub(super) fn unqueue_confirm_panel(
     confirm: &super::UnqueueConfirm,
     height: Option<usize>,

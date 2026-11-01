@@ -418,8 +418,8 @@ impl<'a> Dispatcher<'a> {
             //
             // Said here and not in `tear_down_checkout`'s own problem line,
             // because that has other callers that do not hold the task:
-            // `queue_unqueue_forced`, through `tear_down_stopped`, carries it
-            // to pending (or, for a routine copy, deletes it) and
+            // `unqueue_stopped`, through `tear_down_stopped`, carries it to
+            // pending (or, for a routine copy, deletes it) and
             // `discard_arm` deletes it, and nothing would try again for
             // either.
             report.problems.push(format!(
@@ -1396,9 +1396,11 @@ impl<'a> Dispatcher<'a> {
                 record.reclaim_session_home();
             }
         }
-        // No pass follows an unqueue to write the records back, so they are
-        // saved here. Left on disk, the task's old records would outlive it,
-        // and `prune_stale_lane_records` keeps them once the same id is queued
+        // With no dispatcher running, no pass follows an unqueue to write the
+        // records back, so they are saved here. A running dispatcher prunes
+        // its own copy on its next pass once the task has left the queue.
+        // Left on disk, the task's old records would outlive it, and
+        // `prune_stale_lane_records` keeps them once the same id is queued
         // again, so the new run would start beside the old run's records.
         if let Err(e) = save_lane_records(self.repo, &self.lanes) {
             report.problems.push(format!(

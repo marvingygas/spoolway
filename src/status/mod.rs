@@ -2814,10 +2814,10 @@ pub(crate) fn resume_task(repo: &Repo, pipelines: &Pipelines, id: &str) -> Resul
 }
 
 /// Whether `task` has not started at all — still sitting on the pipeline's
-/// own `queued` step, with no worktree cut and no lane ever begun. This is
-/// the one state the board's `unqueue` may act on: unqueuing anything further
-/// along would mean tearing down a checkout, which is outside what it reaches —
-/// see this task's own non-goals.
+/// own `queued` step, with no worktree cut and no lane ever begun. Such a
+/// task is unqueued by moving its file alone; one further along has a
+/// checkout to tear down first, and only once it has stopped — see
+/// [`stopped_for_unqueue`].
 pub(crate) fn not_started(task: &crate::task::Task) -> bool {
     task.stage() == crate::pipeline::QUEUED
 }
@@ -3006,10 +3006,10 @@ pub(crate) fn skipped_last_steps(
 /// Where a task stands is its stage when that is a step. A task parked on
 /// `paused` stands on the step `parked_from` names, and one parked anywhere
 /// else on the step [`crate::commands::resume_target`] sends it back to;
-/// a task that never started stands at the entry. Following `on_pass` alone,
-/// a review that sends a task back to an earlier step does not make that step
-/// count as ahead: the road a pass takes is what decides whether the task
-/// will still reach a `last:` step.
+/// a task that never started stands at the entry. Only `on_pass` is
+/// followed, since passing is how a task reaches the end of its pipeline: a
+/// step a failure sends it to leads back onto that road through its own
+/// `on_pass`.
 fn past_on_route(
     pipeline: &crate::pipeline::Pipeline,
     task: &crate::task::Task,
@@ -3085,8 +3085,9 @@ enum UnqueueLead {
     /// It has a branch or a worktree of its own, which the answer deletes for
     /// good.
     Deletes,
-    /// It ran in a checkout it borrowed, which stays, and has no branch of
-    /// its own. Neither line is true of it, so the panel says neither.
+    /// Something ran for it, but it has no branch or worktree the answer
+    /// deletes: it ran in a checkout it borrowed, which stays. Neither line
+    /// is true of it, so the panel says neither.
     Neither,
 }
 
@@ -3299,8 +3300,9 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
 /// task that has already started is a different road: `queue unqueue
 /// --force` goes around this function's own `not_started` gate and calls
 /// [`carry_to_pending`] directly, once its own teardown has cleared the
-/// checkout — see `commands::queue::queue_unqueue_forced`. The tasks after it
-/// that have not started come through this function.
+/// checkout — see `commands::queue::unqueue_stopped`, which the board's
+/// `unqueue` on a stopped task runs too. The tasks after it that have not
+/// started come through this function.
 pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<Unqueued> {
     unqueue_in(repo, id, &[])
 }
@@ -3428,10 +3430,10 @@ pub(crate) enum Unqueued {
 /// written to pending with every reserved key and the dispatcher's pause
 /// records dropped, then its queue file removed and its hook runs under
 /// `tracking/` stopped and reclaimed. The caller decides whether `task` may
-/// go — the board's `unqueue` and [`unqueue_task`] only carry a task that has
-/// not started, `queue unqueue --force` one whose checkout it has just torn
-/// down — and holds the task's
-/// lock while it does.
+/// go — [`unqueue_task`] only carries a task that has not started, and
+/// `commands::queue::unqueue_stopped`, which the board's `unqueue` and
+/// `queue unqueue --force` run on a stopped task, one whose checkout it has
+/// just torn down — and holds the task's lock while it does.
 ///
 /// `None` when a task already sits in `pending/` under this id: that is
 /// a newer draft — a producer re-ran over work already submitted — and

@@ -11778,8 +11778,8 @@ mod tests {
     /// branch although that holds a commit no remote has, which is the one
     /// case `clean_up` keeps a branch for. No problem line is left about a
     /// kept branch, since nothing is kept. Its lane record is gone from
-    /// `lanes.json` too, which no pass follows to write, and another task's
-    /// stays.
+    /// `lanes.json` too, which this teardown writes itself, and another
+    /// task's stays.
     #[test]
     fn a_stopped_task_banks_its_lane_and_loses_a_branch_no_remote_has() {
         let (mut repo, _root_guard) = fixture("stopped-teardown-banks");

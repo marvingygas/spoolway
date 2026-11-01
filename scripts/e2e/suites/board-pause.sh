@@ -23,7 +23,9 @@
 # Open task is checked once, for the popup a refused open shows: an editor
 # that is not on `PATH` is refused before anything is started. Open plan is
 # checked only for being listed, under open task, on a task with a `plan:`:
-# picking it would start the machine's real browser.
+# picking it would start the machine's real browser. Unqueue is checked on a
+# chain that never started, on a routine copy, and on a paused task whose
+# branch and worktree it deletes.
 #
 # Pausing from the menu and the dispatch tab's stop popup carry most of the
 # suite, since pausing and stopping with `i` are the two answers that can
@@ -857,6 +859,47 @@ if poll_until 25 _gone nightly-1; then ok "enter removes the copy from the queue
 else bad "enter removes the copy from the queue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 works "no draft lands in pending" test ! -e "$SPOOLWAY_PROJECT_HOME/pending/nightly-1.md"
 works "and the routine file is untouched" test -f .spoolway/routines/nightly/nightly.md
+
+# ------------------- unqueue from a paused row's menu tears it down
+# A task that ran and was paused lists unqueue too, while the dispatcher
+# runs. Its panel says the branch and worktree go for good, in place of the
+# line saying nothing has run, and `enter` deletes both and carries the task
+# and the one after it to pending. `unq-head` gets a hang lane of its own so
+# it is genuinely cut and mid-turn before `queue pause` stops it; `unq-tail`
+# waits on it in the same group.
+mkdir -p "$CTL"
+echo hang > "$CTL/unq-head"
+task_doc "$LIVE/unq-head.md" unq-head "$BODY" "group: 0-unq"
+must "unq-head queues" "$SPOOLWAY" queue add --from "$LIVE/unq-head.md"
+queue_idle unq-tail unq-head
+UNQ_PID=$(lane_pid "unq-head · implement" 30)
+if [ -n "$UNQ_PID" ]; then ok "the lane to pause is really mid-turn"
+else bad "the lane to pause is really mid-turn"; fi
+UNQ_TREE=$(sed -n 's/^worktree_path: *//p' "$SPOOLWAY_PROJECT_HOME/queue/unq-head.md")
+works "and has a worktree of its own" test -d "$UNQ_TREE"
+must "pausing it by hand" "$SPOOLWAY" queue pause unq-head
+stage_reaches "it parks" unq-head paused 25
+
+MARK=$(wc -l < "$BOARD_LOG")
+cursor_to unq-head
+pick_item unqueue
+draws "unqueue on the paused row opens its panel" "unqueue unq-head"
+draws "saying it has a branch and a worktree" "unq-head has a branch and a worktree."
+draws "that are deleted for good" "both are deleted and cannot be recovered."
+draws "and listing the task after it" "unq-tail   (depends on unq-head)"
+never_draws "with no line saying nothing has run" "nothing has run" "$MARK"
+never_draws "and no line about the queue tab" "the queue tab is what sends" "$MARK"
+stage_stays "nothing moves while the panel is open" unq-head paused
+
+press $'\r'
+if poll_until 25 _gone unq-head; then ok "enter carries the paused task to pending"
+else bad "enter carries the paused task to pending"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+if poll_until 25 _gone unq-tail; then ok "and the task after it"
+else bad "and the task after it"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+works "its worktree is removed" test ! -e "$UNQ_TREE"
+works "its branch is deleted" test -z "$(git branch --list task/unq-head)"
+has "the task lands in pending" "id: unq-head" "$SPOOLWAY_PROJECT_HOME/pending/unq-head.md"
+has "and so does the one after it" "id: unq-tail" "$SPOOLWAY_PROJECT_HOME/pending/unq-tail.md"
 
 # ------------------------- pause reaches a blocked row with a live lane
 #
