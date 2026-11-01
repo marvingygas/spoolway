@@ -542,6 +542,19 @@ impl LaneRecord {
         self.kept
     }
 
+    /// When this lane started, in milliseconds: what the board's `focus` on a
+    /// stopped row orders a task's open panes by. [`lanes_to_close`] orders by
+    /// whole seconds, but two steps of a fast task can start within one, and
+    /// `focus` has to tell them apart. A record without a millisecond stamp,
+    /// such as an adopted lane's, counts from the start of its second.
+    pub(crate) fn started_ms(&self) -> i64 {
+        if self.started_at_ms > 0 {
+            self.started_at_ms
+        } else {
+            self.started_at * 1000
+        }
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and

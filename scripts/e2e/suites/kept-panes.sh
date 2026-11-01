@@ -16,7 +16,8 @@
 # While the two-step task's second step runs beside its kept first lane, the
 # board's options menu offers `focus` on its row, and picking it zooms the
 # running lane's pane, never the kept one's. A zoom herdr refuses opens the
-# `focus` popup with herdr's own message.
+# `focus` popup with herdr's own message. Once the task is parked, its row
+# still offers `focus` and zooms the newest pane the task has open.
 #
 # Against the double rather than a real server — its header says why there is
 # no isolated herdr to run this on. An agent there is a registration, not a
@@ -179,6 +180,13 @@ else
   sed 's/^/        /' "$HSTATE/agents"
 fi
 
+# The dispatcher writes a lane's record at the end of its pass. `focus` on the
+# parked row orders panes by those records, and a lane with none counts as the
+# oldest, so the second lane's record is waited for before the dispatcher stops.
+lane_recorded() { grep -qF "\"$1\"" "$SPOOLWAY_PROJECT_HOME/lanes.json" 2>/dev/null; }
+if poll_until 30 lane_recorded "kept · second"; then ok "the second step's lane has a record"
+else bad "the second step's lane has a record"; fi
+
 screen_start "$LIVE/board.out"
 screen_board
 # `kept` is the only row, so the cursor is already on it. A running agent
@@ -236,6 +244,34 @@ screen_press $'\r'
 if poll_while 10 board_shows "─ focus ─"; then ok "enter closes the popup"
 else bad "enter closes the popup"; board_now | sed 's/^/        /'; fi
 rm -f "$HSTATE/zoom.refused"
+
+# A parked task keeps its panes: pausing interrupts the lane but closes
+# nothing, so `kept` stands on `paused` with the first step's kept lane and the
+# second step's lane both open. Its row lists `focus` between `open task` and
+# `restart`, and picking it zooms the pane that started last, the second
+# step's, not the kept first one. `zoomed.index` is emptied first, since the
+# running row's zoom above wrote the same pane into it.
+must "the task is parked" "$SPOOLWAY" queue pause kept
+if poll_until 10 board_shows "paused"; then ok "the board shows the parked row"
+else bad "the board shows the parked row"; board_now | sed 's/^/        /'; fi
+: >"$HSTATE/zoomed.index"
+screen_press o
+if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
+  && poll_until 10 board_shows "> focus"; then
+  ok "a parked row with panes open lists focus under open task"
+else
+  bad "a parked row with panes open lists focus under open task"; board_now | sed 's/^/        /'
+fi
+if board_shows "    restart"; then ok "and restart under focus"
+else bad "and restart under focus"; board_now | sed 's/^/        /'; fi
+screen_press $'\r'
+if poll_until 10 zoomed "$SECOND_PANE"; then
+  ok "picking focus on the parked row zooms the task's newest pane"
+else
+  bad "picking focus on the parked row zooms the task's newest pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
+fi
+if ! zoomed "$FIRST_PANE"; then ok "and not the older kept pane"
+else bad "and not the older kept pane ($FIRST_PANE)"; fi
 screen_stop
 dispatcher_restart
 
