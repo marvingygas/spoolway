@@ -8282,6 +8282,30 @@ fn lands_in(task: &PendingTask, state: &ScreenState) -> Option<String> {
     task.base.clone().or_else(|| state.board_branch.clone())
 }
 
+/// The highlighted chain head's stack, when it has one: its id, the task of
+/// another group it depends on, and where that task lands — its own `base:`,
+/// or for a pending task naming none the board's branch, which queuing it
+/// from this screen gives it. `None` for a head that stacks on nothing, or
+/// on a task whose branch is not known.
+fn stacked_on(groups: &[Group], state: &ScreenState) -> Option<(String, String, String)> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    let head = highlighted_task(groups, state)?;
+    head.depends_on
+        .iter()
+        .filter(|dep| !group.tasks.iter().any(|t| &t.id == *dep))
+        .find_map(|dep| {
+            let task = groups
+                .iter()
+                .flat_map(|g| &g.tasks)
+                .find(|t| &t.id == dep)?;
+            let lands = match task.state {
+                TaskState::Pending => lands_in(task, state),
+                _ => task.base.clone(),
+            }?;
+            Some((head.id.clone(), dep.clone(), lands))
+        })
+}
+
 /// `enter` on the edit lands in picker: write `base: <branch>` into every
 /// pending file of the group whose chain head `menu` was opened on, read the
 /// groups again so the tasks pane shows it, and close to the screen.
@@ -8300,6 +8324,11 @@ fn lands_in(task: &PendingTask, state: &ScreenState) -> Option<String> {
 /// temporary file and a rename, so none is ever left half written; a write
 /// that fails part way through names the files already changed and the
 /// ones left as they were, since the chain then names two bases.
+///
+/// A head stacked on another group's last task keeps the item, but a pick
+/// other than where that task lands changes nothing and says why — see
+/// [`stacked_on`]. Submission refuses a stacked pair whose bases differ, and
+/// the group stacked on is not this pick's to rewrite.
 fn set_lands_in(
     repo: &Repo,
     groups: &mut Vec<Group>,
@@ -8330,6 +8359,19 @@ fn set_lands_in(
             ),
         );
     };
+    if let Some((id, dep, lands)) =
+        stacked_on(groups, state).filter(|(_, _, lands)| lands != branch)
+    {
+        return outcome(
+            "lands in not changed",
+            format!(
+                "`{id}` stacks on `{dep}`, which lands in `{lands}`, and a chain stacked on \
+                 another lands where that one does: its work is cut from that branch and only \
+                 merges into its own base. No file was changed. To land in `{branch}`, change \
+                 what `{id}` depends on first, or pick the lands-in branch of `{dep}`'s group."
+            ),
+        );
+    }
     let value = yaml_scalar(branch);
     let mut texts = Vec::with_capacity(paths.len());
     for path in &paths {
@@ -17264,6 +17306,48 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(repo.pending_dir().join("other.md")).unwrap(),
             other
+        );
+    }
+
+    /// A head stacked on another group's last task keeps edit lands in, but
+    /// only the branch that task lands in is written: any other pick would
+    /// leave a pair submission refuses, so it changes no file and says why.
+    #[test]
+    fn a_stacked_head_lands_only_where_its_stack_does() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-stacked");
+        write_pending(
+            &repo,
+            "login",
+            &task_text("login", "group: auth\nbase: plan/live\n", BODY),
+        );
+        let before = task_text("wire", "group: pay\ndepends_on: [login]\n", BODY);
+        let wire = write_pending(&repo, "wire", &before);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert!(menu.items.contains(&RowOption::EditLandsIn));
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "feature/other");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in not changed");
+        assert!(
+            notice
+                .text
+                .contains("`wire` stacks on `login`, which lands in `plan/live`"),
+            "{}",
+            notice.text
+        );
+        assert_eq!(std::fs::read_to_string(&wire).unwrap(), before);
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "plan/live");
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert!(
+            std::fs::read_to_string(&wire)
+                .unwrap()
+                .lines()
+                .any(|l| l == "base: plan/live")
         );
     }
 
