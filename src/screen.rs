@@ -1194,20 +1194,20 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 }
 
 /// What a test that reads a screen's text calls the screen `lines` draw: the
-/// tab the strip marks open, or `fallback` when there is no strip, and the
+/// tab the strip draws lit, or `fallback` when there is no strip, and the
 /// title of a popup drawn over it, if there is one. A popup's top border
 /// sits inside the tab's own `│` border, which a pane's title never does.
+///
+/// `lines` keep their codes: the lit tab differs from the rest only by the
+/// dim in front of every other label, which plain text has lost.
 #[cfg(test)]
 pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
-    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "OVERRIDES", "EVAL"]
-        .into_iter()
-        .find(|tab| {
-            lines
-                .iter()
-                .take(3)
-                .any(|line| line.contains(&format!("[{tab}]")))
-        })
+    let tab = lines
+        .iter()
+        .take(3)
+        .find_map(|line| shell::lit_tab(line))
         .map_or(fallback.to_string(), str::to_lowercase);
+    let lines: Vec<String> = lines.iter().map(|line| shell::plain(line)).collect();
     let popup = lines.iter().find_map(|line| {
         let (_, after) = line.split_once('│')?;
         let (_, title) = after.split_once(corner::TOP_LEFT)?;
@@ -1221,16 +1221,18 @@ pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
 }
 
 /// The frames one scripted walk drew, as the screens a test reads, each
-/// named by what it shows — see [`shown_screen`]. Named by content because a
-/// walk's earlier frames are not the screen its keys were written to reach,
-/// and a name written beside the keys would be wrong for them.
+/// named by what it shows — see [`shown_screen`] — with its codes taken
+/// out. Named by content because a walk's earlier frames are not the screen
+/// its keys were written to reach, and a name written beside the keys would
+/// be wrong for them.
 #[cfg(test)]
 pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Vec<String>)> {
     frames
         .iter()
         .map(|frame| {
             let lines: Vec<String> = frame.lines().map(str::to_string).collect();
-            (shown_screen(&lines, fallback), lines)
+            let name = shown_screen(&lines, fallback);
+            (name, lines.iter().map(|line| shell::plain(line)).collect())
         })
         .collect()
 }
@@ -1596,18 +1598,34 @@ mod tests {
         assert!(!report.contains("popup"), "{report}");
     }
 
-    /// A screen is named by the tab the strip marks and the title of the
+    /// A screen is named by the tab the strip draws lit and the title of the
     /// popup over it, and by the fallback tab when there is no strip.
     #[test]
     fn a_screen_is_named_by_its_tab_and_the_popup_over_it() {
         let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
-        let plain = lines(
-            "\n  ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →\n\n ╭─ groups ──┬─ tasks ──╮\n │ > a       │          │\n",
-        );
-        assert_eq!(shown_screen(&plain, "eval"), "queue tab");
-        let popup = lines(
-            "\n  ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →\n\n ╭─ routines ┬─ details ╮\n │   ╭─ weekly ───╮  │\n",
-        );
+        // The strip as `shell` draws it: bold, with every label but the
+        // open tab's dimmed.
+        let dim = |label: &str| format!("\x1b[2m{label}\x1b[22m\x1b[1m");
+        let strip = |labels: [String; 4]| format!("\x1b[1m  {}\x1b[0m", labels.join("        "));
+        let queue_open = strip([
+            dim("[1] DISPATCH"),
+            "[2] QUEUE".to_string(),
+            dim("[3] ROUTINES"),
+            dim("[4] EVAL"),
+        ]);
+        let queue = lines(&format!(
+            "\n{queue_open}\n\n ╭─ [groups] ┬─ tasks ──╮\n │ > a       │          │\n"
+        ));
+        assert_eq!(shown_screen(&queue, "eval"), "queue tab");
+        let routines_open = strip([
+            dim("[1] DISPATCH"),
+            dim("[2] QUEUE"),
+            "[3] ROUTINES".to_string(),
+            dim("[4] EVAL"),
+        ]);
+        let popup = lines(&format!(
+            "\n{routines_open}\n\n ╭─ [routines] ┬─ details ╮\n │   ╭─ weekly ───╮  │\n"
+        ));
         assert_eq!(
             shown_screen(&popup, "eval"),
             "routines tab, popup \"weekly\""
@@ -1667,20 +1685,20 @@ mod tests {
     fn tui_text_is_lowercase() {
         let _t = test_terminal((100, 30));
         let mut screens: Vec<(String, Vec<String>)> = Vec::new();
-        let (left, right, down) = ("\x1b[D", "\x1b[C", "\x1b[B");
+        let (dispatch, routines, overrides, down) = ("1", "3", "4", "\x1b[B");
         let walks: Vec<String> = vec![
             // The tabs, each as the screen opens or is reached.
             String::new(),
-            left.into(),
-            right.into(),
+            dispatch.into(),
+            routines.into(),
             // Queue tab: panes, filters, the options menu and what each
             // item asks, then what answering it says.
-            "\t".into(),
+            "\x1b[C".into(),
             "f".into(),
             "fwire".into(),
             "fzzz".into(),
             "h".into(),
-            "h\t".into(),
+            "h\x1b[C".into(),
             " ".into(),
             " \r".into(),
             "\r".into(),
@@ -1698,70 +1716,70 @@ mod tests {
             // Routines tab: the list, its details pane, the job and the
             // routine without a job or without a routine, and the options
             // each has.
-            format!("{right}\t"),
-            format!("{right}\r"),
-            format!("{right}{down}"),
-            format!("{right}{down}{down}"),
-            format!("{right}{down}{down}\t"),
-            format!("{right}o"),
-            format!("{right}o\r"),
-            format!("{right}o\r\r"),
-            format!("{right}o\r\r\r"),
-            format!("{right}o\r\r\r\r"),
-            format!("{right}o\r1\r"),
-            format!("{right}o{down}\r"),
-            format!("{right}o{down}\r\r"),
-            format!("{right}o{down}{down}\r"),
-            format!("{right}o{down}{down}\r\r"),
-            format!("{right}{down}o"),
-            format!("{right}{down}o\r"),
-            format!("{right}{down}o\r\r"),
-            format!("{right}{down}o\r\r\r"),
-            format!("{right}{down}{down}o"),
-            format!("{right}{down}{down}o\r"),
-            format!("{right} \r"),
-            format!("{right} \r\r"),
+            format!("{routines}\x1b[C"),
+            format!("{routines}\r"),
+            format!("{routines}{down}"),
+            format!("{routines}{down}{down}"),
+            format!("{routines}{down}{down}\x1b[C"),
+            format!("{routines}o"),
+            format!("{routines}o\r"),
+            format!("{routines}o\r\r"),
+            format!("{routines}o\r\r\r"),
+            format!("{routines}o\r\r\r\r"),
+            format!("{routines}o\r1\r"),
+            format!("{routines}o{down}\r"),
+            format!("{routines}o{down}\r\r"),
+            format!("{routines}o{down}{down}\r"),
+            format!("{routines}o{down}{down}\r\r"),
+            format!("{routines}{down}o"),
+            format!("{routines}{down}o\r"),
+            format!("{routines}{down}o\r\r"),
+            format!("{routines}{down}o\r\r\r"),
+            format!("{routines}{down}{down}o"),
+            format!("{routines}{down}{down}o\r"),
+            format!("{routines} \r"),
+            format!("{routines} \r\r"),
             // Overrides tab: each section, the search row, both config
             // popups with something typed into them, and the pipeline
             // section's step selection, searched, and its value field. The
             // prompts section's own walks are below.
-            format!("{right}{right}"),
-            format!("{right}{right}\t"),
-            format!("{right}{right}\t\t\t"),
-            format!("{right}{right}fdispatch"),
-            format!("{right}{right}fzzz"),
-            format!("{right}{right}\rdispatch.x\t5"),
-            format!("{right}{right}{down}\r"),
-            format!("{right}{right}\t\r"),
-            format!("{right}{right}\t\rfnot set"),
-            format!("{right}{right}\t\ra\rx"),
+            overrides.to_string(),
+            format!("{overrides}\x1b[C"),
+            format!("{overrides}\x1b[C\x1b[C\x1b[C"),
+            format!("{overrides}fdispatch"),
+            format!("{overrides}fzzz"),
+            format!("{overrides}\rdispatch.x\t5"),
+            format!("{overrides}{down}\r"),
+            format!("{overrides}\x1b[C\r"),
+            format!("{overrides}\x1b[C\rfnot set"),
+            format!("{overrides}\x1b[C\ra\rx"),
             // Dispatch tab: the board's rows, their options and the
             // resume and skip-a-hook questions. Never `enter` outside a
             // popup, and never an option that opens a file.
-            format!("{left}u"),
-            format!("{left}o"),
-            format!("{left}{down}"),
-            format!("{left}{down}{down}{down}"),
-            format!("{left}{down}o"),
-            format!("{left}{down}{down}{down}o"),
-            format!("{left}{down}{down}{down}{down}o"),
-            format!("{left}{down}{down}{down}r"),
-            format!("{left}{down}{down}{down}k"),
+            format!("{dispatch}u"),
+            format!("{dispatch}o"),
+            format!("{dispatch}{down}"),
+            format!("{dispatch}{down}{down}{down}"),
+            format!("{dispatch}{down}o"),
+            format!("{dispatch}{down}{down}{down}o"),
+            format!("{dispatch}{down}{down}{down}{down}o"),
+            format!("{dispatch}{down}{down}{down}r"),
+            format!("{dispatch}{down}{down}{down}k"),
         ];
         for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
-            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            let frames = crate::screen::shell::drive_coloured_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
         // The overrides tab's prompts section with a prompt to list: its
         // search, both popups `enter` opens, and the `open workspace` popup
         // `w` opens when the folder cannot be opened.
         let prompt_walks = [
-            format!("{right}{right}\t\t"),
-            format!("{right}{right}\t\tfimpl"),
-            format!("{right}{right}\t\t\r"),
-            format!("{right}{right}\t\t\r\r\r"),
-            format!("{right}{right}w"),
+            format!("{overrides}\x1b[C\x1b[C"),
+            format!("{overrides}\x1b[C\x1b[Cfimpl"),
+            format!("{overrides}\x1b[C\x1b[C\r"),
+            format!("{overrides}\x1b[C\x1b[C\r\r\r"),
+            format!("{overrides}w"),
         ];
         crate::browser::refuse_opens("could not open the overrides folder: no display is set");
         for (i, keys) in prompt_walks.iter().enumerate() {
@@ -1769,7 +1787,7 @@ mod tests {
             let path = crate::prompt::directory_form(&repo, "implementer");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "implementer\n").unwrap();
-            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            let frames = crate::screen::shell::drive_coloured_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
         // A project with nothing in it, where each tab says so and the
@@ -1777,14 +1795,14 @@ mod tests {
         let empty_walks = [
             String::new(),
             "o".into(),
-            left.into(),
-            format!("{left}o"),
-            right.into(),
-            format!("{right}o"),
+            dispatch.into(),
+            format!("{dispatch}o"),
+            routines.into(),
+            format!("{routines}o"),
         ];
         for (i, keys) in empty_walks.iter().enumerate() {
             let (repo, _guard) = crate::status::testutil::fixture(&format!("capitals-empty-{i}"));
-            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            let frames = crate::screen::shell::drive_coloured_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
         for (name, panel) in [

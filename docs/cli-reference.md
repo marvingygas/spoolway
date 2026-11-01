@@ -75,15 +75,15 @@ The screen draws on the terminal's alternate screen for as long as it is open, s
 finds nothing older than the current frame and the mouse wheel does nothing. `q` puts the
 terminal back exactly as it was before spoolway started.
 
-The strip is drawn bold, with no colour. Tab labels are written in capitals. The open tab's
-label is marked with brackets, the same mark the key line gives a key: `[QUEUE]`, `[DISPATCH]`.
-`←` sits one space outside `DISPATCH`, the first tab, and `→` sits one space outside `EVAL`,
-the last. One blank row sits
-above the strip and one below it.
+The strip is drawn bold, with no colour. Tab labels are written in capitals, each after its
+digit in brackets: `[1] DISPATCH`, `[2] QUEUE`. The open tab's label is drawn at normal
+brightness and every other label is dimmed. One blank row sits above the strip and one
+below it.
 
 | Key | What it does |
 |---|---|
-| `←` `→` | Move to the neighbouring tab, when no popup or sub-mode of the tab's own is open |
+| `1`–`5` | Open that tab, when no popup or sub-mode of the tab's own is open. The open tab's own digit does nothing. A home-mode project has no overrides tab, so its eval is `4` |
+| `←` `→` | Move to the next section or pane, wrapping at either end, when no popup or sub-mode of the tab's own is open |
 | `q` | Quit the whole screen, when no popup or sub-mode of the tab's own is open |
 
 Inside the eval tab's filter panel and any popup drawn over a tab, `←` and `→` keep their own
@@ -185,6 +185,7 @@ that still has a task to queue or has every task archived. A group with every ta
 queued never appears. Below the groups that can be queued, the pane also lists one row per plan
 page that no task names yet. See [Queueing a plan](planning.md#queueing-a-plan). The left pane
 is titled `groups`. The right pane is titled `tasks` and lists the highlighted group's tasks.
+The focused pane's title is drawn in square brackets, such as `[groups]`.
 Beside a plan row it says `use /spoolway-tasks`. Each task shows its `pipeline:`, `depends on:`,
 `starts from:` and `lands in:`. `starts from:` is the task's own `starts_from:`, else its first
 dependency's id, else the same branch as `lands in:`. `lands in:` is the task's `base:`, else the
@@ -195,7 +196,7 @@ board's branch.
 | Key | What it does |
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
-| `tab` | Switch focus between the groups and tasks panes |
+| `←` `→` | Switch focus between the groups and tasks panes, and move the brackets with it |
 | `esc` | With the tasks pane focused, return focus to the groups pane |
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
@@ -216,7 +217,7 @@ task, in this order:
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
 Over the groups pane it offers these for the highlighted group. A group with no tasks and no plan
-page says `nothing to do here`. To reach them from the tasks pane, press `tab` first.
+page says `nothing to do here`. To reach them from the tasks pane, press `←` first.
 
 | Item | What it does |
 |---|---|
@@ -1001,7 +1002,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 
 | Key | What it does |
 |---|---|
-| `[tab]` | Cycle through the lanes, directory and trials tables |
+| `[←→]` | Cycle through the lanes, directory and trials tables |
 | `[↑↓]` | Move the cursor |
 | `[a]` / `[d]` | Open the sort popup, ascending or descending |
 | `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |

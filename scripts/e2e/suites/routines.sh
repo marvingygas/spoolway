@@ -50,13 +50,13 @@ task_doc .spoolway/routines/nightly/audit-docs.md audit-docs "$BODY" \
   "group: nightly" "depends_on: [audit-deps]"
 task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: maintenance"
 
-# `→` moves from the queue tab `on_screen` hands over to the routines tab;
+# `3` moves from the queue tab `on_screen` hands over to the routines tab;
 # `j` moves the cursor off `maintenance` (alphabetically first) onto
 # `nightly`; `space` ticks it; `enter` queues both its documents as one batch
 # — starting a dispatcher is the dispatch tab's `enter`, not this one's; the
 # trailing `n` is noise the popup saying what was queued ignores, and the
 # pipe running dry ends the screen, the same way `trials.sh` does.
-on_screen '\x1b[Cj \rn' /dev/null
+on_screen '3j \rn' /dev/null
 
 works "the first task reaches the queue under a minted id" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/audit-deps-1.md"
@@ -82,21 +82,25 @@ has "unminted, unmodified" "id: audit-deps" \
   .spoolway/routines/nightly/audit-deps.md
 
 # The whole of `maintenance`, with the cursor already on it (it sorts
-# first) once `→` reaches the routines tab: `space` ticks it and `enter`
+# first) once `3` reaches the routines tab: `space` ticks it and `enter`
 # queues it, which takes in `prune` from its nested `weekly/` too — there is
 # no `weekly` row to tick on its own. The trailing `n` is noise it ignores,
 # and the pipe running dry ends the screen.
-on_screen '\x1b[C \rn' /dev/null
+on_screen '3 \rn' /dev/null
 
 works "a nested task queues with its top-level routine" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 has "still carrying that routine's group" "group: maintenance" \
   "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 
-# A second, solo pick: `→` reaches the routines tab, and `tab` moves the
-# cursor onto `maintenance`'s tasks in the details pane, already on `prune`,
-# its one task, nested or not; `space` queues it alone. `prune-1` is taken by
-# the batch above, so this one mints the next number.
+# A second run of `maintenance`, ticked from its details rather than the
+# list: `3` reaches the routines tab, `→` moves into the details pane, `j`
+# moves the task cursor off the first task, and `space` still ticks the
+# routine those details belong to, not that one task; `enter` from there
+# queues the whole routine. `sweep`, added beside the nested `prune` first,
+# is what shows the whole routine went: it depends on `prune`, since a group
+# is one chain. `prune-1` is taken by the batch above, so this one mints the
+# next number.
 #
 # `prune-1` lands first, the way a finished run leaves it: a group is one
 # chain, and `maintenance` still holding `prune-1` in the queue would make a
@@ -107,11 +111,25 @@ sed -i 's/^stage: .*/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
 must "prune-1 lands, as a finished run would" \
   mv "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md" "$SPOOLWAY_PROJECT_HOME/archive/prune-1.md"
+task_doc .spoolway/routines/maintenance/sweep.md sweep "$BODY" \
+  "group: maintenance" "depends_on: [prune]"
 
-on_screen '\x1b[C\t n' /dev/null
+on_screen '3\x1b[Cj \rn' /dev/null
 
-works "tab reaches a nested task under its routine, and a solo pick queues it" \
+works "space on a routine's details ticks it, and enter there queues its nested task" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
+works "and every other task in the routine with it" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/sweep-1.md"
+has "— chained onto the nested task's minted id" "prune-2" \
+  "$SPOOLWAY_PROJECT_HOME/queue/sweep-1.md"
+
+# `sweep-1` is unqueued first: it depends on `prune-2` and has not started,
+# so the unqueue of `prune-2` below is refused while it is still queued.
+# `sweep.md` goes too, so later steps find `maintenance` holding `prune` alone,
+# as it did before this check.
+must "the sweep copy unqueues" "$SPOOLWAY" queue unqueue sweep-1
+must "and its routine file goes, leaving maintenance as it was" \
+  rm .spoolway/routines/maintenance/sweep.md
 
 # Unqueuing that copy deletes it. The routine is still in the checkout for the
 # routines tab to queue again, so a draft in pending would only be a duplicate
@@ -188,13 +206,13 @@ lacks "and the ticket that earlier run's own hook opened" "ticket:" \
 lacks "and the epic a fresh run must not inherit" "epic:" \
   .spoolway/routines/archived-reuse/archived-reuse.md
 
-# The routines tab reads its folders fresh on the `→` that reaches it, so
+# The routines tab reads its folders fresh on the `3` that reaches it, so
 # the routine just saved is listed, and it opens with the list's first
 # entry under the cursor. `archived-reuse` sorts before every routine folder
 # this suite wrote earlier, so `space` ticks it and `enter` queues it
 # straight from there, the same `n`-declines-the-dispatcher shape every
 # other queueing keystroke here uses.
-on_screen '\x1b[C \rn' /dev/null
+on_screen '3 \rn' /dev/null
 
 works "the saved routine queues back, past the refusal a stamped copy would hit" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/archived-reuse-1.md"
@@ -235,7 +253,7 @@ EOF
 # Delete asks, esc keeps everything.
 DELETE="$LIVE/routine-delete.txt"
 LAST="$LIVE/routine-delete-popup.txt"
-on_screen '\x1b[Cjjo\x1b[B\x1b[B\r\x1b' "$DELETE"
+on_screen '3jjo\x1b[B\x1b[B\r\x1b' "$DELETE"
 works "delete then esc keeps the routine" test -d .spoolway/routines/nightly
 has "and its whole-folder job" "[jobs.nightly-audit]" "$USER_STORE"
 has "and its second job" "[jobs.audit-docs]" "$PROJECT_STORE"
@@ -251,7 +269,7 @@ has "under the shared key row" "[enter] confirm   [esc] close" "$LAST"
 
 # The menu that led there names each job, offering to switch it.
 MENU="$LIVE/routine-two-jobs-menu.txt"
-on_screen '\x1b[Cjjo' "$MENU"
+on_screen '3jjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with two jobs offers to activate the inactive one" "> activate job audit-docs" "$LAST"
@@ -263,7 +281,7 @@ lacks "nor delete job" "delete job" "$LAST"
 # Activate job beside an active job on the same routine (`o`, `enter`)
 # writes nothing and says why in a popup.
 REFUSED="$LIVE/routine-activate-refused.txt"
-on_screen '\x1b[Cjjo\r' "$REFUSED"
+on_screen '3jjo\r' "$REFUSED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } /also runs/ { last = $0 } END { print last }' \
   "$REFUSED" | sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "activate job beside an active job opens a popup" "─ activate job " "$LAST"
@@ -274,7 +292,7 @@ has "before activating this one" "then activate this one." "$LAST"
 has "activate job writes nothing" "enabled = false" "$PROJECT_STORE"
 
 # Delete asks, enter deletes the jobs and then the folder.
-on_screen '\x1b[Cjjo\x1b[B\x1b[B\r\r' /dev/null
+on_screen '3jjo\x1b[B\x1b[B\r\r' /dev/null
 works "delete then enter removes the routine folder" \
   test ! -e .spoolway/routines/nightly
 lacks "and its whole-folder job from the user store" "[jobs.nightly-audit]" "$USER_STORE"
@@ -289,7 +307,7 @@ works "nothing is staged" \
 # so `jj` puts the cursor on `release`, which has no job yet.
 MENU="$LIVE/routine-no-job-menu.txt"
 LAST="$LIVE/routine-no-job-menu-last.txt"
-on_screen '\x1b[Cjjo' "$MENU"
+on_screen '3jjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with no job offers edit schedule first" "> edit schedule" "$LAST"
@@ -302,7 +320,7 @@ lacks "nor edit job" "edit job" "$LAST"
 # store under the routine's own name.
 NEW_JOB="$LIVE/routine-new-job.txt"
 LAST="$LIVE/routine-new-job-saved.txt"
-on_screen '\x1b[Cjjo\r0 3 * * 1-5\rbug\r' "$NEW_JOB"
+on_screen '3jjo\r0 3 * * 1-5\rbug\r' "$NEW_JOB"
 has "edit schedule saves the job to the user store" "[jobs.release]" "$USER_STORE"
 has "with the routine it was made on" 'routine = "release"' "$USER_STORE"
 has "with the schedule typed" 'schedule = "0 3 * * 1-5"' "$USER_STORE"
@@ -317,7 +335,7 @@ has "and where to change it" "edit or deactivate it with o on its routine." "$LA
 # A routine with a job offers no second one: its menu is the job's own,
 # edit schedule, deactivate job, then delete routine.
 MENU="$LIVE/routine-one-job-menu.txt"
-on_screen '\x1b[Cjjo' "$MENU"
+on_screen '3jjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with a job offers edit schedule first" "> edit schedule" "$LAST"
@@ -332,34 +350,51 @@ lacks "nor delete job" "delete job" "$LAST"
 # its schedule reads none; `jj` reaches `release`, whose job was saved above.
 DETAILS="$LIVE/routine-details.txt"
 LAST="$LIVE/routine-details-last.txt"
-on_screen '\x1b[C' "$DETAILS"
+on_screen '3' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the routines tab's right pane is titled details" "─ details ─" "$LAST"
+has "beside the focused list's bracketed title" "─ [routines] ─" "$LAST"
 has "a routine with no job says its schedule is none" "schedule:    none" "$LAST"
-has "and the list's key line names tab details" "[tab] details" "$LAST"
+has "and the list's key line names no tab, nor enter with nothing ticked" \
+  "[space] select   [o] options   [q] quit" "$LAST"
+lacks "nor any tab pair" "[tab]" "$LAST"
 lacks "a routine row carries no task count" "1 task" "$LAST"
-on_screen '\x1b[Cjj' "$DETAILS"
+on_screen '3jj' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with a job draws the job's schedule" "schedule:    0 3 * * 1-5" "$LAST"
 has "and names the job" "job:         release" "$LAST"
 
+# `→` moves focus, and the brackets with it, onto the details pane, and `←`
+# from the list wraps round to it too. The key line stays the list's.
+on_screen '3\x1b[C' "$DETAILS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "→ brackets the details pane's title" "─ [details] ─" "$LAST"
+has "and leaves the list's plain" "─ routines ─" "$LAST"
+has "under the same key line, naming no tab" \
+  "[space] select   [o] options   [q] quit" "$LAST"
+on_screen '3\x1b[D' "$DETAILS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "← wraps round to the details pane too" "─ [details] ─" "$LAST"
+
 # Deactivate job (`o`, down, `enter`) writes the job back disabled, to the
 # user store it lives in and nowhere else, and the details pane says it is
 # inactive; the same keys again are activate job, which drops the key.
-on_screen '\x1b[Cjjo\x1b[B\r' "$DETAILS"
+on_screen '3jjo\x1b[B\r' "$DETAILS"
 has "deactivate job writes the job disabled" "enabled = false" "$USER_STORE"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "and the details pane says the job is inactive" "next:        inactive" "$LAST"
 lacks "never into the project store" "[jobs.release]" "$PROJECT_STORE"
-on_screen '\x1b[Cjjo' "$MENU"
+on_screen '3jjo' "$MENU"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$MENU" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "an inactive job offers activate job" "│    activate job" "$LAST"
 lacks "in place of deactivate job" "deactivate job" "$LAST"
-on_screen '\x1b[Cjjo\x1b[B\r' /dev/null
+on_screen '3jjo\x1b[B\r' /dev/null
 lacks "activate job writes the job enabled again" "enabled" "$USER_STORE"
 has "and keeps it" "[jobs.release]" "$USER_STORE"
 
@@ -367,7 +402,7 @@ has "and keeps it" "[jobs.release]" "$USER_STORE"
 # schedule: eleven backspaces clear `0 3 * * 1-5`, a new one is typed, and
 # `enter` on the pipeline popup keeps the job's own pipeline. The job keeps
 # its name, its routine and its store.
-on_screen "\x1b[Cjjo\r$(printf '\\x7f%.0s' {1..11})0 4 * * *\r\r" /dev/null
+on_screen "3jjo\r$(printf '\\x7f%.0s' {1..11})0 4 * * *\r\r" /dev/null
 has "edit schedule saves the new schedule" 'schedule = "0 4 * * *"' "$USER_STORE"
 lacks "in place of the old one" 'schedule = "0 3 * * 1-5"' "$USER_STORE"
 has "under the job's own name" "[jobs.release]" "$USER_STORE"
@@ -388,7 +423,7 @@ pipeline = "bugfix"
 routine = "nightly"
 EOF
 ORPHAN="$LIVE/routine-orphan.txt"
-on_screen '\x1b[Cjjj' "$ORPHAN"
+on_screen '3jjj' "$ORPHAN"
 sed 's/\x1b\[[0-9;]*m//g' "$ORPHAN" >"$ORPHAN.plain"
 has "a job without a routine gets a row named after its routine" "> nightly    " "$ORPHAN.plain"
 # On the row itself: the details' `next:` line says "missing" too, so the
@@ -405,13 +440,13 @@ has "its key line is options and quit" "[o] options   [q] quit" "$ORPHAN.plain"
 # `jjj` moves onto the job's row, and `space` and `enter` there do nothing,
 # so the ticked routine is not queued unseen.
 QUEUED_BEFORE=$(find "$SPOOLWAY_PROJECT_HOME/queue" -name '*.md' | wc -l)
-on_screen '\x1b[C jjj \r' /dev/null
+on_screen '3 jjj \r' /dev/null
 works "space and enter on the job's row queue nothing" \
   test "$(find "$SPOOLWAY_PROJECT_HOME/queue" -name '*.md' | wc -l)" -eq "$QUEUED_BEFORE"
 
 # Its menu offers edit schedule alone, and nothing a routine offers.
 MENU="$LIVE/routine-orphan-menu.txt"
-on_screen '\x1b[Cjjjo' "$MENU"
+on_screen '3jjjo' "$MENU"
 sed 's/\x1b\[[0-9;]*m//g' "$MENU" >"$MENU.plain"
 has "the job's row offers edit schedule" "> edit schedule" "$MENU.plain"
 lacks "and no delete job" "delete job" "$MENU.plain"
@@ -425,7 +460,7 @@ mkdir -p .spoolway/routines/zz-broken
 task_doc .spoolway/routines/zz-broken/fine.md zz-fine "$BODY" "group: zz-broken"
 printf 'no frontmatter fence here\n' >.spoolway/routines/zz-broken/torn.md
 BROKEN="$LIVE/routine-unparseable.txt"
-on_screen '\x1b[Cjjj \r' "$BROKEN"
+on_screen '3jjj \r' "$BROKEN"
 has "queueing a routine folder with an unparseable file is refused" "queue refused" "$BROKEN"
 has "naming the file" "torn.md" "$BROKEN"
 works "and none of the folder's other tasks was queued" \

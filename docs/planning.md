@@ -140,10 +140,11 @@ runs `spoolway task contract --from` over the directory to check the set.
 
 <img src="screenshots/readme/queue.png" alt="the queue screen">
 
-Bare `spoolway` opens the screen on the dispatch tab, and `→` reaches the queue tab. The left
+Bare `spoolway` opens the screen on the dispatch tab, and `2` opens the queue tab. The left
 pane, titled `groups`, lists one row per group in the pending directory, and one per plan page no
 task names yet. The right pane, titled `tasks`, lists the highlighted group's tasks and what each
-waits on.
+waits on. The focused pane's title is drawn in square brackets, such as `[groups]`, so you can see
+which pane the keys act on. `←` and `→` move the brackets to the other pane.
 
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in
@@ -153,7 +154,7 @@ groups. A plan row shows only its name, without the date in front of it, with no
 no tail. With a plan row highlighted, the tasks pane says only `use /spoolway-tasks`:
 
 ```
-╭─ groups ───────────────┬─ tasks ────────────────────────────────────────────╮
+╭─ [groups] ─────────────┬─ tasks ────────────────────────────────────────────╮
 │   [ ] checkout         │                                                    │
 │   [ ] cart             │   use /spoolway-tasks                              │
 │ >     search           │                                                    │
@@ -175,7 +176,7 @@ after the path reads again.
 
 | Key | What it does |
 |---|---|
-| `tab` | Switch focus between the groups and tasks panes. |
+| `←` `→` | Switch focus between the groups and tasks panes. |
 | `esc` | With the tasks pane focused, return focus to the groups pane. |
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
@@ -183,6 +184,12 @@ after the path reads again.
 | `f` | Search the group list. `enter` keeps the search, `esc` clears it. |
 | `h` | Show or hide done groups. A queued group never appears. |
 | `ctrl-c` | Leave the screen. |
+
+The key line under the screen names `space`, `enter` and `o` only while each would act, and names
+it again as soon as it would. `space` shows over a group it can tick, `enter` once a group is
+selected, and `o` while the focused pane has a row under its cursor. An empty queue's key line
+starts at `[f] search`. A search that hides every group still shows `enter` while a group is
+selected, because `enter` queues it anyway.
 
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left exactly where it is. A
@@ -215,7 +222,7 @@ A plan line always reads `0 open — plan <path>`, so a script that counts group
 `o` opens a menu for the row the focused pane highlights, titled with that row's name. With
 the tasks pane focused it acts on the highlighted task. With the groups pane focused it acts
 on the highlighted group, even though the tasks pane shows that group's tasks too. To reach a
-group's actions from the tasks pane, press `tab` first. The cursor opens on the first item.
+group's actions from the tasks pane, press `←` first. The cursor opens on the first item.
 A group whose tasks name a plan page lists `open plan` first:
 
 ```
@@ -369,9 +376,11 @@ never a task template: it holds finished tasks, not a skeleton with a placeholde
 Bare `spoolway` has a routines tab, between the queue and overrides tabs. Its left pane,
 titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
 pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
+As on the queue tab, the focused pane's title is drawn in square brackets, such as `[routines]`,
+and `←` and `→` move the brackets to the other pane.
 
 ```
-┌ routines ────────────────┬ details ──────────────────────────────────────────────────────────────┐
+╭─ [routines] ─────────────┬─ details ─────────────────────────────────────────────────────────────╮
 │ > [ ] dependabot         │                                                                       │
 │   [ ] release-spoolway   │   schedule:    0 */2 * * *                                            │
 │                          │   pipeline:    dependabot                                             │
@@ -386,8 +395,8 @@ pane, titled `details`, shows the highlighted routine's job, then its tasks unde
 │                          │       depends on:  -                                                  │
 │                          │       description: chore(deps): review and merge open Dependabot pull │
 │                          │                    requests                                           │
-└──────────────────────────┴───────────────────────────────────────────────────────────────────────┘
- [space] select   [enter] queue   [o] options   [tab] details   [q] quit
+╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯
+ [space] select   [o] options   [q] quit
 ```
 
 What the job rows say depends on how many jobs point at the routine:
@@ -413,11 +422,16 @@ without a key.
 
 | Key | What it does |
 |---|---|
-| `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
-| `enter` | Queue every task under every ticked routine as one batch. |
+| `space` | Tick or untick a routine. Over the details pane it ticks the routine whose details are shown, and the tick shows in the list. On a job row it does nothing. |
+| `enter` | Queue every task under every ticked routine as one batch, from either pane. With nothing ticked, or on a job row, it does nothing. |
 | `o` | Open the options menu of the row the focused pane highlights. |
-| `tab` | Switch focus between the routine list and the details pane. |
+| `←` `→` | Switch focus between the routine list and the details pane. On a job row they do nothing. |
 | `esc` | Over the details pane, return focus to the list. Over the list, do nothing. |
+
+The key line names `space`, `enter` and `o` only while each would act. `space` shows over a
+routine, from either pane. `enter` shows once a routine is ticked and the cursor is not on a job
+row. `o` shows while the focused pane has a row under its cursor, so a job row's key line is
+`[o] options` and `[q] quit` alone.
 
 The options menu follows focus the same way it does on the queue screen, and is titled with the
 highlighted row's name:

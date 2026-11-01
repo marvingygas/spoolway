@@ -323,13 +323,10 @@ measure large
 # Eval reads the ledger and the sessions on a background thread, so it may go
 # over budget while it does. What it may not do is stay there: freed memory has
 # to go back to the system within a few seconds of leaving. The screen of the
-# large history is still open, on the queue tab; Eval is three tabs to its
-# right.
+# large history is still open, on the queue tab; `5` opens Eval.
 eval_back_mb=""
 eval_stuck=""
-screen_press $'\x1b[C'   # routines
-screen_press $'\x1b[C'   # overrides
-screen_press $'\x1b[C'   # eval
+screen_press 5   # eval
 # Left only once the load is over, which is not what is measured: a load left
 # early holds its memory until it ends, and on a slow runner that is after the
 # settle below. Judged from the frame on screen, not by counting frames: a tab
@@ -340,7 +337,7 @@ screen_press $'\x1b[C'   # eval
 eval_frame() { # prints the frame on screen when it is a whole Eval frame
   local frame
   frame=$(screen_last_frame)
-  case "$frame" in *'[EVAL]'*$'\x1b[?2026l'*) printf '%s' "$frame" ;; *) return 1 ;; esac
+  case "$frame" in *'─ [eval]'*$'\x1b[?2026l'*) printf '%s' "$frame" ;; *) return 1 ;; esac
 }
 eval_opened() { eval_frame > /dev/null; }
 eval_loaded() {
@@ -357,7 +354,7 @@ fi
 # A load that never ends is an Eval that holds its memory for good, so it fails
 # the Eval check below rather than ending the suite before any verdict prints.
 if [ -z "$eval_stuck" ]; then
-  screen_press $'\x1b[D'   # back to overrides
+  screen_press 4   # back to overrides
   for ((i = 0; i <= EVAL_SETTLE_S * 10; i++)); do
     kb=$(now_kb "$E2E_SCREEN_PID")
     eval_back_mb=$(mb "${kb:-0}")

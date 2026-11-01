@@ -349,7 +349,7 @@ git commit -qm "settle config.toml the way sync writes it" -- .spoolway/config.t
 on_screen '\r' "$IGNORED_SCREEN"
 frame "$IGNORED_SCREEN" 1 >"$IGNORED_SCREEN.first"
 has "bare spoolway opens on the dispatch tab" \
-  "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$IGNORED_SCREEN.first"
+  "[1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] OVERRIDES        [5] EVAL" "$IGNORED_SCREEN.first"
 lacks "with no override ignored popup over it" \
   "override ignored" "$IGNORED_SCREEN.first"
 lacks "and no ignored-override note anywhere in the session's output" \
@@ -678,12 +678,12 @@ picker_bad() { bad "$1"; picker_text | sed 's/^/        /' >&2; }
 
 PICK_LOG="$LIVE/picker.out"
 screen_start "$PICK_LOG"
-# Queue tab, `→` twice onto the overrides tab, then `tab` three times onto
-# the active section, its cursor on the default pipeline's file.
+# Queue tab, `4` onto the overrides tab, then `←` onto the active section,
+# its cursor on the default pipeline's file.
 PICK_MARK=$(wc -l < "$PICK_LOG")
-screen_press $'\x1b[C\x1b[C'
+screen_press 4
 poll_until 10 screen_drew_since "$PICK_MARK" "[config]" || bad "the overrides tab never drew"
-screen_press $'\t\t\t'
+screen_press $'\x1b[D'
 poll_until 10 screen_drew_since "$PICK_MARK" "pipelines/default.yml" || bad "the active section never drew"
 
 PICK_MARK=$(wc -l < "$PICK_LOG")

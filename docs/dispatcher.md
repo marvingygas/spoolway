@@ -544,6 +544,13 @@ cursor sits on a row it can resume. `[u] update config` joins it, between `[o] o
 `[q] quit`, only while a dispatcher holds the lock and the `config changed` line is up. On an empty board it sits between `enter` and `q`. It is drawn in normal
 text, and every other pair on the line is dim.
 
+The `enter` pair shows only while `enter` would start or stop dispatching. While a menu, a panel
+or a popup that reads keys is open, such as the stop popup, `enter` answers that instead, so the
+pair leaves the key line until it closes. The `starting dispatcher`, `updating config…` and
+`successfully loaded` popups read no keys, so the pair stays under them. Once the dispatcher has
+been asked to stop, `enter` does nothing until it has gone, so the pair is off the key line until
+`[enter] start dispatching` replaces it.
+
 | Key | What it does |
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
@@ -991,16 +998,17 @@ the line, and `[u] update config` is off the key line.
 
 ## The overrides tab
 
-Bare `spoolway`'s tab strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES`, `EVAL`. The
-overrides tab sets keys in the private [overrides layer](configuration.md#the-overrides-layer)
-from the screen, so a change needs no `override` command per key. A home-mode project has no
-overrides tab: its whole setup already lives privately in its workspace, so there is no
-checked-in file to override. Its strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `EVAL`, and `→`
-from routines reaches eval.
+Bare `spoolway`'s tab strip numbers `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES` and `EVAL` from `1`
+to `5`, and `4` opens the overrides tab. The overrides tab sets keys in the private
+[overrides layer](configuration.md#the-overrides-layer) from the screen, so a change needs no
+`override` command per key. A home-mode project has no overrides tab: its whole setup already lives privately in its workspace, so there is no
+checked-in file to override. Its strip numbers `DISPATCH`, `QUEUE`, `ROUTINES` and `EVAL` from `1`
+to `4`, and `4` opens eval.
 
-The tab has four sections, named in its list box's title. The open one is bracketed, the way the
-strip brackets the open tab. The tab always opens on config, and `tab` moves the brackets one
-section right, wrapping from active back to config. `←` and `→` still change tabs.
+The tab has four sections, named in its list box's title. The open one is bracketed. The tab
+always opens on config. `→` moves the brackets one section right, wrapping from active back to
+config, and `←` moves them one section left, wrapping from config to active. They move the
+section only while the section is at rest. They do nothing inside a search row or a popup.
 
 ```
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
@@ -1034,7 +1042,7 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 `spoolway config override --set models.qwen3-coder.input=0.4` writes one key from the command line.
 
 ```
-    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+    [1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] OVERRIDES        [5] EVAL
 
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
 │                                                                              │
@@ -1049,7 +1057,7 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 │   watch                                                                      │
 │     dirs                        empty                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+ [enter] set value   [f] search   [o] options   [w] open workspace   [q] quit
 ```
 
 | Key | What it does |
@@ -1059,14 +1067,15 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 | `f` | Open the `search:` row at the top of the list. |
 | `o` | Open the options menu of the key under the cursor. |
 | `w` | Open the overrides folder. |
-| `tab` | Move to the next section. |
+| `←` `→` | Move to the previous or the next section. |
 
 The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
 
 While the `search:` row is open the key line reads `[enter] search   [esc] cancel`. What is
 typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
 exactly the dimmed keys. `enter` keeps the results, and `esc` clears the search. A search that
-leaves no key leaves nothing for `enter` or `o` to open. A list taller than
+leaves no key leaves nothing for `enter` or `o` to open, so the key line drops
+`[enter] set value` and `[o] options` until a key matches again. A list taller than
 the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,
 such as `↑ 3 keys above · ↓ 6 keys below`.
 
@@ -1139,10 +1148,12 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 │     serial                                                                   │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] select   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+ [enter] select   [f] search   [o] options   [w] open workspace   [q] quit
 ```
 
 `↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
+A search that leaves no field drops `[enter] select` and `[o] options` from the key line until a
+field matches again, since neither has a field to act on.
 `w` opens the overrides folder.
 `o` opens the options menu of the field under the cursor. It offers `delete override` when a pipeline patch sets the field. That removes the field from every step of every patch that sets it, after one confirm popup that names each file and key. A patch left with no keys leaves the layer.
 `enter` on a field opens its step selection. It lists every pipeline with a step that takes the
@@ -1184,7 +1195,7 @@ time the step selection opens, the `not set` steps are hidden.
 | `a` | Select every listed step. Pressed again once they all are, clear the selection. |
 | `f` | Open the `search:` row. |
 | `h` | Show the `not set` steps, or hide them again. The key line reads `[h] show not set` while they are hidden and `[h] hide not set` while they are shown. |
-| `enter` | Open the value field. With no step selected it does nothing. |
+| `enter` | Open the value field. With no step selected it does nothing, and the key line leaves `[enter] set value` out until a step is selected. |
 | `esc` | Go back to the field list. |
 
 The search matches pipeline names, step ids and the values shown, `not set` included, so `not
@@ -1262,11 +1273,12 @@ layer already holds a copy of reads `overridden`.
 │   reproducer                                                                 │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] override   [f] search   [w] open workspace   [tab] section   [q] quit
+ [enter] override   [f] search   [w] open workspace   [q] quit
 ```
 
 `↑` and `↓` move the cursor. `f` opens a `search:` row that narrows the list to the prompts whose
-name holds what is typed, and `overridden` finds the prompts the layer holds.
+name holds what is typed, and `overridden` finds the prompts the layer holds. A search that leaves
+no prompt drops `[enter] override` from the key line until a prompt matches again.
 
 A prompt override replaces the whole `PROMPT.md`, so the tab has no field for it and starts no
 editor. `enter` on a prompt the layer does not hold writes its copy to
@@ -1304,7 +1316,7 @@ ones the dispatcher reads. A worktree's own copy of them never changes what a ro
 copy replaces the whole file, so its row reads `whole file`.
 
 ```
-    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+    [1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] OVERRIDES        [5] EVAL
 
 ╭─ config   pipeline   prompts   [active (7)] ─────────────────────────────────╮
 │                                                                              │
@@ -1321,7 +1333,7 @@ copy replaces the whole file, so its row reads `whole file`.
 │   [ ] prompts/code-reviewer          whole file                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] select all   [o] options   [w] open workspace   [tab] section   [q] quit
+ [space] select   [a] select all   [o] options   [w] open workspace   [q] quit
 ```
 
 A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints. The
@@ -1353,7 +1365,10 @@ branch has merged: a promote keeps its entries in the layer until you delete the
 | `a` | Select every file and key. A second `a` clears the selection. |
 | `o` | Open the menu: `edit`, `promote selected` and `delete selected`. |
 | `w` | Open the overrides folder. |
-| `tab` | Move to the next section. |
+| `←` `→` | Move to the previous or the next section. |
+
+An empty layer has no row to select and nothing for the menu to act on. Its key line reads
+`[w] open workspace   [q] quit`, and `space`, `a` and `o` come back once the layer holds a file.
 
 `enter` on the list does nothing: every row is edited through `o`, then `edit`. The menu opens
 on `edit`, which always acts on the row under the cursor. The menu's title says how many keys are

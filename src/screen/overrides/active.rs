@@ -385,7 +385,7 @@ impl ActiveSection {
     }
 
     /// Whether the list has the keys, with nothing open over it: the only
-    /// time `tab`, `q`, `w` and `←`/`→` reach past the section.
+    /// time the arrows, `q`, `w` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::List)
     }
@@ -841,16 +841,21 @@ impl ActiveSection {
     }
 
     /// The key line under the frame: whatever the section shows names its
-    /// own keys.
+    /// own keys. An empty layer has no row for `space` or `a` to select and
+    /// no item for `o`'s menu, so only `w` and `q` are named on it.
     pub(super) fn footer(&self) -> Vec<(&'static str, &'static str)> {
         match &self.view {
+            View::List if self.files.is_empty() => [
+                [super::OPEN_WORKSPACE].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
             View::List => [
                 [
                     ("space", "select"),
                     ("a", "select all"),
                     super::OPTIONS,
                     super::OPEN_WORKSPACE,
-                    ("tab", "section"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -1249,7 +1254,7 @@ mod tests {
     /// The tab, opened on its active section.
     fn on_active(repo: &Repo) -> State {
         let mut state = State::new(repo);
-        type_keys(repo, &mut state, "\t\t\t");
+        type_keys(repo, &mut state, "\x1b[D");
         assert_eq!(state.section, Section::Active);
         state
     }
@@ -1317,8 +1322,19 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [space] select   [a] select all   [o] options   [w] open workspace   [tab] section"
+            " [space] select   [a] select all   [o] options   [w] open workspace"
         );
+    }
+
+    // An empty layer has nothing for `space`, `a` or `o` to act on, so its
+    // key line names only `w`, and `q` under bare `spoolway`'s strip.
+    #[test]
+    fn an_empty_layer_names_only_open_workspace_and_quit() {
+        let (repo, _guard) = project("active-empty");
+        let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+        let state = on_active(&repo);
+        assert!(state.layer.files.is_empty());
+        assert_eq!(key_line(&state), " [w] open workspace   [q] quit");
     }
 
     // A key the merge ignores reads `ignored —` with the reason `override
@@ -1781,7 +1797,7 @@ mod tests {
             "steps:\n  implement:\n    model: claude-opus-5-5\n  test:\n    timeout: 90m\n",
         );
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\tfmodel\ro\r");
+        type_keys(&repo, &mut state, "\x1b[Cfmodel\ro\r");
         let drawn = popup(&state);
         assert!(
             drawn.iter().any(|l| l.contains("3 keys in 2 files")),

@@ -570,9 +570,16 @@ impl NewJobWalk {
     }
 
     /// The key line under the frame while the walk is open — the same keys
-    /// its popup names.
+    /// its popup names, less `enter` on the schedule popup while the
+    /// expression will not parse, when [`NewJobWalk::key`] reads `enter` as
+    /// nothing.
     pub(super) fn footer(&self) -> String {
         match self {
+            NewJobWalk::Schedule(draft)
+                if crate::cron::Cron::parse(draft.schedule.trim()).is_err() =>
+            {
+                key_hint(&SCHEDULE_KEYS[1..])
+            }
             NewJobWalk::Schedule(_) => key_hint(SCHEDULE_KEYS),
             NewJobWalk::PickPipeline { .. } => hint(&crate::screen::answer_keys()),
         }
@@ -580,6 +587,8 @@ impl NewJobWalk {
 }
 
 /// The schedule popup's keys, in the popup and on the line under the frame.
+/// `enter` leads, so the key line can drop it alone — see
+/// [`NewJobWalk::footer`].
 const SCHEDULE_KEYS: &[(&str, &str)] = &[("enter", "accept"), ("esc", "cancel")];
 
 /// The routines tab's popup once its edit schedule has saved a job:
@@ -933,6 +942,26 @@ pub(crate) fn jobs_asking_panels() -> Vec<(&'static str, Vec<String>)> {
 mod tests {
     use super::*;
     use crate::commands::testutil::fixture;
+
+    /// The schedule step's key line names `[enter] accept` only while the
+    /// typed text parses, since `enter` moves on only then; `[esc] cancel`
+    /// stays throughout. Its popup's own key row is left as it was. Before
+    /// the key line asked, it named `enter` over an empty or broken field.
+    #[test]
+    fn the_schedule_key_line_names_enter_only_while_the_cron_text_parses() {
+        let line = |schedule: &str| {
+            let mut draft = Draft::new(&Pipelines::builtin());
+            draft.schedule = schedule.to_string();
+            crate::status::strip_ansi(&NewJobWalk::schedule(draft).footer())
+                .trim()
+                .to_string()
+        };
+        for broken in ["", "0 3 * *", "nonsense"] {
+            assert_eq!(line(broken), "[esc] cancel", "{broken:?}");
+        }
+        assert_eq!(line("0 3 * * 1-5"), "[enter] accept   [esc] cancel");
+        assert_eq!(line(" 0 3 * * 1-5 "), "[enter] accept   [esc] cancel");
+    }
 
     /// The pipeline picker's query row says `search:`, the word the queue
     /// tab's search box uses, so the board names it one way on every tab.

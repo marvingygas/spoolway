@@ -3819,17 +3819,17 @@ fn trials_table(rows: &[TrialRow], sort: Option<&Sort>) -> Vec<Line> {
 // end-to-end suite is scripting drive it identically, and the screen ends
 // the moment either runs out.
 //
-// Three tables: `tab` cycles from the lanes to the watched directories to
-// the trials and back, which `by` and which filter are rows on the filter
-// panel, and the sort is the popup `a` or `d` opens. The one drill-in is
-// `enter` on a trial, which is nothing but a filter set for the person: the
-// lanes table, narrowed to that trial and grouped by pipeline. Every lanes
-// and directory table is built by the same functions the
-// printing path uses (`lanes_table`, `dirs_table`, `sessions_table`), so the
-// screen and a pasted `spoolway eval --by step` can never disagree about a
-// column. Rendered without colour throughout: `pad_to` counts every
-// character as one column, and an ANSI escape slipped into a row would throw
-// the frame's own border out of line with it.
+// Three tables: `→` cycles from the lanes to the watched directories to
+// the trials and back, and `←` walks them the other way. Which `by` and
+// which filter are rows on the filter panel, and the sort is the popup `a`
+// or `d` opens. The one drill-in is `enter` on a trial, which is nothing
+// but a filter set for the person: the lanes table, narrowed to that trial
+// and grouped by pipeline. Every lanes and directory table is built by the
+// same functions the printing path uses (`lanes_table`, `dirs_table`,
+// `sessions_table`), so the screen and a pasted `spoolway eval --by step`
+// can never disagree about a column. Rendered without colour throughout:
+// `pad_to` counts every character as one column, and an ANSI escape slipped
+// into a row would throw the frame's own border out of line with it.
 
 /// Which of the three tables is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3840,7 +3840,7 @@ enum TableKind {
 }
 
 impl TableKind {
-    /// The table `tab` moves to: the trials table last, so `tab` from an
+    /// The table `→` moves to: the trials table last, so `→` from an
     /// opened trial's lanes table runs through the directories back to the
     /// list it was opened from.
     fn next(self) -> TableKind {
@@ -3848,6 +3848,17 @@ impl TableKind {
             TableKind::Lanes => TableKind::Dirs,
             TableKind::Dirs => TableKind::Trials,
             TableKind::Trials => TableKind::Lanes,
+        }
+    }
+
+    /// The table `←` moves to: [`TableKind::next`] walked backwards, so `←`
+    /// from an opened trial's lanes table goes straight back to the list it
+    /// was opened from.
+    fn previous(self) -> TableKind {
+        match self {
+            TableKind::Lanes => TableKind::Trials,
+            TableKind::Dirs => TableKind::Lanes,
+            TableKind::Trials => TableKind::Dirs,
         }
     }
 
@@ -3862,7 +3873,7 @@ impl TableKind {
     }
 }
 
-/// Every section's name, in the order `tab` walks them, the open one
+/// Every section's name, in the order `→` walks them, the open one
 /// bracketed: the left side of the top border, as the overrides tab names
 /// its own sections.
 fn section_names(table: TableKind) -> String {
@@ -3910,7 +3921,7 @@ impl Scope {
 /// parsing happens once, in `load`, so a bad value is reported in one place.
 ///
 /// The tables keep their own `by` and their own narrowing rows, so
-/// `tab` back to a table finds it the way it was left; `since` and `until`
+/// an arrow back to a table finds it the way it was left; `since` and `until`
 /// are shared, since a window bounds every table the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Filters {
@@ -3945,7 +3956,7 @@ struct Filters {
     trial_sort: Option<Sort>,
     /// Which figures the lanes and directory tables draw, flipped by `t` —
     /// kept here for the same reason the sorts are, so it rides along with
-    /// `tab`, `r`, a change of `by` and the filter panel. Never saved: every
+    /// `←`/`→`, `r`, a change of `by` and the filter panel. Never saved: every
     /// visit opens on totals.
     figures: Figures,
 }
@@ -5042,20 +5053,40 @@ fn filters_label(
 /// bracketed the way the board brackets its own by [`key_hint`]. The frame
 /// sits one column in from the key line's own leading space, so one more is
 /// added in front to line the first key up under the frame's first column
-/// of content. No `[↑↓] move` leads it: no other tab lists the arrows on
-/// its key line, which only the popups name. The trials table trades
+/// of content. No `[↑↓] move` leads it, and no `←`/`→` for the sections:
+/// no other tab lists the arrows on its key line, which only the popups
+/// name, and the bracketed section in the box title already shows which
+/// table they have reached. The trials table trades
 /// `[e] export` for `[enter] open`: it has nothing to export, and a trial
 /// to open. Nor has it a `[t]`, which names the figures the other two would
 /// switch to.
-fn footer(table: TableKind, figures: Figures) -> String {
-    let tab = ("tab", "section");
+///
+/// A pair is named only while its key would act. Under the filter, sort or
+/// calendar popup the table's letters belong to the popup, and while a load
+/// runs only `q` and a tab's digit are read, so each leaves `[q] quit` alone.
+/// `rows` is how many rows the table on screen holds: on an empty trials
+/// table `enter` has no trial to open, and `[enter] open` goes until one
+/// comes back.
+fn footer(table: TableKind, figures: Figures, mode: &Mode, rows: usize) -> String {
+    if matches!(
+        mode,
+        Mode::Filter(_) | Mode::Calendar { .. } | Mode::Sort { .. } | Mode::Loading { .. }
+    ) {
+        return format!(" {}", key_hint(&[("q", "quit")]));
+    }
     let flip = ("t", figures.other().label(table));
     let keys: &[(&str, &str)] = match table {
+        TableKind::Trials if rows == 0 => &[
+            ("a", "ascending"),
+            ("d", "descending"),
+            ("f", "filters"),
+            ("r", "refresh"),
+            ("q", "quit"),
+        ],
         TableKind::Trials => &[
             ("enter", "open"),
             ("a", "ascending"),
             ("d", "descending"),
-            tab,
             ("f", "filters"),
             ("r", "refresh"),
             ("q", "quit"),
@@ -5064,7 +5095,6 @@ fn footer(table: TableKind, figures: Figures) -> String {
             ("a", "ascending"),
             ("d", "descending"),
             flip,
-            tab,
             ("f", "filters"),
             ("e", "export"),
             ("r", "refresh"),
@@ -5136,7 +5166,12 @@ fn eval_frame_rows_at(
     let width = frame_width(content.max(border));
     // Wrapped before the body is measured, because each row it wraps onto
     // past its first comes off the body's.
-    let keys = crate::screen::key_rows(&footer(state.table, state.filters.figures));
+    let keys = crate::screen::key_rows(&footer(
+        state.table,
+        state.filters.figures,
+        &state.mode,
+        row_count(&lines),
+    ));
     let rows = frame_rows(height, keys.len());
     let mut body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
@@ -5288,10 +5323,10 @@ fn filter_fields(table: TableKind) -> &'static [FilterField] {
 
 /// A copy of [`Filters`] a person is editing in the filter panel, plus which
 /// row the cursor is on and which table's rows it draws — fixed at the
-/// moment `f` opened the panel, since nothing in [`Mode::Filter`] lets `tab`
-/// change the table while it is up. `esc` drops this untouched; `enter`
-/// turns it back into the real `Filters` and reloads — see `run_screen_with`'s
-/// own handling of [`Mode::Filter`].
+/// moment `f` opened the panel, since nothing in [`Mode::Filter`] lets the
+/// arrows change the table while it is up: there they change a row's value.
+/// `esc` drops this untouched; `enter` turns it back into the real `Filters`
+/// and reloads — see `run_screen_with`'s own handling of [`Mode::Filter`].
 #[derive(Debug, Clone)]
 struct Draft {
     field: usize,
@@ -5349,11 +5384,11 @@ enum Mode {
     /// A [`load`] running on its own thread, under a keyless `eval` popup
     /// reading `loading…` — over an empty frame on a visit's first load, and
     /// over the table already shown on `r` or the filter panel's `enter`.
-    /// Only `←`, `→` and `q` are read: every other key would act on a table
-    /// that is about to be replaced. `filters` are the ones loaded through,
-    /// the screen's own once the result lands; `reset_cursor` is set by the
-    /// filter panel, whose new filters can leave the old row far past the
-    /// end.
+    /// Only a tab's digit and `q` are read: every other key would act on a
+    /// table that is about to be replaced. `filters` are the ones loaded
+    /// through, the screen's own once the result lands; `reset_cursor` is set
+    /// by the filter panel, whose new filters can leave the old row far past
+    /// the end.
     ///
     /// The screen owns the only receiver, so a load replaced by a newer one,
     /// or one still running when the person leaves the tab, sends into a
@@ -5495,7 +5530,7 @@ impl ScreenState {
     /// it sits past it.
     ///
     /// The limit is the row count of the very lines the frame draws, so it
-    /// follows `tab`, `t`, a filter and a reload without each of them
+    /// follows `←`/`→`, `t`, a filter and a reload without each of them
     /// knowing it. Without it `↓` counted on past the last row while the
     /// marker, clamped at draw time, stayed on it, and `↑` looked dead until
     /// every extra press had been undone.
@@ -5648,8 +5683,8 @@ fn run_screen(
 
 /// The screen's own loop. Ends in [`Leave::Quit`] on `q` or when the input
 /// runs out, and in whatever [`crate::screen::shell::leave_on`] reads off
-/// `←` or `→` while browsing or loading when bare `spoolway` hosts this as
-/// its eval tab.
+/// a tab's digit while browsing or loading when bare `spoolway` hosts this
+/// as its eval tab.
 ///
 /// Every load goes through `start` and lands through [`Mode::Loading`], the
 /// first one included, so the frame is drawn on the keypress that opened
@@ -5682,8 +5717,8 @@ fn run_screen_with(
     let mut state = ScreenState::new(args);
     let mut loaded: Option<Loaded> = None;
     // The reason the visit's first load failed, once it has. Hosted, the tab
-    // still has a strip and three neighbours to reach, so the reason is held
-    // on it rather than printed on the way out.
+    // still has a strip and other tabs to open, so the reason is held on it
+    // rather than printed on the way out.
     let mut failed: Option<String> = None;
     state.start_loading(&mut start, state.filters.clone(), false);
 
@@ -5726,7 +5761,7 @@ fn run_screen_with(
                 None if crate::screen::shell::hosted().is_some() => {
                     crate::screen::shell::message_tab(&message, input, out)
                 }
-                // Standalone there is no neighbour to reach: the reason was
+                // Standalone there is no other tab to open: the reason was
                 // read on the frame this key answered, and the screen ends.
                 None => Leave::Quit,
             });
@@ -5741,7 +5776,7 @@ fn run_screen_with(
             let was_table = state.table;
             'handle: {
                 // Browsing and loading are the modes with no filter panel, calendar
-                // or notice open: the only ones where `←` and `→` are a hosting
+                // or notice open: the only ones where the digits are a hosting
                 // shell's.
                 if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
                     && let Some(leave) = crate::screen::shell::leave_on(key)
@@ -5867,12 +5902,16 @@ fn run_screen_with(
                     Mode::Browsing => match key {
                         Key::Up | Key::Char('k') => state.cursor = state.cursor.saturating_sub(1),
                         Key::Down | Key::Char('j') => state.cursor += 1,
-                        Key::Tab => {
+                        Key::Right => {
                             state.table = state.table.next();
                             state.cursor = 0;
                         }
+                        Key::Left => {
+                            state.table = state.table.previous();
+                            state.cursor = 0;
+                        }
                         // Opening a trial is only a filter set for the person, so
-                        // `tab` and the `trial` row's `all` are what leave it. The
+                        // the arrows and the `trial` row's `all` are what leave it. The
                         // `pipeline` and `version` rows are cleared with it: either
                         // could hide one of the trial's own pipelines, and showing
                         // every one of those side by side is the point of opening it.
@@ -9100,31 +9139,32 @@ mod screen_tests {
 
     /// Hosted, a ledger eval cannot read is held on the tab under the strip
     /// — the shell still has four other tabs to reach — rather than printed
-    /// on the way out, and `←` leaves it.
+    /// on the way out, and a tab's digit leaves it.
     #[test]
     fn hosted_an_unreadable_window_is_held_on_the_tab_until_a_shell_key() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-hosted-load-error");
         let _hosting = Hosting::open(Tab::Eval);
         let args = EvalArgs {
             since: Some("not-a-date".into()),
             ..no_args()
         };
-        let mut input = keys("x\x1b[D");
+        let mut input = keys("x\x1b[D1");
         let mut out = Vec::new();
         let leave = run_now(&repo, &args, &mut input, &mut out);
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let drawn = String::from_utf8(out).unwrap();
         assert!(drawn.contains("spoolway eval: "), "{drawn}");
         assert!(drawn.contains("DISPATCH"), "under the strip: {drawn}");
     }
 
-    /// Hosted as bare `spoolway`'s eval tab, `←` and `→` while browsing hand
-    /// the screen back to the shell, and the frame is eval's own under the
-    /// strip. Inside the filter panel they keep cycling a row's value.
+    /// Hosted as bare `spoolway`'s eval tab, a tab's digit while browsing
+    /// hands the screen back to the shell, and the frame is eval's own under
+    /// the strip. The arrows no longer leave, and inside the filter panel
+    /// they keep cycling a row's value.
     #[test]
-    fn hosted_browsing_leaves_on_the_arrows_but_the_filters_keep_them() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+    fn hosted_browsing_leaves_on_a_digit_and_the_filters_keep_the_arrows() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-hosted-leave");
         let _hosting = Hosting::open(Tab::Eval);
         let run = |input: &str| {
@@ -9134,12 +9174,12 @@ mod screen_tests {
             (leave, String::from_utf8(out).unwrap())
         };
 
-        let (leave, drawn) = run("\x1b[D");
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let (leave, drawn) = run("1");
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
-        assert!(first.contains("DISPATCH"), "{first}");
+        assert!(first.contains("[1] DISPATCH"), "{first}");
         assert!(has_top(first, TableKind::Lanes, "by pipeline"), "{first}");
-        assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
+        assert_eq!(run("\x1b[D\x1b[C4").0, Leave::Open(Tab::Overrides));
 
         // `f` opens the filters; `→` there cycles a row, and the input then
         // runs out inside the panel.
@@ -9170,7 +9210,7 @@ mod screen_tests {
         }
         bank_two_trials(&repo);
         let down = DOWN;
-        let trials = "\t\t";
+        let trials = "\x1b[C\x1b[C";
         // Lanes, then per task, directories and the trials; each table
         // sorted, narrowed, refreshed, exported and opened.
         let walks = [
@@ -9180,7 +9220,7 @@ mod screen_tests {
             down.into(),
             "t".into(),
             format!("t{down}"),
-            "\t".into(),
+            "\x1b[C".into(),
             "f".into(),
             format!("f{down}"),
             "f\r".into(),
@@ -9199,7 +9239,7 @@ mod screen_tests {
             format!("{trials}f"),
             format!("{trials}r"),
             format!("{trials}\r"),
-            format!("{trials}\r\t"),
+            format!("{trials}\r\x1b[C"),
         ];
         let mut screens = Vec::new();
         for input in &walks {
@@ -9207,7 +9247,7 @@ mod screen_tests {
         }
         // No run, no trial: each table says there is nothing to show.
         let (empty, _empty_guard) = fixture("tui-screens-empty");
-        for input in ["", "t", "\t", trials, "f", "e"] {
+        for input in ["", "t", "\x1b[C", trials, "f", "e"] {
             screens.extend(drawn_screens(&empty, input));
         }
         screens
@@ -9270,15 +9310,15 @@ mod screen_tests {
 
     /// Hosted, switching to eval draws the strip, the eval frame and the
     /// keyless loading popup before the load lands. While it shows, `f` and
-    /// `tab` are not read and `→` still leaves, and leaving drops the
+    /// `→` are not read and a tab's digit still leaves, and leaving drops the
     /// receiver, so the thread's late result goes nowhere.
     #[test]
     fn the_first_frame_is_drawn_under_the_loading_popup_before_the_load_lands() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-loading-first");
         let _hosting = Hosting::open(Tab::Eval);
         let senders = Senders::default();
-        let mut input = keys("f\t\x1b[C");
+        let mut input = keys("f\x1b[C3");
         let mut out = Vec::new();
         let leave = run_screen_with(
             &repo,
@@ -9290,11 +9330,11 @@ mod screen_tests {
             &mut out,
         )
         .unwrap();
-        assert_eq!(leave, Leave::Switch(Toward::Right));
+        assert_eq!(leave, Leave::Open(Tab::Routines));
 
         let drawn = String::from_utf8(out).unwrap();
         let all = frames(&drawn);
-        // Not one per ignored key any more: `f` and `tab` leave the loading
+        // Not one per ignored key any more: `f` and `→` leave the loading
         // frame exactly as it was, and the shared frame writer now skips a
         // frame that matches the last one it painted — the same skip
         // `commands::queue` and `commands::jobs` already had, extended to
@@ -9309,10 +9349,9 @@ mod screen_tests {
                 !frame.contains(&format!("{TOP_LEFT}─ filters")),
                 "`f` was not read: {frame}"
             );
-            assert!(
-                frame.contains("[a] ascending   [d] descending   [t] per task   [tab] section"),
-                "{frame}"
-            );
+            // Only `q` and a digit are read while the load runs.
+            assert!(frame.contains("[q] quit"), "{frame}");
+            assert!(!frame.contains("[a] ascending"), "{frame}");
         }
 
         assert_eq!(senders.borrow().len(), 1, "one load, started once");
@@ -9416,22 +9455,40 @@ mod screen_tests {
         );
     }
 
-    /// 200 keys and then `←`: the tab switches after the one frame drawn
+    /// 200 keys and then `1`: the tab switches after the one frame drawn
     /// for the table. The keys alternate `↓` and `↑` so that every one of
     /// them would change the frame, and the frame writer, which skips a
     /// repeat of the last frame, could not hide a frame drawn per key.
     #[test]
-    fn a_burst_of_keys_then_left_switches_after_one_frame() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
-        let (repo, _root_guard) = fixture_to_sort("screen-burst-left");
+    fn a_burst_of_keys_then_a_digit_switches_after_one_frame() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-digit");
         let _hosting = Hosting::open(Tab::Eval);
-        let script = format!("{}\x1b[D", format!("{DOWN}k").repeat(100));
+        let script = format!("{}1", format!("{DOWN}k").repeat(100));
         let mut input = keys(&script);
         let mut out = Vec::new();
         let leave = run_now(&repo, &no_args(), &mut input, &mut out);
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let drawn = String::from_utf8(out).unwrap();
         assert_eq!(frames(&drawn).len(), 1, "one frame for the whole burst");
+    }
+
+    /// Hosted, one `→` moves one table and the tab stays open: the shell
+    /// reads no arrow, so the input runs out on the eval tab rather than
+    /// leaving it, with the directories bracketed.
+    #[test]
+    fn hosted_one_arrow_moves_one_table_and_keeps_the_tab_open() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
+        let (repo, _root_guard) = fixture_with_one_run("screen-hosted-arrow");
+        let _hosting = Hosting::open(Tab::Eval);
+        let mut input = keys(RIGHT);
+        let mut out = Vec::new();
+        let leave = run_now(&repo, &no_args(), &mut input, &mut out);
+        assert_eq!(leave, Leave::Quit, "the input ran out on the tab");
+        let drawn = String::from_utf8(out).unwrap();
+        let last = last_frame(&drawn);
+        assert!(last.contains("[5] EVAL"), "{last}");
+        assert!(has_top(last, TableKind::Dirs, "by dir "), "{last}");
     }
 
     /// A key inside the burst still acts in the order typed: `q` ends the
@@ -9677,7 +9734,7 @@ mod screen_tests {
     }
 
     /// A cursor move re-clips the table already built; a new load, a filter,
-    /// a sort, `tab` and `t` each build it again. The built table is told
+    /// a sort, `←`/`→` and `t` each build it again. The built table is told
     /// apart by pointer, since a rebuild hands back a new one.
     #[test]
     fn a_cursor_move_reuses_the_built_table_and_every_other_change_rebuilds_it() {
@@ -9736,7 +9793,7 @@ mod screen_tests {
             }),
             "a sort"
         );
-        assert!(rebuilt_by(&|s| s.table = s.table.next()), "tab");
+        assert!(rebuilt_by(&|s| s.table = s.table.next()), "→");
         assert!(rebuilt_by(&|s| s.filters.flip_figures()), "t");
     }
 
@@ -10191,7 +10248,7 @@ mod screen_tests {
             (TableKind::Trials, "[enter] open"),
         ] {
             for figures in [Figures::Totals, Figures::Average] {
-                let line = footer(table, figures);
+                let line = footer(table, figures, &Mode::Browsing, 1);
                 assert!(!line.contains("↑↓"), "{line:?}");
                 assert!(
                     line.starts_with(&format!(" {} {first}", crate::status::DIM)),
@@ -10201,9 +10258,65 @@ mod screen_tests {
         }
     }
 
+    /// Under the filter, sort or calendar popup, and while a load runs, the
+    /// table's letters do nothing, so the key line is `[q] quit` alone on
+    /// every table.
+    #[test]
+    fn the_key_line_is_quit_alone_under_a_popup_and_while_loading() {
+        for table in [TableKind::Lanes, TableKind::Dirs, TableKind::Trials] {
+            let draft = || Draft::new(table, no_filters());
+            let modes = [
+                Mode::Filter(draft()),
+                Mode::Calendar {
+                    draft: draft(),
+                    field: FilterField::Since,
+                    year: 2026,
+                    month: 11,
+                    day: 1,
+                },
+                Mode::Sort {
+                    descending: false,
+                    columns: Vec::new(),
+                    cursor: 0,
+                },
+                Mode::Loading {
+                    pending: std::sync::mpsc::channel().1,
+                    filters: no_filters(),
+                    reset_cursor: false,
+                },
+            ];
+            for mode in &modes {
+                let line = crate::screen::shell::plain(&footer(table, Figures::Totals, mode, 3));
+                assert_eq!(line, "  [q] quit", "{table:?}");
+            }
+        }
+    }
+
+    /// An empty trials table has no trial for `enter` to open, so
+    /// `[enter] open` leaves its key line, and comes back with a row.
+    #[test]
+    fn the_trials_key_line_names_enter_only_with_a_trial_to_open() {
+        let line = |rows| {
+            crate::screen::shell::plain(&footer(
+                TableKind::Trials,
+                Figures::Totals,
+                &Mode::Browsing,
+                rows,
+            ))
+        };
+        assert_eq!(
+            line(0),
+            "  [a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"
+        );
+        assert_eq!(
+            line(1),
+            "  [enter] open   [a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"
+        );
+    }
+
     /// The screen opens on the lanes table by pipeline, on its totals, with
     /// its `total` line and the bracketed key line naming the figures `t`
-    /// switches to and `tab` as `section`.
+    /// switches to, and no `[tab]`.
     #[test]
     fn the_screen_opens_by_pipeline_with_a_total_and_bracketed_keys() {
         let (repo, _root_guard) = fixture_with_one_run("screen-opens");
@@ -10218,7 +10331,7 @@ mod screen_tests {
         assert!(last.contains("│ total"), "{last}");
         assert!(
             last.contains(
-                "[a] ascending   [d] descending   [t] per task   [tab] section   [f] filters   [e] export   [r] refresh   [q] quit"
+                "[a] ascending   [d] descending   [t] per task   [f] filters   [e] export   [r] refresh   [q] quit"
             ),
             "{last}"
         );
@@ -10252,49 +10365,81 @@ mod screen_tests {
         }
     }
 
-    /// `tab` cycles the tasks, the directories and the trials and back,
+    /// `→` cycles the tasks, the directories and the trials and back,
     /// nothing else.
     #[test]
-    fn tab_cycles_the_tasks_the_directories_and_the_trials() {
+    fn right_cycles_the_tasks_the_directories_and_the_trials() {
         let (repo, _root_guard) = fixture_with_one_run("screen-tab");
-        let text = screen(&repo, "\t");
+        let text = screen(&repo, "\x1b[C");
         let dirs = last_frame(&text);
         assert!(has_top(dirs, TableKind::Dirs, "by dir "), "{dirs}");
         assert!(dirs.contains("│ DIR"), "{dirs}");
-        assert!(dirs.contains("[tab] section"), "{dirs}");
+        assert!(!dirs.contains("[tab]"), "{dirs}");
         let root = repo.root.canonicalize().unwrap();
         assert!(
             dirs.contains(&*root.to_string_lossy()),
             "the project's own directory is a row even with no sessions\n{dirs}"
         );
 
-        let trials = last_frame(&screen(&repo, "\t\t")).to_string();
+        let trials = last_frame(&screen(&repo, "\x1b[C\x1b[C")).to_string();
         assert!(has_top(&trials, TableKind::Trials, ""), "{trials}");
         assert!(trials.contains("no data."), "{trials}");
+        // An empty trials table has no trial for `enter` to open.
         assert!(
-            trials.contains(
-                "[enter] open   [a] ascending   [d] descending   [tab] section   [f] filters   [r] refresh   [q] quit"
-            ),
+            trials
+                .contains("[a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"),
             "{trials}"
         );
+        assert!(!trials.contains("[enter] open"), "{trials}");
 
-        let text = screen(&repo, "\t\t\t");
+        let text = screen(&repo, "\x1b[C\x1b[C\x1b[C");
         assert!(
             has_top(last_frame(&text), TableKind::Lanes, "by pipeline "),
             "{text}"
         );
     }
 
-    /// Three `tab`s from opening walk the box title's brackets from `eval`
-    /// through `directories` and `trials` back to `eval`. The grouping and
-    /// view sit on the border's right side, and the trials section has none.
-    /// Every key line names `tab` as `section`.
+    /// Three `→`s from opening walk the box title's brackets from `eval`
+    /// through `directories` and `trials` back to `eval`, and three `←`s
+    /// walk them the other way, wrapping from `eval` to `trials`. `tab`
+    /// moves nothing. The grouping and view sit on the border's right side,
+    /// and the trials section has none. No key line names `tab`.
     #[test]
-    fn tab_walks_the_brackets_through_the_section_names() {
+    fn the_arrows_walk_the_brackets_through_the_section_names() {
         let (repo, _root_guard) = fixture_with_one_run("screen-tab-sections");
-        let lanes_keys = "[a] ascending   [d] descending   [t] per task   [tab] section   \
+        let lanes_keys = "[a] ascending   [d] descending   [t] per task   \
                           [f] filters   [e] export   [r] refresh   [q] quit";
+        let dirs_keys = "[a] ascending   [d] descending   [t] per session   \
+                         [f] filters   [e] export   [r] refresh   [q] quit";
+        // The fixture's run is no trial, so the trials table is empty and
+        // its key line has no `[enter] open`.
+        let trials_keys = "[a] ascending   [d] descending   [f] filters   \
+                           [r] refresh   [q] quit";
         let walk = [
+            (
+                "\t",
+                "[eval]   directories   trials",
+                " by pipeline · totals ─",
+                lanes_keys,
+            ),
+            (
+                "\x1b[D",
+                "eval   directories   [trials]",
+                "───",
+                trials_keys,
+            ),
+            (
+                "\x1b[D\x1b[D",
+                "eval   [directories]   trials",
+                " by dir · totals ─",
+                dirs_keys,
+            ),
+            (
+                "\x1b[D\x1b[D\x1b[D",
+                "[eval]   directories   trials",
+                " by pipeline · totals ─",
+                lanes_keys,
+            ),
             (
                 "",
                 "[eval]   directories   trials",
@@ -10302,21 +10447,19 @@ mod screen_tests {
                 lanes_keys,
             ),
             (
-                "\t",
+                "\x1b[C",
                 "eval   [directories]   trials",
                 " by dir · totals ─",
-                "[a] ascending   [d] descending   [t] per session   [tab] section   \
-                 [f] filters   [e] export   [r] refresh   [q] quit",
+                dirs_keys,
             ),
             (
-                "\t\t",
+                "\x1b[C\x1b[C",
                 "eval   directories   [trials]",
                 "───",
-                "[enter] open   [a] ascending   [d] descending   [tab] section   \
-                 [f] filters   [r] refresh   [q] quit",
+                trials_keys,
             ),
             (
-                "\t\t\t",
+                "\x1b[C\x1b[C\x1b[C",
                 "[eval]   directories   trials",
                 " by pipeline · totals ─",
                 lanes_keys,
@@ -10337,10 +10480,11 @@ mod screen_tests {
                 top.contains(&format!("{right}{TOP_RIGHT}")),
                 "after {input:?}: {top}"
             );
-            if input == "\t\t" {
+            if left.contains("[trials]") {
                 assert!(!top.contains(" by "), "no grouping on trials: {top}");
             }
             assert!(last.contains(keys), "after {input:?}: {last}");
+            assert!(!last.contains("[tab]"), "after {input:?}: {last}");
         }
     }
 
@@ -10712,9 +10856,9 @@ mod screen_tests {
         bank_dir(&repo, "2026-09-02T09:00:00+00:00", "/w/notes", "s2", 0.18);
         let home = claude_home_with("narrows", "s1", &skill_transcript());
 
-        // `tab`, `f`, `→` on `by` to `session`, `enter`.
+        // `→`, `f`, `→` on `by` to `session`, `enter`.
         let text = crate::platform::test_home::with_home(&home, || {
-            screen(&repo, &format!("\tf{RIGHT}\rq"))
+            screen(&repo, &format!("\x1b[Cf{RIGHT}\rq"))
         });
         let sessions = last_frame(&text);
         assert!(
@@ -10725,9 +10869,9 @@ mod screen_tests {
         assert!(sessions.contains("spoolway-plan"), "{sessions}");
         assert!(sessions.contains(" notes "), "{sessions}");
 
-        // `tab`, `f`, down twice to `skill`, `→` to its one candidate.
+        // `→`, `f`, down twice to `skill`, `→` to its one candidate.
         let text = crate::platform::test_home::with_home(&home, || {
-            screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
+            screen(&repo, &format!("\x1b[Cf{DOWN}{DOWN}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
         assert!(has_top(filtered, TableKind::Dirs, "by dir "), "{filtered}");
@@ -10785,7 +10929,7 @@ mod screen_tests {
         let home = claude_home_with("skill-tool-filter", "s1", &lines);
 
         let text = crate::platform::test_home::with_home(&home, || {
-            screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}\rq"))
+            screen(&repo, &format!("\x1b[Cf{DOWN}{DOWN}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
         assert!(has_top(filtered, TableKind::Dirs, "by dir "), "{filtered}");
@@ -10840,9 +10984,9 @@ mod screen_tests {
         );
         let home = claude_home_with("both-forms", "s1", &lines);
 
-        // `tab`, `f`, `→` on `by` to `session`.
+        // `→`, `f`, `→` on `by` to `session`.
         let text = crate::platform::test_home::with_home(&home, || {
-            screen(&repo, &format!("\tf{RIGHT}\rq"))
+            screen(&repo, &format!("\x1b[Cf{RIGHT}\rq"))
         });
         let sessions = last_frame(&text);
         assert!(sessions.contains("SKILL"), "{sessions}");
@@ -10852,9 +10996,9 @@ mod screen_tests {
             "one skill named two ways must not count as two: {sessions}"
         );
 
-        // `tab`, `f`, down twice to `skill`: exactly one candidate to cycle to.
+        // `→`, `f`, down twice to `skill`: exactly one candidate to cycle to.
         let text = crate::platform::test_home::with_home(&home, || {
-            screen(&repo, &format!("\tf{DOWN}{DOWN}{RIGHT}{RIGHT}\rq"))
+            screen(&repo, &format!("\x1b[Cf{DOWN}{DOWN}{RIGHT}{RIGHT}\rq"))
         });
         let filtered = last_frame(&text);
         assert!(
@@ -10921,7 +11065,7 @@ mod screen_tests {
         .unwrap();
 
         let text = crate::platform::test_home::with_home(&root, || {
-            screen(&repo, &format!("\tf{RIGHT}\rq"))
+            screen(&repo, &format!("\x1b[Cf{RIGHT}\rq"))
         });
         let sessions = last_frame(&text);
         assert!(
@@ -11478,22 +11622,22 @@ mod screen_tests {
         );
     }
 
-    /// A sort on `USD` outlives `tab` round every table, `r`, and a change of
+    /// A sort on `USD` outlives `→` round every table, `r`, and a change of
     /// `by` on the filter panel — and the directory table, which has its
     /// own sort, is left in its default order meanwhile.
     #[test]
-    fn a_sort_survives_tab_refresh_and_a_new_by_and_each_table_keeps_its_own() {
+    fn a_sort_survives_the_arrows_refresh_and_a_new_by_and_each_table_keeps_its_own() {
         let (repo, _root_guard) = fixture_to_sort("screen-sort-survives");
         // `USD` is the fifteenth column under `by pipeline`.
         let to_usd = DOWN.repeat(15);
-        let text = screen(&repo, &format!("d{to_usd}\r\t\t\trf{RIGHT}\rq"));
+        let text = screen(&repo, &format!("d{to_usd}\r\x1b[C\x1b[C\x1b[Crf{RIGHT}\rq"));
         let all = frames(&text);
         let sorted = |f: &str| f.contains("▼USD");
 
         let dirs = all
             .iter()
             .find(|f| has_top(f, TableKind::Dirs, "by dir "))
-            .expect("`tab` reached the directory table");
+            .expect("`→` reached the directory table");
         assert!(
             !dirs.contains('▼'),
             "the directory table keeps its own sort: {dirs}"
@@ -12424,7 +12568,7 @@ mod screen_tests {
             pipeline: Some("impl".into()),
             ..no_args()
         };
-        let open = "\t\t\r";
+        let open = "\x1b[C\x1b[C\r";
         let mut input = keys(&format!("{open}q"));
         let mut out = Vec::new();
         run_now(&repo, &args, &mut input, &mut out);
@@ -12439,7 +12583,8 @@ mod screen_tests {
         assert!(last.contains("│ impl_ui "), "{last}");
         assert!(!last.contains("impl_tdd"), "the other trial: {last}");
         assert!(!last.contains("default"), "the ordinary lane: {last}");
-        assert!(last.contains("[tab] section"), "{last}");
+        assert!(last.contains("[f] filters"), "{last}");
+        assert!(!last.contains("[tab]"), "{last}");
 
         let to_trial = DOWN.repeat(4);
         let mut input = keys(&format!("{open}f{to_trial}{LEFT}\rq"));
@@ -12468,7 +12613,7 @@ mod screen_tests {
             "the queued arm parses"
         );
 
-        let last = last_frame(&screen(&repo, "\t\tq")).to_string();
+        let last = last_frame(&screen(&repo, "\x1b[C\x1b[Cq")).to_string();
         assert!(has_top(&last, TableKind::Trials, ""), "{last}");
         let newer = last.find("retire-worktree-root").expect("t1's row");
         let older = last.find("board-step-grace-window").expect("t2's row");
@@ -12477,7 +12622,7 @@ mod screen_tests {
         assert!(last.contains("impl_tdd               1  settled"), "{last}");
 
         // `WHEN` is the second column: `a`, `↓` twice, `enter`.
-        let last = last_frame(&screen(&repo, &format!("\t\ta{DOWN}{DOWN}\rq"))).to_string();
+        let last = last_frame(&screen(&repo, &format!("\x1b[C\x1b[Ca{DOWN}{DOWN}\rq"))).to_string();
         assert!(last.contains(" ▲WHEN"), "{last}");
         let newer = last.find("retire-worktree-root").expect("t1's row");
         let older = last.find("board-step-grace-window").expect("t2's row");
@@ -12487,7 +12632,7 @@ mod screen_tests {
             since: Some("2026-10-01".into()),
             ..no_args()
         };
-        let mut input = keys("\t\tq");
+        let mut input = keys("\x1b[C\x1b[Cq");
         let mut out = Vec::new();
         run_now(&repo, &args, &mut input, &mut out);
         let text = String::from_utf8(out).unwrap();
@@ -12539,7 +12684,7 @@ mod screen_tests {
             "{last}"
         );
         assert!(
-            last.contains("[d] descending   [t] totals   [tab] section"),
+            last.contains("[d] descending   [t] totals   [f] filters"),
             "{last}"
         );
 
@@ -12550,19 +12695,19 @@ mod screen_tests {
             "{last}"
         );
         assert!(
-            last.contains("[d] descending   [t] per task   [tab] section"),
+            last.contains("[d] descending   [t] per task   [f] filters"),
             "{last}"
         );
     }
 
-    /// One `t` covers both tables, and survives `tab`, `r` and a new `by`
+    /// One `t` covers both tables, and survives `→`, `r` and a new `by`
     /// from the filter panel. The trials table has no figures to switch.
     #[test]
-    fn the_view_survives_tab_refresh_and_a_new_by() {
+    fn the_view_survives_the_arrows_refresh_and_a_new_by() {
         let (repo, _root_guard) = fixture_to_sort("screen-t-keeps");
         bank_dir(&repo, "2026-08-01T09:00:00+00:00", "/w/proj", "s1", 0.5);
 
-        let text = screen(&repo, "t\tq");
+        let text = screen(&repo, "t\x1b[Cq");
         let last = last_frame(&text);
         assert!(
             has_top(last, TableKind::Dirs, "by dir · per session "),
@@ -12570,12 +12715,12 @@ mod screen_tests {
         );
         assert!(header_of(last).contains("IN/SESSION"), "{last}");
 
-        let text = screen(&repo, "t\t\tq");
+        let text = screen(&repo, "t\x1b[C\x1b[Cq");
         let last = last_frame(&text);
         assert!(has_top(last, TableKind::Trials, ""), "{last}");
         assert!(!last.contains("[t]"), "{last}");
 
-        let text = screen(&repo, "t\t\t\trq");
+        let text = screen(&repo, "t\x1b[C\x1b[C\x1b[Crq");
         let last = last_frame(&text);
         assert!(
             has_top(last, TableKind::Lanes, "by pipeline · per task "),
@@ -12765,17 +12910,17 @@ mod screen_tests {
         let to_session = format!("f{RIGHT}\r");
         let to_dir = format!("f{LEFT}\r");
 
-        let text = screen(&repo, &format!("\ttd{to_in}\r{to_session}t{to_dir}q"));
+        let text = screen(&repo, &format!("\x1b[Ctd{to_in}\r{to_session}t{to_dir}q"));
         let last = last_frame(&text);
         assert!(has_top(last, TableKind::Dirs, "by dir · totals "), "{last}");
         assert!(header_of(last).contains("▼IN  "), "{last}");
 
-        let text = screen(&repo, &format!("\td{to_in}\r{to_session}q"));
+        let text = screen(&repo, &format!("\x1b[Cd{to_in}\r{to_session}q"));
         let last = last_frame(&text);
         assert!(has_top(last, TableKind::Dirs, "by session "), "{last}");
         assert!(last.contains("▼IN  "), "a sort on IN reads as one: {last}");
 
-        let text = screen(&repo, &format!("\td{to_in}\r{to_session}t{to_dir}q"));
+        let text = screen(&repo, &format!("\x1b[Cd{to_in}\r{to_session}t{to_dir}q"));
         let last = last_frame(&text);
         assert!(
             has_top(last, TableKind::Dirs, "by dir · per session "),

@@ -93,7 +93,7 @@ impl PromptsSection {
     }
 
     /// Whether the list has the keys, with nothing open over it: the only
-    /// time `tab`, `q` and `←`/`→` reach past the section.
+    /// time the arrows, `q` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::List)
     }
@@ -284,15 +284,20 @@ impl PromptsSection {
     }
 
     /// The key line under the frame: whatever the section shows names its
-    /// own keys.
+    /// own keys. With no prompt left by the search, `enter` has nothing to
+    /// override, so its pair goes until a prompt matches again.
     pub(super) fn footer(&self) -> Vec<(&'static str, &'static str)> {
         match &self.view {
+            View::List if self.matches().is_empty() => [
+                [("f", "search"), super::OPEN_WORKSPACE].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
             View::List => [
                 [
                     ("enter", "override"),
                     ("f", "search"),
                     super::OPEN_WORKSPACE,
-                    ("tab", "section"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -334,7 +339,7 @@ mod tests {
             std::fs::write(&path, format!("{name}\n")).unwrap();
         }
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t\t");
+        type_keys(&repo, &mut state, "\x1b[C\x1b[C");
         assert_eq!(state.section, Section::Prompts);
         (repo, guard, state)
     }
@@ -387,7 +392,7 @@ mod tests {
         assert_eq!(drawn[4], row("> implementer"));
         assert_eq!(
             drawn.last().unwrap(),
-            " [enter] override   [f] search   [w] open workspace   [tab] section"
+            " [enter] override   [f] search   [w] open workspace"
         );
     }
 
@@ -422,6 +427,25 @@ mod tests {
         );
         type_keys(&repo, &mut state, "\x1b");
         assert_eq!(state.prompts.matches().len(), 3);
+    }
+
+    // A search that leaves no prompt leaves `enter` nothing to override, so
+    // the key line drops it until `esc` on the search row brings the
+    // prompts back.
+    #[test]
+    fn a_search_that_leaves_no_prompt_drops_enter_from_the_key_line() {
+        let (repo, _guard, mut state) = prompts_project("prompts-no-match", &["implementer"]);
+        type_keys(&repo, &mut state, "fzzz\r");
+        assert!(state.prompts.matches().is_empty());
+        assert_eq!(
+            lines(&state).last().unwrap(),
+            " [f] search   [w] open workspace"
+        );
+        type_keys(&repo, &mut state, "f\x1b");
+        assert_eq!(
+            lines(&state).last().unwrap(),
+            " [enter] override   [f] search   [w] open workspace"
+        );
     }
 
     // `enter` on a prompt the layer does not hold writes the copy
@@ -500,7 +524,7 @@ mod tests {
         std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::write(&folder, "").unwrap();
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t\t");
+        type_keys(&repo, &mut state, "\x1b[C\x1b[C");
         let note = lines(&state)
             .iter()
             .map(|l| l.trim_matches('│').trim().to_string())

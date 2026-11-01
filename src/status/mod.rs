@@ -491,7 +491,11 @@ impl Board {
     ///
     /// `popup` is the tab's own — a start gate, why its dispatcher ended, or
     /// where the reload `u` asked for has got to — drawn over the table the
-    /// same way the board's confirm panels are.
+    /// same way the board's confirm panels are. `tab_takes_enter` is the
+    /// tab's half of whether the key line names `enter`: false while its
+    /// popup reads keys or its dispatcher has already been asked to stop,
+    /// when `enter` does nothing to the dispatcher — see
+    /// [`Board::takes_enter`].
     /// The board's own panel wins while one is open: the tab opens no popup
     /// of its own until the board is at rest.
     ///
@@ -509,6 +513,7 @@ impl Board {
         pipelines: &Pipelines,
         dispatching: bool,
         popup: Option<&[String]>,
+        tab_takes_enter: bool,
     ) -> Result<String> {
         // A reader started by this very call has just read on this thread —
         // see [`Reader::start`] — so a second reading straight after it
@@ -520,7 +525,14 @@ impl Board {
         } else {
             reader.wake_and_wait()?
         };
-        Ok(self.paint_from(repo, pipelines, dispatching, popup, &snapshot))
+        Ok(self.paint_from(
+            repo,
+            pipelines,
+            dispatching,
+            popup,
+            tab_takes_enter,
+            &snapshot,
+        ))
     }
 
     /// [`Board::hosted_frame`], drawn from whatever reading [`Reader`] last
@@ -535,9 +547,17 @@ impl Board {
         pipelines: &Pipelines,
         dispatching: bool,
         popup: Option<&[String]>,
+        tab_takes_enter: bool,
     ) -> String {
         let snapshot = self.reader(repo, pipelines).latest();
-        self.paint_from(repo, pipelines, dispatching, popup, &snapshot)
+        self.paint_from(
+            repo,
+            pipelines,
+            dispatching,
+            popup,
+            tab_takes_enter,
+            &snapshot,
+        )
     }
 
     /// Ask the reader for one more reading, without waiting for it. Every
@@ -585,6 +605,7 @@ impl Board {
         pipelines: &Pipelines,
         dispatching: bool,
         popup: Option<&[String]>,
+        tab_takes_enter: bool,
         snapshot: &Arc<Snapshot>,
     ) -> String {
         self.apply(snapshot);
@@ -593,12 +614,22 @@ impl Board {
             repo,
             pipelines,
             dispatching,
+            self.takes_enter(tab_takes_enter),
             snapshot,
             self.cursor.as_deref(),
             &self.recent,
             name.as_deref(),
         );
         self.with_popup(frame, popup)
+    }
+
+    /// Whether `enter` would start or stop the dispatch tab's dispatcher:
+    /// only with the board at rest and `tab_takes_enter`, the tab's own
+    /// answer — see [`Board::hosted_frame`]. Under the board's own menu or
+    /// panel `enter` answers that instead, and shell.rs hands `enter` to
+    /// the tab only with the board at rest.
+    fn takes_enter(&self, tab_takes_enter: bool) -> bool {
+        self.at_rest() && tab_takes_enter
     }
 
     /// [`Board::name`], read off git on the first call and kept after.
@@ -643,6 +674,7 @@ impl Board {
             repo,
             pipelines,
             dispatching,
+            self.takes_enter(true),
             &snapshot,
             self.cursor.as_deref(),
             &self.recent,
@@ -4593,11 +4625,15 @@ fn build_now(repo: &Repo, pipelines: &Pipelines, memory: &mut Memory) -> Option<
 /// `cursor` is live rather than carried in the snapshot, since moving it is
 /// the one thing a key does that never needs a fresh reading behind it —
 /// see [`Board::apply`]. `recent` is the board's own ticker, copied off the
-/// snapshot once when the board folded it in.
+/// snapshot once when the board folded it in. `takes_enter` is whether
+/// `enter` would reach the tab and start or stop dispatching — see
+/// [`Board::takes_enter`] — and the key line names it only then.
+#[allow(clippy::too_many_arguments)]
 fn paint(
     repo: &Repo,
     pipelines: &Pipelines,
     dispatching: bool,
+    takes_enter: bool,
     snapshot: &Snapshot,
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
@@ -4607,6 +4643,7 @@ fn paint(
         repo,
         pipelines,
         dispatching,
+        takes_enter,
         snapshot,
         cursor,
         recent,
@@ -4624,6 +4661,7 @@ fn paint_at(
     repo: &Repo,
     pipelines: &Pipelines,
     dispatching: bool,
+    takes_enter: bool,
     snapshot: &Snapshot,
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
@@ -4685,6 +4723,7 @@ fn paint_at(
             available.as_deref(),
             pane,
             phase,
+            takes_enter,
             &snapshot.waiting,
             name,
             jobs,
@@ -4770,10 +4809,11 @@ fn paint_at(
     //
     // `q` joins it only inside bare `spoolway`'s dispatch tab, the one place
     // it quits — see `crate::screen::shell::quit_hint` — and so does `enter`,
-    // the one place it starts or stops dispatching. `[u] update config` sits
-    // between `[o] options` and `q` while a dispatcher holds the lock and a
-    // reload has something to load, drawn out of the dim — see
-    // [`update_hint`].
+    // the one place it starts or stops dispatching, and only while pressing
+    // it would: not under a menu or popup that reads keys, nor once a stop
+    // has been asked — see [`enter_hint`]. `[u] update config` sits between
+    // `[o] options` and `q` while a dispatcher holds the lock and a reload
+    // has something to load, drawn out of the dim — see [`update_hint`].
     let resumable = cursor
         .and_then(|id| snapshot.rows.iter().find(|row| row.id == id))
         .is_some_and(|row| row.resumable);
@@ -4781,8 +4821,9 @@ fn paint_at(
         true => &[("r", "resume")],
         false => &[],
     };
+    let enter = enter_hint(phase, takes_enter);
     let keys = [
-        &[enter_hint(phase)][..],
+        enter.as_slice(),
         resume,
         &[("o", "options")],
         update_hint(phase, &snapshot.waiting),
@@ -4910,23 +4951,29 @@ fn update_hint(phase: Phase, waiting: &Waiting) -> &'static [(&'static str, &'st
 }
 
 /// The key line's `enter` pair: what pressing it would do to the tab's own
-/// dispatcher, given whether it has one up.
-fn enter_hint(phase: Phase) -> (&'static str, &'static str) {
-    match phase {
+/// dispatcher, given whether it has one up. `None` unless `takes_enter`:
+/// under a menu, a confirm panel or a tab popup that reads keys, `enter`
+/// answers that instead, and over a dispatcher already asked to stop it
+/// does nothing — see [`Board::takes_enter`].
+fn enter_hint(phase: Phase, takes_enter: bool) -> Option<(&'static str, &'static str)> {
+    if !takes_enter {
+        return None;
+    }
+    Some(match phase {
         Phase::Watching {
             dispatching: false, ..
         } => ("enter", "start dispatching"),
         Phase::Watching {
             dispatching: true, ..
         } => ("enter", "stop dispatching"),
-    }
+    })
 }
 
 /// [`paint`]'s frame for a board with no rows: the header alone in the
 /// top-right corner, then [`view::greeting_screen`] centred down the rest of
-/// the pane, and a key line of `enter`, `u` by the same rule the busy board
-/// keeps — see [`update_hint`], fed `waiting` — and, inside the dispatch
-/// tab, `q`.
+/// the pane, and a key line of `enter` while `takes_enter` holds, `u` by the
+/// same rule the busy board keeps — see [`update_hint`], fed `waiting` —
+/// and, inside the dispatch tab, `q`.
 /// Under the greeting, `jobs` is drawn as the busy board's own job ledger —
 /// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
 /// the lock, and none is what a project with no enabled job has anyway.
@@ -4956,16 +5003,18 @@ fn paint_empty(
     available: Option<&str>,
     pane: usize,
     phase: Phase,
+    takes_enter: bool,
     waiting: &Waiting,
     name: Option<&str>,
     jobs: &[crate::jobs::ActiveJob],
     lockup_frame: usize,
 ) -> String {
     let hosted = crate::screen::shell::hosted().is_some();
+    let enter = enter_hint(phase, takes_enter);
     let (keys, height) = hosted_keys(
         crate::screen::key_hint_lit(
             &[
-                &[enter_hint(phase)][..],
+                enter.as_slice(),
                 update_hint(phase, waiting),
                 crate::screen::shell::quit_hint(),
             ]
@@ -7707,7 +7756,9 @@ mod tests {
         add(&repo, "login", &[], None);
 
         let mut board = Board::for_test();
-        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        board
+            .hosted_frame(&repo, &pipelines, false, None, true)
+            .unwrap();
         assert!(!board.reading_landed(), "nothing new before any wake");
 
         board.wake_reader();
@@ -7717,7 +7768,7 @@ mod tests {
         }
         assert!(board.reading_landed(), "the woken reading should land");
 
-        board.hosted_frame_from_memory(&repo, &pipelines, false, None);
+        board.hosted_frame_from_memory(&repo, &pipelines, false, None, true);
         assert!(
             !board.reading_landed(),
             "a frame drawn from memory takes the landed reading in"
@@ -7759,7 +7810,9 @@ mod tests {
 
         let mut board = Board::for_test();
         assert!(board.landed_signal().is_none(), "no reader before a frame");
-        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        board
+            .hosted_frame(&repo, &pipelines, false, None, true)
+            .unwrap();
         let signal = board.landed_signal().expect("a reader makes a signal");
         let ready = |wait| crate::screen::poll_ready(&[signal.read_fd()], wait)[0];
         assert!(!ready(Duration::ZERO), "the seed reading is not signalled");
@@ -7779,7 +7832,9 @@ mod tests {
         add(&repo, "login", &[], None);
 
         let mut board = Board::for_test();
-        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        board
+            .hosted_frame(&repo, &pipelines, false, None, true)
+            .unwrap();
         // Chained, since a group is one chain.
         let mut previous = "login".to_string();
         for round in 0..20 {
@@ -7787,7 +7842,9 @@ mod tests {
             board.wake_reader();
             add(&repo, &id, &[previous.as_str()], None);
             previous = id.clone();
-            let frame = board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+            let frame = board
+                .hosted_frame(&repo, &pipelines, false, None, true)
+                .unwrap();
             assert!(frame.contains(&id), "{id} missing from:\n{frame}");
         }
     }
@@ -8409,6 +8466,7 @@ mod tests {
             repo,
             pipelines,
             false,
+            true,
             &snapshot,
             None,
             &VecDeque::new(),
@@ -8714,6 +8772,7 @@ mod tests {
             &repo,
             &pipelines,
             false,
+            true,
             &snapshot,
             None,
             &VecDeque::new(),
@@ -8750,6 +8809,7 @@ mod tests {
                 &repo,
                 &pipelines,
                 dispatching,
+                true,
                 &Snapshot {
                     holder,
                     ..Snapshot::empty()
@@ -8797,6 +8857,7 @@ mod tests {
             &repo,
             &pipelines,
             true,
+            true,
             &Snapshot {
                 holder: Some(4242),
                 ..full_board()
@@ -8811,6 +8872,7 @@ mod tests {
                 &repo,
                 &pipelines,
                 holder.is_some(),
+                true,
                 &Snapshot {
                     holder,
                     active_jobs: jobs.clone(),
@@ -8852,6 +8914,7 @@ mod tests {
             strip(&paint_at(
                 &repo,
                 &pipelines,
+                true,
                 true,
                 snapshot,
                 None,
@@ -9137,6 +9200,7 @@ mod tests {
                 strip(&paint(
                     &repo,
                     &pipelines,
+                    true,
                     true,
                     snapshot,
                     None,
@@ -10171,6 +10235,7 @@ mod tests {
                 None,
                 96,
                 watching,
+                true,
                 &Waiting::default(),
                 None,
                 &[],
@@ -14357,7 +14422,7 @@ mod tests {
 
         let mut board = Board::for_test();
         let frame = board
-            .hosted_frame(&repo, &pipelines, false, Some(&panel))
+            .hosted_frame(&repo, &pipelines, false, Some(&panel), false)
             .unwrap();
         assert!(frame.contains("finding 39"), "{frame}");
         assert!(frame.contains("[enter] its own key"), "{frame}");
@@ -14366,7 +14431,8 @@ mod tests {
     /// Inside the dispatch tab the board draws in an untitled box,
     /// and a popup the tab opens still lands on it: every row of the box,
     /// the popup's included, ends in the box's right border, and the key
-    /// line stays under the bottom border.
+    /// line stays under the bottom border. It keeps `enter` under a popup
+    /// that passes keys through, and drops it under one that reads them.
     #[test]
     fn a_hosted_board_draws_in_a_box_and_a_popup_lands_inside_it() {
         let (repo, _root_guard) = fixture("hosted-board-boxed");
@@ -14375,16 +14441,18 @@ mod tests {
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
         let mut board = Board::for_test();
         let width = pane_width() + 2;
-        for popup in [
-            None,
-            Some(crate::screen::panel(
-                "a popup",
-                &["over it".into()],
-                &crate::screen::confirm(),
-            )),
-        ] {
+        let panel = crate::screen::panel("a popup", &["over it".into()], &crate::screen::confirm());
+        // No popup, then one that passes keys through, then one that reads
+        // them: `Some` holds whether it reads keys.
+        for popup in [None, Some(false), Some(true)] {
             let frame = board
-                .hosted_frame(&repo, &pipelines, false, popup.as_deref())
+                .hosted_frame(
+                    &repo,
+                    &pipelines,
+                    false,
+                    popup.map(|_| panel.as_slice()),
+                    popup != Some(true),
+                )
                 .unwrap();
             let lines: Vec<String> = frame.lines().map(strip_ansi).collect();
             assert!(lines[0].starts_with(&format!("{TOP_LEFT}──")), "{frame}");
@@ -14398,10 +14466,12 @@ mod tests {
             for line in &lines[1..bottom] {
                 assert!(line.starts_with('│') && line.ends_with('│'), "{line:?}");
             }
-            assert!(
+            assert_eq!(
                 lines[bottom + 1].contains("[enter] start dispatching"),
+                popup != Some(true),
                 "{frame}"
             );
+            assert!(lines[bottom + 1].contains("[o] options"), "{frame}");
             if popup.is_some() {
                 assert!(frame.contains("over it"), "{frame}");
             }
@@ -15533,7 +15603,9 @@ mod tests {
         // Drawn through `hosted_frame`, not `Board::frame`: this is the one
         // path with a `status::Reader` of its own to go stale, and the
         // snapshot it reads here carries nothing live — no lane exists yet.
-        board.hosted_frame(&repo, &pipelines, false, None).unwrap();
+        board
+            .hosted_frame(&repo, &pipelines, false, None, true)
+            .unwrap();
 
         // Only now does a lane start for it — after the reading above, with
         // nothing telling the board to read again before the key below.
@@ -19007,6 +19079,7 @@ mod tests {
             repo,
             &Pipelines::builtin(),
             false,
+            true,
             &full_board(),
             Some(cursor),
             &arrivals(3),
@@ -19266,6 +19339,7 @@ mod tests {
             &repo,
             &Pipelines::builtin(),
             false,
+            true,
             &snapshot,
             Some("alpha"),
             &arrivals(3),

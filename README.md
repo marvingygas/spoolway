@@ -126,9 +126,9 @@ of work. See **[Tasks](docs/tasks.md)**.
 
 ### 4. Queue
 
-`spoolway` opens on the dispatch tab. `→` from there reaches the queue tab, which groups pending
-tasks. Select a group and press `enter` to queue it. The tab strip runs dispatch, queue, routines,
-overrides and eval, and `←` and `→` move between them.
+`spoolway` opens on the dispatch tab. `2` from there opens the queue tab, which groups pending
+tasks. Select a group and press `enter` to queue it. The tab strip numbers dispatch, queue,
+routines, overrides and eval from `1` to `5`, and each tab's digit opens it.
 
 <img src="docs/screenshots/readme/queue.png" alt="the queue tab" width="100%">
 
@@ -136,7 +136,7 @@ overrides and eval, and `←` and `→` move between them.
 
 To start dispatching, spoolway must run in herdr.
 
-`spoolway` opens on the dispatch tab, and `←` from the queue tab returns to it. Press `enter` there
+`spoolway` opens on the dispatch tab, and `1` from any tab returns to it. Press `enter` there
 to start dispatching.
 
 <img src="docs/screenshots/readme/dispatch.png" alt="the dispatch tab" width="100%">
@@ -340,7 +340,7 @@ spoolway eval
 
 `spoolway eval` prints the lanes table, grouped by pipeline. `spoolway eval --by version`
 compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table interactively:
-`tab` cycles to the directory table and the trials table, `t` switches between totals and per-task
+`→` cycles to the directory table and the trials table, `t` switches between totals and per-task
 figures, `f` filters, and `e` exports CSV.
 
 <img src="docs/screenshots/readme/eval.png" alt="the eval tab" width="100%">

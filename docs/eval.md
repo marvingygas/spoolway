@@ -29,8 +29,8 @@ screen over the same rows.
 <img src="screenshots/readme/eval.png" alt="the eval screen">
 
 The screen holds three tables. The lanes table groups dispatched lanes. The directory table
-groups sessions run by hand in a watched directory. The trials table lists every trial. `tab`
-cycles through them, lanes to directories to trials and back.
+groups sessions run by hand in a watched directory. The trials table lists every trial. `→`
+cycles through them, lanes to directories to trials and back, and `←` cycles the other way.
 
 A table with no rows shows the single line `no data.`, whatever left it empty. The directory
 table shows it under both `by dir` and `by session`.
@@ -41,7 +41,7 @@ transcript's size or modification time changed since the last read. The same rea
 model once from the price table. The screen keeps those prices until the next read, so a price
 table refreshed meanwhile shows after `[r]`. On first opening the tab,
 the popup sits over an empty frame. On `[r]` or the filter panel, it sits over the table
-already on screen. It closes by itself when the read finishes, and only `[←]`, `[→]` and `[q]`
+already on screen. It closes by itself when the read finishes, and only a tab's digit and `[q]`
 work while it shows.
 
 | Key | What it does |
@@ -50,20 +50,24 @@ work while it shows.
 | `[a]` | Open the sort popup, ascending |
 | `[d]` | Open the sort popup, descending |
 | `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |
-| `[tab]` | Move to the next section |
+| `[←→]` | Move to the next section with `→` and the previous one with `←`, wrapping at either end |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the table on screen, in the view drawn, to a CSV file |
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
+
+The key line names a key only while it would act. While the filter panel, the sort popup or the
+calendar is open, that popup reads every key but `[q]`. While the `loading…` popup shows, only a
+tab's digit and `[q]` work. In each case the key line reads `[q] quit` alone.
 
 The cursor stops at the last row of the table, so one `[↑]` always moves it up. When a read, a
 filter or `[t]` leaves fewer rows than the cursor's position, the cursor moves to the new last
 row.
 
 While you browse, keys that arrive faster than the screen draws are all applied in the order
-typed, and the screen draws one frame for them. Holding `[↓]` and then pressing `[←]` switches
-tab at once. Opening a popup, the filter panel, the calendar or a notice ends the burst, and
-that frame is drawn before the next key is read.
+typed, and the screen draws one frame for them. Holding `[↓]` and then pressing a tab's digit
+opens that tab at once. Opening a popup, the filter panel, the calendar or a notice ends the burst,
+and that frame is drawn before the next key is read.
 
 ### Totals and per task
 
@@ -75,13 +79,13 @@ names the view `[t]` switches to.
 
 | View | Border's right side | Key line |
 |---|---|---|
-| Totals | `by pipeline · totals` | `[d] descending   [t] per task   [tab] section` |
-| Per task | `by pipeline · per task` | `[d] descending   [t] totals   [tab] section` |
+| Totals | `by pipeline · totals` | `[d] descending   [t] per task` |
+| Per task | `by pipeline · per task` | `[d] descending   [t] totals` |
 
 On the directory table the same view is named `per session`, as in `by dir · per session`.
 
-The view survives `[tab]`, `[r]`, a change of `by` and the filter panel. Every new visit to the
-eval tab opens on totals. The trials table has no `[t]`.
+The view survives a move between sections, `[r]`, a change of `by` and the filter panel. Every
+new visit to the eval tab opens on totals. The trials table has no `[t]`.
 
 After the grouping and the view, the top border's right side names the scope only for
 `--project` and `--all`, then lists the filters in force. The trials table has no grouping, so
@@ -108,7 +112,7 @@ The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts corr
 `—` or an unpriced cost, sorts last in both directions, and the `total` or `average` line always
 stays last.
 
-The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
+The sort survives a change of `by`, the filter panel, a move between sections and `[r]`. Each table keeps its
 own sort. Pressing `[t]` moves a sort on a figure column to the matching column of the other
 view, such as `IN` to `IN/TASK` and `TIME` to `TIME/TASK`. `IN USD` moves to `IN USD/TASK`, and the other three class costs move the same way. A sort on `USD/TASK` moves to `USD`.
 
@@ -310,7 +314,7 @@ reached, ran nothing and banks nothing.
 
 ## The directory table
 
-`[tab]` switches to the directory table. A second `[tab]` opens the trials table, below. The
+`→` switches to the directory table. A second `→` opens the trials table, below. The
 directory table covers every watched root, this project's own directory included, even one
 with no sessions yet. It opens on `by dir`, one row per watched directory.
 
@@ -369,7 +373,7 @@ directory table; it is read from the screen only.
 
 ## The trials table
 
-A second `[tab]` from the directory table opens the trials table, one row per trial that
+A second `→` from the directory table opens the trials table, one row per trial that
 banked a lane in the window, newest first. A trial groups the arms the `trial` item on a group forked, one
 per ticked pipeline, under one trial id. See [Trials](planning.md#trials).
 
@@ -385,7 +389,8 @@ The table has no `total` line and no `[e]` export.
 
 `enter` opens the highlighted trial. It sets the lanes table's `trial` filter to it, switches
 `by` to `pipeline`, clears `pipeline` and `version`, and shows the lanes table, so every one of
-the trial's pipelines is a row.
+the trial's pipelines is a row. On an empty trials table there is no trial to open, so the key
+line leaves `[enter] open` out.
 
 `[a]`/`[d]` sort the table the same way as the other two. Its filter panel has only `since` and
 `until`; there is no command-line flag for it, it is read from the screen only.

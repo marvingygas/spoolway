@@ -525,7 +525,7 @@ impl PipelineSection {
     }
 
     /// Whether the field list has the keys, with nothing open over it: the
-    /// only time `tab`, `q` and `←`/`→` reach past the section.
+    /// only time the arrows, `q` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::Fields)
     }
@@ -989,16 +989,21 @@ impl PipelineSection {
     }
 
     /// The key line under the frame: whatever the section shows names its
-    /// own keys.
+    /// own keys. A search that leaves no field leaves `enter` and `o`
+    /// nothing to open, so both pairs go until a field matches again.
     pub(super) fn footer(&self) -> Vec<(&'static str, &'static str)> {
         match &self.view {
+            View::Fields if self.fields().is_empty() => [
+                [("f", "search"), super::OPEN_WORKSPACE].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
             View::Fields => [
                 [
                     ("enter", "select"),
                     ("f", "search"),
                     super::OPTIONS,
                     super::OPEN_WORKSPACE,
-                    ("tab", "section"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -1015,8 +1020,13 @@ impl PipelineSection {
 
     /// The picking list's keys: `h` before `esc`, naming which way it goes
     /// next, and left out on a field no step sets, where it does nothing.
+    /// `enter` is named only once a step is selected, since with none it
+    /// has nothing to set the value on.
     fn select_keys(&self, selection: &Selection) -> Vec<(&'static str, &'static str)> {
         let mut keys = SELECT_KEYS.to_vec();
+        if selection.selected.is_empty() {
+            keys.retain(|&(key, _)| key != "enter");
+        }
         if can_hide(&self.pipelines, selection.field) {
             let toggle = match selection.show_not_set {
                 true => ("h", "hide not set"),
@@ -1028,8 +1038,9 @@ impl PipelineSection {
     }
 }
 
-/// The picking list's keys, on the line under the frame, less the `h` that
-/// [`PipelineSection::select_keys`] puts before `esc`.
+/// The picking list's keys, on the line under the frame.
+/// [`PipelineSection::select_keys`] puts `h` before `esc`, and takes
+/// `enter` out while no step is selected.
 const SELECT_KEYS: &[(&str, &str)] = &[
     ("space", "select"),
     ("a", "select all"),
@@ -1321,7 +1332,7 @@ mod tests {
     /// on `model`, the field most of these tests set.
     fn on_pipeline(repo: &Repo) -> State {
         let mut state = State::new(repo);
-        type_keys(repo, &mut state, "\t");
+        type_keys(repo, &mut state, "\x1b[C");
         type_keys(repo, &mut state, &"\x1b[B".repeat(at_field("model")));
         state
     }
@@ -1394,7 +1405,7 @@ mod tests {
         write_patch(&repo, "gamma", "steps:\n  build:\n    timeout: 5m\n");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let rows = rows_of(&state);
         assert_eq!(
             &rows[..25],
@@ -1433,7 +1444,24 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [enter] select   [f] search   [o] options   [w] open workspace   [tab] section"
+            " [enter] select   [f] search   [o] options   [w] open workspace"
+        );
+    }
+
+    // A search that leaves no field leaves `enter` and `o` nothing to open,
+    // so the key line names neither until `esc` on the search row brings
+    // the fields back.
+    #[test]
+    fn a_search_that_leaves_no_field_drops_enter_and_o_from_the_key_line() {
+        let (repo, _guard) = pipelines_project("no-field");
+        let mut state = on_pipeline(&repo);
+        type_keys(&repo, &mut state, "fzzz\r");
+        assert!(state.pipeline.fields().is_empty());
+        assert_eq!(key_line(&state), " [f] search   [w] open workspace");
+        type_keys(&repo, &mut state, "f\x1b");
+        assert_eq!(
+            key_line(&state),
+            " [enter] select   [f] search   [o] options   [w] open workspace"
         );
     }
 
@@ -1466,16 +1494,22 @@ mod tests {
             ]
         );
         assert!(!rows.iter().any(|r| r.contains("gamma")), "{rows:#?}");
+        // No step is selected yet, so `enter` has nothing to set.
+        assert_eq!(
+            key_line(&state),
+            " [space] select   [a] select all   [h] show not set   [esc] back"
+        );
+        type_keys(&repo, &mut state, " ");
         assert_eq!(
             key_line(&state),
             " [space] select   [a] select all   [enter] set value   [h] show not set   [esc] back"
         );
 
-        // `esc` goes back to the fields, and `tab` only then leaves.
-        type_keys(&repo, &mut state, "\t");
-        assert!(!state.pipeline.at_rest(), "tab does not leave a pick");
+        // `esc` goes back to the fields, and `→` only then leaves.
+        type_keys(&repo, &mut state, "\x1b[C");
+        assert!(!state.pipeline.at_rest(), "`→` does not leave a pick");
         esc(&repo, &mut state);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         assert_eq!(state.section, super::super::Section::Prompts);
     }
 
@@ -1594,7 +1628,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("all-steps");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("on_pass"));
         type_keys(&repo, &mut state, &format!("{down}\r"));
         assert_eq!(
@@ -1638,7 +1672,7 @@ mod tests {
     fn a_route_to_a_missing_step_is_written_and_reported_as_ignored() {
         let (repo, _guard) = pipelines_project("missing-route");
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("on_pass"));
         let erase = "\x7f".repeat(20);
         type_keys(
@@ -1677,7 +1711,7 @@ mod tests {
         );
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         assert_eq!(rows_of(&state)[2], ">   description          2 overridden");
 
         type_keys(&repo, &mut state, "o\r");
@@ -2190,6 +2224,12 @@ mod tests {
         )
     }
 
+    /// [`select_line`] while no step is selected, with no `enter` to set a
+    /// value on none.
+    fn unselected_line(which: &str) -> String {
+        format!(" [space] select   [a] select all   [h] {which} not set   [esc] back")
+    }
+
     /// The selected steps, as `pipeline.step`.
     fn picked(state: &State) -> Vec<String> {
         let View::Select(selection) = &state.pipeline.view else {
@@ -2221,7 +2261,7 @@ mod tests {
         ];
         type_keys(&repo, &mut state, "\x1b[B\r");
         assert_eq!(&rows_of(&state)[..7], hidden);
-        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+        assert_eq!(lines(&state).last().unwrap(), &unselected_line("show"));
 
         type_keys(&repo, &mut state, "h");
         assert_eq!(
@@ -2238,11 +2278,11 @@ mod tests {
                 "",
             ]
         );
-        assert_eq!(lines(&state).last().unwrap(), &select_line("hide"));
+        assert_eq!(lines(&state).last().unwrap(), &unselected_line("hide"));
 
         type_keys(&repo, &mut state, "h");
         assert_eq!(&rows_of(&state)[..7], hidden);
-        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+        assert_eq!(lines(&state).last().unwrap(), &unselected_line("show"));
     }
 
     // `h` hiding the not-set steps deselects every one that was selected,
@@ -2293,7 +2333,7 @@ mod tests {
         let _terminal = crate::screen::test_terminal((100, 40));
         let mut state = on_pipeline(&repo);
         type_keys(&repo, &mut state, "\x1b[B\rh");
-        assert_eq!(lines(&state).last().unwrap(), &select_line("hide"));
+        assert_eq!(lines(&state).last().unwrap(), &unselected_line("hide"));
         esc(&repo, &mut state);
         type_keys(&repo, &mut state, "\r");
         assert!(
@@ -2301,7 +2341,7 @@ mod tests {
             "{:#?}",
             rows_of(&state)
         );
-        assert_eq!(lines(&state).last().unwrap(), &select_line("show"));
+        assert_eq!(lines(&state).last().unwrap(), &unselected_line("show"));
     }
 
     // On a field no step sets, hiding would leave nothing to pick, so the
@@ -2312,7 +2352,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("nobody-sets");
         let _terminal = crate::screen::test_terminal((100, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("background"));
         type_keys(&repo, &mut state, &format!("{down}\r"));
         let all = [
@@ -2324,7 +2364,7 @@ mod tests {
             "",
         ];
         assert_eq!(&rows_of(&state)[..6], all);
-        let line = " [space] select   [a] select all   [enter] set value   [esc] back";
+        let line = " [space] select   [a] select all   [esc] back";
         assert_eq!(lines(&state).last().unwrap(), line);
 
         type_keys(&repo, &mut state, "h");
@@ -2377,7 +2417,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("partial-hidden");
         let _terminal = crate::screen::test_terminal((100, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("background"));
         type_keys(
             &repo,

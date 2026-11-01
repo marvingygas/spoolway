@@ -319,9 +319,9 @@ wait_for_said() {
 
 # Bare `spoolway` — the one screen — with `keys` typed into it, and every
 # frame it drew written to `out`. The screen opens on the dispatch tab, so
-# one `\033[C` is typed ahead of `keys` and the caller is handed the queue
-# tab, as before: `\033[C` from there is the routines tab, a second one the
-# overrides tab, and `\033[D` the dispatch tab. The first frame in `out` is
+# `2` is typed ahead of `keys` and the caller is handed the queue tab, as
+# before: each tab's digit opens it from there, `1` dispatch, `3` routines,
+# `4` overrides and `5` eval. The first frame in `out` is
 # therefore the dispatch tab's, with the queue tab's after it. The screen
 # draws only with stdout on a terminal, so `script`
 # gives it a pty for stdout while the keys still arrive on an ordinary pipe,
@@ -342,7 +342,7 @@ wait_for_said() {
 on_screen() {
   local keys=$1 out=$2; shift 2
   _screen_ready
-  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="\033[C$keys" E2E_BIN="$SPOOLWAY" \
+  env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="2$keys" E2E_BIN="$SPOOLWAY" \
     script -qec 'printf "$E2E_KEYS" | "$E2E_BIN"' "$out" >/dev/null 2>&1
 }
 
@@ -512,12 +512,12 @@ screen_start() {
   }
   E2E_SCREEN_PID=$(cat "$pidfile")
   # The screen opens on the dispatch tab, and its board says `dispatcher
-  # stopped`, the text `screen_board` waits for. One `→` hands every caller the queue
+  # stopped`, the text `screen_board` waits for. `2` hands every caller the queue
   # tab, which is where each counts its keys from, and the wait for its
   # `groups` pane keeps that opening board from standing in for a frame the
   # caller's own keys draw.
-  screen_press $'\x1b[C'
-  poll_until 10 screen_drew_since "$mark" "─ groups" || {
+  screen_press 2
+  poll_until 10 queue_tab_drew_since "$mark" || {
     printf '  \033[31mSETUP\033[0m the screen never drew the queue tab\n' >&2
     tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
     exit 2
@@ -541,12 +541,23 @@ screen_drew_since() {
   grep -qaF -- "$2" < <(tail -n "+$(($1 + 1))" "$E2E_SCREEN_LOG")
 }
 
-# Onto the dispatch tab, one `←` from the queue tab `screen_start` hands over, and
+# queue_tab_drew_since <line>: the queue tab's top border is past <line>,
+# whichever of its panes has focus. The focused pane's title is bracketed,
+# so the groups pane's reads `[groups]` while it has the keys and `groups`
+# while the tasks pane does.
+queue_tab_drew_since() {
+  screen_drew_since "$1" "─ [groups]" || screen_drew_since "$1" "─ groups"
+}
+
+# Onto the dispatch tab, `1` from the queue tab `screen_start` hands over, and
 # nothing started there. Fails the suite's setup if the board is never drawn.
+# A screen already on that tab draws nothing for `1`, so one whose last frame
+# is the stopped board is left as it is.
 screen_board() {
   local mark
+  case "$(screen_last_frame)" in *"dispatcher stopped"*) return 0 ;; esac
   mark=$(wc -l < "$E2E_SCREEN_LOG")
-  screen_press $'\x1b[D'
+  screen_press 1
   poll_until 10 screen_drew_since "$mark" "dispatcher stopped" || {
     printf '  \033[31mSETUP\033[0m the screen never drew the dispatch tab\n' >&2
     tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
@@ -572,6 +583,15 @@ screen_board() {
 screen_dispatch() {
   local seen i
   screen_board
+  # A dispatcher just stopped can read `dispatcher stopped` a frame before the
+  # tab has let go of the stop, and until then `enter` reads nothing. The key
+  # line names `[enter] start dispatching` only once it would act, so the key
+  # waits for that rather than for the header (board-pause on #1453's CI).
+  poll_until 10 screen_offers_start || {
+    printf '  \033[31mSETUP\033[0m the dispatch tab never offered to start dispatching\n' >&2
+    tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
+    exit 2
+  }
   seen=$(screen_frames)
   screen_press $'\r'
   for ((i = 0; i < 200; i++)); do
@@ -614,6 +634,13 @@ screen_last_frame() {
   fi
   frame=$(tail -c "+$((at + ${#start} + 1))" "$E2E_SCREEN_LOG")
   printf '%s\n' "${frame%%"$start"*}"
+}
+
+# Whether the open screen's last frame names `[enter] start dispatching` on
+# its key line: the dispatch tab with no dispatcher of its own, and `enter`
+# free to start one.
+screen_offers_start() {
+  screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' | grep -qF "[enter] start dispatching"
 }
 
 # Quit the open screen: `esc` closes whatever panel is up, `q` quits, and

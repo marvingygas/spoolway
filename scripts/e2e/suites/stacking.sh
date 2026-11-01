@@ -598,9 +598,9 @@ depends_on_listed() {
 }
 MENU_LOG="$LIVE/depends-on.out"
 screen_start "$MENU_LOG"
-# `tab` onto the tasks pane, `o`, `↓` three times past edit pipeline and
+# `→` onto the tasks pane, `o`, `↓` three times past edit pipeline and
 # edit lands in onto edit depends on, `enter`.
-screen_press $'\to\x1b[B\x1b[B\x1b[B\r'
+screen_press $'\x1b[Co\x1b[B\x1b[B\x1b[B\r'
 if poll_until 30 depends_on_listed; then
   ok "edit depends on opens the picker titled with the head and lists its targets"
 else
