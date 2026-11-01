@@ -4961,10 +4961,10 @@ struct StackTarget {
     id: String,
     /// The task's group, drawn beside it.
     group: String,
-    /// The branch the group lands in, as the tasks pane shows it — see
-    /// [`lands_in`] — which the pick copies as `base:` onto the head's
-    /// chain. `None` when that is not known: a pending task naming no
-    /// `base:` on a detached checkout.
+    /// The branch the group lands in — see [`stack_lands_in`] — which the
+    /// pick copies as `base:` onto the head's chain. `None` when that is
+    /// not known: a pending task naming no `base:` on a detached checkout,
+    /// or a queued or done one recorded without it.
     lands: Option<String>,
 }
 
@@ -5143,10 +5143,7 @@ fn stack_targets(
         let target = StackTarget {
             id: tail.id.clone(),
             group: other.name.clone(),
-            lands: match tail.state {
-                TaskState::Pending => lands_in(tail, state),
-                TaskState::Queued | TaskState::Done => tail.base.clone(),
-            },
+            lands: stack_lands_in(tail, state),
         };
         match other.state {
             GroupState::Done => done.push(target),
@@ -8593,6 +8590,20 @@ fn lands_in(task: &PendingTask, state: &ScreenState) -> Option<String> {
     task.base.clone().or_else(|| state.board_branch.clone())
 }
 
+/// Where a group stacked onto `task` takes its lands in from: for a pending
+/// task, [`lands_in`], since queuing it from this screen gives it the
+/// board's branch; for a queued or done task, its recorded `base:` alone,
+/// since it was queued already and the board's branch now says nothing of
+/// where it went. `None` when that is not known. Edit depends on copies
+/// this as the stacked chain's `base:`, and edit lands in checks a pick
+/// against it, so the two must read the same answer.
+fn stack_lands_in(task: &PendingTask, state: &ScreenState) -> Option<String> {
+    match task.state {
+        TaskState::Pending => lands_in(task, state),
+        TaskState::Queued | TaskState::Done => task.base.clone(),
+    }
+}
+
 /// The highlighted chain head's stack, when it has one: its id, the task of
 /// another group it depends on, and where that task lands — its own `base:`,
 /// or for a pending task naming none the board's branch, which queuing it
@@ -8609,10 +8620,7 @@ fn stacked_on(groups: &[Group], state: &ScreenState) -> Option<(String, String, 
                 .iter()
                 .flat_map(|g| &g.tasks)
                 .find(|t| &t.id == dep)?;
-            let lands = match task.state {
-                TaskState::Pending => lands_in(task, state),
-                _ => task.base.clone(),
-            }?;
+            let lands = stack_lands_in(task, state)?;
             Some((head.id.clone(), dep.clone(), lands))
         })
 }
@@ -18423,6 +18431,68 @@ mod tests {
         for (path, before) in &paths {
             assert_eq!(&std::fs::read_to_string(path).unwrap(), before);
         }
+    }
+
+    /// A stack onto a task whose lands in is not known writes the head's
+    /// `depends_on:` alone: no `base:` is copied, and the chain's other
+    /// pending file is neither changed nor rewritten. The target is a queued
+    /// task recorded with no `base:`, which does not take the board's branch
+    /// even while the board names one, since it was queued already.
+    #[test]
+    fn a_stack_onto_a_task_landing_nowhere_known_writes_only_the_heads_depends_on() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-unknown-lands");
+        write_pending(
+            &repo,
+            "ship-cart",
+            &task_text("ship-cart", "group: cart\n", BODY),
+        );
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: billing\n", BODY));
+        let tests_text = task_text("tests", "group: billing\ndepends_on: [wire]\n", BODY);
+        let tests = write_pending(&repo, "tests", &tests_text);
+        // Dated long ago, so a rewrite through `write_atomic`, even one
+        // putting back the same bytes, shows as a new modified time.
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1 << 30);
+        std::fs::File::options()
+            .write(true)
+            .open(&tests)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let mut groups = listed(&repo);
+        // Set by hand, as `stack_targets_leave_out_the_current_stack_and_every_group_above`
+        // does: what the listing gives a queued group.
+        for group in groups.iter_mut().filter(|g| g.name == "cart") {
+            group.state = GroupState::Queued;
+            for task in &mut group.tasks {
+                task.state = TaskState::Queued;
+            }
+        }
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+        let menu = pending_options(&groups, &state).unwrap();
+        let group = shown(&groups, &state)[state.group_cursor];
+        let head = highlighted_task(&groups, &state).unwrap();
+        let (ready, _) = stack_targets(&groups, &state, group, head);
+        let [target] = &ready[..] else {
+            panic!("{ready:?}");
+        };
+        assert_eq!(target.lands, None);
+        let target = target.clone();
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, Some(&target));
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        let after = std::fs::read_to_string(&wire).unwrap();
+        assert!(
+            after.lines().any(|l| l == "depends_on: [ship-cart]"),
+            "{after}"
+        );
+        assert!(!after.contains("base:"), "{after}");
+        assert_eq!(std::fs::read_to_string(&tests).unwrap(), tests_text);
+        assert_eq!(
+            std::fs::metadata(&tests).unwrap().modified().unwrap(),
+            long_ago
+        );
     }
 
     /// Two groups where deleting `cart-totals` reaches into the other one:
