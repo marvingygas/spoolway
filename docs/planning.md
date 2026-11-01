@@ -185,6 +185,12 @@ after the path reads again.
 | `h` | Show or hide done groups. A queued group never appears. |
 | `ctrl-c` | Leave the screen. |
 
+The key line under the screen names `space`, `enter` and `o` only while each would act, and names
+it again as soon as it would. `space` shows over a group it can tick, `enter` once a group is
+selected, and `o` while the focused pane has a row under its cursor. An empty queue's key line
+starts at `[f] search`. A search that hides every group still shows `enter` while a group is
+selected, because `enter` queues it anyway.
+
 Queueing deletes the group's pending tasks from the pending directory. A sibling task
 already in the queue or the archive is left exactly where it is. A
 group with a validation error is refused and nothing is deleted. A task whose start branch does
@@ -387,7 +393,7 @@ and `←` and `→` move the brackets to the other pane.
 │                          │       description: chore(deps): review and merge open Dependabot pull │
 │                          │                    requests                                           │
 ╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯
- [space] select   [enter] queue   [o] options   [q] quit
+ [space] select   [o] options   [q] quit
 ```
 
 What the job rows say depends on how many jobs point at the routine:
@@ -418,6 +424,11 @@ without a key.
 | `o` | Open the options menu of the row the focused pane highlights. |
 | `←` `→` | Switch focus between the routine list and the details pane. On a job row they do nothing. |
 | `esc` | Over the details pane, return focus to the list. Over the list, do nothing. |
+
+The key line names `space`, `enter` and `o` only while each would act. `space` shows over a
+routine, from either pane. `enter` shows once a routine is ticked and the cursor is not on a job
+row. `o` shows while the focused pane has a row under its cursor, so a job row's key line is
+`[o] options` and `[q] quit` alone.
 
 The options menu follows focus the same way it does on the queue screen, and is titled with the
 highlighted row's name:

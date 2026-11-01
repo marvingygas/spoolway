@@ -195,7 +195,8 @@ are active. deactivate them first, …`.
 `edit schedule` walks two panels. `esc` on either writes nothing.
 
 1. The schedule. The field states the expression in words and shows its next three firings as
-   you type. `enter` is refused until the expression parses.
+   you type. `enter` is refused until the expression parses, and the key line under the
+   screen names `[enter] accept` only while it does.
 2. The pipeline. The picker lists every pipeline the repo defines as answers, and narrows as
    you type. `↑` `↓` move the cursor, and `enter` saves the job with the pipeline under it.
 

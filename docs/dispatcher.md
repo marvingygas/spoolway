@@ -544,6 +544,11 @@ cursor sits on a row it can resume. `[u] update config` joins it, between `[o] o
 `[q] quit`, only while a dispatcher holds the lock and the `config changed` line is up. On an empty board it sits between `enter` and `q`. It is drawn in normal
 text, and every other pair on the line is dim.
 
+The `enter` pair shows only while `enter` would start or stop dispatching. While a menu, a panel
+or a popup that reads keys is open, such as the stop popup, `enter` answers that instead, so the
+pair leaves the key line until it closes. The `starting dispatcher`, `updating config…` and
+`successfully loaded` popups read no keys, so the pair stays under them.
+
 | Key | What it does |
 |---|---|
 | `↑` `↓` | Move the cursor. It starts on the first row of the first group and walks every row the board draws, done ones included. If its row leaves the board, such as its group finishing, the cursor falls back to the first row with no key pressed. |
