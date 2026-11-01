@@ -12782,6 +12782,7 @@ mod tests {
     #[test]
     fn the_options_menu_lists_only_what_each_row_can_do() {
         let (repo, _root_guard) = fixture("options-per-row");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add_to(&repo, "running", &[], Some("implement"), Some("running"));
         add_to(&repo, "held", &[], None, Some("held"));

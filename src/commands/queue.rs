@@ -13860,6 +13860,7 @@ mod tests {
     #[test]
     fn unqueue_deletes_the_worktree_and_a_branch_no_remote_has() {
         let (repo, _root_guard) = fixture("unqueue-forced-deletes");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         let origin = repo.root.display().to_string();
         crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
@@ -13905,6 +13906,7 @@ mod tests {
             ("rebase", "rebase"),
         ] {
             let (repo, _root_guard) = fixture(&format!("unqueue-forced-off-{name}"));
+            crate::mux::force_headless_for_test();
             let pipelines = Pipelines::builtin();
             add(&repo, "solo", &[]);
             let worktree = paused_with_worktree(&repo, "solo");
@@ -13942,6 +13944,7 @@ mod tests {
     #[test]
     fn unqueue_leaves_a_borrowed_checkout_alone() {
         let (repo, _root_guard) = fixture("unqueue-forced-borrowed");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         crate::repo::run(&repo.root, "git", &["branch", "task/solo"]).unwrap();
@@ -13965,6 +13968,7 @@ mod tests {
     #[test]
     fn unqueue_carries_every_task_after_it_in_its_group() {
         let (repo, _root_guard) = fixture("unqueue-forced-chain");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "first", &[]);
         add(&repo, "middle", &["first"]);
@@ -13993,6 +13997,7 @@ mod tests {
     #[test]
     fn unqueue_works_under_a_running_dispatcher_only_for_a_stopped_task() {
         let (repo, _root_guard) = fixture("unqueue-forced-locked");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         // One group is one chain, so the stopped task follows the running one.
         add(&repo, "running", &[]);
@@ -14019,6 +14024,7 @@ mod tests {
     #[test]
     fn unqueue_carries_nothing_when_the_worktree_cannot_be_removed() {
         let (repo, _root_guard) = fixture("unqueue-forced-stuck");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         crate::repo::run(&repo.root, "git", &["branch", "task/solo"]).unwrap();
@@ -14048,6 +14054,7 @@ mod tests {
     #[test]
     fn unqueue_stops_a_running_hook_and_reclaims_the_task_files() {
         let (repo, _root_guard) = fixture("unqueue-forced-hook");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -14109,6 +14116,7 @@ mod tests {
     #[test]
     fn unqueue_stops_what_a_finished_command_step_backgrounded() {
         let (repo, _root_guard) = fixture("unqueue-forced-group");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -14154,6 +14162,7 @@ mod tests {
     #[test]
     fn unqueue_deletes_a_started_routine_copy_past_a_pending_draft() {
         let (repo, _root_guard) = fixture("unqueue-forced-routine-copy");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         let routine = repo.routines_dir().join("nightly").join("nightly.md");
         std::fs::create_dir_all(routine.parent().unwrap()).unwrap();
@@ -14190,6 +14199,7 @@ mod tests {
     #[test]
     fn unqueue_carries_a_started_copy_whose_routine_is_gone() {
         let (repo, _root_guard) = fixture("unqueue-forced-routine-gone");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "nightly-3", &[]);
         let mut copy = queued(&repo, "nightly-3");
@@ -14217,6 +14227,7 @@ mod tests {
     #[test]
     fn unqueue_carries_a_routine_copy_a_dependent_leans_on() {
         let (repo, _root_guard) = fixture("unqueue-forced-routine-dependent");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         let routine = repo.routines_dir().join("nightly").join("nightly.md");
         std::fs::create_dir_all(routine.parent().unwrap()).unwrap();
@@ -14248,6 +14259,7 @@ mod tests {
     #[test]
     fn unqueue_refuses_before_teardown_over_a_dependents_newer_draft() {
         let (repo, _root_guard) = fixture("unqueue-forced-dependent-draft");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         add(&repo, "after", &["solo"]);
@@ -28262,6 +28274,7 @@ body\n";
     #[test]
     fn queue_unqueue_refuses_a_running_task_naming_the_pause_command() {
         let (repo, _root_guard) = fixture("queue-unqueue-running");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         add(&repo, "after", &["solo"]);
@@ -28294,6 +28307,7 @@ body\n";
     #[test]
     fn queue_unqueue_tells_a_done_task_it_is_done_not_running() {
         let (repo, _root_guard) = fixture("queue-unqueue-done");
+        crate::mux::force_headless_for_test();
         add(&repo, "login", &[]);
         let mut task = queued(&repo, "login");
         task.front.stage = crate::pipeline::DONE.to_string();
@@ -28316,6 +28330,7 @@ body\n";
     #[test]
     fn queue_unqueue_names_pause_force_for_a_running_command_step() {
         let (repo, _root_guard) = fixture("queue-unqueue-running-command");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
@@ -28357,6 +28372,7 @@ body\n";
         use std::os::unix::fs::PermissionsExt;
         for (stage, pauses) in [(crate::pipeline::PAUSED, false), ("implement", true)] {
             let (repo, _root_guard) = fixture(&format!("queue-unqueue-cut-going-{stage}"));
+            crate::mux::force_headless_for_test();
             add(&repo, "solo", &[]);
             let mut task = queued(&repo, "solo");
             task.front.stage = stage.to_string();
@@ -28461,6 +28477,7 @@ body\n";
     #[test]
     fn queue_unqueue_says_what_it_deleted_and_each_task_it_moved() {
         let (repo, _root_guard) = fixture("queue-unqueue-started");
+        crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         add(&repo, "after", &["solo"]);
@@ -28499,6 +28516,7 @@ body\n";
     #[test]
     fn queue_unqueue_says_nothing_was_deleted_for_a_borrowed_checkout() {
         let (repo, _root_guard) = fixture("queue-unqueue-borrowed-quiet");
+        crate::mux::force_headless_for_test();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
         task.front.stage = "paused".to_string();
@@ -28521,6 +28539,7 @@ body\n";
     #[test]
     fn queue_unqueue_names_a_last_step_the_task_left_behind_is_past() {
         let (repo, _root_guard) = fixture("queue-unqueue-last");
+        crate::mux::force_headless_for_test();
         let pipelines = with_last_step();
         let last_step = "suite";
         add(&repo, "login", &[]);
