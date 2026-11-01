@@ -2083,7 +2083,7 @@ mod tests {
         assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
-            last.contains(" [space] select   [enter] queue   [o] options   [q] quit"),
+            last.contains(" [space] select   [o] options   [q] quit"),
             "{last}"
         );
 
