@@ -209,7 +209,7 @@ task, in this order:
 | Item | What it does |
 |---|---|
 | `open task` | Open the task in your editor |
-| `edit pipeline` | Pick another of the project's pipelines and write it into the task's `pipeline:`, when it is pending. `f` searches the list, `enter` writes the pick, and `esc` goes back to the menu. A gate on a step the new pipeline lacks is cleared |
+| `edit pipeline` | Pick another of the project's pipelines and write it into the task's `pipeline:`. Listed only on a pending task. See below |
 | `gate` | Set or clear a `gate_at` on the task |
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
@@ -225,6 +225,8 @@ page says `nothing to do here`. To reach them from the tasks pane, press `tab` f
 
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
+
+`edit pipeline` opens a picker of every pipeline the project defines except the task's current one. The picker is titled `pipeline for <task>` and its key row reads `[enter] confirm   [f] search   [esc] back`. `f` searches the list. `enter` writes the pick into the `pipeline:` line of the task's pending file and closes to the queue screen, where the tasks pane shows the new pipeline. `esc` goes back to the options menu. A gate set on the screen stays when the gate picker would offer the same step on the new pipeline. Otherwise the gate is cleared. If the pending file is gone or the task is no longer pending, nothing is written and a popup names the file.
 
 `gate` opens a picker of the agent steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker

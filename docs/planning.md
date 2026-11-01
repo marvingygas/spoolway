@@ -232,6 +232,7 @@ A group whose tasks name a plan page lists `open plan` first:
 | Item | Listed on | What it does |
 |---|---|---|
 | `open task` | A task. | Open the task in your editor. |
+| `edit pipeline` | A pending task. | Pick another of the project's pipelines and write it into the task's `pipeline:`. See [`spoolway queue`](cli-reference.md#spoolway-queue). |
 | `open plan` | A group with at least one task whose `plan:` is set and not empty, or a plan row. Never a task. | Open every page the group's tasks name in `plan:`, each distinct page once and in task order, or the plan row's page, in your default browser. Pages that cannot open are listed together in one `open plan` popup, and the others still open. See [Options menu](dispatcher.md#options-menu). |
 | `gate` | A task. | Open the gate picker on the task. `enter` gates it at the step under the cursor, `enter` on the step already gated clears it, and `esc` closes the picker. |
 | `trial` | A group with tasks. | Fork the group as a trial. See [Trials](#trials). |
