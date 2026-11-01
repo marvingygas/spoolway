@@ -739,11 +739,13 @@ fn unqueue_saying(
 /// says so.
 ///
 /// The pause command is the way out for a task running an agent step, or held
-/// by a lane, but not for the other two. A running command step makes `queue
-/// pause` refuse without `--force`, and a worktree cut still going is not
-/// something `queue pause` stops, so each is named for what actually ends it.
-/// A task on `done` is not running and has nothing to pause: the board offers
-/// it no `unqueue` either, and the dispatcher archives it on its own.
+/// by a lane. A running command step makes `queue pause` refuse without
+/// `--force`, so that is named instead. A worktree cut still going is not
+/// something `queue pause` stops. On a parked task waiting for the cut is all
+/// there is to do. On a task on a working step the cut ends and the step's lane
+/// starts, so the pause is named first to keep the step from starting. A task
+/// on `done` is not running and has nothing to pause: the board offers it no
+/// `unqueue` either, and the dispatcher archives it on its own.
 fn running_refusal(repo: &Repo, pipelines: &Pipelines, tasks: &[Task], id: &str) -> String {
     let stage = tasks
         .iter()
@@ -755,35 +757,45 @@ fn running_refusal(repo: &Repo, pipelines: &Pipelines, tasks: &[Task], id: &str)
              its own.\n\nnothing was changed."
         );
     }
-    if crate::cut::running(repo, id).is_some() {
-        return format!(
-            "`{id}` has a worktree cut still going on `{stage}` — unqueue takes a stopped task \
-             only.\n\n  `spoolway queue pause` does not stop a cut. wait for it to finish, then \
-             unqueue it:\n      spoolway queue unqueue {id}\n\nnothing was changed."
-        );
-    }
+    let parked = matches!(
+        stage,
+        crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED
+    );
     let command = crate::status::running_command_steps(repo, tasks, pipelines)
         .into_iter()
         .find(|running| running.task == id);
-    let doing = match (&command, stage) {
-        (Some(running), _) => format!("is running step {}", running.step),
-        (
-            None,
-            crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED,
-        ) => {
-            format!("has a lane still working on `{stage}`")
-        }
-        (None, step) => format!("is running step {step}"),
-    };
-    let pause = match &command {
-        Some(_) => format!(
-            "spoolway queue pause --force {id}   (throws away the command's work in progress)"
+    let (pause, warning) = match &command {
+        Some(_) => (
+            format!("spoolway queue pause --force {id}"),
+            "\n  `--force` throws away the command's work in progress.\n",
         ),
-        None => format!("spoolway queue pause {id}"),
+        None => (format!("spoolway queue pause {id}"), ""),
+    };
+    if crate::cut::running(repo, id).is_some() {
+        let way = match parked {
+            true => format!(
+                "`spoolway queue pause` does not stop a cut. wait for it to finish, then \
+                 unqueue it:\n      spoolway queue unqueue {id}\n"
+            ),
+            false => format!(
+                "`spoolway queue pause` does not stop a cut, but it keeps the step from \
+                 starting when the cut ends. pause it, wait for the cut to finish, then \
+                 unqueue it:\n      {pause}\n      spoolway queue unqueue {id}\n{warning}"
+            ),
+        };
+        return format!(
+            "`{id}` has a worktree cut still going on `{stage}` — unqueue takes a stopped task \
+             only.\n\n  {way}\nnothing was changed."
+        );
+    }
+    let doing = match (&command, parked) {
+        (Some(running), _) => format!("is running step {}", running.step),
+        (None, true) => format!("has a lane still working on `{stage}`"),
+        (None, false) => format!("is running step {stage}"),
     };
     format!(
         "`{id}` {doing} — unqueue takes a stopped task only.\n\n  to stop it where it is, \
-         then unqueue it:\n      {pause}\n      spoolway queue unqueue {id}\n\n\
+         then unqueue it:\n      {pause}\n      spoolway queue unqueue {id}\n{warning}\n\
          nothing was changed."
     )
 }
@@ -967,27 +979,17 @@ pub(crate) fn unqueue_stopped(
     let drafted = crate::status::drafted_in_batch(repo, &dependents)?;
     let routine_file =
         crate::status::stopped_routine_file(repo, &tasks, &tasks[idx], &dependents, &drafted);
-    let carried = std::iter::once(id.to_string())
-        .filter(|_| routine_file.is_none())
-        .chain(
-            dependents
-                .iter()
-                .filter(|dependent| {
-                    tasks
-                        .iter()
-                        .find(|t| t.id() == dependent.as_str())
-                        .is_some_and(|t| {
-                            crate::status::deleted_on_unqueue(repo, t, &drafted).is_none()
-                        })
-                })
-                .cloned(),
-        );
-    refuse_draft_in_the_way(
+    let mut carried: Vec<String> = Vec::new();
+    if routine_file.is_none() {
+        carried.push(id.to_string());
+    }
+    carried.extend(crate::status::carried_to_pending(
         repo,
-        id,
-        &carried.collect::<Vec<_>>(),
-        "nothing was torn down.",
-    )?;
+        &tasks,
+        &dependents,
+        &drafted,
+    ));
+    refuse_draft_in_the_way(repo, id, &carried, "nothing was torn down.")?;
 
     // Read before the teardown removes what they name. The same rules the
     // board's panel draws its warnings by, so the command and the popup say
@@ -28329,49 +28331,73 @@ body\n";
         runs.stop(&key);
 
         assert!(err.starts_with("`solo` is running step handover"), "{err}");
-        assert!(err.contains("spoolway queue pause --force solo"), "{err}");
+        assert!(
+            err.contains(
+                "\n      spoolway queue pause --force solo\n      spoolway queue unqueue solo\n"
+            ),
+            "the command lines must paste into a shell: {err}"
+        );
+        assert!(
+            err.contains("\n  `--force` throws away the command's work in progress.\n"),
+            "the warning stands on its own line: {err}"
+        );
         assert!(err.ends_with("nothing was changed."), "{err}");
         assert_eq!(said, "");
         assert!(repo.task("solo").is_ok());
     }
 
-    /// A parked task whose worktree cut is still going is told to wait for the
-    /// cut, not to pause: `queue pause` does not stop a cut, so that advice
-    /// would bring the same refusal back. Fails when the pause route is named.
+    /// A task whose worktree cut is still going is told what ends the
+    /// refusal. Parked, only the cut matters, so it is told to wait and not to
+    /// pause: `queue pause` does not stop a cut. On a working step the cut
+    /// ends and the step's lane starts, so waiting alone brings the refusal
+    /// back; the pause comes first. Fails when the parked task is sent to
+    /// pause, or the working one is sent to wait without pausing.
     #[test]
-    fn queue_unqueue_tells_a_task_with_a_cut_going_to_wait_for_it() {
+    fn queue_unqueue_tells_a_task_with_a_cut_going_what_to_do_about_it() {
         use std::os::unix::fs::PermissionsExt;
-        let (repo, _root_guard) = fixture("queue-unqueue-cut-going");
-        add(&repo, "solo", &[]);
-        let mut task = queued(&repo, "solo");
-        task.front.stage = crate::pipeline::PAUSED.to_string();
-        task.save().unwrap();
-        let hook = repo.root.join(".git/hooks/post-checkout");
-        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(&hook, "#!/bin/sh\nsleep 300\n").unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = repo.worktree_root().join("task-solo");
-        let began = crate::cut::begin(&repo, "solo", &path, "task/solo", "HEAD");
-        assert!(
-            began
-                .unwrap_err()
-                .downcast_ref::<crate::cut::CutPending>()
-                .is_some()
-        );
+        for (stage, pauses) in [(crate::pipeline::PAUSED, false), ("implement", true)] {
+            let (repo, _root_guard) = fixture(&format!("queue-unqueue-cut-going-{stage}"));
+            add(&repo, "solo", &[]);
+            let mut task = queued(&repo, "solo");
+            task.front.stage = stage.to_string();
+            task.save().unwrap();
+            let hook = repo.root.join(".git/hooks/post-checkout");
+            std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+            std::fs::write(&hook, "#!/bin/sh\nsleep 300\n").unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = repo.worktree_root().join("task-solo");
+            let began = crate::cut::begin(&repo, "solo", &path, "task/solo", "HEAD");
+            assert!(
+                began
+                    .unwrap_err()
+                    .downcast_ref::<crate::cut::CutPending>()
+                    .is_some()
+            );
 
-        let (result, said) = unqueue_said(&repo, &Pipelines::builtin(), "solo");
-        let err = format!("{:#}", result.unwrap_err());
-        crate::cut::stop_and_reclaim(&repo, "solo", "run it again").unwrap();
+            let (result, said) = unqueue_said(&repo, &Pipelines::builtin(), "solo");
+            let err = format!("{:#}", result.unwrap_err());
+            crate::cut::stop_and_reclaim(&repo, "solo", "run it again").unwrap();
 
-        assert!(
-            err.starts_with("`solo` has a worktree cut still going on `paused`"),
-            "{err}"
-        );
-        assert!(err.contains("wait for it to finish"), "{err}");
-        assert!(!err.contains("spoolway queue pause solo"), "{err}");
-        assert!(err.ends_with("nothing was changed."), "{err}");
-        assert_eq!(said, "");
-        assert!(repo.task("solo").is_ok());
+            assert!(
+                err.starts_with(&format!(
+                    "`solo` has a worktree cut still going on `{stage}`"
+                )),
+                "{err}"
+            );
+            assert!(err.contains("wait for"), "{stage}: {err}");
+            assert_eq!(
+                err.contains("\n      spoolway queue pause solo\n"),
+                pauses,
+                "{stage}: {err}"
+            );
+            assert!(
+                err.contains("\n      spoolway queue unqueue solo\n"),
+                "{stage}: {err}"
+            );
+            assert!(err.ends_with("nothing was changed."), "{stage}: {err}");
+            assert_eq!(said, "");
+            assert!(repo.task("solo").is_ok());
+        }
     }
 
     /// A parked task is refused for a lane still working on it with the pause
