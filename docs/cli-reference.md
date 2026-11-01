@@ -590,10 +590,14 @@ branch it is on, including another branch, a detached HEAD, or the middle of a r
 cherry-pick or revert. Only `task/<id>` is deleted. Any other branch, the remote branch and any
 pull request stay. A borrowed checkout is left standing.
 
-The command prints what it did, in this order. The board's popup draws the same sentences.
+The command prints what it did, in this order. It decides what it deleted by the same rule as the
+board's popup, but says it in its own words. The `last:` sentence is the popup's, joined onto one
+line.
 
-- `deleted branch <branch> and its worktree`, only when it deleted a branch or a worktree. A task
-  that never started, or that ran in a borrowed checkout, prints no such line.
+- A deletion line, only when it deleted a branch or a worktree. It reads `deleted branch <branch>
+  and its worktree` when it deleted both, `deleted branch <branch>` when the task had a local
+  branch and no worktree, and `deleted worktree <path>` when it had a worktree and no local
+  branch. A task that never started, or that ran in a borrowed checkout, prints no such line.
 - `<task> is past its last: step <step>. unqueueing leaves no other task to run them.`, only when
   the popup would show it. The task left at the end of the group walked past a `last:` step that
   no task is left to run. Several tasks or steps are named in the one line. Nothing runs the step

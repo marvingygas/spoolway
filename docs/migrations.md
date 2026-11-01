@@ -82,8 +82,9 @@ Nothing to sync. Update the scripts that call `spoolway queue unqueue`.
   started is now also unqueued together with the tasks after it, where 0.17.0 refused it while a
   queued task depended on it.
 - The output changes. The command no longer prints `removed worktree <path>` or `kept worktree
-  <path>`. A started task prints `deleted branch <branch> and its worktree` instead, only when
-  it deleted a branch or a worktree. A task left at the end of its group after it walked past a
+  <path>`. A started task prints one deletion line instead, only when it deleted a branch or
+  a worktree: `deleted branch <branch> and its worktree`, `deleted branch <branch>` when it had no
+  worktree, or `deleted worktree <path>` when it had no local branch. A task left at the end of its group after it walked past a
   `last:` step prints `<task> is past its last: step <step>. unqueueing leaves no other task to run
   them.`. Each task it moved prints `unqueued `<task>` → <path>`. A running task's refusal now
   reads `` `<task>` is running step <step> — unqueue takes a stopped task only. `` and no

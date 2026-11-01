@@ -738,9 +738,17 @@ fn unqueue_saying(
     unqueue_stopped(repo, pipelines, id, &check, say)
 }
 
-/// What a running task is told: unqueue takes a stopped task only, and the
-/// pause command stops it where it is. Nothing was changed, and says so.
+/// What a task that is not stopped is told: unqueue takes a stopped task only,
+/// and the pause command stops it where it is. Nothing was changed, and says
+/// so. A task on `done` is not running and has nothing to pause: the board
+/// offers it no `unqueue` either, and the dispatcher archives it on its own.
 fn running_refusal(id: &str, stage: &str) -> String {
+    if stage == crate::pipeline::DONE {
+        return format!(
+            "`{id}` is done — unqueue takes a stopped task only, and a done task is archived on \
+             its own.\n\nnothing was changed."
+        );
+    }
     let doing = match stage {
         crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED => {
             format!("has a lane or a cut still working on `{stage}`")
@@ -28228,6 +28236,27 @@ body\n";
             assert!(repo.task("after").is_ok(), "the task after it stays");
             assert!(!repo.pending_dir().join("solo.md").exists());
         }
+    }
+
+    /// A task still in the queue on `done` is not running, and has nothing to
+    /// pause: it is told it is done, with no pause route, and nothing changes.
+    /// Fails when it is called running a step `done` and sent to pause it.
+    #[test]
+    fn queue_unqueue_tells_a_done_task_it_is_done_not_running() {
+        let (repo, _root_guard) = fixture("queue-unqueue-done");
+        add(&repo, "login", &[]);
+        let mut task = queued(&repo, "login");
+        task.front.stage = crate::pipeline::DONE.to_string();
+        task.save().unwrap();
+
+        let (result, said) = unqueue_said(&repo, &Pipelines::builtin(), "login");
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.starts_with("`login` is done"), "{err}");
+        assert!(!err.contains("queue pause"), "{err}");
+        assert!(err.ends_with("nothing was changed."), "{err}");
+        assert_eq!(said, "");
+        assert!(repo.task("login").is_ok());
     }
 
     /// A stopped task with a branch and a worktree says what it deleted, then

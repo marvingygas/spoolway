@@ -907,9 +907,10 @@ The panel names a `last:` step and does nothing else about it. No task runs the 
 | `enter` | Unqueue the task and every unstarted task that depends on it. A task that has started is torn down first, as `spoolway queue unqueue` does it, with or without a dispatcher running. |
 | `esc` | Close the panel and change nothing. |
 
-`spoolway queue unqueue <task>` takes the same tasks without asking. It prints the deletion and
-`last:` sentences from the first rows of this table as one line each, then one line for each task
-it moved. See [`spoolway queue unqueue <task>`](cli-reference.md#spoolway-queue-unqueue-task).
+`spoolway queue unqueue <task>` takes the same tasks without asking. It decides
+what it deleted by the same rule as the first row of the parts table above, and prints it as one
+line in its own words. It prints the `last:` sentence from the third row as one line, then one line
+for each task it moved. See [`spoolway queue unqueue <task>`](cli-reference.md#spoolway-queue-unqueue-task).
 
 When anything the panel drew has changed since it opened, `enter` redraws the panel with the line `this changed since it opened, so nothing was unqueued.` and changes nothing. A task that resumed, a new unblocker lane and a different `last:` result all count. A refusal `enter` meets stays in the panel, above the key line. On a short pane the panel folds its task lists under `… and n more` before it drops anything else. The warnings, the count and the key line always show.
 
