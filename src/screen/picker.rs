@@ -75,10 +75,12 @@ enum Fetch<T> {
     /// `origin`, or it succeeded and the list was read again.
     Off,
     /// Running on its own thread, which answers on `answer` and then
-    /// signals `wake`.
+    /// signals `wake`. `work` says whether it is a fetch or a load, which
+    /// words what the popup says if the thread ends without answering.
     Running {
         answer: Receiver<Fetched<T>>,
         wake: Option<Arc<Wake>>,
+        work: Work,
     },
     /// It failed, for git's reason.
     Failed(String),
@@ -86,9 +88,19 @@ enum Fetch<T> {
     /// this reason, so the list is still the one from before the fetch.
     Unread(String),
     /// A load read its list but left something out, and says what in this
-    /// text, worded by the list itself. Each of its lines starts a row of
-    /// its own, so what to do about it can sit apart from what went wrong.
+    /// text, worded by the list itself, or its thread stopped without an
+    /// answer, and this says so. Each of its lines starts a row of its own,
+    /// so what to do about it can sit apart from what went wrong.
     Noted(String),
+}
+
+/// What runs on a picker's thread.
+#[derive(Clone, Copy)]
+enum Work {
+    /// [`Picker::fetching_origin`]: a fetch of `origin`, then a read.
+    Fetch,
+    /// [`Picker::loading`]: a load with no fetch in it.
+    Load,
 }
 
 /// What the fetch's or load's thread answers: why the fetch failed, if it
@@ -148,36 +160,23 @@ impl<T: Clone + Send + 'static> Picker<T> {
     /// has nothing to fetch, so its picker lists at once rather than failing
     /// a fetch every time.
     pub(crate) fn fetching_origin(
-        mut self,
+        self,
         root: &Path,
         reload: impl FnOnce() -> Result<Vec<Entry<T>>> + Send + 'static,
     ) -> Picker<T> {
         if crate::repo::run(root, "git", &["remote", "get-url", "origin"]).is_err() {
             return self;
         }
-        let (send, answer) = std::sync::mpsc::channel();
-        let wake = Wake::new().map(Arc::new);
-        let signal = wake.clone();
         let root = root.to_path_buf();
-        std::thread::spawn(move || {
+        self.running("fetching origin…", Work::Fetch, move || {
             let failure = fetch_origin(&root);
             let entries = reload().map_err(|err| format!("{err:#}"));
-            let fetched = Fetched {
+            Fetched {
                 failure,
                 entries,
                 notice: None,
-            };
-            // A picker closed while the fetch ran has dropped its end, so
-            // the answer goes nowhere and nothing is signalled.
-            if send.send(fetched).is_ok()
-                && let Some(signal) = signal
-            {
-                signal.notify();
             }
-        });
-        self.fetch = Fetch::Running { answer, wake };
-        self.waiting = "fetching origin…";
-        self
+        })
     }
 
     /// The picker, showing `waiting` in place of its list while `load`
@@ -186,28 +185,44 @@ impl<T: Clone + Send + 'static> Picker<T> {
     /// the list, each line wrapped on rows of its own, or `None` when it
     /// left nothing out.
     pub(crate) fn loading(
-        mut self,
+        self,
         waiting: &'static str,
         load: impl FnOnce() -> (Vec<Entry<T>>, Option<String>) + Send + 'static,
+    ) -> Picker<T> {
+        self.running(waiting, Work::Load, move || {
+            let (entries, notice) = load();
+            Fetched {
+                failure: None,
+                entries: Ok(entries),
+                notice,
+            }
+        })
+    }
+
+    /// The picker, showing `waiting` in place of its list while `run` works
+    /// on a thread of its own, then settling on what it answers. The one
+    /// thread body [`Picker::fetching_origin`] and [`Picker::loading`]
+    /// share, so a fix to how it answers reaches both.
+    fn running(
+        mut self,
+        waiting: &'static str,
+        work: Work,
+        run: impl FnOnce() -> Fetched<T> + Send + 'static,
     ) -> Picker<T> {
         let (send, answer) = std::sync::mpsc::channel();
         let wake = Wake::new().map(Arc::new);
         let signal = wake.clone();
         std::thread::spawn(move || {
-            let (entries, notice) = load();
-            let fetched = Fetched {
-                failure: None,
-                entries: Ok(entries),
-                notice,
-            };
-            // As in `fetching_origin`: a closed picker takes no answer.
+            let fetched = run();
+            // A picker closed while the thread ran has dropped its end, so
+            // the answer goes nowhere and nothing is signalled.
             if send.send(fetched).is_ok()
                 && let Some(signal) = signal
             {
                 signal.notify();
             }
         });
-        self.fetch = Fetch::Running { answer, wake };
+        self.fetch = Fetch::Running { answer, wake, work };
         self.waiting = waiting;
         self
     }
@@ -230,17 +245,28 @@ impl<T: Clone + Send + 'static> Picker<T> {
     /// Take the fetch's answer, if it has come: the list read after it, and
     /// why the fetch or the read failed when one did.
     pub(crate) fn settle(&mut self) {
-        let Fetch::Running { answer, .. } = &self.fetch else {
+        let Fetch::Running { answer, work, .. } = &self.fetch else {
             return;
         };
-        let fetched = match answer.try_recv() {
-            Ok(fetched) => fetched,
-            Err(TryRecvError::Empty) => return,
+        let fetched = match (answer.try_recv(), work) {
+            (Ok(fetched), _) => fetched,
+            (Err(TryRecvError::Empty), _) => return,
             // The thread ended without answering, which only a panic does.
-            Err(TryRecvError::Disconnected) => Fetched {
+            (Err(TryRecvError::Disconnected), Work::Fetch) => Fetched {
                 failure: Some("the fetch stopped without an answer".to_string()),
                 entries: Err("the fetch stopped without an answer".to_string()),
                 notice: None,
+            },
+            // A load ran no fetch, so the fetch's rows would name one that
+            // never happened. It says what stopped, by its waiting row, over
+            // the list the picker was made with.
+            (Err(TryRecvError::Disconnected), Work::Load) => Fetched {
+                failure: None,
+                entries: Ok(std::mem::take(&mut self.entries)),
+                notice: Some(format!(
+                    "{} stopped without an answer. esc and reopen to try again.",
+                    self.waiting.trim_end_matches('…')
+                )),
             },
         };
         // A failed fetch is named first: the list from before it is then
@@ -799,6 +825,25 @@ mod tests {
                 }),
         );
         assert_eq!(inside(&picker)[2], "  > ship-cart");
+    }
+
+    // A load whose thread dies says what stopped, by its waiting row, and
+    // not that a fetch failed, since none ran.
+    #[test]
+    fn a_load_that_stops_without_an_answer_says_what_stopped() {
+        let picker = settled(
+            Picker::new("depends on for wire", Vec::new(), LOOK)
+                .loading("checking pull requests…", || panic!("the load broke")),
+        );
+        let rows = inside(&picker);
+        let blank = rows.iter().skip(2).position(String::is_empty).unwrap() + 2;
+        let said: Vec<&str> = rows[2..blank].iter().map(|l| l.trim()).collect();
+        assert_eq!(
+            said.join(" "),
+            "checking pull requests stopped without an answer. esc and reopen to try \
+             again."
+        );
+        assert!(!rows.iter().any(|row| row.contains("fetch")), "{rows:?}");
     }
 
     // `esc` closes the picker while the fetch still runs, and the fetch's
