@@ -1727,7 +1727,7 @@ mod tests {
             // popups with something typed into them, and the pipeline
             // section's step selection, searched, and its value field. The
             // prompts section's own walks are below.
-            format!("{overrides}"),
+            overrides.to_string(),
             format!("{overrides}\x1b[C"),
             format!("{overrides}\x1b[C\x1b[C\x1b[C"),
             format!("{overrides}fdispatch"),
