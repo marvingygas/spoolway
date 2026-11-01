@@ -5060,9 +5060,29 @@ fn filters_label(
 /// `[e] export` for `[enter] open`: it has nothing to export, and a trial
 /// to open. Nor has it a `[t]`, which names the figures the other two would
 /// switch to.
-fn footer(table: TableKind, figures: Figures) -> String {
+///
+/// A pair is named only while its key would act. Under the filter, sort or
+/// calendar popup the table's letters belong to the popup, and while a load
+/// runs only `q` and a tab's digit are read, so each leaves `[q] quit` alone.
+/// `rows` is how many rows the table on screen holds: on an empty trials
+/// table `enter` has no trial to open, and `[enter] open` goes until one
+/// comes back.
+fn footer(table: TableKind, figures: Figures, mode: &Mode, rows: usize) -> String {
+    if matches!(
+        mode,
+        Mode::Filter(_) | Mode::Calendar { .. } | Mode::Sort { .. } | Mode::Loading { .. }
+    ) {
+        return format!(" {}", key_hint(&[("q", "quit")]));
+    }
     let flip = ("t", figures.other().label(table));
     let keys: &[(&str, &str)] = match table {
+        TableKind::Trials if rows == 0 => &[
+            ("a", "ascending"),
+            ("d", "descending"),
+            ("f", "filters"),
+            ("r", "refresh"),
+            ("q", "quit"),
+        ],
         TableKind::Trials => &[
             ("enter", "open"),
             ("a", "ascending"),
@@ -5146,7 +5166,12 @@ fn eval_frame_rows_at(
     let width = frame_width(content.max(border));
     // Wrapped before the body is measured, because each row it wraps onto
     // past its first comes off the body's.
-    let keys = crate::screen::key_rows(&footer(state.table, state.filters.figures));
+    let keys = crate::screen::key_rows(&footer(
+        state.table,
+        state.filters.figures,
+        &state.mode,
+        row_count(&lines),
+    ));
     let rows = frame_rows(height, keys.len());
     let mut body = render_lines(&lines, state.cursor, width);
     let cursor_line = cursor_line_index(&lines, state.cursor);
@@ -9324,10 +9349,9 @@ mod screen_tests {
                 !frame.contains(&format!("{TOP_LEFT}─ filters")),
                 "`f` was not read: {frame}"
             );
-            assert!(
-                frame.contains("[a] ascending   [d] descending   [t] per task   [f] filters"),
-                "{frame}"
-            );
+            // Only `q` and a digit are read while the load runs.
+            assert!(frame.contains("[q] quit"), "{frame}");
+            assert!(!frame.contains("[a] ascending"), "{frame}");
         }
 
         assert_eq!(senders.borrow().len(), 1, "one load, started once");
@@ -10224,7 +10248,7 @@ mod screen_tests {
             (TableKind::Trials, "[enter] open"),
         ] {
             for figures in [Figures::Totals, Figures::Average] {
-                let line = footer(table, figures);
+                let line = footer(table, figures, &Mode::Browsing, 1);
                 assert!(!line.contains("↑↓"), "{line:?}");
                 assert!(
                     line.starts_with(&format!(" {} {first}", crate::status::DIM)),
@@ -10232,6 +10256,62 @@ mod screen_tests {
                 );
             }
         }
+    }
+
+    /// Under the filter, sort or calendar popup, and while a load runs, the
+    /// table's letters do nothing, so the key line is `[q] quit` alone on
+    /// every table.
+    #[test]
+    fn the_key_line_is_quit_alone_under_a_popup_and_while_loading() {
+        for table in [TableKind::Lanes, TableKind::Dirs, TableKind::Trials] {
+            let draft = || Draft::new(table, no_filters());
+            let modes = [
+                Mode::Filter(draft()),
+                Mode::Calendar {
+                    draft: draft(),
+                    field: FilterField::Since,
+                    year: 2026,
+                    month: 11,
+                    day: 1,
+                },
+                Mode::Sort {
+                    descending: false,
+                    columns: Vec::new(),
+                    cursor: 0,
+                },
+                Mode::Loading {
+                    pending: std::sync::mpsc::channel().1,
+                    filters: no_filters(),
+                    reset_cursor: false,
+                },
+            ];
+            for mode in &modes {
+                let line = crate::screen::shell::plain(&footer(table, Figures::Totals, mode, 3));
+                assert_eq!(line, "  [q] quit", "{table:?}");
+            }
+        }
+    }
+
+    /// An empty trials table has no trial for `enter` to open, so
+    /// `[enter] open` leaves its key line, and comes back with a row.
+    #[test]
+    fn the_trials_key_line_names_enter_only_with_a_trial_to_open() {
+        let line = |rows| {
+            crate::screen::shell::plain(&footer(
+                TableKind::Trials,
+                Figures::Totals,
+                &Mode::Browsing,
+                rows,
+            ))
+        };
+        assert_eq!(
+            line(0),
+            "  [a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"
+        );
+        assert_eq!(
+            line(1),
+            "  [enter] open   [a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"
+        );
     }
 
     /// The screen opens on the lanes table by pipeline, on its totals, with
@@ -10304,12 +10384,13 @@ mod screen_tests {
         let trials = last_frame(&screen(&repo, "\x1b[C\x1b[C")).to_string();
         assert!(has_top(&trials, TableKind::Trials, ""), "{trials}");
         assert!(trials.contains("no data."), "{trials}");
+        // An empty trials table has no trial for `enter` to open.
         assert!(
-            trials.contains(
-                "[enter] open   [a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"
-            ),
+            trials
+                .contains("[a] ascending   [d] descending   [f] filters   [r] refresh   [q] quit"),
             "{trials}"
         );
+        assert!(!trials.contains("[enter] open"), "{trials}");
 
         let text = screen(&repo, "\x1b[C\x1b[C\x1b[C");
         assert!(
@@ -10330,8 +10411,10 @@ mod screen_tests {
                           [f] filters   [e] export   [r] refresh   [q] quit";
         let dirs_keys = "[a] ascending   [d] descending   [t] per session   \
                          [f] filters   [e] export   [r] refresh   [q] quit";
-        let trials_keys = "[enter] open   [a] ascending   [d] descending   \
-                           [f] filters   [r] refresh   [q] quit";
+        // The fixture's run is no trial, so the trials table is empty and
+        // its key line has no `[enter] open`.
+        let trials_keys = "[a] ascending   [d] descending   [f] filters   \
+                           [r] refresh   [q] quit";
         let walk = [
             (
                 "\t",
