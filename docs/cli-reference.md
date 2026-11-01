@@ -211,6 +211,7 @@ task, in this order:
 | `open task` | Open the task in your editor |
 | `edit pipeline` | Pick another of the project's pipelines and write it into the task's `pipeline:`. Listed only on a pending task. See below |
 | `edit lands in` | Pick the branch the task's chain lands in, from every local and `origin` branch, and write it into the `base:` of every pending task in its group. Listed only on a pending chain head, the task that depends on no other task in its own group. A head stacked on another group takes only the branch that group lands in |
+| `edit depends on` | Pick the task of another group the task's chain stacks on, or `none`, and write it into the task's `depends_on:`. A pick also writes the branch that group lands in into the `base:` of every pending task in the chain's group. Lists the last task of every other pending and queued group, and of each done group whose pull request is still open. Leaves out the current pick and every group that already stacks on this one. Listed only on a pending chain head |
 | `gate` | Set or clear a `gate_at` on the task |
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
