@@ -1306,10 +1306,11 @@ impl<'a> Dispatcher<'a> {
     /// homes are reclaimed. This is what unqueuing a paused, blocked or
     /// hook-failed task runs.
     ///
-    /// `lanes` must be only lanes this project owns, see [`crate::dispatch::owns_cwd`]: the
-    /// multiplexer is shared, and another project's session can carry the same
-    /// `<task> · <step>` name. Stopping it would kill their agent and bank its
-    /// spend into this project's ledger.
+    /// `lanes` must be only lanes this project owns, see
+    /// [`crate::dispatch::owns_cwd`]: the multiplexer is shared, and another
+    /// project's session can carry the same `<task> · <step>` name. Stopping
+    /// it would kill their agent and bank its spend into this project's
+    /// ledger.
     ///
     /// It leaves out what only a finished task has: no commit first, because
     /// the work is thrown away on purpose; no removal marker, because nothing
