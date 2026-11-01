@@ -24,10 +24,9 @@
 //! A tab's screen keeps its own loop. When it reads a tab's digit or `q`
 //! with no popup or sub-mode of its own open — [`leave_on`] — it hands a
 //! [`Leave`] back here and returns, and this loop opens the tab with that
-//! number. That is
-//! what lets every key the tab's screen already reads, inside its filters or
-//! its popups, keep its own meaning without this module knowing what any of
-//! them are.
+//! number. That is what lets every key the tab's screen already reads,
+//! inside its filters or its popups, keep its own meaning without this
+//! module knowing what any of them are.
 //!
 //! The screen opens with nothing to say about the project's setup. A note
 //! printed ahead of it would be wiped by the first frame before anybody could
@@ -237,9 +236,10 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
 /// bold, the weight the wordmark is drawn in, and reset on the same line so
 /// the bold never runs into the row under it. Nothing is coloured.
 ///
-/// A dimmed label ends on [`NORMAL_INTENSITY`] and the bold again, not on a
-/// reset: most terminals clear bold and dim with one code, so a reset or a
-/// bare `22` after a dimmed label would draw every label after it thin.
+/// A dimmed label ends on [`NORMAL_INTENSITY`] with the bold written again
+/// straight after it. Most terminals clear bold along with dim, on a reset
+/// and on `22` alike, so either one alone would leave every label after the
+/// first dimmed one without the strip's bold.
 ///
 /// `width` is the drawing area's, not the terminal's: the frame writer's
 /// one-column indent moves the line in by the margin, which keeps it centred
