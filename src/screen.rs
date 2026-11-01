@@ -1586,11 +1586,11 @@ mod tests {
     fn a_screen_is_named_by_its_tab_and_the_popup_over_it() {
         let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
         let plain = lines(
-            "\n  ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →\n\n ╭─ groups ──┬─ tasks ──╮\n │ > a       │          │\n",
+            "\n  ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →\n\n ╭─ [groups] ┬─ tasks ──╮\n │ > a       │          │\n",
         );
         assert_eq!(shown_screen(&plain, "eval"), "queue tab");
         let popup = lines(
-            "\n  ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →\n\n ╭─ routines ┬─ details ╮\n │   ╭─ weekly ───╮  │\n",
+            "\n  ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →\n\n ╭─ [routines] ┬─ details ╮\n │   ╭─ weekly ───╮  │\n",
         );
         assert_eq!(
             shown_screen(&popup, "eval"),

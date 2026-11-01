@@ -1563,7 +1563,11 @@ mod tests {
             !first.contains("─ dispatch"),
             "the box has no title: {first}"
         );
-        assert!(!first.contains("─ groups"), "{first}");
+        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(
+            !["─ groups", "─ [groups]"].iter().any(|t| first.contains(t)),
+            "{first}"
+        );
         assert!(first.contains("nothing queued"), "{first}");
         assert!(
             first.contains("\n  [enter] start dispatching   [q] quit\n"),
@@ -1578,7 +1582,7 @@ mod tests {
             last.contains("DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL"),
             "{last}"
         );
-        assert!(last.contains("─ groups"), "{last}");
+        assert!(last.contains("─ [groups]"), "{last}");
     }
 
     // A home-mode project draws four tabs and still opens on dispatch, the
@@ -1654,7 +1658,7 @@ mod tests {
             "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[D\x1b[C",
         );
         const DISPATCH: &str = "dispatcher stopped";
-        const QUEUE: &str = "─ groups";
+        const QUEUE: &str = "─ [groups]";
         const ROUTINES: &str = "[ROUTINES]";
         // Its key line rather than its title: with no terminal to measure
         // the whole config list is drawn, and its top runs off the screen.
@@ -1947,7 +1951,7 @@ mod tests {
             last.contains("DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL"),
             "{last}"
         );
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
             last.contains(
@@ -2017,7 +2021,11 @@ mod tests {
         );
         assert!(last.contains("[enter] confirm   [esc] close"), "{last}");
         assert!(last.contains("dispatcher stopped"), "{last}");
-        assert!(!last.contains("─ groups"), "{last}");
+        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(
+            !["─ groups", "─ [groups]"].iter().any(|t| last.contains(t)),
+            "{last}"
+        );
     }
 
     // `esc` backs out of the gate having started nothing: the board is back
@@ -3158,7 +3166,11 @@ mod tests {
         let frames = drive_host(&repo, "\x1b[Do\x1b[C");
         let last = frames.last().unwrap();
         assert!(last.contains("> open"), "the menu is still up: {last}");
-        assert!(!last.contains("─ groups"), "{last}");
+        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(
+            !["─ groups", "─ [groups]"].iter().any(|t| last.contains(t)),
+            "{last}"
+        );
     }
 
     // Once the panel is answered — `unqueue` picked from the menu, then
@@ -3170,7 +3182,7 @@ mod tests {
         crate::status::testutil::add(&repo, "wire", &[], None);
         let frames = drive_host(&repo, "\x1b[Do\x1b[B\x1b[B\r\r\x1b[C");
         let last = frames.last().unwrap();
-        assert!(last.contains("─ groups"), "{last}");
+        assert!(last.contains("─ [groups]"), "{last}");
     }
 
     // A tab with only a message to show keeps it under the strip, ignores

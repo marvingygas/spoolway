@@ -8962,7 +8962,8 @@ fn orphan_details_lines(repo: &Repo, orphan: &Orphan, width: usize) -> Vec<Strin
 /// The whole of [`Mode::Routines`]'s own frame: the same two-pane geometry
 /// [`two_pane_frame`] lays the pending screen out with, routines on the left
 /// and the highlighted one's [`routine_details_lines`] on the right, both
-/// titled with fixed words the same way [`pending_frame`] titles its own.
+/// titled with fixed words the same way [`pending_frame`] titles its own,
+/// the focused one bracketed by [`pane_titles`].
 fn render_routines(
     panes: &Panes,
     jobs: &LoadedJobs,
@@ -8972,6 +8973,7 @@ fn render_routines(
     let layout = layout(footer);
     let orphans = orphan_jobs(panes.repo, panes.routines, jobs);
     let (right, right_starts, focus) = routine_details_lines(panes, jobs, nav, layout.right);
+    let titles = pane_titles("routines", "details", nav.focus);
     two_pane_frame(
         &routine_list_pane(panes.routines_dir, panes.routines, &orphans, nav, layout),
         &window(
@@ -8984,8 +8986,8 @@ fn render_routines(
             layout.rows,
             layout.right,
         ),
-        "routines",
-        "details",
+        &titles.0,
+        &titles.1,
         layout,
     )
 }
@@ -9024,6 +9026,20 @@ fn routine_list_pane(
         layout.rows,
         layout.left,
     )
+}
+
+/// The two titles [`two_pane_frame`] draws, the focused pane's in square
+/// brackets and the other plain: `[groups]` and `tasks` while
+/// [`Focus::Groups`] has the keys. The `>` row marker alone said which pane
+/// `space`, `o` and `esc` act on, and a person had to find it first; the
+/// overrides and eval tabs already bracket their open section's name the
+/// same way. The brackets cost two columns, which `two_pane_frame`'s own cut
+/// of a title to its pane absorbs in a narrow one.
+fn pane_titles(left: &str, right: &str, focus: Focus) -> (String, String) {
+    match focus {
+        Focus::Groups => (format!("[{left}]"), right.to_string()),
+        Focus::Tasks => (left.to_string(), format!("[{right}]")),
+    }
 }
 
 /// Lay two panes of lines side by side, bordered in box-drawing characters —
@@ -9429,7 +9445,8 @@ fn popup(
 /// highlighted group's tasks on the right.
 /// Each pane is titled with the fixed word for what it lists, never a count
 /// or the highlighted group's name: a title that changed as the cursor moved
-/// said what was in the pane but not what the pane was for.
+/// said what was in the pane but not what the pane was for. The focused
+/// pane's word is bracketed — see [`pane_titles`].
 fn pending_frame(
     groups: &[Group],
     pipelines: &Pipelines,
@@ -9448,6 +9465,7 @@ fn pending_frame(
     // the filter's own row is added on top of that.
     let query_row = usize::from(matches!(state.mode, Mode::Filter));
     let group_line = query_row + group_line_index(state.group_cursor, &boundary_for(&shown, state));
+    let titles = pane_titles("groups", "tasks", state.focus);
     two_pane_frame(
         &window(
             &left,
@@ -9469,8 +9487,8 @@ fn pending_frame(
             layout.rows,
             layout.right,
         ),
-        "groups",
-        "tasks",
+        &titles.0,
+        &titles.1,
         layout,
     )
 }
@@ -15684,6 +15702,37 @@ mod tests {
         assert_eq!(state.focus, Focus::Tasks);
     }
 
+    /// The top border of the two-pane frame `drawn` last painted — the one
+    /// line that opens with a corner and splits at `┬`.
+    fn pane_border(drawn: &str) -> &str {
+        last_frame(drawn)
+            .lines()
+            .find(|line| line.contains(&format!("{TOP_LEFT}─ ")) && line.contains('┬'))
+            .unwrap_or_else(|| panic!("no two-pane top border in:\n{drawn}"))
+    }
+
+    /// The queue tab brackets the focused pane's title: `[groups]` as it
+    /// opens, `[tasks]` once `tab` moves focus, and `[groups]` again once
+    /// `esc` brings it back.
+    #[test]
+    fn the_queue_tabs_brackets_follow_focus() {
+        let (repo, _root_guard) = fixture("screen-focus-brackets");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+
+        for (input, left, right) in [
+            ("", "─ [groups] ", "─ tasks "),
+            ("\t", "─ groups ", "─ [tasks] "),
+            ("\t\x1b", "─ [groups] ", "─ tasks "),
+        ] {
+            let drawn = screen(&repo, listed(&repo), input);
+            let top = pane_border(&drawn);
+            assert!(
+                top.contains(&format!("{TOP_LEFT}{left}")) && top.contains(&format!("┬{right}")),
+                "{input:?}: {top}"
+            );
+        }
+    }
+
     /// `esc` over the tasks pane goes back to the groups pane and leaves the
     /// group cursor where it was; over the groups pane it does nothing.
     #[test]
@@ -17035,7 +17084,7 @@ mod tests {
         );
         assert!(first.contains("no-group.md"), "{first}");
         assert!(first.contains("[enter] confirm"), "{first}");
-        assert!(first.contains("─ groups"), "the tab under it: {first}");
+        assert!(first.contains("─ [groups]"), "the tab under it: {first}");
         assert!(first.contains("DISPATCH"), "under the strip: {first}");
     }
 
@@ -17227,6 +17276,36 @@ mod tests {
             lines.next().unwrap().chars().count(),
             "the top border must end where the row under it does:\n{rendered}"
         );
+    }
+
+    /// A bracketed title costs two more columns, and in a pane too narrow
+    /// for it the title is cut rather than pushing the top border past the
+    /// rows under it — on either side, whichever pane has focus.
+    #[test]
+    fn a_bracketed_title_keeps_the_top_border_as_wide_as_a_row() {
+        for width in [4, 8, 9, 10, 30] {
+            for focus in [Focus::Groups, Focus::Tasks] {
+                let layout = Layout {
+                    left: width,
+                    right: width,
+                    rows: None,
+                };
+                let (left_title, right_title) = pane_titles("routines", "details", focus);
+                let frame = two_pane_frame(
+                    &["> [ ] nightly".to_string()],
+                    &["  audit-deps".to_string()],
+                    &left_title,
+                    &right_title,
+                    layout,
+                );
+                let top = frame[0].chars().count();
+                assert!(
+                    frame.iter().all(|line| line.chars().count() == top),
+                    "{width} columns, {focus:?}:\n{}",
+                    frame.join("\n")
+                );
+            }
+        }
     }
 
     /// The panes fill the terminal they are drawn in: a measured layout gets
@@ -20356,7 +20435,7 @@ mod tests {
         let (opening, after_h) = (frames[0], frames[1]);
 
         assert!(
-            opening.contains("─ groups ─") && opening.contains("─ tasks ─"),
+            opening.contains("─ [groups] ─") && opening.contains("─ tasks ─"),
             "the opening titles are the panes' fixed names, with no count:\n{opening}"
         );
         assert!(!opening.contains("no group"), "{opening}");
@@ -20386,7 +20465,7 @@ mod tests {
         );
 
         assert!(
-            after_h.contains("─ groups ─") && after_h.contains("─ tasks ─"),
+            after_h.contains("─ [groups] ─") && after_h.contains("─ tasks ─"),
             "`h` leaves both titles as they were:\n{after_h}"
         );
         assert!(after_h.contains("finished"), "{after_h}");
@@ -21178,7 +21257,7 @@ mod tests {
             "{frame}"
         );
         assert!(frame.contains("[enter] confirm"), "{frame}");
-        assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+        assert!(frame.contains("─ [groups]"), "the tab under it: {frame}");
     }
 
     /// `enter` only queues. A clean submission lands and the screen says
@@ -21493,7 +21572,7 @@ mod tests {
 
         assert_eq!(exit, ScreenExit::Quit);
         assert!(
-            drawn.contains("─ groups ─"),
+            drawn.contains("─ [groups] ─"),
             "the empty screen still draws its title:\n{drawn}"
         );
         assert!(drawn.contains("nothing to queue"), "{drawn}");
@@ -21707,7 +21786,7 @@ mod tests {
             "a group with no match on its name must drop out of the filtered list:\n{last}"
         );
         assert!(
-            last.contains("─ groups ─"),
+            last.contains("─ [groups] ─"),
             "the filter leaves the title alone: {last}"
         );
         assert!(last.contains("─ tasks ─"), "{last}");
@@ -21877,7 +21956,7 @@ mod tests {
         let drawn = routines_screen(&repo, "");
         let last = last_frame(&drawn);
 
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(
             last.contains("─ details ─") && !last.contains("─ nightly"),
             "the right title names the pane, not the highlighted routine: {last}"
@@ -21970,7 +22049,7 @@ mod tests {
         let drawn = routines_screen(&repo, "");
         let last = last_frame(&drawn);
 
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [ ] maintenance"), "{last}");
         assert!(!last.contains("weekly"), "a subfolder is no row: {last}");
         assert!(last.contains("  sweep"), "{last}");
@@ -22024,6 +22103,33 @@ mod tests {
         assert_eq!(nav.task_cursor, 1, "the tasks pane's cursor kept");
     }
 
+    /// The routines tab brackets the focused pane's title the same way:
+    /// `[routines]` over the list, `[details]` once `tab` moves focus, and
+    /// `[routines]` again once `esc` brings it back.
+    #[test]
+    fn the_routines_tabs_brackets_follow_focus() {
+        let (repo, _root_guard) = fixture("routines-focus-brackets");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+
+        for (input, left, right) in [
+            ("", "─ [routines] ", "─ details "),
+            ("\t", "─ routines ", "─ [details] "),
+            ("\t\x1b", "─ [routines] ", "─ details "),
+        ] {
+            let drawn = routines_screen(&repo, input);
+            let top = pane_border(&drawn);
+            assert!(
+                top.contains(&format!("{TOP_LEFT}{left}")) && top.contains(&format!("┬{right}")),
+                "{input:?}: {top}"
+            );
+        }
+    }
+
     /// Over the tasks pane the key line names `o` and `tab` back to the
     /// routines, and `esc` moves the cursor back to the list.
     #[test]
@@ -22048,7 +22154,7 @@ mod tests {
         assert!(tasks.contains("> audit-deps"), "{tasks}");
 
         let back = last_frame(&routines_screen(&repo, "\t\x1b")).to_string();
-        assert!(back.contains("─ routines ─"), "still in the view: {back}");
+        assert!(back.contains("─ [routines] ─"), "still in the view: {back}");
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
             back.contains(
@@ -22398,7 +22504,7 @@ mod tests {
         let last =
             last_frame(&routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\r\x1b"))).to_string();
         assert!(!last.contains("delete this routine"), "{last}");
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(repo.routines_dir().join("nightly").is_dir());
         assert_eq!(job_names(&repo), vec!["nightly-audit"]);
     }
@@ -22420,7 +22526,7 @@ mod tests {
 
         assert!(!repo.routines_dir().join("nightly").exists());
         assert_eq!(job_names(&repo), vec!["weekly-prune"]);
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [ ] maintenance"), "{last}");
         assert!(!last.contains("nightly"), "{last}");
         assert!(!last.contains("delete this routine"), "{last}");
@@ -22538,7 +22644,7 @@ mod tests {
             let last = last_frame(&routines_screen(&repo, input)).to_string();
             assert!(!last.contains("when does"), "{input:?}: {last}");
             assert!(!last.contains("which pipeline"), "{input:?}: {last}");
-            assert!(last.contains("─ routines ─"), "{input:?}: {last}");
+            assert!(last.contains("─ [routines] ─"), "{input:?}: {last}");
             assert!(job_names(&repo).is_empty(), "{input:?}");
             assert!(!repo.user_jobs_file().exists(), "{input:?}");
         }
@@ -22759,7 +22865,7 @@ mod tests {
             !repo.user_jobs_file().exists(),
             "never copied to the user store"
         );
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(!last.contains("deactivate job"), "the menu closed: {last}");
         assert!(
             last.contains("next:        inactive"),
@@ -22850,7 +22956,7 @@ mod tests {
 
         let closed = last_frame(&routines_screen(&repo, "jo\r\r")).to_string();
         assert!(!closed.contains("─ activate job "), "{closed}");
-        assert!(closed.contains("─ routines ─"), "{closed}");
+        assert!(closed.contains("─ [routines] ─"), "{closed}");
     }
 
     /// With two other jobs active on the routine, the refusal names both
@@ -23031,9 +23137,13 @@ mod tests {
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
-        assert!(last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [x] nightly"), "the tick kept: {last}");
-        assert!(!last.contains("─ groups"), "{last}");
+        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(
+            !["─ groups", "─ [groups]"].iter().any(|t| last.contains(t)),
+            "{last}"
+        );
     }
 
     /// The queue tab reads nothing on `r`: routines have a tab of their own,
@@ -23052,8 +23162,13 @@ mod tests {
         let drawn = screen(&repo, listed(&repo), "r");
         let last = last_frame(&drawn);
 
-        assert!(last.contains("─ groups ─"), "{last}");
-        assert!(!last.contains("─ routines ─"), "{last}");
+        assert!(last.contains("─ [groups] ─"), "{last}");
+        assert!(
+            !["─ routines ─", "─ [routines] ─"]
+                .iter()
+                .any(|t| last.contains(t)),
+            "{last}"
+        );
         assert!(!last.contains("[r] routines"), "{last}");
     }
 
@@ -23079,7 +23194,7 @@ mod tests {
 
         let under = last_frame(&routines_screen(&repo, " \r")).to_string();
         assert!(under.contains("queued 1 task"), "{under}");
-        assert!(under.contains("─ routines ─"), "over the list: {under}");
+        assert!(under.contains("─ [routines] ─"), "over the list: {under}");
 
         let (repo, _root_guard) = fixture("routines-queued-close-2");
         write_routine(
@@ -23092,7 +23207,11 @@ mod tests {
         let last = last_frame(&drawn);
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(!last.contains("queued 1 task"), "{last}");
-        assert!(!last.contains("─ groups"), "{last}");
+        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(
+            !["─ groups", "─ [groups]"].iter().any(|t| last.contains(t)),
+            "{last}"
+        );
     }
 
     /// Two routine files sharing a task id are one routine, so the pane
@@ -26528,7 +26647,7 @@ group_description: search
                     "[enter] confirm   [space] select   [a] select all   [esc] back".to_string(),
                 ]);
                 assert_eq!(popup_rows(frame, "issue tracking"), expected, "{frame}");
-                assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+                assert!(frame.contains("─ [groups]"), "the tab under it: {frame}");
                 assert!(hook_calls(&repo).is_empty(), "the hook ran unasked");
                 assert!(repo.queued_ids().is_empty());
             }
@@ -27006,7 +27125,7 @@ group_description: audit
                     "{frame}"
                 );
                 assert!(
-                    frame.contains("─ routines"),
+                    frame.contains("─ [routines]"),
                     "over the routines pane: {frame}"
                 );
                 assert!(repo.queued_ids().is_empty());
@@ -27315,7 +27434,7 @@ group_description: audit
                 "the body says what enter does: {frame}"
             );
             assert!(frame.contains("[enter] confirm   [esc] close"), "{frame}");
-            assert!(frame.contains("─ groups"), "the tab under it: {frame}");
+            assert!(frame.contains("─ [groups]"), "the tab under it: {frame}");
             // Nothing outside the frame: every byte written went out as part
             // of one frame or another, each opening with the shared frame
             // writer's own start code.
