@@ -4794,8 +4794,8 @@ enum Mode {
     /// The options menu's edit pipeline picker over the pending screen —
     /// see [`PipelinePick`]. `enter` writes the pick into the task's pending
     /// file through [`set_pipeline`] and closes to the screen; `esc` goes
-    /// back to the menu it was opened from. Boxed, since a picker is many
-    /// times the size of every other mode.
+    /// back to the menu it was opened from. Boxed, so the picker's size
+    /// does not become the size of every other mode too.
     EditPipeline(Box<PipelinePick>),
 }
 
@@ -7092,9 +7092,9 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 /// almost always name the same page. A plan row there offers open plan and
 /// then delete, both on its page. Neither edit pipeline nor delete is
 /// offered on a queued or done task: those files live in the queue or the
-/// archive, which this menu does not touch. `None`, and no menu, when the focused pane
-/// highlights no row at all: an empty pending directory, a filter that
-/// matched nothing, or a tasks pane with no tasks.
+/// archive, which this menu does not touch. `None`, and no menu, when the
+/// focused pane highlights no row at all: an empty pending directory, a
+/// filter that matched nothing, or a tasks pane with no tasks.
 fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     let (title, row, items) = match state.focus {
@@ -7270,9 +7270,8 @@ impl Picked<'_> {
     /// popup through [`begin_pending_delete`], or [`begin_plan_delete`] on a
     /// plan row. Edit pipeline, which had no key either, opens
     /// [`Mode::EditPipeline`] on a task that is still pending. On the pending
-    /// screen the menu's row must also still be the
-    /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
-    /// having done nothing.
+    /// screen the menu's row must also still be the highlighted one — see
+    /// [`OptionsMenu`]'s `row` — or the menu closes having done nothing.
     fn run(
         &self,
         groups: &[Group],
@@ -16509,15 +16508,13 @@ mod tests {
         let path = write_pending(&repo, "wire", &before);
         let drawn = screen(&repo, listed(&repo), "\to\x1b[B\r\r");
         let after = std::fs::read_to_string(&path).unwrap();
+        // The pipeline line moves to the top of the front matter; every
+        // other line stays as it was, in the same order.
         let others = |doc: &str| -> Vec<String> {
-            let mut lines: Vec<String> = doc
-                .lines()
-                .filter(|l| !l.starts_with("pipeline: bugfix"))
-                .filter(|l| *l != "pipeline: default")
+            doc.lines()
+                .filter(|l| *l != "pipeline: bugfix" && *l != "pipeline: default")
                 .map(str::to_string)
-                .collect();
-            lines.sort();
-            lines
+                .collect()
         };
         assert!(after.lines().any(|l| l == "pipeline: bugfix"), "{after}");
         assert!(!after.lines().any(|l| l == "pipeline: default"), "{after}");
