@@ -4835,9 +4835,9 @@ impl std::fmt::Debug for PipelinePick {
 const EDIT_PICK_KEYS: &[(&str, &str)] = &[("enter", "confirm"), ("f", "search"), ("esc", "back")];
 
 /// The columns of text in the edit pipeline, edit lands in and edit depends
-/// on pickers, between their margins. Pipeline names are short, so this is narrower
-/// than the promote picker's branch list; a name longer than it widens the
-/// popup rather than being cut.
+/// on pickers, between their margins. Pipeline names are short, so this is
+/// narrower than the promote picker's branch list; a name longer than it
+/// widens the popup rather than being cut.
 const EDIT_PICK_TEXT: usize = 44;
 
 /// The column `origin` starts at on the edit lands in picker's row for a
@@ -5077,9 +5077,10 @@ fn stack_dependency<'a>(group: &Group, head: &'a PendingTask) -> Option<&'a Stri
 /// A group's last task is the one no other task of the group depends on,
 /// the only task submission lets another group stack onto (see
 /// [`check_dependencies_set`]); a group with more than one is not one chain
-/// and is left out, since submission would refuse a stack on it. The task
-/// the head depends on now is left out, since picking it changes nothing,
-/// and so is a plan row, which has no task. So is every group that already
+/// and is left out: submission refuses a stack on a pending or queued one,
+/// and a done one has no single task to offer. The task the head depends
+/// on now is left out, since picking it changes nothing, and so is a plan
+/// row, which has no task. So is every group that already
 /// stacks on the head's own group, directly or through any number of other
 /// groups: stacking onto one of them would make a loop.
 fn stack_targets(
@@ -10243,15 +10244,13 @@ fn two_pane_frame(
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
 /// [`Mode::DeletePlan`], [`Mode::NewJob`], [`Mode::PickRoutine`],
 /// [`Mode::EditPipeline`], [`Mode::EditLandsIn`], [`Mode::EditDependsOn`]
-/// — none of the ordinary
-/// line's keys is read, so
-/// this draws the picker's own key row instead, the same keys its popup
-/// names. A notice is different: it
-/// reads only `enter` to close it, or only `esc` for
-/// [`Mode::PlanNotDeleted`], which its own popup says, and the line
-/// under the frame stays the one the screen will read again once it is
-/// closed — all but [`Mode::JobSaved`], which the routines tab's mockup
-/// draws over its own `[enter] confirm` line. [`Mode::Options`] keeps the
+/// — none of the ordinary line's keys is read, so this draws the picker's
+/// own key row instead, the same keys its popup names. A notice is
+/// different: it reads only `enter` to close it, or only `esc` for
+/// [`Mode::PlanNotDeleted`], which its own popup says, and the line under
+/// the frame stays the one the screen will read again once it is closed —
+/// all but [`Mode::JobSaved`], which the routines tab's mockup draws over
+/// its own `[enter] confirm` line. [`Mode::Options`] keeps the
 /// ordinary line too: the menu names its own keys in its popup, and is one
 /// step on the way to an action the line under it already names as
 /// `o options`.
@@ -16938,10 +16937,11 @@ mod tests {
 
     /// `o` lists what the focused row can do, titled with its name: over
     /// the tasks pane a pending chain head offers open task, edit pipeline,
-    /// edit lands in, edit depends on, gate then delete, over the groups pane a group with a
-    /// pending task offers trial, save as routine then delete. A group with
-    /// no tasks has none of them and opens the menu with nothing in it, and
-    /// a pane with no row under its cursor opens no menu at all.
+    /// edit lands in, edit depends on, gate then delete, over the groups
+    /// pane a group with a pending task offers trial, save as routine then
+    /// delete. A group with no tasks has none of them and opens the menu
+    /// with nothing in it, and a pane with no row under its cursor opens no
+    /// menu at all.
     #[test]
     fn the_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("screen-options-lists");
