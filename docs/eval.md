@@ -57,8 +57,8 @@ work while it shows.
 | `[q]` | Quit |
 
 The key line names a key only while it would act. While the filter panel, the sort popup or the
-calendar is open, it reads every key but `[q]`, and while the `loading…` popup shows only a tab's
-digit and `[q]` work. In each case the key line reads `[q] quit` alone.
+calendar is open, that popup reads every key but `[q]`. While the `loading…` popup shows, only a
+tab's digit and `[q]` work. In each case the key line reads `[q] quit` alone.
 
 The cursor stops at the last row of the table, so one `[↑]` always moves it up. When a read, a
 filter or `[t]` leaves fewer rows than the cursor's position, the cursor moves to the new last
