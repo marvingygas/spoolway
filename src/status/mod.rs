@@ -1537,17 +1537,16 @@ impl Board {
                         )
                     })?;
                 let tasks = repo.tasks()?;
-                let lanes =
-                    unqueue_lanes(&tasks, &head.id, || crate::mux::backend(repo)?.list_lanes())
-                        .with_context(|| {
-                            format!(
-                                "did not unqueue `{}`: it has started since this opened, and the \
+                let list = || crate::mux::backend(repo)?.list_lanes();
+                let lanes = unqueue_lanes(&tasks, &head.id, list).with_context(|| {
+                    format!(
+                        "did not unqueue `{}`: it has started since this opened, and the \
                          multiplexer would not list its lanes, so it cannot tell whether one \
                          is working on it. check that the multiplexer is running, then press \
                          enter again. nothing was unqueued.",
-                                head.name
-                            )
-                        })?;
+                        head.name
+                    )
+                })?;
                 unchanged(&tasks, &lanes)?;
             }
             // The head's lock is let go above, since `unqueue_in` takes it
