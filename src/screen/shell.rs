@@ -797,15 +797,13 @@ impl DispatchTab {
         self.child.is_some()
     }
 
-    /// The tab's popup for the board to draw: `panel`, which is
-    /// [`Popup::panel`] of it, along with whether it reads keys — under one
-    /// that does, the key line drops `enter`, which answers the popup
-    /// rather than reaching [`DispatchTab::enter`].
-    fn drawn<'a>(&self, panel: Option<&'a [String]>) -> Option<crate::status::TabPopup<'a>> {
-        Some(crate::status::TabPopup {
-            panel: panel?,
-            reads_keys: self.popup.as_ref().is_some_and(Popup::reads_keys),
-        })
+    /// Whether `enter`, handed to the tab, would start or stop its
+    /// dispatcher — so the key line names it only then. A popup that reads
+    /// keys takes `enter` itself, and over a child already asked to stop
+    /// [`DispatchTab::enter`] does nothing.
+    fn takes_enter(&self) -> bool {
+        !self.popup.as_ref().is_some_and(Popup::reads_keys)
+            && !self.child.as_ref().is_some_and(|child| child.stopping())
     }
 
     /// Forget a child that has exited, and open the popup saying why if it
@@ -1354,13 +1352,14 @@ fn board_frame_rows(
     board: &mut crate::status::Board,
     tab: &DispatchTab,
 ) -> Option<Vec<String>> {
-    let panel = tab.popup.as_ref().map(Popup::panel);
+    let popup = tab.popup.as_ref().map(Popup::panel);
     let frame = board
         .hosted_frame(
             repo,
             pipelines,
             tab.dispatching(),
-            tab.drawn(panel.as_deref()),
+            popup.as_deref(),
+            tab.takes_enter(),
         )
         .ok()?;
     let mut rows = strip();
@@ -1381,12 +1380,13 @@ fn draw_board_from_memory(
     writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl Write,
 ) {
-    let panel = tab.popup.as_ref().map(Popup::panel);
+    let popup = tab.popup.as_ref().map(Popup::panel);
     let frame = board.hosted_frame_from_memory(
         repo,
         pipelines,
         tab.dispatching(),
-        tab.drawn(panel.as_deref()),
+        popup.as_deref(),
+        tab.takes_enter(),
     );
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));
@@ -1898,7 +1898,9 @@ mod tests {
     /// idle, `Stop` over a running child — takes `enter` first, so the pair
     /// goes; a popup that closes on its own — `Loaded` idle, `Starting`
     /// over a running child — passes `enter` through, so the pair stays.
-    /// Before the key line asked, it named the pair under every popup.
+    /// Over a child already asked to stop, with no popup up, `enter` does
+    /// nothing, so the pair goes there too. Before the key line asked, it
+    /// named the pair under every popup and over a stopping child.
     #[test]
     fn the_dispatch_key_line_names_enter_only_where_it_reaches_the_tab() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-enter-hint-popups");
@@ -1934,6 +1936,12 @@ mod tests {
         let line = key_line(&running);
         assert!(line.contains("[enter] stop dispatching"), "{line}");
         running.popup = Some(Popup::Stop(0));
+        let line = key_line(&running);
+        assert!(!line.contains("[enter]"), "{line}");
+
+        running.popup = None;
+        running.stop();
+        assert!(stopping(&running) && running.dispatching());
         let line = key_line(&running);
         assert!(!line.contains("[enter]"), "{line}");
     }
