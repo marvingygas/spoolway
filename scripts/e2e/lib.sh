@@ -551,8 +551,11 @@ queue_tab_drew_since() {
 
 # Onto the dispatch tab, `1` from the queue tab `screen_start` hands over, and
 # nothing started there. Fails the suite's setup if the board is never drawn.
+# A screen already on that tab draws nothing for `1`, so one whose last frame
+# is the stopped board is left as it is.
 screen_board() {
   local mark
+  case "$(screen_last_frame)" in *"dispatcher stopped"*) return 0 ;; esac
   mark=$(wc -l < "$E2E_SCREEN_LOG")
   screen_press 1
   poll_until 10 screen_drew_since "$mark" "dispatcher stopped" || {
