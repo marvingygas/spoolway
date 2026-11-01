@@ -1038,9 +1038,9 @@ impl PipelineSection {
     }
 }
 
-/// The picking list's keys, on the line under the frame, less the `h` that
-/// [`PipelineSection::select_keys`] puts before `esc`. It drops `enter`
-/// again while no step is selected.
+/// The picking list's keys, on the line under the frame.
+/// [`PipelineSection::select_keys`] puts `h` before `esc`, and takes
+/// `enter` out while no step is selected.
 const SELECT_KEYS: &[(&str, &str)] = &[
     ("space", "select"),
     ("a", "select all"),

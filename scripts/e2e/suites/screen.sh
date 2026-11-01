@@ -675,8 +675,8 @@ has "active counts both keys" "active (2)" "$LAST"
 # all and offers no `h`. `→` moves onto the section, seven `↓` past the
 # six fields every step takes and model onto effort, and `enter` lists both
 # pipelines with their steps under them, with no `enter` named until `a`
-# selects every step. `enter` opens the value field, `low` is typed and saved, and `enter`
-# closes the popup the save opened.
+# selects every step. `enter` opens the value field, `low` is typed and
+# saved, and `enter` closes the popup the save opened.
 sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
 lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
 PIPELINE_TAB="$LIVE/overrides-pipeline.txt"
