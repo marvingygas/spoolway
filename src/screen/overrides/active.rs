@@ -390,6 +390,28 @@ impl ActiveSection {
         matches!(self.view, View::List)
     }
 
+    /// What the open branch picker's fetch signals once it has answered,
+    /// for the tab to wait on beside its keys.
+    pub(super) fn wake(&self) -> Option<std::sync::Arc<crate::screen::Wake>> {
+        match &self.view {
+            View::Pick(picker) => picker.wake(),
+            _ => None,
+        }
+    }
+
+    /// Whether a branch picker is open with its fetch still running.
+    #[cfg(test)]
+    pub(super) fn fetching(&self) -> bool {
+        matches!(&self.view, View::Pick(picker) if picker.fetching())
+    }
+
+    /// Hand the open branch picker its fetch's answer, if it has come.
+    pub(super) fn settle(&mut self) {
+        if let View::Pick(picker) = &mut self.view {
+            picker.settle();
+        }
+    }
+
     /// Every file and key, in list order.
     fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
@@ -638,7 +660,7 @@ impl ActiveSection {
             return View::Notice(notice);
         }
         match promote::branches(repo) {
-            Ok(branches) => View::Pick(Picker::new(files, branches)),
+            Ok(branches) => View::Pick(Picker::new(repo, files, branches)),
             Err(err) => View::Notice(Notice::new(
                 "not promoted",
                 format!(
@@ -836,7 +858,7 @@ impl ActiveSection {
             .concat(),
             View::Menu(_) if self.menu_items().is_empty() => vec![("esc", "close")],
             View::Menu(_) | View::Confirm(_) | View::Promote(_) => ANSWER_KEYS.to_vec(),
-            View::Pick(picker) if picker.searching => super::SEARCH_KEYS.to_vec(),
+            View::Pick(picker) if picker.searching() => super::SEARCH_KEYS.to_vec(),
             View::Pick(_) => promote::PICK_KEYS.to_vec(),
             View::Set { .. } => SET_KEYS.to_vec(),
             View::Notice(_) => vec![("enter", "confirm")],

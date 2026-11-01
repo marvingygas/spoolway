@@ -12,12 +12,14 @@
 //! handling — only what is generic across any of them lives here. [`shell`]
 //! is what bare `spoolway` opens: the same screens, one per tab, under one
 //! strip, one terminal guard and one quit — and [`dispatcher`] is the
-//! `spoolway dispatch` child its dispatch tab starts and stops.
+//! `spoolway dispatch` child its dispatch tab starts and stops. [`picker`] is
+//! the searchable list any of them opens a popup over.
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
 pub(crate) mod overrides;
 pub(crate) mod pane;
+pub(crate) mod picker;
 pub(crate) mod shell;
 
 /// One key a screen reads, decoded from however many bytes it took.
