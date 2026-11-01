@@ -641,13 +641,26 @@ item:
 | `open task` | Every row, `done` ones included. | Open the task file in your editor. See [Editor](#editor). |
 | `open plan` | A row whose task sets `plan:` to a value that is not empty. | Open the plan page `plan:` names in your default browser. |
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
-| `focus` | A row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. Never under the headless backend, and never for a kept pane, a finished step or a queued or paused row. | Bring that pane in front of you, maximized, with `herdr pane zoom <pane> --on`. The pane stays zoomed until you unzoom it in herdr. |
+| `focus` | A running row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. A `paused`, `blocked` or `hook_failed` row whose task still has a pane open: an agent lane, a kept one included, or a command step's pane. Never under the headless backend, never on a queued row, and never on a running row for a kept pane or a finished step. | Bring that pane in front of you, maximized, with `herdr pane zoom <pane> --on`. On a `paused`, `blocked` or `hook_failed` row it is the task's open pane that started last. The pane stays zoomed until you unzoom it in herdr. |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
 | `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A copy of a routine is deleted instead, when its routine file still exists. Asks first. For such a copy the panel is titled with the routine's name, says the copy is deleted, names the routine file that stays (relative to the repository root), and says the routines tab queues it again. When several tasks go, the panel lists the ones going back to the pending directory apart from the routine copies being deleted, each group with its own closing line. |
 
 So a running row lists `open task`, `pause` and `restart`, and `focus` between `pause` and
 `restart` when its step's pane can be found. A paused row that can be resumed
-lists `open task` and `restart`, and is resumed with `r`. A queued row lists `open task`, `pause`
+lists `open task` and `restart`, and `focus` between them while its task has a pane open. It is
+resumed with `r`:
+
+```
+╭─ cart-empty-state ──────────────╮
+│  > open task                    │
+│    focus                        │
+│    restart                      │
+│                                 │
+│  [enter] confirm   [esc] close  │
+╰─────────────────────────────────╯
+```
+
+A queued row lists `open task`, `pause`
 and `unqueue`, and a done row lists `open task` alone. A row whose task sets `plan:` also lists
 `open plan`, directly under `open task`. A row whose task file is gone opens the menu with
 `nothing to do here` over `[esc] close`.
@@ -660,8 +673,22 @@ any other Linux uses `xdg-open`. When the page is gone, or the platform's progra
 
 `focus` looks the pane up again when you press `enter`. When the lane or the run has ended since
 the menu opened, it does nothing. When herdr refuses the zoom, a popup titled `focus` shows
-herdr's error on an `o:` line and says that `restart` in this menu starts the step again in a new
-pane. `enter` closes it.
+herdr's error on an `o:` line and says the step's pane may have been closed. On a running row it
+adds that `restart` in this menu starts the step again in a new pane. On a `paused`, `blocked` or
+`hook_failed` row it ends there, with no restart or resume advice:
+
+```
+╭─ focus ─────────────────────────────────────────────╮
+│  o: herdr pane zoom w2:p3 --on: no pane w2:p3       │
+│                                                     │
+│  The step's pane may have been closed.              │
+│                                                     │
+│  [enter] confirm                                    │
+╰─────────────────────────────────────────────────────╯
+```
+
+A command step's pane that you closed by hand leaves its record behind, so it can still be
+listed, and its zoom is refused this way. `enter` closes the popup.
 
 On the queue screen, a group lists `open plan` when any of its tasks sets `plan:`. Picking it opens every distinct page the group's tasks name, in task order. A task on that screen does not list it. A plan row lists it too, and opens its own page. The routines pane does not list it.
 
