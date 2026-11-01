@@ -45,6 +45,9 @@
 # it is the root and runs a step carrying `first:`; the task above it declares
 # one and walks past.
 # covers: step.first — only a chain's declared root runs it; a dependent walks past without starting the command
+#
+# Last, a pending chain head is stacked onto a queued group from the queue
+# tab's options menu, through edit depends on, and its file checked.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -576,5 +579,45 @@ else
   bad "and its \`stack\` line names the sibling and the stack it is outside of"
   sed 's/^/        /' <<<"$sibb_out"
 fi
+
+
+# -------------------------------------------- stacking a pending head from the menu
+# Edit depends on, the queue tab's options menu item on a pending chain head,
+# stacks the head's group onto another group's last task and copies where
+# that group lands. `sibb` above is the last and only task of `sib-b`, a
+# group still in the queue, landing in `main`; the head below lands in
+# `plan/live` until the pick. The menu lists the groups it can stack onto
+# once `gh` has been asked about the done ones, so the list is waited for
+# before `f` searches it down to `sibb` and `enter` picks it.
+PENDING="$SPOOLWAY_PROJECT_HOME/pending"
+mkdir -p "$PENDING"
+task_doc "$PENDING/menu-head.md" menu-head "$BODY" "group: menu-stack" "base: plan/live"
+depends_on_open() { screen_last_frame | grep -qF "╭─ depends on for menu-head"; }
+depends_on_listed() {
+  depends_on_open && ! screen_last_frame | grep -qF "checking pull requests…"
+}
+MENU_LOG="$LIVE/depends-on.out"
+screen_start "$MENU_LOG"
+# `tab` onto the tasks pane, `o`, `↓` three times past edit pipeline and
+# edit lands in onto edit depends on, `enter`.
+screen_press $'\to\x1b[B\x1b[B\x1b[B\r'
+if poll_until 30 depends_on_listed; then
+  ok "edit depends on opens the picker titled with the head and lists its targets"
+else
+  bad "edit depends on opens the picker titled with the head and lists its targets"
+  screen_last_frame | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/^/        /' >&2
+fi
+screen_press $'fsibb\r\r'
+stacked_from_menu() { grep -qx 'depends_on: \[sibb\]' "$PENDING/menu-head.md"; }
+if poll_until 10 stacked_from_menu; then
+  ok "enter writes the pick as the head's depends_on"
+else
+  bad "enter writes the pick as the head's depends_on"
+  sed 's/^/        /' "$PENDING/menu-head.md"
+fi
+has "and the lands-in branch of the group it stacks on as its base" \
+  "base: main" "$PENDING/menu-head.md"
+lacks "in place of the one it landed in" "base: plan/live" "$PENDING/menu-head.md"
+screen_stop
 
 finish

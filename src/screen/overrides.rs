@@ -42,7 +42,7 @@ use std::io::Write;
 use anyhow::Result;
 
 use super::shell::{self, Leave};
-use super::{Key, Notice, PollableRead, keys, pad_to, pad_visible};
+use super::{Key, Notice, PollableRead, edit, keys, pad_to, pad_visible};
 use crate::config::Config;
 use crate::repo::Repo;
 use crate::status::{DIM, RESET};
@@ -434,10 +434,19 @@ pub(crate) fn tab(
         // Drawn again on every idle slice, not only after a key: a pane
         // resized while nothing is typed would otherwise keep a frame
         // measured for the old size, wrapped or cut, until the next key.
-        // The writer skips a frame that has not changed.
-        let Some(key) = shell::wait_key(input, || {
-            writer.write_frame(&frame(&state), super::pane_size(), out)
-        }) else {
+        // The writer skips a frame that has not changed. A branch picker
+        // fetching `origin` wakes the wait when the fetch answers, so its
+        // list is drawn then rather than at the next slice.
+        let wake = state.layer.wake();
+        let Some(key) = shell::wait_key_woken(
+            input,
+            wake.as_deref(),
+            || crate::status::POLL,
+            || {
+                state.layer.settle();
+                writer.write_frame(&frame(&state), super::pane_size(), out)
+            },
+        ) else {
             return Ok(Leave::Quit);
         };
         // Only at rest: the search rows, the fields, the picking list, the
@@ -593,20 +602,6 @@ fn browse(state: &mut State, key: Key) {
 /// either end.
 fn move_cursor(state: &mut State, key: Key) {
     state.cursor = super::move_cursor(state.cursor, state.matches().len(), key);
-}
-
-/// `key` typed into a one-line field holding `text`: a character is added,
-/// backspace takes the last one off, and anything else is ignored. `0x08`
-/// is the backspace many terminals send in place of `DEL`, the same pairing
-/// the queue tab's search reads.
-fn edit(text: &mut String, key: Key) {
-    match key {
-        Key::Backspace | Key::Char('\u{8}') => {
-            text.pop();
-        }
-        Key::Char(c) if !c.is_control() => text.push(c),
-        _ => {}
-    }
 }
 
 /// Write `key` as `value` into the layer, as typed. An empty key, or a

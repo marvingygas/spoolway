@@ -4791,6 +4791,405 @@ enum Mode {
     /// [`OptionsMenu`]. The arrows move its cursor, `enter` runs the item
     /// under it and `esc` closes it onto the screen it was opened over.
     Options(OptionsMenu),
+    /// The options menu's edit pipeline picker over the pending screen —
+    /// see [`PipelinePick`]. `enter` writes the pick into the task's pending
+    /// file through [`set_pipeline`] and closes to the screen; `esc` goes
+    /// back to the menu it was opened from. Boxed, so the picker's size
+    /// does not become the size of every other mode too.
+    EditPipeline(Box<PipelinePick>),
+    /// The options menu's edit lands in picker over the pending screen —
+    /// see [`LandsInPick`]. `enter` writes the pick as `base:` into every
+    /// pending file of the task's group through [`set_lands_in`] and closes
+    /// to the screen; `esc` goes back to the menu it was opened from.
+    /// Boxed, as [`Mode::EditPipeline`] is.
+    EditLandsIn(Box<LandsInPick>),
+    /// The options menu's edit depends on picker over the pending screen —
+    /// see [`DependsOnPick`]. `enter` writes the pick as the head's
+    /// `depends_on:`, and its group's lands-in branch as `base:` into every
+    /// pending file of the task's group, through [`set_depends_on`], and
+    /// closes to the screen; `esc` goes back to the menu it was opened from.
+    /// Boxed, as [`Mode::EditPipeline`] is.
+    EditDependsOn(Box<DependsOnPick>),
+}
+
+/// [`Mode::EditPipeline`]'s state: the menu it was opened from, which `esc`
+/// reopens and whose `row` is the task the pick is written to, and the list
+/// of every pipeline but the task's own.
+struct PipelinePick {
+    menu: OptionsMenu,
+    list: crate::screen::picker::Picker<String>,
+}
+
+// By hand, since the picker holds a channel and draws itself rather than
+// print as data; the menu says which task it is open on.
+impl std::fmt::Debug for PipelinePick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelinePick")
+            .field("menu", &self.menu)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The edit pipeline, edit lands in and edit depends on pickers' key row,
+/// in the popup and under the frame while nothing is being searched.
+const EDIT_PICK_KEYS: &[(&str, &str)] = &[("enter", "confirm"), ("f", "search"), ("esc", "back")];
+
+/// The columns of text in the edit pipeline, edit lands in and edit depends
+/// on pickers, between their margins. Pipeline names are short, so this is
+/// narrower than the promote picker's branch list; a name longer than it
+/// widens the popup rather than being cut.
+const EDIT_PICK_TEXT: usize = 44;
+
+/// The column `origin` starts at on the edit lands in picker's row for a
+/// branch only `origin` has, counted from the cursor mark. It leaves room
+/// for `origin` inside [`EDIT_PICK_TEXT`]; a longer name pushes only its
+/// own `origin` along, one space past its end.
+const LANDS_IN_COLUMN: usize = 36;
+
+/// The column the group's name starts at on the edit depends on picker's
+/// rows, counted from the cursor mark. It fits a task id of up to
+/// twenty-six characters with two spaces after it, so most groups line up
+/// in one column, and leaves fourteen columns for the group's name inside
+/// [`EDIT_PICK_TEXT`]; a longer id pushes only its own group along, one
+/// space past its end.
+const DEPENDS_ON_COLUMN: usize = 30;
+
+impl PipelinePick {
+    /// The picker over every pipeline `pipelines` defines but `task`'s own,
+    /// in name order, so the cursor opens on the first one that changes
+    /// something. A task naming no pipeline, or one the project lacks, is
+    /// offered them all.
+    fn new(pipelines: &Pipelines, task: &PendingTask, menu: OptionsMenu) -> PipelinePick {
+        let entries = pipelines
+            .names()
+            .into_iter()
+            .filter(|name| task.pipeline.as_deref() != Some(*name))
+            .map(|name| crate::screen::picker::Entry {
+                label: name.to_string(),
+                column: None,
+                value: name.to_string(),
+            })
+            .collect();
+        let look = crate::screen::picker::Look {
+            width: EDIT_PICK_TEXT,
+            column: 0,
+            keys: EDIT_PICK_KEYS,
+            noun: ("pipeline", "pipelines"),
+            empty: "no other pipeline to pick",
+        };
+        let title = format!("pipeline for {}", task.id);
+        PipelinePick {
+            menu,
+            list: crate::screen::picker::Picker::new(title, entries, look),
+        }
+    }
+}
+
+/// [`Mode::EditLandsIn`]'s state: the menu it was opened from, which `esc`
+/// reopens and whose `row` is the chain head the pick is written from, and
+/// the list of every branch but the one the task lands in now.
+struct LandsInPick {
+    menu: OptionsMenu,
+    list: crate::screen::picker::Picker<String>,
+}
+
+// By hand, for the reason `PipelinePick`'s is.
+impl std::fmt::Debug for LandsInPick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LandsInPick")
+            .field("menu", &self.menu)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LandsInPick {
+    /// The picker over `listed` but `current`, the branch the tasks pane
+    /// shows the task landing in, so the cursor opens on the first branch
+    /// that changes something. It fetches `origin` as it opens and lists
+    /// the branches again once the fetch ends — see
+    /// [`crate::screen::picker::Picker::fetching_origin`].
+    fn new(
+        repo: &Repo,
+        task: &PendingTask,
+        current: Option<String>,
+        listed: Vec<crate::screen::picker::Branch>,
+        menu: OptionsMenu,
+    ) -> LandsInPick {
+        let look = crate::screen::picker::Look {
+            width: EDIT_PICK_TEXT,
+            column: LANDS_IN_COLUMN,
+            keys: EDIT_PICK_KEYS,
+            noun: ("branch", "branches"),
+            empty: "no other branch to land in",
+        };
+        let title = format!("lands in for {}", task.id);
+        let entries = lands_in_entries(listed, current.as_deref());
+        let reread = repo.clone();
+        let list = crate::screen::picker::Picker::new(title, entries, look).fetching_origin(
+            &repo.root,
+            move || {
+                crate::screen::picker::branches(&reread)
+                    .map(|listed| lands_in_entries(listed, current.as_deref()))
+            },
+        );
+        LandsInPick { menu, list }
+    }
+}
+
+/// `listed` but `current` as the edit lands in picker's entries, `origin`
+/// beside a branch only the remote has.
+fn lands_in_entries(
+    listed: Vec<crate::screen::picker::Branch>,
+    current: Option<&str>,
+) -> Vec<crate::screen::picker::Entry<String>> {
+    listed
+        .into_iter()
+        .filter(|branch| Some(branch.name.as_str()) != current)
+        .map(|branch| crate::screen::picker::Entry {
+            column: branch.remote_only.then(|| "origin".to_string()),
+            label: branch.name.clone(),
+            value: branch.name,
+        })
+        .collect()
+}
+
+/// One last task a chain head can be stacked onto, as the edit depends on
+/// picker lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StackTarget {
+    /// The task's id, which the head's `depends_on:` names.
+    id: String,
+    /// The task's group, drawn beside it.
+    group: String,
+    /// The branch the group lands in — see [`stack_lands_in`] — which the
+    /// pick copies as `base:` onto the head's chain. `None` when that is
+    /// not known: a pending task naming no `base:` on a detached checkout,
+    /// or a queued or done one recorded without it.
+    lands: Option<String>,
+}
+
+/// [`Mode::EditDependsOn`]'s state: the menu it was opened from, which `esc`
+/// reopens and whose `row` is the chain head the pick is written to, and
+/// the list of what it can stack onto, `None` being the `none` row.
+struct DependsOnPick {
+    menu: OptionsMenu,
+    list: crate::screen::picker::Picker<Option<StackTarget>>,
+}
+
+// By hand, for the reason `PipelinePick`'s is.
+impl std::fmt::Debug for DependsOnPick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DependsOnPick")
+            .field("menu", &self.menu)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DependsOnPick {
+    /// The picker over what `head`, the chain head of `group`, can stack
+    /// onto — see [`stack_targets`]. It opens on a `checking pull
+    /// requests…` row while a thread of its own asks `gh`, the program run
+    /// as GitHub's command line, which done groups still have their pull
+    /// request open, so the key loop never waits on it and `esc` still goes
+    /// back while it asks. With no done group nothing is asked, and the row
+    /// gives way to the list as soon as the thread has answered.
+    fn new(
+        repo: &Repo,
+        groups: &[Group],
+        state: &ScreenState,
+        group: &Group,
+        head: &PendingTask,
+        gh: String,
+        menu: OptionsMenu,
+    ) -> DependsOnPick {
+        let look = crate::screen::picker::Look {
+            width: EDIT_PICK_TEXT,
+            column: DEPENDS_ON_COLUMN,
+            keys: EDIT_PICK_KEYS,
+            noun: ("task", "tasks"),
+            empty: "no other group to stack on",
+        };
+        let title = format!("depends on for {}", head.id);
+        let (ready, done) = stack_targets(groups, state, group, head);
+        let stacked = stack_dependency(group, head).is_some();
+        let repo = repo.clone();
+        let list = crate::screen::picker::Picker::new(title, Vec::new(), look).loading(
+            "checking pull requests…",
+            move || {
+                let (open, failure) = open_done_targets(&gh, &repo, done);
+                (
+                    depends_on_entries(stacked, ready.into_iter().chain(open).collect()),
+                    failure.map(|reason| {
+                        format!(
+                            "pull request check failed: {}. done groups are left out.\nrun \
+                             gh auth login, then reopen.",
+                            reason.trim_end_matches('.')
+                        )
+                    }),
+                )
+            },
+        );
+        DependsOnPick { menu, list }
+    }
+}
+
+/// The edit depends on picker's entries: `none` first while the head stacks
+/// on something, since only then does clearing it change anything, then
+/// `targets` in the order of their groups' names, each group beside its
+/// task.
+fn depends_on_entries(
+    stacked: bool,
+    mut targets: Vec<StackTarget>,
+) -> Vec<crate::screen::picker::Entry<Option<StackTarget>>> {
+    targets.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| a.id.cmp(&b.id)));
+    let none = stacked.then(|| crate::screen::picker::Entry {
+        label: "none".to_string(),
+        column: None,
+        value: None,
+    });
+    none.into_iter()
+        .chain(
+            targets
+                .into_iter()
+                .map(|target| crate::screen::picker::Entry {
+                    label: target.id.clone(),
+                    column: Some(target.group.clone()),
+                    value: Some(target),
+                }),
+        )
+        .collect()
+}
+
+/// The task of another group `head` depends on, which stacks its chain onto
+/// that group: the first id in its `depends_on:` that is not a task of
+/// `group`. `None` for a head that stacks on nothing.
+fn stack_dependency<'a>(group: &Group, head: &'a PendingTask) -> Option<&'a String> {
+    head.depends_on
+        .iter()
+        .find(|dep| !group.tasks.iter().any(|t| &t.id == *dep))
+}
+
+/// What `head`, the chain head of `group`, can be stacked onto: the last
+/// task of every other group, split into those of pending and queued groups,
+/// listed as they are, and those of done groups, which are listed only once
+/// GitHub says their pull request is still open — see [`open_done_targets`].
+///
+/// A group's last task is the one no other task of the group depends on,
+/// the only task submission lets another group stack onto (see
+/// [`check_dependencies_set`]); a group with more than one is not one chain
+/// and is left out: submission refuses a stack on a pending or queued one,
+/// and a done one has no single task to offer. The task the head depends
+/// on now is left out, since picking it changes nothing, and so is a plan
+/// row, which has no task. So is every group that already
+/// stacks on the head's own group, directly or through any number of other
+/// groups: stacking onto one of them would make a loop.
+fn stack_targets(
+    groups: &[Group],
+    state: &ScreenState,
+    group: &Group,
+    head: &PendingTask,
+) -> (Vec<StackTarget>, Vec<StackTarget>) {
+    let group_of = |id: &str| {
+        groups
+            .iter()
+            .find(|g| g.tasks.iter().any(|t| t.id == id))
+            .map(|g| g.name.as_str())
+    };
+    // Every group's stacking edges: the groups any of its tasks depends on.
+    let stacks: Vec<(&str, Vec<&str>)> = groups
+        .iter()
+        .map(|g| {
+            let onto = g
+                .tasks
+                .iter()
+                .flat_map(|t| &t.depends_on)
+                .filter_map(|dep| group_of(dep))
+                .filter(|name| *name != g.name)
+                .collect();
+            (g.name.as_str(), onto)
+        })
+        .collect();
+    // The head's group and every group stacked on it, one hop further each
+    // pass, until a pass finds no new one.
+    let mut above: BTreeSet<&str> = BTreeSet::from([group.name.as_str()]);
+    loop {
+        let more: Vec<&str> = stacks
+            .iter()
+            .filter(|(name, onto)| !above.contains(name) && onto.iter().any(|o| above.contains(o)))
+            .map(|(name, _)| *name)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        above.extend(more);
+    }
+    let current = stack_dependency(group, head);
+    let (mut ready, mut done) = (Vec::new(), Vec::new());
+    for other in groups {
+        if other.state == GroupState::Plan || above.contains(other.name.as_str()) {
+            continue;
+        }
+        let mut tails = other.tasks.iter().filter(|task| {
+            !other
+                .tasks
+                .iter()
+                .any(|t| t.depends_on.iter().any(|dep| dep == &task.id))
+        });
+        let (Some(tail), None) = (tails.next(), tails.next()) else {
+            continue;
+        };
+        if Some(&tail.id) == current {
+            continue;
+        }
+        let target = StackTarget {
+            id: tail.id.clone(),
+            group: other.name.clone(),
+            lands: stack_lands_in(tail, state),
+        };
+        match other.state {
+            GroupState::Done => done.push(target),
+            _ => ready.push(target),
+        }
+    }
+    (ready, done)
+}
+
+/// Those of `done`, the last tasks of done groups, whose branch has a pull
+/// request still open, asked of `gh` one branch at a time: a done group
+/// whose work has landed, or that opened no pull request, is nothing to
+/// stack onto. The branch is read off the archive index, and a task it
+/// names none for is left out.
+///
+/// The first time `gh` cannot answer, no more are asked and every done group
+/// is left out, with `gh`'s reason: a `gh` that is not logged in fails the
+/// same way for each, and a list with only some of them would read as
+/// though the rest had landed. Asked only of done groups, since a pending
+/// or queued group's work has not landed by definition.
+fn open_done_targets(
+    gh: &str,
+    repo: &Repo,
+    done: Vec<StackTarget>,
+) -> (Vec<StackTarget>, Option<String>) {
+    if done.is_empty() {
+        return (Vec::new(), None);
+    }
+    let branches: BTreeMap<String, String> = crate::archive_index::read(repo)
+        .into_iter()
+        .filter(|entry| !entry.branch.trim().is_empty())
+        .map(|entry| (entry.id, entry.branch))
+        .collect();
+    let mut open = Vec::new();
+    for target in done {
+        let Some(branch) = branches.get(&target.id) else {
+            continue;
+        };
+        match super::stack::pr_is_open(gh, &repo.root, branch) {
+            Ok(true) => open.push(target),
+            Ok(false) => {}
+            Err(err) => return (Vec::new(), Some(format!("{err:#}"))),
+        }
+    }
+    (open, None)
 }
 
 /// [`Mode::Options`]'s state: the row `o` was pressed on, the items it
@@ -4828,12 +5227,24 @@ impl OptionsMenu {
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open task, `g`
 /// gate, `t` trial, `s` save as routine, and the routines tab's `n`, now
-/// edit schedule, and `x` delete routine. Delete on the pending screen and
-/// open plan never had a key of their own, and neither did the routines
-/// tab's job items.
+/// edit schedule, and `x` delete routine. Delete on the pending screen, edit
+/// pipeline, edit lands in, edit depends on and open plan never had a key of
+/// their own, and neither did the routines tab's job items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
+    /// A pending task's `pipeline:`, picked from the project's other
+    /// pipelines and written into its pending file — see
+    /// [`Mode::EditPipeline`].
+    EditPipeline,
+    /// A pending chain head's `base:`, picked from the local and `origin`
+    /// branches and written into every pending file of its group — see
+    /// [`Mode::EditLandsIn`].
+    EditLandsIn,
+    /// A pending chain head's `depends_on:`, picked from the last tasks of
+    /// the other groups it could stack onto and written with that group's
+    /// lands-in branch — see [`Mode::EditDependsOn`].
+    EditDependsOn,
     /// On the pending screen's group menu, every page the group's tasks
     /// name in `plan:`, and on a plan row, the row's own page. A task's
     /// menu never offers it.
@@ -4873,6 +5284,9 @@ impl RowOption {
         match self {
             RowOption::Open => "open task".to_string(),
             RowOption::OpenPlan => "open plan".to_string(),
+            RowOption::EditPipeline => "edit pipeline".to_string(),
+            RowOption::EditLandsIn => "edit lands in".to_string(),
+            RowOption::EditDependsOn => "edit depends on".to_string(),
             RowOption::Gate => "gate".to_string(),
             RowOption::Trial => "trial".to_string(),
             RowOption::SaveRoutine => "save as routine".to_string(),
@@ -6128,8 +6542,9 @@ fn run_screen_from(
         // does there. Only the modes with a text field give that character
         // any meaning of its own, appending it the same as any other letter:
         // `Mode::Filter`'s query (see `handle_filter_key`'s own doc comment),
-        // `Mode::SaveRoutine`'s name, and `Mode::NewJob`'s cron expression
-        // and pipeline search.
+        // `Mode::SaveRoutine`'s name, `Mode::NewJob`'s cron expression and
+        // pipeline search, and `Mode::EditPipeline`'s, `Mode::EditLandsIn`'s
+        // and `Mode::EditDependsOn`'s search.
         match &state.mode {
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
             Mode::Gate { cursor, dependents } => {
@@ -6445,6 +6860,75 @@ fn run_screen_from(
                     state.mode = state.after_popup(Mode::Browsing);
                 }
             }
+            Mode::EditPipeline(_) => {
+                // Taken out of the mode, since a key over the picker
+                // consumes it; the arm above has just matched it, so the
+                // `else` is never reached.
+                let Mode::EditPipeline(pick) = std::mem::replace(&mut state.mode, Mode::Browsing)
+                else {
+                    continue;
+                };
+                let PipelinePick { menu, list } = *pick;
+                state.mode = match list.handle_key(key) {
+                    crate::screen::picker::Picked::Open(list) => {
+                        Mode::EditPipeline(Box::new(PipelinePick { menu, list: *list }))
+                    }
+                    crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    crate::screen::picker::Picked::Chosen(name) => {
+                        let mode =
+                            set_pipeline(repo, pipelines, &mut groups, &mut state, &menu, &name);
+                        // `set_pipeline` may have read `groups` again or
+                        // patched them; a reading already in flight could
+                        // still carry the old pipeline back — see
+                        // `refresh_from_reader`.
+                        known_reading = known_reading.max(reader.started_count());
+                        mode
+                    }
+                };
+            }
+            Mode::EditLandsIn(_) => {
+                // Taken out of the mode, as `Mode::EditPipeline`'s arm does.
+                let Mode::EditLandsIn(pick) = std::mem::replace(&mut state.mode, Mode::Browsing)
+                else {
+                    continue;
+                };
+                let LandsInPick { menu, list } = *pick;
+                state.mode = match list.handle_key(key) {
+                    crate::screen::picker::Picked::Open(list) => {
+                        Mode::EditLandsIn(Box::new(LandsInPick { menu, list: *list }))
+                    }
+                    crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    crate::screen::picker::Picked::Chosen(branch) => {
+                        let mode = set_lands_in(repo, &mut groups, &mut state, &menu, &branch);
+                        // As after `set_pipeline`: a reading already in
+                        // flight could still carry the old `base:` back.
+                        known_reading = known_reading.max(reader.started_count());
+                        mode
+                    }
+                };
+            }
+            Mode::EditDependsOn(_) => {
+                // Taken out of the mode, as `Mode::EditPipeline`'s arm does.
+                let Mode::EditDependsOn(pick) = std::mem::replace(&mut state.mode, Mode::Browsing)
+                else {
+                    continue;
+                };
+                let DependsOnPick { menu, list } = *pick;
+                state.mode = match list.handle_key(key) {
+                    crate::screen::picker::Picked::Open(list) => {
+                        Mode::EditDependsOn(Box::new(DependsOnPick { menu, list: *list }))
+                    }
+                    crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    crate::screen::picker::Picked::Chosen(target) => {
+                        let mode =
+                            set_depends_on(repo, &mut groups, &mut state, &menu, target.as_ref());
+                        // As after `set_pipeline`: a reading already in
+                        // flight could still carry the old fields back.
+                        known_reading = known_reading.max(reader.started_count());
+                        mode
+                    }
+                };
+            }
             Mode::Options(menu) => match key {
                 Key::Esc => state.mode = menu.closed(),
                 Key::Enter => {
@@ -6623,8 +7107,22 @@ fn wait_for_key(
         if crate::platform::stop::asked() {
             return None;
         }
-        if !cfg!(unix) || input.byte_pending(crate::status::POLL) {
+        // The edit lands in picker fetches `origin` as it opens, and the
+        // edit depends on picker asks GitHub about done groups; either's
+        // answer cuts the wait short, so the list is drawn then rather than
+        // at the next slice.
+        let wake = match &state.mode {
+            Mode::EditLandsIn(pick) => pick.list.wake(),
+            Mode::EditDependsOn(pick) => pick.list.wake(),
+            _ => None,
+        };
+        if !cfg!(unix) || input.wait_pending(crate::status::POLL, wake.as_deref()) {
             return read_key(input);
+        }
+        match &mut state.mode {
+            Mode::EditLandsIn(pick) => pick.list.settle(),
+            Mode::EditDependsOn(pick) => pick.list.settle(),
+            _ => {}
         }
         refresh_from_reader(reader, known, groups, state);
         reload_jobs(panes.repo, panes.routines, state);
@@ -6984,27 +7482,57 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
     (!group.tasks.is_empty()).then_some(group)
 }
 
+/// Whether `task` is the head of `group`'s chain: it depends on no task of
+/// its own group. A dependency on another group's task does not count, since
+/// a chain's head may stack the whole chain onto another group's last task.
+///
+/// Only the head is offered edit lands in and edit depends on. The rest of
+/// the chain must land where the head does, and submission refuses a
+/// dependency and a dependent whose `base:` differ — see
+/// [`check_dependencies_set`] — so the head's pick of a branch is written
+/// into every pending file of the group at once. Only a chain's head may
+/// stack it onto another group, so only the head's `depends_on:` can be
+/// picked from other groups' tasks.
+fn is_chain_head(group: &Group, task: &PendingTask) -> bool {
+    !task
+        .depends_on
+        .iter()
+        .any(|dep| group.tasks.iter().any(|t| &t.id == dep))
+}
+
 /// `o` on the pending screen: the menu for the row the focused pane
 /// highlights, titled with that row's name. Over the tasks pane a task
-/// offers open task, then gate, and then delete while the task is still a
-/// pending file. Over the groups pane a group offers open plan where
+/// offers open task, then edit pipeline while the task is still a pending
+/// file, then edit lands in and edit depends on while it is also its
+/// chain's head — see [`is_chain_head`] — then gate, and then delete while
+/// it is still a pending file. Over
+/// the groups pane a group offers open plan where
 /// [`super::pending::plan_of`] finds a `plan:` on any of its tasks, then
 /// trial and save as routine, both only where [`trial_target`] allows them,
 /// and then delete while the group holds at least one pending file. Open
 /// plan sits on the group rather than on each task because a group's tasks
 /// almost always name the same page. A plan row there offers open plan and
-/// then delete, both on its page. Delete is never offered on a queued or
-/// done task: those files live in the queue or the archive, which this menu
-/// does not touch. `None`, and no menu, when the focused pane
-/// highlights no row at all: an empty pending directory, a filter that
-/// matched nothing, or a tasks pane with no tasks.
+/// then delete, both on its page. No edit item and no delete is offered on
+/// a queued or done task: those files live in the queue or the
+/// archive, which this menu does not touch. `None`, and no menu, when the
+/// focused pane highlights no row at all: an empty pending directory, a
+/// filter that matched nothing, or a tasks pane with no tasks.
 fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
     let (title, row, items) = match state.focus {
         Focus::Tasks => {
             let task = group.tasks.get(state.task_cursor)?;
-            let mut items = vec![RowOption::Open, RowOption::Gate];
-            if task.state == TaskState::Pending {
+            let pending = task.state == TaskState::Pending;
+            let mut items = vec![RowOption::Open];
+            if pending {
+                items.push(RowOption::EditPipeline);
+            }
+            if pending && is_chain_head(group, task) {
+                items.push(RowOption::EditLandsIn);
+                items.push(RowOption::EditDependsOn);
+            }
+            items.push(RowOption::Gate);
+            if pending {
                 items.push(RowOption::Delete);
             }
             (task.id.clone(), task_key(task), items)
@@ -7166,9 +7694,13 @@ impl Picked<'_> {
     /// key's own check, so an item whose row no longer allows it does
     /// nothing. Delete on the pending screen, which had no key, opens its
     /// popup through [`begin_pending_delete`], or [`begin_plan_delete`] on a
-    /// plan row. On the pending screen the menu's row must also still be the
-    /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
-    /// having done nothing.
+    /// plan row. Edit pipeline, which had no key either, opens
+    /// [`Mode::EditPipeline`] on a task that is still pending, and edit lands
+    /// in opens [`Mode::EditLandsIn`] on one that is still its chain's head,
+    /// or a notice when git cannot list the branches, and edit depends on
+    /// opens [`Mode::EditDependsOn`] on such a head too. On the pending
+    /// screen the menu's row must also still be the highlighted one — see
+    /// [`OptionsMenu`]'s `row` — or the menu closes having done nothing.
     fn run(
         &self,
         groups: &[Group],
@@ -7217,6 +7749,9 @@ impl Picked<'_> {
                 // The pending screen's items are never put on a routine's
                 // menu.
                 RowOption::OpenPlan
+                | RowOption::EditPipeline
+                | RowOption::EditLandsIn
+                | RowOption::EditDependsOn
                 | RowOption::Gate
                 | RowOption::Trial
                 | RowOption::SaveRoutine
@@ -7229,6 +7764,61 @@ impl Picked<'_> {
         match item {
             RowOption::Open => open_highlighted(self.repo, groups, state),
             RowOption::OpenPlan => open_highlighted_plan(groups, state),
+            RowOption::EditPipeline => highlighted_task(groups, state)
+                .filter(|task| task.state == TaskState::Pending)
+                .map_or(closed, |task| {
+                    Mode::EditPipeline(Box::new(PipelinePick::new(
+                        self.pipelines,
+                        task,
+                        menu.clone(),
+                    )))
+                }),
+            RowOption::EditLandsIn => {
+                let head = shown(groups, state)
+                    .get(state.group_cursor)
+                    .copied()
+                    .zip(highlighted_task(groups, state))
+                    .filter(|(group, task)| {
+                        task.state == TaskState::Pending && is_chain_head(group, task)
+                    });
+                let Some((_, task)) = head else {
+                    return closed;
+                };
+                match crate::screen::picker::branches(self.repo) {
+                    Ok(listed) => Mode::EditLandsIn(Box::new(LandsInPick::new(
+                        self.repo,
+                        task,
+                        lands_in(task, state),
+                        listed,
+                        menu.clone(),
+                    ))),
+                    Err(err) => outcome(
+                        "lands in not changed",
+                        format!(
+                            "git could not list the branches: {err:#}. Nothing was written; \
+                             fix what stopped git, then open edit lands in again with o."
+                        ),
+                    ),
+                }
+            }
+            RowOption::EditDependsOn => shown(groups, state)
+                .get(state.group_cursor)
+                .copied()
+                .zip(highlighted_task(groups, state))
+                .filter(|(group, task)| {
+                    task.state == TaskState::Pending && is_chain_head(group, task)
+                })
+                .map_or(closed, |(group, task)| {
+                    Mode::EditDependsOn(Box::new(DependsOnPick::new(
+                        self.repo,
+                        groups,
+                        state,
+                        group,
+                        task,
+                        crate::repo::gh_program(),
+                        menu.clone(),
+                    )))
+                }),
             RowOption::Gate => Mode::Gate {
                 cursor: 0,
                 dependents: gate_dependents(self.repo, self.pipelines, groups, state),
@@ -7577,8 +8167,13 @@ fn handle_filter_key(groups: &[Group], state: &mut ScreenState, key: Key) {
 }
 
 fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey> {
+    highlighted_task(groups, state).map(task_key)
+}
+
+/// The task under the tasks pane's cursor, whichever pane has focus.
+fn highlighted_task<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a PendingTask> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
-    Some(task_key(group.tasks.get(state.task_cursor)?))
+    group.tasks.get(state.task_cursor)
 }
 
 /// The pending screen's open task: open the highlighted task in the editor
@@ -7879,6 +8474,535 @@ fn handle_gate_key(
     }
 }
 
+/// `enter` on the edit pipeline picker: write `pipeline: <name>` into the
+/// pending file of the task `menu` was opened on, read the groups again so
+/// the tasks pane shows it, and close to the screen.
+///
+/// The queue reader can replace the groups while the picker is open, and
+/// another screen can queue the task meanwhile, which moves its file out of
+/// the pending directory. So the task must still be the highlighted one,
+/// still pending, and its file still there, or nothing is written and a
+/// notice names the file. The file is read again rather than taken from the
+/// groups, so a hand edit made while the picker was open is kept, and only
+/// its `pipeline:` line changes — see [`with_frontmatter_field`].
+///
+/// A screen gate names a step of the old pipeline. It is kept only when the
+/// gate picker would offer that step on the new one — see [`gate_steps`] —
+/// and dropped otherwise. The screen submits a gate as `gate_at:`, and
+/// submission refuses the whole group over a `gate_at:` naming no step of
+/// the pipeline, a command step, or a step the task walks past (see
+/// [`check_gate_at`] and [`check_gate_at_runs`]).
+///
+/// When the groups will not read again, the task's own row is patched in
+/// memory and a notice says so, since the rest of the list may then be
+/// behind until the queue reader's next pass.
+fn set_pipeline(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    menu: &OptionsMenu,
+    name: &str,
+) -> Mode {
+    let path = std::path::PathBuf::from(&menu.row);
+    let still_pending = highlighted_task(groups, state)
+        .is_some_and(|task| task_key(task) == menu.row && task.state == TaskState::Pending);
+    if !still_pending || !path.is_file() {
+        return outcome(
+            "pipeline not changed",
+            format!(
+                "{} was not changed: the task was queued, deleted or moved while the picker \
+                 was open. Open its menu again with o to pick a pipeline for it as it is now.",
+                path.display()
+            ),
+        );
+    }
+    let written = std::fs::read_to_string(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|doc| {
+            let doc = with_frontmatter_field(&doc, "pipeline", name);
+            crate::task::write_atomic(&path, &doc).map(|()| doc)
+        });
+    let doc = match written {
+        Ok(doc) => doc,
+        Err(err) => {
+            return outcome(
+                "pipeline not changed",
+                format!(
+                    "{} was not changed: {err:#}. Fix what stops the file being read or \
+                     written, then pick the pipeline again.",
+                    path.display()
+                ),
+            );
+        }
+    };
+    // Judged on the text just written, with the dependents counted the way
+    // the gate picker counts them when it opens on this task.
+    let offered = |step: &str| {
+        let dependents = gate_dependents(repo, pipelines, groups, state);
+        highlighted_task(groups, state)
+            .zip(task_pipeline(&doc, pipelines).ok())
+            .is_some_and(|(task, pipeline)| {
+                gate_steps(task, &doc, pipeline, dependents)
+                    .iter()
+                    .any(|s| s.id == step)
+            })
+    };
+    if state
+        .gates
+        .get(&menu.row)
+        .is_some_and(|step| !offered(step))
+    {
+        state.gates.remove(&menu.row);
+    }
+    match super::pending::list_rows(repo) {
+        Ok(rows) => {
+            adopt_groups(rows.groups, groups, state);
+            Mode::Browsing
+        }
+        // The file is written, so the pane shows what it now says; the
+        // queue reader's next pass reads the rest of the list again.
+        Err(err) => {
+            if let Some(task) = groups
+                .iter_mut()
+                .flat_map(|group| &mut group.tasks)
+                .find(|task| task_key(task) == menu.row)
+            {
+                task.pipeline = Some(name.to_string());
+            }
+            outcome(
+                "pipeline changed",
+                format!(
+                    "{} now names pipeline `{name}`, but the pending task list would not \
+                     read again: {err:#}. The rest of the list may be behind until the \
+                     screen reads it again.",
+                    path.display()
+                ),
+            )
+        }
+    }
+}
+
+/// The branch `task` lands in, as the tasks pane's `lands in:` row names
+/// it: its own `base:`, else the board checkout's branch, which `enter`
+/// hands a task naming none — see [`ScreenState::board_branch`]. `None` on
+/// a detached checkout for a task naming none.
+fn lands_in(task: &PendingTask, state: &ScreenState) -> Option<String> {
+    task.base.clone().or_else(|| state.board_branch.clone())
+}
+
+/// Where a group stacked onto `task` takes its lands in from: for a pending
+/// task, [`lands_in`], since queuing it from this screen gives it the
+/// board's branch; for a queued or done task, its recorded `base:` alone,
+/// since it was queued already and the board's branch now says nothing of
+/// where it went. `None` when that is not known. Edit depends on copies
+/// this as the stacked chain's `base:`, and edit lands in checks a pick
+/// against it, so the two must read the same answer.
+fn stack_lands_in(task: &PendingTask, state: &ScreenState) -> Option<String> {
+    match task.state {
+        TaskState::Pending => lands_in(task, state),
+        TaskState::Queued | TaskState::Done => task.base.clone(),
+    }
+}
+
+/// The highlighted chain head's stack, when it has one: its id, the task of
+/// another group it depends on, and where that task lands — its own `base:`,
+/// or for a pending task naming none the board's branch, which queuing it
+/// from this screen gives it. `None` for a head that stacks on nothing, or
+/// on a task whose branch is not known.
+fn stacked_on(groups: &[Group], state: &ScreenState) -> Option<(String, String, String)> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    let head = highlighted_task(groups, state)?;
+    head.depends_on
+        .iter()
+        .filter(|dep| !group.tasks.iter().any(|t| &t.id == *dep))
+        .find_map(|dep| {
+            let task = groups
+                .iter()
+                .flat_map(|g| &g.tasks)
+                .find(|t| &t.id == dep)?;
+            let lands = stack_lands_in(task, state)?;
+            Some((head.id.clone(), dep.clone(), lands))
+        })
+}
+
+/// A pending task of another group stacked onto the highlighted head's
+/// chain that would not land in `branch`: its id, the pending task of this
+/// group it depends on, and where it lands now — its own `base:`, else the
+/// board's branch. `None` when no such task depends on a task this pick
+/// rewrites, or whose branch is not known. A queued or done task of this
+/// group keeps its `base:`, so a task stacked on one of those is left out.
+fn stacked_onto(
+    groups: &[Group],
+    state: &ScreenState,
+    branch: &str,
+) -> Option<(String, String, String)> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    let rewritten = |id: &String| {
+        group
+            .tasks
+            .iter()
+            .any(|t| &t.id == id && t.state == TaskState::Pending)
+    };
+    groups
+        .iter()
+        .filter(|other| other.name != group.name)
+        .flat_map(|other| &other.tasks)
+        .filter(|task| task.state == TaskState::Pending)
+        .find_map(|task| {
+            let dep = task.depends_on.iter().find(|dep| rewritten(dep))?;
+            let lands = lands_in(task, state).filter(|lands| lands != branch)?;
+            Some((task.id.clone(), dep.clone(), lands))
+        })
+}
+
+/// `enter` on the edit lands in picker: write `base: <branch>` into every
+/// pending file of the group whose chain head `menu` was opened on, read the
+/// groups again so the tasks pane shows it, and close to the screen.
+///
+/// Every pending task of the group gets it, not the head alone: submission
+/// refuses a dependency and a dependent whose `base:` differ (see
+/// [`check_dependencies_set`]), and a task naming none is sent on the
+/// board's branch rather than its dependency's, so a head changed alone
+/// would leave a chain that no longer queues. A queued or done task of the
+/// group is not touched: those files live in the queue or the archive.
+///
+/// The head must still be the highlighted task and still pending, with its
+/// file still there, for the reason [`set_pipeline`] checks the same. The
+/// files are then written through [`write_chain`].
+///
+/// A head stacked on another group's last task keeps the item, but a pick
+/// other than where that task lands changes nothing and says why — see
+/// [`stacked_on`]. Submission refuses a stacked pair whose bases differ, and
+/// the group stacked on is not this pick's to rewrite. For the same reason
+/// a pick changes nothing while another group's pending task stacks onto
+/// this chain and lands elsewhere — see [`stacked_onto`]: that group would
+/// be left on the old branch, depending on a task that no longer lands
+/// there.
+fn set_lands_in(
+    repo: &Repo,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    menu: &OptionsMenu,
+    branch: &str,
+) -> Mode {
+    let head = std::path::PathBuf::from(&menu.row);
+    let paths: Option<Vec<std::path::PathBuf>> = shown(groups, state)
+        .get(state.group_cursor)
+        .zip(highlighted_task(groups, state))
+        .filter(|(_, task)| task_key(task) == menu.row && task.state == TaskState::Pending)
+        .map(|(group, _)| {
+            group
+                .tasks
+                .iter()
+                .filter(|task| task.state == TaskState::Pending)
+                .map(|task| task.path.clone())
+                .collect()
+        });
+    let Some(paths) = paths.filter(|_| head.is_file()) else {
+        return outcome(
+            "lands in not changed",
+            format!(
+                "{} was not changed: the task was queued, deleted or moved while the picker \
+                 was open. Open its menu again with o to pick where it lands as it is now.",
+                head.display()
+            ),
+        );
+    };
+    if let Some((id, dep, lands)) =
+        stacked_on(groups, state).filter(|(_, _, lands)| lands != branch)
+    {
+        return outcome(
+            "lands in not changed",
+            format!(
+                "`{id}` stacks on `{dep}`, which lands in `{lands}`, and a chain stacked on \
+                 another lands where that one does: its work is cut from that branch and only \
+                 merges into its own base. No file was changed. To land in `{branch}`, change \
+                 what `{id}` depends on first, or pick the lands-in branch of `{dep}`'s group."
+            ),
+        );
+    }
+    if let Some((id, dep, lands)) = stacked_onto(groups, state, branch) {
+        return outcome(
+            "lands in not changed",
+            format!(
+                "`{id}` of another group stacks on `{dep}` and lands in `{lands}`, and a chain \
+                 stacked on another lands where that one does: moving `{dep}`'s chain alone would \
+                 leave `{id}` waiting on work that never merges into its base. No file was changed. \
+                 To land in `{branch}`, change what `{id}` depends on first."
+            ),
+        );
+    }
+    let value = yaml_scalar(branch);
+    let words = ChainWrite {
+        noun: "lands in",
+        again: "pick the branch again",
+        changed: format!("These files now land in `{branch}`"),
+        split: "The chain will not queue while its tasks land in two branches.",
+        done: format!(
+            "the chain's {} now land in `{branch}`",
+            plural(paths.len(), "pending task")
+        ),
+    };
+    write_chain(
+        repo,
+        groups,
+        state,
+        &words,
+        &paths,
+        |_, doc| with_frontmatter_field(doc, "base", &value),
+        |task| task.base = Some(branch.to_string()),
+    )
+}
+
+/// `enter` on the edit depends on picker: write the head `menu` was opened
+/// on a `depends_on: [<id>]` naming `target`, or drop its `depends_on:` for
+/// `none`, read the groups again so the tasks pane shows it, and close to
+/// the screen.
+///
+/// A stack also copies the stacked group's lands-in branch as `base:` into
+/// every pending file of the head's group, the write edit lands in makes and
+/// for its reason: submission refuses a stacked pair whose bases differ (see
+/// [`check_dependencies_set`]), and the chain must land where its head does.
+/// The branch is the one the tasks pane shows for that group, so a pending
+/// group naming no `base:` gives the board's branch, which queuing it from
+/// this screen gives it too. Only where that is not known either — such a
+/// group on a detached checkout, or a queued or done task recorded with no
+/// `base:` — is the head's `depends_on:` written alone. `none`
+/// leaves every `base:` as it is: the chain still lands where it did.
+///
+/// The head must still be the highlighted task, still pending and still its
+/// chain's head, with its file still there, for the reason [`set_pipeline`]
+/// checks the same. As in [`set_lands_in`], a base that would leave another
+/// group's pending task stacked onto this chain on the old branch changes
+/// nothing and says why — see [`stacked_onto`].
+fn set_depends_on(
+    repo: &Repo,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    menu: &OptionsMenu,
+    target: Option<&StackTarget>,
+) -> Mode {
+    let head = std::path::PathBuf::from(&menu.row);
+    let found: Option<(String, Vec<std::path::PathBuf>)> = shown(groups, state)
+        .get(state.group_cursor)
+        .zip(highlighted_task(groups, state))
+        .filter(|(group, task)| {
+            task_key(task) == menu.row
+                && task.state == TaskState::Pending
+                && is_chain_head(group, task)
+        })
+        .map(|(group, task)| {
+            let paths = group
+                .tasks
+                .iter()
+                .filter(|task| task.state == TaskState::Pending)
+                .map(|task| task.path.clone())
+                .collect();
+            (task.id.clone(), paths)
+        });
+    let Some((id, paths)) = found.filter(|_| head.is_file()) else {
+        return outcome(
+            "depends on not changed",
+            format!(
+                "{} was not changed: the task was queued, deleted or moved while the picker \
+                 was open. Open its menu again with o to pick what it depends on as it is now.",
+                head.display()
+            ),
+        );
+    };
+    let branch = target.and_then(|target| target.lands.as_deref());
+    if let Some((target, branch)) = target.zip(branch)
+        && let Some((other, dep, lands)) = stacked_onto(groups, state, branch)
+    {
+        let target = &target.id;
+        return outcome(
+            "depends on not changed",
+            format!(
+                "`{other}` of another group stacks on `{dep}` and lands in `{lands}`, and a \
+                 chain stacked on another lands where that one does: stacking `{id}` on \
+                 `{target}` moves `{dep}`'s chain to `{branch}` and would leave `{other}` \
+                 waiting on work that never merges into its base. No file was changed. To \
+                 stack on `{target}`, change what `{other}` depends on first."
+            ),
+        );
+    }
+    // Without a base to copy, only the head's own file changes.
+    let paths = match branch {
+        Some(_) => paths,
+        None => vec![head.clone()],
+    };
+    let depends_on = target.map(|target| format!("[{}]", yaml_scalar(&target.id)));
+    let base = branch.map(yaml_scalar);
+    let words = ChainWrite {
+        noun: "depends on",
+        again: "pick the task again",
+        changed: match branch {
+            Some(branch) => format!("These files now land in `{branch}`"),
+            None => "These files were changed".to_string(),
+        },
+        split: "The chain will not queue while its tasks land in two branches.",
+        done: match (target, branch) {
+            (Some(target), Some(branch)) => format!(
+                "`{id}` now depends on `{}` and the chain's {} land in `{branch}`",
+                target.id,
+                plural(paths.len(), "pending task")
+            ),
+            (Some(target), None) => format!("`{id}` now depends on `{}`", target.id),
+            (None, _) => format!("`{id}` now depends on nothing"),
+        },
+    };
+    write_chain(
+        repo,
+        groups,
+        state,
+        &words,
+        &paths,
+        |path, doc| {
+            let doc = match &base {
+                Some(base) => with_frontmatter_field(doc, "base", base),
+                None => doc.to_string(),
+            };
+            match (path == head.as_path(), &depends_on) {
+                (false, _) => doc,
+                (true, Some(list)) => with_frontmatter_field(&doc, "depends_on", list),
+                (true, None) => without_frontmatter_field(&doc, "depends_on"),
+            }
+        },
+        |task| {
+            if let Some(branch) = branch {
+                task.base = Some(branch.to_string());
+            }
+            if task.path == head {
+                task.depends_on = target.map(|target| target.id.clone()).into_iter().collect();
+            }
+        },
+    )
+}
+
+/// What a chain-wide write's popups say, worded by the edit making it.
+struct ChainWrite<'a> {
+    /// What the edit is called, as in `lands in not changed`.
+    noun: &'a str,
+    /// What to do once the cause is fixed, such as `pick the branch again`.
+    again: &'a str,
+    /// Heads the list of files a write that failed part way had changed.
+    changed: String,
+    /// What a write that failed part way leaves the chain unable to do.
+    split: &'a str,
+    /// What the write did, for the popup the screen opens when the pending
+    /// list will not read again after it.
+    done: String,
+}
+
+/// Rewrite every file in `paths` through `rewrite`, read the groups again so
+/// the tasks pane shows them, and close to the screen. The shared tail of
+/// the edits that write a whole chain's pending files at once: edit lands
+/// in, and edit depends on when it copies a base.
+///
+/// Every file is read and its new text built before any is written, so a
+/// file that will not read changes nothing. Each is then written through a
+/// temporary file and a rename, so none is ever left half written; a write
+/// that fails part way through names the files already changed and the ones
+/// left as they were, since the chain then names two bases. When the list
+/// will not read again, `patch` makes each written task show what its file
+/// now says.
+fn write_chain(
+    repo: &Repo,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    words: &ChainWrite,
+    paths: &[std::path::PathBuf],
+    rewrite: impl Fn(&std::path::Path, &str) -> String,
+    patch: impl Fn(&mut PendingTask),
+) -> Mode {
+    let noun = words.noun;
+    let again = words.again;
+    let mut texts = Vec::with_capacity(paths.len());
+    for path in paths {
+        match std::fs::read_to_string(path) {
+            Ok(doc) => texts.push(rewrite(path, &doc)),
+            Err(err) => {
+                return outcome(
+                    &format!("{noun} not changed"),
+                    format!(
+                        "no file of the group was changed: {} would not read: {err}. Fix what \
+                         stops it being read, then {again}.",
+                        path.display()
+                    ),
+                );
+            }
+        }
+    }
+    for (at, (path, text)) in paths.iter().zip(&texts).enumerate() {
+        let Err(err) = crate::task::write_atomic(path, text) else {
+            continue;
+        };
+        if at == 0 {
+            return outcome(
+                &format!("{noun} not changed"),
+                format!(
+                    "no file of the group was changed: {err:#}. Fix what stops the write, \
+                     then {again}."
+                ),
+            );
+        }
+        let list = |paths: &[std::path::PathBuf]| {
+            paths
+                .iter()
+                .map(|path| format!("  {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        return outcome(
+            &format!("{noun} changed in part"),
+            format!(
+                "{err:#}. {}:\n{}\nThese were left unchanged:\n{}\n{} Fix what stops the \
+                 write, then {again}.",
+                words.changed,
+                list(&paths[..at]),
+                list(&paths[at..]),
+                words.split,
+            ),
+        );
+    }
+    match super::pending::list_rows(repo) {
+        Ok(rows) => {
+            adopt_groups(rows.groups, groups, state);
+            Mode::Browsing
+        }
+        // The files are written, so the pane shows what they now say; the
+        // queue reader's next pass reads the rest of the list again.
+        Err(err) => {
+            for task in groups.iter_mut().flat_map(|group| &mut group.tasks) {
+                if paths.contains(&task.path) {
+                    patch(task);
+                }
+            }
+            outcome(
+                &format!("{noun} changed"),
+                format!(
+                    "{}, but the pending task list would not read again: {err:#}. The rest \
+                     of the list may be behind until the screen reads it again.",
+                    words.done
+                ),
+            )
+        }
+    }
+}
+
+/// `value` as a YAML scalar that reads back as that same string: bare where
+/// it already would, quoted where YAML would read it as something else. A
+/// branch may be named `1.0` or `true`, which bare would read back as a
+/// number or a boolean, and `base:` would then hold no string at all.
+fn yaml_scalar(value: &str) -> String {
+    serde_norway::to_string(value)
+        .map(|text| text.trim_end().to_string())
+        // Serializing a string does not fail; should it ever, a single-quoted
+        // scalar reads back as the string all the same.
+        .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "''")))
+}
+
 /// Insert or replace a `<key>: <value>` line right after a task's
 /// opening `---` fence, dropping any line already there for that same key —
 /// and, with it, the indented or `- ` lines that continued it, so a
@@ -7891,6 +9015,19 @@ fn handle_gate_key(
 /// [`write_back_ids`], which does — this only ever touches the text in
 /// memory; what happens to the result is each caller's own business.
 pub(super) fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> String {
+    rewrite_frontmatter_field(doc, key, Some(value))
+}
+
+/// A task's text with its frontmatter's `<key>:` line dropped, the lines
+/// continuing it included, as [`with_frontmatter_field`] drops them before
+/// writing its own. A task naming no such key comes back unchanged.
+fn without_frontmatter_field(doc: &str, key: &str) -> String {
+    rewrite_frontmatter_field(doc, key, None)
+}
+
+/// [`with_frontmatter_field`] with `value`, and [`without_frontmatter_field`]
+/// with `None`, which writes no line in place of the one it drops.
+fn rewrite_frontmatter_field(doc: &str, key: &str, value: Option<&str>) -> String {
     // `split_fence` accepts a leading byte order mark, so a routine saved
     // with one reaches here too. `trim` does not count it as whitespace, so
     // left on, the fence would not be found and the id would go unminted.
@@ -7903,12 +9040,14 @@ pub(super) fn with_frontmatter_field(doc: &str, key: &str, value: &str) -> Strin
     }
 
     let prefix = format!("{key}:");
-    let mut out = String::with_capacity(doc.len() + key.len() + value.len() + 4);
+    let mut out = String::with_capacity(doc.len() + key.len() + value.map_or(0, str::len) + 4);
     out.push_str(&doc[..=nl]);
-    out.push_str(&prefix);
-    out.push(' ');
-    out.push_str(value);
-    out.push('\n');
+    if let Some(value) = value {
+        out.push_str(&prefix);
+        out.push(' ');
+        out.push_str(value);
+        out.push('\n');
+    }
     let mut in_frontmatter = true;
     let mut dropping = false;
     for line in doc[nl + 1..].lines() {
@@ -8473,11 +9612,7 @@ pub(crate) fn tasks_pane_lines(
         // That one is named by id, not by branch: a pending dependency has
         // no branch yet, and the queued summary names the branch itself
         // where it matters — see `missing_start_sentence`.
-        let lands_in = task
-            .base
-            .clone()
-            .or_else(|| state.board_branch.clone())
-            .unwrap_or_else(|| "-".to_string());
+        let lands_in = lands_in(task, state).unwrap_or_else(|| "-".to_string());
         let starts_from = task
             .starts_from
             .clone()
@@ -9107,14 +10242,15 @@ fn two_pane_frame(
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
-/// [`Mode::DeletePlan`], [`Mode::NewJob`], [`Mode::PickRoutine`] — none
-/// of the ordinary line's keys is read, so this draws the picker's own key
-/// row instead, the same keys its popup names. A notice is different: it
-/// reads only `enter` to close it, or only `esc` for
-/// [`Mode::PlanNotDeleted`], which its own popup says, and the line
-/// under the frame stays the one the screen will read again once it is
-/// closed — all but [`Mode::JobSaved`], which the routines tab's mockup
-/// draws over its own `[enter] confirm` line. [`Mode::Options`] keeps the
+/// [`Mode::DeletePlan`], [`Mode::NewJob`], [`Mode::PickRoutine`],
+/// [`Mode::EditPipeline`], [`Mode::EditLandsIn`], [`Mode::EditDependsOn`]
+/// — none of the ordinary line's keys is read, so this draws the picker's
+/// own key row instead, the same keys its popup names. A notice is
+/// different: it reads only `enter` to close it, or only `esc` for
+/// [`Mode::PlanNotDeleted`], which its own popup says, and the line under
+/// the frame stays the one the screen will read again once it is closed —
+/// all but [`Mode::JobSaved`], which the routines tab's mockup draws over
+/// its own `[enter] confirm` line. [`Mode::Options`] keeps the
 /// ordinary line too: the menu names its own keys in its popup, and is one
 /// step on the way to an action the line under it already names as
 /// `o options`.
@@ -9130,6 +10266,14 @@ fn two_pane_frame(
 fn footer(state: &ScreenState, on_orphan: bool) -> String {
     match &state.mode {
         Mode::Filter => key_hint(SEARCH_KEYS),
+        // The picker's search row reads keys the way the filter box does,
+        // so it names the same two ways out of it.
+        Mode::EditPipeline(pick) if pick.list.searching => key_hint(SEARCH_KEYS),
+        Mode::EditPipeline(_) => key_hint(EDIT_PICK_KEYS),
+        Mode::EditLandsIn(pick) if pick.list.searching => key_hint(SEARCH_KEYS),
+        Mode::EditLandsIn(_) => key_hint(EDIT_PICK_KEYS),
+        Mode::EditDependsOn(pick) if pick.list.searching => key_hint(SEARCH_KEYS),
+        Mode::EditDependsOn(_) => key_hint(EDIT_PICK_KEYS),
         // The save panel reads a name the same way the filter box reads a
         // query, so its own line names the same two keys the filter's does
         // to leave it — `enter`/`esc` — rather than any of the ordinary
@@ -9416,6 +10560,9 @@ fn popup(
             (checkbox_row_cap(layout), popup_height(layout)),
         )),
         Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
+        Mode::EditPipeline(pick) => Some(pick.list.popup(layout.rows)),
+        Mode::EditLandsIn(pick) => Some(pick.list.popup(layout.rows)),
+        Mode::EditDependsOn(pick) => Some(pick.list.popup(layout.rows)),
         Mode::Options(menu) => {
             let labels: Vec<String> = menu.items.iter().map(RowOption::label).collect();
             let items: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -15157,10 +16304,14 @@ mod tests {
     /// own loop adds around it.
     #[test]
     fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
-        let (baseline_proc, baseline_reads) =
-            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\r");
-        let (measured_proc, measured_reads) =
-            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\rj");
+        let (baseline_proc, baseline_reads) = process_and_read_counts(
+            "queue-reader-thread-gate-baseline",
+            "\to\x1b[B\x1b[B\x1b[B\x1b[B\r",
+        );
+        let (measured_proc, measured_reads) = process_and_read_counts(
+            "queue-reader-thread-gate-measured",
+            "\to\x1b[B\x1b[B\x1b[B\x1b[B\rj",
+        );
 
         assert_eq!(
             measured_proc, baseline_proc,
@@ -15785,11 +16936,12 @@ mod tests {
     }
 
     /// `o` lists what the focused row can do, titled with its name: over
-    /// the tasks pane a pending task offers open task, gate then delete, over
-    /// the groups pane a group with a pending task offers trial, save as
-    /// routine then delete. A group with no tasks has none of them and opens
-    /// the menu with nothing in it, and a pane with no row under its cursor
-    /// opens no menu at all.
+    /// the tasks pane a pending chain head offers open task, edit pipeline,
+    /// edit lands in, edit depends on, gate then delete, over the groups
+    /// pane a group with a pending task offers trial, save as routine then
+    /// delete. A group with no tasks has none of them and opens the menu
+    /// with nothing in it, and a pane with no row under its cursor opens no
+    /// menu at all.
     #[test]
     fn the_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("screen-options-lists");
@@ -15808,7 +16960,14 @@ mod tests {
         assert_eq!(menu.title, "wire");
         assert_eq!(
             menu.items,
-            [RowOption::Open, RowOption::Gate, RowOption::Delete]
+            [
+                RowOption::Open,
+                RowOption::EditPipeline,
+                RowOption::EditLandsIn,
+                RowOption::EditDependsOn,
+                RowOption::Gate,
+                RowOption::Delete
+            ]
         );
 
         // `list_groups` never hands back an empty group, so one is made by
@@ -15861,7 +17020,14 @@ mod tests {
             let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
             assert_eq!(
                 menu.items,
-                [RowOption::Open, RowOption::Gate, RowOption::Delete],
+                [
+                    RowOption::Open,
+                    RowOption::EditPipeline,
+                    RowOption::EditLandsIn,
+                    RowOption::EditDependsOn,
+                    RowOption::Gate,
+                    RowOption::Delete
+                ],
                 "{id}"
             );
         }
@@ -15888,7 +17054,8 @@ mod tests {
     /// The groups pane's menu on a group whose task has a `plan:` draws
     /// `open plan`, `trial`, `save as routine` and `delete`, in that order,
     /// the cursor on the first, and that task's own menu draws `open task`,
-    /// `gate` and `delete` with no `open plan` among them.
+    /// `edit pipeline`, `edit lands in`, `edit depends on`, `gate` and
+    /// `delete` with no `open plan` among them.
     #[test]
     fn the_group_menu_draws_open_plan_first_and_the_task_menu_drops_it() {
         let (repo, _root_guard) = fixture("screen-options-draws-plan");
@@ -15927,6 +17094,9 @@ mod tests {
             [
                 format!("{TOP_LEFT}─ cart-totals {}{TOP_RIGHT}", "─".repeat(19)),
                 "│  > open task                    │".to_string(),
+                "│    edit pipeline                │".to_string(),
+                "│    edit lands in                │".to_string(),
+                "│    edit depends on              │".to_string(),
                 "│    gate                         │".to_string(),
                 "│    delete                       │".to_string(),
                 "│                                 │".to_string(),
@@ -16145,6 +17315,1187 @@ mod tests {
         assert!(matches!(mode, Mode::Browsing), "{mode:?}");
     }
 
+    /// The built-in pipelines and copies of `default` under `names`, so a
+    /// picker has a list long enough to scroll.
+    fn pipelines_named(names: &[&str]) -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        let default = pipelines.pipelines["default"].clone();
+        for name in names {
+            pipelines
+                .pipelines
+                .insert(name.to_string(), default.clone());
+        }
+        pipelines
+    }
+
+    /// `state`'s edit pipeline picker, opened through the menu's own item.
+    fn edit_pipeline_on(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        groups: &[Group],
+        state: &ScreenState,
+    ) -> Box<PipelinePick> {
+        let picked = Picked {
+            repo,
+            pipelines,
+            routines_dir: &repo.routines_dir(),
+        };
+        let menu = pending_options(groups, state).unwrap();
+        match picked.run(groups, &[], state, &menu, RowOption::EditPipeline) {
+            Mode::EditPipeline(pick) => pick,
+            other => panic!("edit pipeline opened {other:?}"),
+        }
+    }
+
+    /// Edit pipeline sits after open task on a pending task's menu, and a
+    /// done task's menu does not offer it, as a queued one's does not —
+    /// see `delete_is_offered_last_exactly_on_rows_with_a_pending_file`.
+    #[test]
+    fn edit_pipeline_is_offered_only_on_a_pending_task() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-offered");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let mut groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items[..2], [RowOption::Open, RowOption::EditPipeline]);
+        assert_eq!(RowOption::EditPipeline.label(), "edit pipeline");
+        groups[0].tasks[0].state = TaskState::Done;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+    }
+
+    /// The picker lists every pipeline but the task's own, in name order,
+    /// titled with the task: scrolled to the last of ten it counts the
+    /// three above, and `f` then `impl` on a picker just opened leaves the
+    /// four names holding it.
+    #[test]
+    fn the_pipeline_picker_lists_the_other_pipelines_and_scrolls_and_searches() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-list");
+        write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: a\npipeline: impl\n", BODY),
+        );
+        let pipelines = pipelines_named(&[
+            "impl",
+            "impl_fast",
+            "impl_lite",
+            "impl_tdd",
+            "impl_ui",
+            "probe",
+            "release",
+            "security",
+            "skill",
+        ]);
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+        let pick = edit_pipeline_on(&repo, &pipelines, &groups, &state);
+        let list = (0..9).fold(pick.list, |list, _| match list.handle_key(Key::Down) {
+            crate::screen::picker::Picked::Open(list) => *list,
+            _ => panic!("the picker closed on a down arrow"),
+        });
+        let drawn: Vec<String> = list
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "╭─ pipeline for wire ────────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│    ↑ 3 pipelines above                         │",
+                "│    impl_lite                                   │",
+                "│    impl_tdd                                    │",
+                "│    impl_ui                                     │",
+                "│    probe                                       │",
+                "│    release                                     │",
+                "│    security                                    │",
+                "│  > skill                                       │",
+                "│                                                │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let list = edit_pipeline_on(&repo, &pipelines, &groups, &state).list;
+        let list = "fimpl"
+            .chars()
+            .fold(list, |list, c| match list.handle_key(Key::Char(c)) {
+                crate::screen::picker::Picked::Open(list) => *list,
+                _ => panic!("the picker closed on {c:?}"),
+            });
+        let drawn: Vec<String> = list
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                "╭─ pipeline for wire ────────────────────────────╮",
+                "│  search: impl▏                                 │",
+                "│                                                │",
+                "│  > impl_fast                                   │",
+                "│    impl_lite                                   │",
+                "│    impl_tdd                                    │",
+                "│    impl_ui                                     │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+    }
+
+    /// `enter` on the picker writes the pick over the task's `pipeline:`
+    /// and leaves every other line of the file as it was, closes to the
+    /// screen, and the tasks pane shows the new pipeline.
+    #[test]
+    fn enter_on_the_pipeline_picker_writes_the_pending_file() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-enter");
+        let before = task_text(
+            "wire",
+            "group: a\ndepends_on:\n- login\nbase: main\n",
+            "## Goal\n\npipeline: default is body text, kept as it is.\n",
+        );
+        let path = write_pending(&repo, "wire", &before);
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\r\r");
+        let after = std::fs::read_to_string(&path).unwrap();
+        // The pipeline line moves to the top of the front matter; every
+        // other line stays as it was, in the same order.
+        let others = |doc: &str| -> Vec<String> {
+            doc.lines()
+                .filter(|l| *l != "pipeline: bugfix" && *l != "pipeline: default")
+                .map(str::to_string)
+                .collect()
+        };
+        assert!(after.lines().any(|l| l == "pipeline: bugfix"), "{after}");
+        assert!(!after.lines().any(|l| l == "pipeline: default"), "{after}");
+        assert_eq!(others(&after), others(&before));
+        assert!(after.ends_with("pipeline: default is body text, kept as it is.\n"));
+        let last = crate::screen::shell::plain(last_frame(&drawn));
+        let pipeline_row = |name: &str| {
+            last.lines().any(|l| {
+                l.split("pipeline:")
+                    .nth(1)
+                    .is_some_and(|rest| rest.trim_start().starts_with(name))
+            })
+        };
+        assert!(pipeline_row("bugfix"), "{last}");
+        assert!(!pipeline_row("default"), "{last}");
+        assert!(!last.contains("pipeline for wire"), "{last}");
+    }
+
+    /// `esc` on the picker goes back to the options menu it was opened from.
+    #[test]
+    fn esc_on_the_pipeline_picker_reopens_the_options_menu() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-esc");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let last = last_frame(&screen(&repo, listed(&repo), "\to\x1b[B\r\x1b")).to_string();
+        assert!(last.contains("> edit pipeline"), "{last}");
+        assert!(!last.contains("pipeline for wire"), "{last}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A screen gate stays when the new pipeline has its step as one the gate
+    /// picker offers, `review` on `bugfix`. It is cleared when the step is
+    /// missing, `implement` on `bugfix`, and when the new pipeline runs it as
+    /// a command, `review` on `checked`, since submission refuses a
+    /// `gate_at:` on a command step. Before the gate check went through
+    /// `gate_steps`, the command-step gate was kept.
+    #[test]
+    fn a_new_pipeline_keeps_a_gate_only_on_a_step_it_has() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-gate");
+        let yaml = "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: review\n  \
+             - id: review\n    run: scripts/gate.sh\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "checked".into(),
+            crate::pipeline::Pipeline::parse("checked", yaml).unwrap(),
+        );
+        for (step, name, kept) in [
+            ("review", "bugfix", true),
+            ("implement", "bugfix", false),
+            ("review", "checked", false),
+        ] {
+            write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+            let mut groups = listed(&repo);
+            let mut state = on_pending_task(&groups, "wire");
+            let key = highlighted_task_key(&groups, &state).unwrap();
+            state.gates.insert(key.clone(), step.to_string());
+            let menu = pending_options(&groups, &state).unwrap();
+            let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, name);
+            assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+            assert_eq!(state.gates.contains_key(&key), kept, "{step} on {name}");
+            assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some(name));
+        }
+    }
+
+    /// A pending list that will not read again after the pick still shows
+    /// the new pipeline on the task's row, patched in memory, and says the
+    /// list would not read in a notice. Before, the failure was dropped
+    /// without a word and the screen closed to browsing.
+    #[test]
+    fn a_list_that_will_not_read_after_a_pipeline_pick_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-reread");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let pipelines = Pipelines::builtin();
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        // Write and search but no read: the listing fails, while the file
+        // itself still reads and the rename into the directory still works.
+        let dir = repo.pending_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o300);
+        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+
+        let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // directory this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .any(|l| l == "pipeline: bugfix")
+        );
+        assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some("bugfix"));
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "pipeline changed");
+        assert!(
+            notice.text.contains(&path.display().to_string())
+                && notice
+                    .text
+                    .contains("the pending task list would not read again: "),
+            "{}",
+            notice.text
+        );
+    }
+
+    /// A pick lands on nothing once its task has moved: with another task
+    /// slid under the cursor, or the pending file gone, a notice names the
+    /// file and nothing is written.
+    #[test]
+    fn a_pipeline_pick_for_a_task_that_moved_writes_nothing() {
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-moved");
+        let left = task_text("left", "group: one\n", BODY);
+        let right = task_text("right", "group: one\n", BODY);
+        write_pending_two(&repo, "left", &left, "right", &right);
+        let pipelines = Pipelines::builtin();
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "left");
+        let menu = pending_options(&groups, &state).unwrap();
+        let path = repo.pending_dir().join("left.md");
+
+        state.task_cursor = 1 - state.task_cursor;
+        let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert!(
+            notice.text.contains(&path.display().to_string()),
+            "{notice:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), left);
+        assert_eq!(
+            std::fs::read_to_string(repo.pending_dir().join("right.md")).unwrap(),
+            right
+        );
+
+        state.task_cursor = 1 - state.task_cursor;
+        std::fs::remove_file(&path).unwrap();
+        let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert!(
+            notice.text.contains(&path.display().to_string()),
+            "{notice:?}"
+        );
+        assert!(!path.exists());
+    }
+
+    /// `state`'s edit lands in picker, opened through the menu's own item.
+    fn edit_lands_in_on(repo: &Repo, groups: &[Group], state: &ScreenState) -> Box<LandsInPick> {
+        let picked = Picked {
+            repo,
+            pipelines: &Pipelines::builtin(),
+            routines_dir: &repo.routines_dir(),
+        };
+        let menu = pending_options(groups, state).unwrap();
+        match picked.run(groups, &[], state, &menu, RowOption::EditLandsIn) {
+            Mode::EditLandsIn(pick) => pick,
+            other => panic!("edit lands in opened {other:?}"),
+        }
+    }
+
+    /// `picker`'s popup, its frame and styling kept but its colours taken
+    /// off.
+    fn drawn_picker(picker: &crate::screen::picker::Picker<String>) -> Vec<String> {
+        picker
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect()
+    }
+
+    /// Edit lands in sits after edit pipeline on a chain head's menu, one
+    /// alone in its group or one stacked onto another group's task, and a
+    /// task depending on another task of its own group has none. Counting
+    /// the stacking dependency as one inside the group would take the item
+    /// off the stacked head.
+    #[test]
+    fn edit_lands_in_is_offered_only_on_a_chain_head() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-offered");
+        write_pending(&repo, "login", &task_text("login", "group: auth\n", BODY));
+        write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: pay\ndepends_on: [login]\n", BODY),
+        );
+        write_pending(
+            &repo,
+            "tests",
+            &task_text("tests", "group: pay\ndepends_on: [wire]\n", BODY),
+        );
+        let mut groups = listed(&repo);
+        let head = [
+            RowOption::Open,
+            RowOption::EditPipeline,
+            RowOption::EditLandsIn,
+            RowOption::EditDependsOn,
+            RowOption::Gate,
+            RowOption::Delete,
+        ];
+        for id in ["login", "wire"] {
+            let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
+            assert_eq!(menu.items, head, "{id}");
+        }
+        let menu = pending_options(&groups, &on_pending_task(&groups, "tests")).unwrap();
+        assert_eq!(
+            menu.items,
+            [
+                RowOption::Open,
+                RowOption::EditPipeline,
+                RowOption::Gate,
+                RowOption::Delete
+            ]
+        );
+        assert_eq!(RowOption::EditLandsIn.label(), "edit lands in");
+
+        // Set by hand, as
+        // `delete_is_offered_last_exactly_on_rows_with_a_pending_file` does:
+        // a queued head is offered no edit at all.
+        let state = on_pending_task(&groups, "login");
+        let at = state.group_cursor;
+        groups[at].tasks[0].state = TaskState::Queued;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+    }
+
+    /// The picker opens on `fetching origin…`, then lists every local and
+    /// `origin` branch once, task branches included and the task's current
+    /// lands-in branch left out, with `origin` beside the branch only the
+    /// fetch brought. Another remote's branch is not listed.
+    #[test]
+    fn the_lands_in_picker_lists_every_branch_but_the_current_one() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-list");
+        let origin_guard = crate::scratch::root("commands-screen-edit-lands-in-list-origin");
+        let _ = std::fs::remove_dir_all(&origin_guard);
+        std::fs::create_dir_all(&origin_guard).unwrap();
+        crate::scratch::git_init(&origin_guard, &["--bare", "-b", "main"]);
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["branch", "main"]);
+        git(&["branch", "task/gh-9-wire"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            &origin_guard.display().to_string(),
+        ]);
+        git(&[
+            "push",
+            "-q",
+            "origin",
+            "main",
+            "plan/demo",
+            "main:feature/remote",
+        ]);
+        // Only the fetch on open can bring this one back.
+        git(&["update-ref", "-d", "refs/remotes/origin/feature/remote"]);
+        git(&["update-ref", "refs/remotes/upstream/elsewhere", "HEAD"]);
+        write_pending(&repo, "wire", &task_text("wire", "group: pay\n", BODY));
+        let groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+
+        let mut list = edit_lands_in_on(&repo, &groups, &state).list;
+        assert_eq!(
+            drawn_picker(&list),
+            [
+                "╭─ lands in for wire ────────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│    fetching origin…                            │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let start = std::time::Instant::now();
+        while list.fetching() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            list.settle();
+        }
+        assert_eq!(
+            drawn_picker(&list),
+            [
+                "╭─ lands in for wire ────────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│  > feature/remote                    origin    │",
+                "│    main                                        │",
+                "│    task/gh-9-wire                              │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        drop(origin_guard);
+    }
+
+    /// `enter` writes the branch as `base:` into every pending file of the
+    /// head's group, the later task's included, closes to the screen, and
+    /// the tasks pane's `lands in:` row shows it. The group then passes
+    /// submission's checks with no `--base`, where before it named none.
+    #[test]
+    fn enter_on_the_lands_in_picker_writes_every_pending_file_of_the_group() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-enter");
+        crate::repo::run(&repo.root, "git", &["branch", "main"]).unwrap();
+        let wire = write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: pay\npipeline: default\n", BODY),
+        );
+        let tests = write_pending(
+            &repo,
+            "tests",
+            &task_text(
+                "tests",
+                "group: pay\npipeline: default\ndepends_on: [wire]\n",
+                BODY,
+            ),
+        );
+        let dry_run = |repo: &Repo| {
+            let args = QueueAddArgs {
+                from: vec![repo.pending_dir().display().to_string()],
+                base: None,
+                dry_run: true,
+                no_tracking: Vec::new(),
+            };
+            queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false)
+        };
+        assert!(dry_run(&repo).is_err(), "it named no base before");
+
+        // Tab onto the tasks pane, o, down twice onto edit lands in, enter
+        // to open it, enter on `main`: `plan/demo` is the board's branch,
+        // where the task lands now, so it is left out.
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\r\r");
+        for path in [&wire, &tests] {
+            let after = std::fs::read_to_string(path).unwrap();
+            assert!(after.lines().any(|l| l == "base: main"), "{after}");
+        }
+        let last = crate::screen::shell::plain(last_frame(&drawn));
+        assert!(last.contains("lands in:    main"), "{last}");
+        assert!(!last.contains("lands in for wire"), "{last}");
+        dry_run(&repo).unwrap();
+    }
+
+    /// `esc` on the picker goes back to the options menu, on edit lands in.
+    #[test]
+    fn esc_on_the_lands_in_picker_reopens_the_options_menu() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-esc");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let last = last_frame(&screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\r\x1b")).to_string();
+        assert!(last.contains("> edit lands in"), "{last}");
+        assert!(!last.contains("lands in for wire"), "{last}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A queued or done task of the group keeps its file, and a task of
+    /// another group is not touched. A head that slid from under the cursor
+    /// writes nothing at all.
+    #[test]
+    fn a_lands_in_pick_writes_only_the_groups_pending_files() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-scope");
+        let other = task_text("other", "group: auth\n", BODY);
+        write_pending(&repo, "other", &other);
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: pay\n", BODY));
+        let queued = task_text("tests", "group: pay\ndepends_on: [wire]\n", BODY);
+        let tests = write_pending(&repo, "tests", &queued);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+
+        state.task_cursor = 1 - state.task_cursor;
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "main");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in not changed");
+        assert!(!std::fs::read_to_string(&wire).unwrap().contains("base:"));
+        state.task_cursor = 1 - state.task_cursor;
+
+        // Set by hand: what the listing gives a task the queue holds.
+        let at = state.group_cursor;
+        let later = 1 - state.task_cursor;
+        groups[at].tasks[later].state = TaskState::Queued;
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "main");
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert!(
+            std::fs::read_to_string(&wire)
+                .unwrap()
+                .lines()
+                .any(|l| l == "base: main")
+        );
+        assert_eq!(std::fs::read_to_string(&tests).unwrap(), queued);
+        assert_eq!(
+            std::fs::read_to_string(repo.pending_dir().join("other.md")).unwrap(),
+            other
+        );
+    }
+
+    /// A head stacked on another group's last task keeps edit lands in, but
+    /// only the branch that task lands in is written: any other pick would
+    /// leave a pair submission refuses, so it changes no file and says why.
+    #[test]
+    fn a_stacked_head_lands_only_where_its_stack_does() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-stacked");
+        write_pending(
+            &repo,
+            "login",
+            &task_text("login", "group: auth\nbase: plan/live\n", BODY),
+        );
+        let before = task_text("wire", "group: pay\ndepends_on: [login]\n", BODY);
+        let wire = write_pending(&repo, "wire", &before);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert!(menu.items.contains(&RowOption::EditLandsIn));
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "feature/other");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in not changed");
+        assert!(
+            notice
+                .text
+                .contains("`wire` stacks on `login`, which lands in `plan/live`"),
+            "{}",
+            notice.text
+        );
+        assert_eq!(std::fs::read_to_string(&wire).unwrap(), before);
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "plan/live");
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert!(
+            std::fs::read_to_string(&wire)
+                .unwrap()
+                .lines()
+                .any(|l| l == "base: plan/live")
+        );
+    }
+
+    /// A head another group's chain stacks onto keeps edit lands in, but a
+    /// pick changes no file while that chain lands where the head does now:
+    /// the head's group would move and leave the stacked group depending on
+    /// a task that no longer lands in its base, which submission refuses.
+    #[test]
+    fn a_head_another_chain_stacks_onto_keeps_its_branch() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-stacked-onto");
+        let mut paths = Vec::new();
+        for (id, extra) in [
+            ("login", "group: auth\n"),
+            ("wire", "group: pay\ndepends_on: [login]\n"),
+            ("tests", "group: pay\ndepends_on: [wire]\n"),
+        ] {
+            let front = format!("{extra}pipeline: default\nbase: plan/demo\n");
+            let text = task_text(id, &front, BODY);
+            paths.push((write_pending(&repo, id, &text), text));
+        }
+        let dry_run = |repo: &Repo| {
+            let args = QueueAddArgs {
+                from: vec![repo.pending_dir().display().to_string()],
+                base: None,
+                dry_run: true,
+                no_tracking: Vec::new(),
+            };
+            queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false)
+        };
+        dry_run(&repo).unwrap();
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "login");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert!(menu.items.contains(&RowOption::EditLandsIn));
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "1.0");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in not changed");
+        assert!(
+            notice
+                .text
+                .contains("`wire` of another group stacks on `login` and lands in `plan/demo`"),
+            "{}",
+            notice.text
+        );
+        for (path, before) in &paths {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), before);
+        }
+        dry_run(&repo).unwrap();
+    }
+
+    /// A write that fails part way through the chain names the files it
+    /// changed and the ones it left as they were. The later task's file is
+    /// moved into a folder it can be read from but not written into, so its
+    /// write fails after the head's has landed.
+    #[test]
+    fn a_lands_in_write_that_fails_part_way_names_the_unchanged_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-partial");
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: pay\n", BODY));
+        let before = task_text("tests", "group: pay\ndepends_on: [wire]\n", BODY);
+        write_pending(&repo, "tests", &before);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        let locked = repo.root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let tests = locked.join("tests.md");
+        std::fs::rename(repo.pending_dir().join("tests.md"), &tests).unwrap();
+        let at = state.group_cursor;
+        let later = 1 - state.task_cursor;
+        groups[at].tasks[later].path = tests.clone();
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&locked, perms.clone()).unwrap();
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "main");
+
+        // Restored before asserting, as the pipeline re-read test does.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in changed in part");
+        let (changed, unchanged) = notice.text.split_once("left unchanged").unwrap();
+        assert!(changed.contains(&wire.display().to_string()), "{changed}");
+        assert!(
+            unchanged.contains(&tests.display().to_string()),
+            "{unchanged}"
+        );
+        assert_eq!(std::fs::read_to_string(&tests).unwrap(), before);
+    }
+
+    /// A branch name YAML would read as something other than a string is
+    /// quoted, so `base:` reads back as the very name picked.
+    #[test]
+    fn a_picked_branch_reads_back_as_written() {
+        for name in ["main", "task/gh-9-wire", "1.0", "true", "123", "null", "#7"] {
+            let doc =
+                with_frontmatter_field("---\nid: wire\n---\nbody\n", "base", &yaml_scalar(name));
+            let front = crate::task::split_fence(&doc).unwrap().0;
+            let yaml: serde_norway::Value = serde_norway::from_str(front).unwrap();
+            assert_eq!(
+                super::super::pending::front_str(&yaml, "base").as_deref(),
+                Some(name),
+                "{doc}"
+            );
+        }
+        assert_eq!(yaml_scalar("task/gh-9-wire"), "task/gh-9-wire");
+    }
+
+    /// `state`'s edit depends on picker, opened through the menu's own item
+    /// with `gh` as GitHub's command line.
+    fn edit_depends_on_on(
+        repo: &Repo,
+        groups: &[Group],
+        state: &ScreenState,
+        gh: &std::path::Path,
+    ) -> Box<DependsOnPick> {
+        let menu = pending_options(groups, state).unwrap();
+        assert!(menu.items.contains(&RowOption::EditDependsOn));
+        let (group, head) = shown(groups, state)
+            .get(state.group_cursor)
+            .copied()
+            .zip(highlighted_task(groups, state))
+            .unwrap();
+        Box::new(DependsOnPick::new(
+            repo,
+            groups,
+            state,
+            group,
+            head,
+            gh.display().to_string(),
+            menu,
+        ))
+    }
+
+    /// `picker`'s popup once its load has answered.
+    fn settled_picker(
+        picker: &mut crate::screen::picker::Picker<Option<StackTarget>>,
+    ) -> Vec<String> {
+        let start = std::time::Instant::now();
+        while picker.fetching() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            picker.settle();
+        }
+        picker
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect()
+    }
+
+    /// The groups `wire`'s chain could stack onto: the last task of every
+    /// other group, pending, queued or done, where it lands as the tasks pane
+    /// shows it, and a pending one naming no `base:` landing on the board's
+    /// branch. Left out are the task `wire` stacks on now, a group with two
+    /// last tasks, and the groups stacked on `wire`'s own, one stacked
+    /// directly and one through it, two hops away.
+    #[test]
+    fn stack_targets_leave_out_the_current_stack_and_every_group_above() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-targets");
+        for (id, front) in [
+            ("login-flow", "group: auth\nbase: main\n"),
+            ("wire", "group: pay\nbase: main\ndepends_on: [login-flow]\n"),
+            ("tests", "group: pay\nbase: main\ndepends_on: [wire]\n"),
+            ("ship-cart-1", "group: cart\nbase: task/gh-1425-x\n"),
+            (
+                "ship-cart",
+                "group: cart\nbase: task/gh-1425-x\ndepends_on: [ship-cart-1]\n",
+            ),
+            ("refresh-guide", "group: docs-refresh\nbase: plan/docs\n"),
+            ("export-csv", "group: billing-export\n"),
+            ("on-pay", "group: above\ndepends_on: [tests]\n"),
+            ("on-above", "group: higher\ndepends_on: [on-pay]\n"),
+            ("fan-a", "group: fan\n"),
+            ("fan-b", "group: fan\n"),
+        ] {
+            write_pending(&repo, id, &task_text(id, front, BODY));
+        }
+        let mut groups = listed(&repo);
+        // Set by hand, as `a_lands_in_pick_writes_only_the_groups_pending_files`
+        // does: what the listing gives a queued and a done group.
+        for group in &mut groups {
+            let (task_state, group_state) = match group.name.as_str() {
+                "cart" => (TaskState::Queued, GroupState::Queued),
+                "docs-refresh" => (TaskState::Done, GroupState::Done),
+                _ => continue,
+            };
+            group.state = group_state;
+            for task in &mut group.tasks {
+                task.state = task_state;
+            }
+        }
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+        let group = shown(&groups, &state)[state.group_cursor];
+        let head = highlighted_task(&groups, &state).unwrap();
+
+        let (mut ready, done) = stack_targets(&groups, &state, group, head);
+        ready.sort_by(|a, b| a.id.cmp(&b.id));
+        let target = |id: &str, group: &str, lands: &str| StackTarget {
+            id: id.to_string(),
+            group: group.to_string(),
+            lands: Some(lands.to_string()),
+        };
+        assert_eq!(
+            ready,
+            [
+                target("export-csv", "billing-export", "plan/demo"),
+                target("ship-cart", "cart", "task/gh-1425-x"),
+            ]
+        );
+        assert_eq!(done, [target("refresh-guide", "docs-refresh", "plan/docs")]);
+    }
+
+    /// The picker opens on `checking pull requests…` while `gh` is asked
+    /// about the done groups' last tasks, and no other, then lists `none`,
+    /// since `wire` stacks on something, and every target beside its group,
+    /// in the order of the groups' names: the done group whose pull request
+    /// is open among them, the one whose pull request merged left out.
+    #[test]
+    fn the_depends_on_picker_lists_none_then_each_task_beside_its_group() {
+        use crate::archive_index::testutil::archive;
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-list");
+        let gh_dir = crate::scratch::root("commands-screen-edit-depends-on-list-gh");
+        let gh =
+            super::super::stack::stand_in_gh(&gh_dir, &["task/refresh-guide"], &["task/old-guide"]);
+        archive(
+            &repo,
+            "refresh-guide",
+            "group: docs-refresh\nbranch: task/refresh-guide\nbase: main\n",
+        );
+        archive(
+            &repo,
+            "old-guide",
+            "group: old-docs\nbranch: task/old-guide\nbase: main\n",
+        );
+        for (id, front) in [
+            ("login-flow", "group: auth\n"),
+            ("wire", "group: pay\ndepends_on: [login-flow]\n"),
+            ("ship-cart", "group: cart\n"),
+            ("export-csv", "group: billing-export\n"),
+        ] {
+            write_pending(&repo, id, &task_text(id, front, BODY));
+        }
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+
+        let mut list = edit_depends_on_on(&repo, &groups, &state, &gh).list;
+        assert_eq!(
+            drawn_picker_of(&list)[3],
+            "│    checking pull requests…                     │"
+        );
+        assert_eq!(
+            settled_picker(&mut list),
+            [
+                "╭─ depends on for wire ──────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│  > none                                        │",
+                "│    export-csv                  billing-export  │",
+                "│    ship-cart                   cart            │",
+                "│    refresh-guide               docs-refresh    │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let mut asked: Vec<String> = std::fs::read_to_string(gh_dir.join("asked"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        asked.sort();
+        assert_eq!(asked, ["task/old-guide", "task/refresh-guide"]);
+    }
+
+    /// A `gh` that cannot answer leaves every done group out, stops asking
+    /// after the first, and says why over the list with `gh`'s own reason
+    /// and what to do, as the mockup draws it.
+    #[test]
+    fn a_failed_pull_request_check_leaves_done_groups_out_and_says_why() {
+        use crate::archive_index::testutil::archive;
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-failed");
+        let gh_dir = crate::scratch::root("commands-screen-edit-depends-on-failed-gh");
+        let gh = super::super::stack::stand_in_gh(
+            &gh_dir,
+            &["task/refresh-guide", "task/guide-two"],
+            &[],
+        );
+        std::fs::write(gh_dir.join("logged-out"), "").unwrap();
+        archive(
+            &repo,
+            "refresh-guide",
+            "group: docs-refresh\nbranch: task/refresh-guide\n",
+        );
+        archive(
+            &repo,
+            "guide-two",
+            "group: docs-two\nbranch: task/guide-two\n",
+        );
+        for (id, front) in [
+            ("login-flow", "group: auth\n"),
+            ("wire", "group: pay\ndepends_on: [login-flow]\n"),
+            ("ship-cart", "group: cart\n"),
+        ] {
+            write_pending(&repo, id, &task_text(id, front, BODY));
+        }
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+
+        let mut list = edit_depends_on_on(&repo, &groups, &state, &gh).list;
+        assert_eq!(
+            settled_picker(&mut list),
+            [
+                "╭─ depends on for wire ──────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│    pull request check failed: To get started   │",
+                "│    with GitHub CLI, please run: gh auth        │",
+                "│    login. done groups are left out.            │",
+                "│    run gh auth login, then reopen.             │",
+                "│                                                │",
+                "│  > none                                        │",
+                "│    ship-cart                   cart            │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let asked = std::fs::read_to_string(gh_dir.join("asked")).unwrap();
+        assert_eq!(asked.lines().count(), 1, "{asked}");
+    }
+
+    /// `picker`'s popup as drawn now, its colours taken off.
+    fn drawn_picker_of(picker: &crate::screen::picker::Picker<Option<StackTarget>>) -> Vec<String> {
+        picker
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect()
+    }
+
+    /// `enter` on a task writes it as the head's `depends_on:`, and the
+    /// lands-in branch of its group as `base:` into every pending file of
+    /// the head's group. The group stacked onto names no `base:`, so the
+    /// branch copied is the board's, which its `lands in:` row shows. The
+    /// screen closes to the tasks pane, which shows both.
+    ///
+    /// Driven key by key rather than through [`screen`], whose keys all
+    /// arrive at once: the picker lists only once its thread has answered,
+    /// and an `enter` pressed before that picks nothing.
+    #[test]
+    fn enter_on_the_depends_on_picker_stacks_the_chain_onto_the_pick() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-enter");
+        let cart = task_text("ship-cart", "group: cart\n", BODY);
+        let cart_path = write_pending(&repo, "ship-cart", &cart);
+        let wire = write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: billing\nbase: main\n", BODY),
+        );
+        let tests = write_pending(
+            &repo,
+            "tests",
+            &task_text(
+                "tests",
+                "group: billing\nbase: main\ndepends_on: [wire]\n",
+                BODY,
+            ),
+        );
+
+        let gh_dir = crate::scratch::root("commands-screen-edit-depends-on-enter-gh");
+        let gh = super::super::stack::stand_in_gh(&gh_dir, &[], &[]);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+        let pick = edit_depends_on_on(&repo, &groups, &state, &gh);
+        let DependsOnPick { menu, mut list } = *pick;
+        settled_picker(&mut list);
+        // `enter` on `ship-cart`, its only entry: `wire` stacks on nothing,
+        // so there is no `none` row.
+        let crate::screen::picker::Picked::Chosen(target) = list.handle_key(Key::Enter) else {
+            panic!("enter picked nothing");
+        };
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, target.as_ref());
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        let after = std::fs::read_to_string(&wire).unwrap();
+        assert!(
+            after.lines().any(|l| l == "depends_on: [ship-cart]"),
+            "{after}"
+        );
+        assert!(after.lines().any(|l| l == "base: plan/demo"), "{after}");
+        let after = std::fs::read_to_string(&tests).unwrap();
+        assert!(after.lines().any(|l| l == "base: plan/demo"), "{after}");
+        assert!(after.lines().any(|l| l == "depends_on: [wire]"), "{after}");
+        assert_eq!(std::fs::read_to_string(&cart_path).unwrap(), cart);
+        let pane = tasks_pane_lines(&groups, &Pipelines::builtin(), &state, 80)
+            .0
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pane.contains("depends on:  ship-cart"), "{pane}");
+        assert!(pane.contains("lands in:    plan/demo"), "{pane}");
+        assert!(
+            gh_dir.join("asked").metadata().is_err(),
+            "no done group to ask about"
+        );
+    }
+
+    /// `none` drops the head's `depends_on:`, a block list's items with it,
+    /// and leaves every `base:` as it was.
+    #[test]
+    fn none_on_the_depends_on_picker_drops_the_stack_and_keeps_the_base() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-none");
+        write_pending(
+            &repo,
+            "login-flow",
+            &task_text("login-flow", "group: auth\nbase: main\n", BODY),
+        );
+        let wire = write_pending(
+            &repo,
+            "wire",
+            &task_text(
+                "wire",
+                "group: pay\ndepends_on:\n- login-flow\nbase: main\n",
+                BODY,
+            ),
+        );
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, None);
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        let after = std::fs::read_to_string(&wire).unwrap();
+        assert!(!after.contains("depends_on"), "{after}");
+        assert!(!after.contains("- login-flow"), "{after}");
+        assert!(after.lines().any(|l| l == "base: main"), "{after}");
+        assert!(
+            highlighted_task(&groups, &state)
+                .unwrap()
+                .depends_on
+                .is_empty()
+        );
+    }
+
+    /// `esc` on the picker goes back to the options menu, on edit depends on.
+    #[test]
+    fn esc_on_the_depends_on_picker_reopens_the_options_menu() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-esc");
+        write_pending(
+            &repo,
+            "ship-cart",
+            &task_text("ship-cart", "group: cart\n", BODY),
+        );
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: billing\n", BODY));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\x1b[B\r\x1b");
+        let last = last_frame(&drawn).to_string();
+        assert!(last.contains("> edit depends on"), "{last}");
+        assert!(!last.contains("depends on for wire"), "{last}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(RowOption::EditDependsOn.label(), "edit depends on");
+    }
+
+    /// A stack onto a group landing elsewhere changes no file while a pending
+    /// task of another group stacks onto this chain and lands where it does
+    /// now: moving the chain alone would leave that task behind.
+    #[test]
+    fn a_stack_that_would_strand_a_group_stacked_onto_the_chain_changes_nothing() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-stranded");
+        let mut paths = Vec::new();
+        for (id, front) in [
+            ("ship-cart", "group: cart\nbase: plan/other\n"),
+            ("wire", "group: pay\nbase: main\n"),
+            ("on-wire", "group: above\nbase: main\ndepends_on: [wire]\n"),
+        ] {
+            let text = task_text(id, front, BODY);
+            paths.push((write_pending(&repo, id, &text), text));
+        }
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        let target = StackTarget {
+            id: "ship-cart".to_string(),
+            group: "cart".to_string(),
+            lands: Some("plan/other".to_string()),
+        };
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, Some(&target));
+
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "depends on not changed");
+        assert!(
+            notice
+                .text
+                .contains("`on-wire` of another group stacks on `wire` and lands in `main`"),
+            "{}",
+            notice.text
+        );
+        for (path, before) in &paths {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), before);
+        }
+    }
+
+    /// A stack onto a task whose lands in is not known writes the head's
+    /// `depends_on:` alone: no `base:` is copied, and the chain's other
+    /// pending file is neither changed nor rewritten. The target is a queued
+    /// task recorded with no `base:`, which does not take the board's branch
+    /// even while the board names one, since it was queued already.
+    #[test]
+    fn a_stack_onto_a_task_landing_nowhere_known_writes_only_the_heads_depends_on() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-unknown-lands");
+        write_pending(
+            &repo,
+            "ship-cart",
+            &task_text("ship-cart", "group: cart\n", BODY),
+        );
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: billing\n", BODY));
+        let tests_text = task_text("tests", "group: billing\ndepends_on: [wire]\n", BODY);
+        let tests = write_pending(&repo, "tests", &tests_text);
+        // Dated long ago, so a rewrite through `write_atomic`, even one
+        // putting back the same bytes, shows as a new modified time.
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1 << 30);
+        std::fs::File::options()
+            .write(true)
+            .open(&tests)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let mut groups = listed(&repo);
+        // Set by hand, as the test
+        // `stack_targets_leave_out_the_current_stack_and_every_group_above`
+        // does: what the listing gives a queued group.
+        for group in groups.iter_mut().filter(|g| g.name == "cart") {
+            group.state = GroupState::Queued;
+            for task in &mut group.tasks {
+                task.state = TaskState::Queued;
+            }
+        }
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+        let menu = pending_options(&groups, &state).unwrap();
+        let group = shown(&groups, &state)[state.group_cursor];
+        let head = highlighted_task(&groups, &state).unwrap();
+        let (ready, _) = stack_targets(&groups, &state, group, head);
+        let [target] = &ready[..] else {
+            panic!("{ready:?}");
+        };
+        assert_eq!(target.lands, None);
+        let target = target.clone();
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, Some(&target));
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        let after = std::fs::read_to_string(&wire).unwrap();
+        assert!(
+            after.lines().any(|l| l == "depends_on: [ship-cart]"),
+            "{after}"
+        );
+        assert!(!after.contains("base:"), "{after}");
+        assert_eq!(std::fs::read_to_string(&tests).unwrap(), tests_text);
+        assert_eq!(
+            std::fs::metadata(&tests).unwrap().modified().unwrap(),
+            long_ago
+        );
+    }
+
     /// Two groups where deleting `cart-totals` reaches into the other one:
     /// `cart-discounts` and `checkout-total` both depend on it.
     /// `checkout` is written first, so `cart` lists first either way the
@@ -16211,7 +18562,14 @@ mod tests {
         let menu = pending_options(&groups, &state).unwrap();
         assert_eq!(
             menu.items,
-            [RowOption::Open, RowOption::Gate, RowOption::Delete]
+            [
+                RowOption::Open,
+                RowOption::EditPipeline,
+                RowOption::EditLandsIn,
+                RowOption::EditDependsOn,
+                RowOption::Gate,
+                RowOption::Delete
+            ]
         );
 
         // Set by hand: what `list_groups` gives a task the queue or the
@@ -20526,10 +22884,11 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // Tab onto tasks, space to select, o, down onto gate and enter to
-        // open the gate picker, down onto the pipeline's second step
+        // Tab onto tasks, space to select, o, down four times onto gate
+        // (past edit pipeline, edit lands in and edit depends on) and enter
+        // to open the gate picker, down onto the pipeline's second step
         // (`review`), enter to pick it, enter to submit.
-        screen(&repo, groups, "\t o\x1b[B\r\x1b[B\r\r");
+        screen(&repo, groups, "\t o\x1b[B\x1b[B\x1b[B\x1b[B\r\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");

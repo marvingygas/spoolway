@@ -1257,7 +1257,7 @@ pub(crate) fn wait_key(input: &mut impl PollableRead, idle: impl FnMut()) -> Opt
 /// `next` is how long until the tab's own tick, so a signal that arrives
 /// partway does not push the tick later. The tick stays the upper bound on
 /// how long a landed reading can wait, should a signal be missed.
-fn wait_key_woken(
+pub(crate) fn wait_key_woken(
     input: &mut impl PollableRead,
     wake: Option<&crate::screen::Wake>,
     mut next: impl FnMut() -> Duration,

@@ -4,12 +4,14 @@
 //! A promote changes the project's setup, and that change usually goes
 //! through a feature branch and a pull request. The board runs in the main
 //! checkout, so a write there would land on whatever branch it has out.
-//! The picker lists the local branches and the branches `origin` had at
-//! the last fetch, task branches left out, and the files go into whichever
-//! checkout holds the picked one. When none does, a worktree is made for it
-//! beside the main checkout first, with a local branch tracking `origin`'s
-//! for one only the remote has. Nothing is committed, and the layer keeps
-//! every promoted entry, as `override promote` keeps them.
+//! The picker fetches `origin` as it opens, then lists the local branches
+//! and `origin`'s, task branches left out. A fetch that fails leaves the
+//! branches the last fetch saw, under rows saying why. The files go into
+//! whichever checkout holds the picked one. When none does, a worktree is
+//! made for it beside the main checkout first, with a local branch
+//! tracking `origin`'s for one only the remote has. Nothing is committed,
+//! and the layer keeps every promoted entry, as `override promote` keeps
+//! them.
 //!
 //! The write itself is `override promote`'s, file by file, into the folder
 //! [`Repo::tracked_write_root`] answers for that checkout, so the tab
@@ -18,25 +20,18 @@
 //! branch carries, so the tab refuses before the picker opens and points at
 //! `override promote` instead.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use super::edit;
 use crate::config::Config;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-use crate::screen::{Key, Notice, keys, pad_to, plural};
+use crate::screen::{Key, Notice, Wake, pad_to, picker, plural};
 
-/// One branch the picker offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Branch {
-    pub(super) name: String,
-    /// Whether only `origin` has it, so promoting onto it first makes a
-    /// local branch tracking `origin`'s.
-    pub(super) remote_only: bool,
-}
+/// One branch the picker offers — see [`picker::Branch`].
+pub(super) use crate::screen::picker::Branch;
 
 /// One file a promote writes, with what the confirm popup lists under it.
 #[derive(Debug, Clone)]
@@ -49,36 +44,15 @@ pub(super) struct Promoted {
     pub(super) keys: Vec<(String, String)>,
 }
 
-/// Every branch the picker offers: the local ones and `origin`'s, in one
-/// list sorted by name, each named once.
+/// Every branch the picker offers: [`picker::branches`], task branches left
+/// out.
 ///
-/// Task branches are left out. Lanes push many of them, and the checkout of
-/// one is a lane's, which [`Repo::tracked_write_root`] refuses. `origin`'s
-/// branches are the ones the last fetch saw; nothing here fetches.
+/// Lanes push many task branches, and the checkout of one is a lane's,
+/// which [`Repo::tracked_write_root`] refuses.
 pub(super) fn branches(repo: &Repo) -> Result<Vec<Branch>> {
-    let listing = repo.git(&[
-        "for-each-ref",
-        "--format=%(refname)",
-        "refs/heads",
-        "refs/remotes/origin",
-    ])?;
-    // Keyed by name, so a branch both sides have is listed once, as local.
-    let mut found: BTreeMap<String, bool> = BTreeMap::new();
-    for line in listing.lines().map(str::trim) {
-        if let Some(name) = line.strip_prefix("refs/heads/") {
-            found.insert(name.to_string(), false);
-        } else if let Some(name) = line.strip_prefix("refs/remotes/origin/")
-            // `origin/HEAD` names the remote's default branch, which is
-            // listed under its own name already.
-            && name != "HEAD"
-        {
-            found.entry(name.to_string()).or_insert(true);
-        }
-    }
-    Ok(found
+    Ok(picker::branches(repo)?
         .into_iter()
-        .filter(|(name, _)| !name.starts_with("task/"))
-        .map(|(name, remote_only)| Branch { name, remote_only })
+        .filter(|branch| !branch.name.starts_with("task/"))
         .collect())
 }
 
@@ -115,27 +89,15 @@ const PROMOTE_TEXT: usize = 54;
 /// one space past its end.
 const BRANCH_FIELD: usize = 46;
 
-/// How many branches the picker shows at once at most. A list longer than
-/// that scrolls, with a row above and below it counting what is out of
-/// sight.
-const PICKER_ROWS: usize = 7;
-
 /// The picker's keys, in the popup and on the line under the frame.
 pub(super) const PICK_KEYS: &[(&str, &str)] =
     &[("enter", "pick"), ("f", "search"), ("esc", "close")];
 
-/// The branch picker `promote selected` opens.
+/// The branch picker `promote selected` opens: the shared picker over the
+/// branches, holding the files a pick promotes.
 pub(super) struct Picker {
     files: Vec<Promoted>,
-    branches: Vec<Branch>,
-    filter: String,
-    /// Whether `f` was pressed and the query is being typed.
-    pub(super) searching: bool,
-    /// Which of [`Picker::matches`] the cursor is on.
-    cursor: usize,
-    /// The first match drawn, kept between keys so the list scrolls only
-    /// when the cursor would leave it.
-    offset: usize,
+    list: picker::Picker<Branch>,
 }
 
 /// What a key over the picker leads to.
@@ -146,126 +108,70 @@ pub(super) enum Picked {
     Branch(Vec<Promoted>, Branch),
 }
 
+/// `branches` as the picker's entries, `origin` beside a branch only the
+/// remote has.
+fn entries(branches: Vec<Branch>) -> Vec<picker::Entry<Branch>> {
+    branches
+        .into_iter()
+        .map(|branch| picker::Entry {
+            label: branch.name.clone(),
+            column: branch.remote_only.then(|| "origin".to_string()),
+            value: branch,
+        })
+        .collect()
+}
+
 impl Picker {
-    pub(super) fn new(files: Vec<Promoted>, branches: Vec<Branch>) -> Picker {
-        Picker {
-            files,
-            branches,
-            filter: String::new(),
-            searching: false,
-            cursor: 0,
-            offset: 0,
-        }
+    /// The picker over `listed`, fetching `origin` as it opens and listing
+    /// the branches again once the fetch ends.
+    pub(super) fn new(repo: &Repo, files: Vec<Promoted>, listed: Vec<Branch>) -> Picker {
+        let look = picker::Look {
+            width: PROMOTE_TEXT,
+            column: BRANCH_FIELD,
+            keys: PICK_KEYS,
+            noun: ("branch", "branches"),
+            empty: "no branch to promote onto",
+        };
+        let reread = repo.clone();
+        let list = picker::Picker::new(format!("{} to", title(&files)), entries(listed), look)
+            .fetching_origin(&repo.root, move || branches(&reread).map(entries));
+        Picker { files, list }
     }
 
-    /// The branches the search leaves, in name order.
-    fn matches(&self) -> Vec<&Branch> {
-        let query = self.filter.to_lowercase();
-        self.branches
-            .iter()
-            .filter(|b| b.name.to_lowercase().contains(&query))
-            .collect()
+    /// Whether the search row is being typed.
+    pub(super) fn searching(&self) -> bool {
+        self.list.searching
+    }
+
+    /// What the fetch on open signals once it has answered.
+    pub(super) fn wake(&self) -> Option<Arc<Wake>> {
+        self.list.wake()
+    }
+
+    /// Whether the fetch on open is still running.
+    #[cfg(test)]
+    pub(super) fn fetching(&self) -> bool {
+        self.list.fetching()
+    }
+
+    /// Take the fetch's answer, if it has come.
+    pub(super) fn settle(&mut self) {
+        self.list.settle();
     }
 
     /// One key over the picker or its search row.
-    pub(super) fn handle_key(mut self, key: Key) -> Picked {
-        let len = self.matches().len();
-        match key {
-            Key::Up | Key::Down => {
-                self.cursor = crate::screen::move_cursor(self.cursor, len, key);
-            }
-            Key::Enter if self.searching => self.searching = false,
-            Key::Esc if self.searching => {
-                self.filter.clear();
-                self.searching = false;
-            }
-            other if self.searching => edit(&mut self.filter, other),
-            Key::Enter => {
-                let Some(branch) = self.matches().get(self.cursor).map(|b| (*b).clone()) else {
-                    return Picked::Open(self);
-                };
-                return Picked::Branch(self.files, branch);
-            }
-            Key::Esc => return Picked::Closed,
-            Key::Char('f') => self.searching = true,
-            _ => {}
+    pub(super) fn handle_key(self, key: Key) -> Picked {
+        let Picker { files, list } = self;
+        match list.handle_key(key) {
+            picker::Picked::Open(list) => Picked::Open(Picker { files, list: *list }),
+            picker::Picked::Closed => Picked::Closed,
+            picker::Picked::Chosen(branch) => Picked::Branch(files, branch),
         }
-        let len = self.matches().len();
-        self.cursor = self.cursor.min(len.saturating_sub(1));
-        self.offset = scrolled(self.offset, self.cursor, PICKER_ROWS);
-        Picked::Open(self)
     }
 
     /// The popup, its list cut to fit the `rows` the list box has.
     pub(super) fn popup(&self, rows: Option<usize>) -> Vec<String> {
-        let mut body = vec![
-            pad_to(&format!("search: {}▏", self.filter), PROMOTE_TEXT),
-            String::new(),
-        ];
-        let matches = self.matches();
-        if matches.is_empty() {
-            body.push(match self.filter.is_empty() {
-                true => "  no branch to promote onto".to_string(),
-                false => "  no branches match this search".to_string(),
-            });
-        }
-        // The rows the list may take: the box's two borders, less the row
-        // `overlay` keeps above a popup and the popup's own borders, search
-        // row, blank rows, key row and the two rows counting what is out of
-        // sight.
-        let room = rows.map_or(PICKER_ROWS, |rows| (rows + 2).saturating_sub(1 + 8));
-        let view = PICKER_ROWS.min(room).max(1);
-        let cut = matches.len() > view;
-        let offset = match cut {
-            true => scrolled(self.offset, self.cursor, view).min(matches.len() - view),
-            false => 0,
-        };
-        let shown = &matches[offset..matches.len().min(offset + view)];
-        // Spelled here: `plural` adds a bare `s`.
-        let marker = |n: usize, arrow: &str, word: &str| match n {
-            0 => String::new(),
-            1 => format!("  {arrow} 1 branch {word}"),
-            n => format!("  {arrow} {n} branches {word}"),
-        };
-        if cut {
-            body.push(marker(offset, "↑", "above"));
-        }
-        for (at, branch) in shown.iter().enumerate() {
-            let mark = if offset + at == self.cursor {
-                "> "
-            } else {
-                "  "
-            };
-            let row = format!("{mark}{}", branch.name);
-            let row = match branch.remote_only {
-                true => format!(
-                    "{}origin",
-                    pad_to(&row, BRANCH_FIELD.max(row.chars().count() + 1))
-                ),
-                false => row,
-            };
-            body.push(pad_to(&row, PROMOTE_TEXT.max(row.chars().count())));
-        }
-        if cut {
-            body.push(marker(matches.len() - offset - shown.len(), "↓", "below"));
-        }
-        crate::screen::panel(
-            &format!("{} to", title(&self.files)),
-            &body,
-            &keys(PICK_KEYS),
-        )
-    }
-}
-
-/// `offset` moved as little as it takes for a view `view` rows tall to
-/// show `cursor`.
-fn scrolled(offset: usize, cursor: usize, view: usize) -> usize {
-    if cursor < offset {
-        cursor
-    } else if cursor >= offset + view {
-        cursor + 1 - view
-    } else {
-        offset
+        self.list.popup(rows)
     }
 }
 
@@ -700,7 +606,7 @@ fn tracked_name(checkout: &Path, target: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{key_line, type_keys};
+    use super::super::tests::key_line;
     use super::super::{Section, State};
     use crate::pipeline::Pipelines;
     use crate::repo::Repo;
@@ -727,11 +633,43 @@ mod tests {
         crate::repo::run(dir, "git", args).unwrap()
     }
 
+    /// `keys` typed at `state` one at a time, as the tab's own tests type
+    /// them, with the picker's fetch of `origin` waited for after each, so
+    /// the next key acts on the list it brought.
+    fn type_keys(repo: &Repo, state: &mut State, keys: &str) {
+        let mut input = std::io::Cursor::new(keys.as_bytes().to_vec());
+        while let Some(key) = crate::screen::read_key(&mut input) {
+            super::super::handle_key(repo, state, key);
+            fetched(state);
+        }
+    }
+
+    /// `keys` typed at `state` with nothing waited for, so a picker that
+    /// opens still shows its fetch running.
+    fn type_unsettled(repo: &Repo, state: &mut State, keys: &str) {
+        super::super::tests::type_keys(repo, state, keys);
+    }
+
+    /// The open picker's fetch of `origin`, waited for and its answer taken.
+    fn fetched(state: &mut State) {
+        let start = std::time::Instant::now();
+        while state.layer.fetching() {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "the fetch never answered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state.layer.settle();
+        }
+    }
+
     /// A main checkout `proj` on `main` tracking pipeline `impl`, inside a
     /// scratch folder, so a worktree made beside it is removed with the
     /// folder. It has a local branch `feature/config-update` with no
     /// checkout, a branch `bare` from before `.spoolway/` was committed, a
     /// task branch, and `origin`'s `feature/remote`, `main` and `HEAD`.
+    /// `origin` is the bare `origin.git` beside it, holding the same two
+    /// branches, so the picker's fetch finds them as they are.
     /// The layer sets both steps of `impl` to opus.
     fn branched(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
         let scratch = crate::scratch::root(&format!("promote-{name}"));
@@ -748,7 +686,14 @@ mod tests {
         for branch in ["feature/config-update", "task/some-lane"] {
             git(&root, &["branch", branch]);
         }
+        let origin = scratch.join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        crate::scratch::git_init(&origin, &["--bare", "-b", "main"]);
         git(&root, &["remote", "add", "origin", "../origin.git"]);
+        git(
+            &root,
+            &["push", "-q", "origin", "main:main", "main:feature/remote"],
+        );
         for (remote, local) in [("feature/remote", "main"), ("main", "main")] {
             git(
                 &root,
@@ -963,6 +908,77 @@ mod tests {
         assert_eq!(inside(&state)[2], "  > bare");
         type_keys(&repo, &mut state, "\x1b");
         assert!(super::super::popup(&state, None).is_none());
+    }
+
+    // The picker opens at once on its waiting row while it fetches
+    // `origin`, and `esc` closes it before the fetch has answered.
+    #[test]
+    fn the_picker_opens_on_fetching_origin_and_esc_closes_it() {
+        let (repo, _guard) = branched("fetching");
+        let mut state = on_active(&repo);
+        type_unsettled(&repo, &mut state, OPEN_PROMOTE);
+        assert_eq!(
+            popup(&state),
+            [
+                "╭─ promote pipelines/impl.yml to ──────────────────────────╮",
+                "│  search: ▏                                               │",
+                "│                                                          │",
+                "│    fetching origin…                                      │",
+                "│                                                          │",
+                "│  [enter] pick   [f] search   [esc] close                 │",
+                "╰──────────────────────────────────────────────────────────╯",
+            ]
+        );
+        assert!(state.layer.fetching());
+        type_unsettled(&repo, &mut state, "\x1b");
+        assert!(super::super::popup(&state, None).is_none());
+    }
+
+    // The fetch on open brings a branch pushed to `origin` since the last
+    // fetch, so the list shows it once the fetch ends.
+    #[test]
+    fn the_picker_lists_a_branch_only_the_fetch_brought() {
+        let (repo, _guard) = branched("fetch-new");
+        git(&repo.root, &["push", "-q", "origin", "main:feature/pushed"]);
+        git(
+            &repo.root,
+            &["update-ref", "-d", "refs/remotes/origin/feature/pushed"],
+        );
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
+        assert_eq!(
+            inside(&state)[4],
+            "    feature/pushed                              origin"
+        );
+    }
+
+    // An unreachable `origin` leaves the branches the last fetch saw, under
+    // the rows giving git's reason.
+    #[test]
+    fn a_failed_fetch_lists_the_last_fetchs_branches_under_why() {
+        let (repo, _guard) = branched("fetch-failed");
+        git(
+            &repo.root,
+            &["remote", "set-url", "origin", "../nowhere.git"],
+        );
+        let mut state = on_active(&repo);
+        type_keys(&repo, &mut state, OPEN_PROMOTE);
+        let rows = inside(&state);
+        let blank = rows.iter().skip(2).position(String::is_empty).unwrap() + 2;
+        assert!(rows[2].starts_with("    fetch failed: '../nowhere.git' does not"));
+        assert!(
+            text(&state)
+                .contains("showing the last fetch's branches. esc and reopen to try again.")
+        );
+        assert_eq!(
+            rows[blank + 1..blank + 5],
+            [
+                "  > bare".to_string(),
+                "    feature/config-update".to_string(),
+                "    feature/remote                              origin".to_string(),
+                "    main".to_string(),
+            ]
+        );
     }
 
     // A list longer than the picker scrolls, counting what is out of sight

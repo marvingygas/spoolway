@@ -209,6 +209,9 @@ task, in this order:
 | Item | What it does |
 |---|---|
 | `open task` | Open the task in your editor |
+| `edit pipeline` | Pick another of the project's pipelines and write it into the task's `pipeline:`. Listed only on a pending task. See below |
+| `edit lands in` | Pick the branch the task's chain lands in, from every local and `origin` branch, and write it into the `base:` of every pending task in its group. Listed only on a pending chain head, the task that depends on no other task in its own group. A head stacked on another group takes only the branch that group lands in |
+| `edit depends on` | Pick the task of another group the task's chain stacks on, or `none`, and write it into the task's `depends_on:`. A pick also writes the branch that group lands in into the `base:` of every pending task in the chain's group. Lists the last task of every other pending and queued group, and of each done group whose pull request is still open. Leaves out the current pick and every group that already stacks on this one. Listed only on a pending chain head |
 | `gate` | Set or clear a `gate_at` on the task |
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
@@ -224,6 +227,42 @@ page says `nothing to do here`. To reach them from the tasks pane, press `tab` f
 
 `enter` runs the item under the cursor and `esc` closes the menu. See
 [Options menu](planning.md#options-menu).
+
+`edit pipeline` opens a picker of every pipeline the project defines except the task's current one. The picker is titled `pipeline for <task>` and its key row reads `[enter] confirm   [f] search   [esc] back`. `f` searches the list. `enter` writes the pick into the `pipeline:` line of the task's pending file and closes to the queue screen, where the tasks pane shows the new pipeline. `esc` goes back to the options menu. A gate set on the screen stays when the gate picker would offer the same step on the new pipeline. Otherwise the gate is cleared. If the pending file is gone or the task is no longer pending, nothing is written and a popup names the file.
+
+`edit lands in` opens a picker titled `lands in for <task>`. It opens on a `fetching origin…` row while `origin` is fetched, then lists every local branch and every `origin` branch once each, task branches included. A branch only `origin` has shows `origin` beside it. The task's current lands-in branch is left out. If the fetch fails, the list shows the failure and the branches of the last fetch. The key row reads `[enter] confirm   [f] search   [esc] back`. `enter` writes the pick as `base:` into every pending task file of the head's group and closes to the queue screen, where the `lands in:` rows show it. `esc` goes back to the options menu. Tasks of the group that are queued or done are not changed.
+
+Three cases write nothing and open a `lands in not changed` popup that says what to do instead:
+
+| Case | What the popup says |
+|---|---|
+| The head depends on a task of another group and the pick is not the branch that task lands in. | Change what the head depends on first, or pick that branch. |
+| A pending task of another group depends on a pending task of this group, and the pick is not the branch that task lands in. | Change what that other task depends on first. |
+| The task was queued, deleted or moved while the picker was open. | Open the options menu again. |
+
+If a file cannot be written, the popup names the files already changed and the files left unchanged. Pick the branch again once the cause is fixed.
+
+`edit depends on` opens a picker titled `depends on for <task>`. It opens on a `checking pull requests…` row while GitHub is asked, through `gh`, which done groups still have an open pull request. Then it lists these rows, each task with its group's name beside it:
+
+| Row | When it is listed |
+|---|---|
+| `none` | Only while the head depends on a task of another group. |
+| The last task of a group | Every other pending group, every other queued group, and each done group whose last task has an open pull request. |
+
+The current pick is left out, and so is every group that stacks on this one, directly or through other groups. A group with more than one last task is left out. `esc` goes back to the options menu while the pull requests are checked.
+
+If the check fails, the list holds no done group, and a notice over it reads `pull request check failed: <reason>. done groups are left out.` and `run gh auth login, then reopen.` The reason is the first line `gh` printed.
+
+The key row reads `[enter] confirm   [f] search   [esc] back`. `enter` on a task writes `depends_on: [<id>]` into the head's pending file. It also writes the branch that task's group lands in as `base:` into every pending task file of the head's group, and closes to the queue screen, where the tasks pane shows the new `depends on` and `lands in:` rows. When that branch is not known, only the head's file is written. `enter` on `none` removes `depends_on:` from the head's file and leaves every `base:` as it is. Tasks of the group that are queued or done are not changed.
+
+Two cases write nothing and open a `depends on not changed` popup that says what to do instead:
+
+| Case | What the popup says |
+|---|---|
+| A pending task of another group depends on a pending task of this group, and the pick lands in another branch. | Change what that other task depends on first. |
+| The task was queued, deleted or moved while the picker was open. | Open the options menu again. |
+
+If a file cannot be written, the popup names the files already changed and the files left unchanged. Pick the task again once the cause is fixed.
 
 `gate` opens a picker of the agent steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker

@@ -844,15 +844,84 @@ impl Pr {
 /// when that branch has none at all — the one outcome that is not a failure
 /// here. Callers that need a live pull request check `is_open` themselves.
 fn pr_view(gh: &str, worktree: &Path, branch: &str) -> Result<Option<Pr>> {
+    Ok(pr_view_or_refusal(gh, worktree, branch)?.unwrap_or(None))
+}
+
+/// `gh pr view <branch>` as [`pr_view`] runs it, but with a refusal kept as
+/// the inner `Err`, holding what `gh` printed on stderr. `pr_view` reads
+/// every refusal as no pull request; [`pr_is_open`] has to tell a branch
+/// with none from a `gh` that could not ask at all.
+fn pr_view_or_refusal(
+    gh: &str,
+    worktree: &Path,
+    branch: &str,
+) -> Result<std::result::Result<Option<Pr>, String>> {
     let view = Command::new(gh)
         .args(["pr", "view", branch, "--json", "number,url,state"])
         .current_dir(worktree)
         .output()
         .with_context(|| format!("running `{gh} pr view {branch}`"))?;
     if !view.status.success() {
-        return Ok(None);
+        return Ok(Err(String::from_utf8_lossy(&view.stderr).into_owned()));
     }
-    parse_pr_view(&view.stdout)
+    parse_pr_view(&view.stdout).map(Ok)
+}
+
+/// Whether `branch` has a pull request still open, asked of `gh` in `dir`:
+/// `false` for a merged or closed one, and for a branch that never had one.
+/// An error, with `gh`'s own first line of stderr, when `gh` could not
+/// answer: not logged in, offline, or not installed. The queue tab's edit
+/// depends on picker asks this of each done group's last task, and leaves
+/// every done group out when it cannot be answered.
+pub(crate) fn pr_is_open(gh: &str, dir: &Path, branch: &str) -> Result<bool> {
+    match pr_view_or_refusal(gh, dir, branch)? {
+        Ok(pr) => Ok(pr.is_some_and(|pr| pr.is_open())),
+        // What `gh pr view` prints for a branch that has no pull request,
+        // the one refusal that is an answer rather than a failure.
+        Err(stderr) if stderr.contains("no pull requests found") => Ok(false),
+        Err(stderr) => match crate::fmt::first_line(&stderr) {
+            "" => bail!("`{gh} pr view {branch}` failed and printed nothing"),
+            line => bail!("{line}"),
+        },
+    }
+}
+
+/// A stand-in `gh` written into `dir`, for tests of [`pr_is_open`] and its
+/// callers. It answers `gh pr view <branch>` with an open pull request for
+/// a branch in `open`, a merged one for a branch in `merged`, and none for
+/// any other. With a file named `logged-out` beside it, it refuses every
+/// call the way a `gh` with no login does. Each branch it is asked about is
+/// appended to `asked` beside it.
+#[cfg(test)]
+pub(crate) fn stand_in_gh(dir: &Path, open: &[&str], merged: &[&str]) -> PathBuf {
+    let path = dir.join("gh");
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("open"), open.join("\n") + "\n").unwrap();
+    std::fs::write(dir.join("merged"), merged.join("\n") + "\n").unwrap();
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+here=$(dirname "$0")
+echo "$3" >>"$here/asked"
+if [ -f "$here/logged-out" ]; then
+  echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+  exit 4
+fi
+if grep -qx "$3" "$here/open"; then
+  echo '{"number":1,"url":"https://example.invalid/1","state":"OPEN"}'
+elif grep -qx "$3" "$here/merged"; then
+  echo '{"number":2,"url":"https://example.invalid/2","state":"MERGED"}'
+else
+  echo "no pull requests found for branch \"$3\"" >&2
+  exit 1
+fi
+"#,
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
 }
 
 /// The parsing half of `pr_view`, split out so it can be tested without `gh`.
@@ -1319,6 +1388,30 @@ mod tests {
                 .unwrap()
                 .expect("gh answered, so there is a pull request");
         assert!(open.is_open());
+    }
+
+    /// `pr_is_open` reads an open pull request as open, and a merged one
+    /// and a branch with none as not, but a `gh` that cannot ask at all is
+    /// an error carrying what `gh` said, not a branch with no pull request.
+    #[test]
+    fn pr_is_open_tells_a_branch_with_none_from_a_gh_that_cannot_ask() {
+        let dir = crate::scratch::root("stack-pr-is-open");
+        let gh = stand_in_gh(&dir, &["task/open-1"], &["task/merged-1"])
+            .display()
+            .to_string();
+        assert!(pr_is_open(&gh, &dir, "task/open-1").unwrap());
+        assert!(!pr_is_open(&gh, &dir, "task/merged-1").unwrap());
+        assert!(!pr_is_open(&gh, &dir, "task/never").unwrap());
+
+        std::fs::write(dir.join("logged-out"), "").unwrap();
+        let err = pr_is_open(&gh, &dir, "task/open-1").unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "To get started with GitHub CLI, please run:  gh auth login"
+        );
+        // `pr_view` itself still reads the refusal as no pull request, as
+        // `spoolway stack` always has.
+        assert!(pr_view(&gh, &dir, "task/open-1").unwrap().is_none());
     }
 
     /// A pull request `gh` reports without a state is not treated as open —

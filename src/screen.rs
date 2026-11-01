@@ -12,12 +12,14 @@
 //! handling — only what is generic across any of them lives here. [`shell`]
 //! is what bare `spoolway` opens: the same screens, one per tab, under one
 //! strip, one terminal guard and one quit — and [`dispatcher`] is the
-//! `spoolway dispatch` child its dispatch tab starts and stops.
+//! `spoolway dispatch` child its dispatch tab starts and stops. [`picker`] is
+//! the searchable list any of them opens a popup over.
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
 pub(crate) mod overrides;
 pub(crate) mod pane;
+pub(crate) mod picker;
 pub(crate) mod shell;
 
 /// One key a screen reads, decoded from however many bytes it took.
@@ -954,6 +956,20 @@ pub(crate) fn options(title: &str, items: &[&str], cursor: usize) -> Vec<String>
     }
     let items: Vec<String> = items.iter().map(|item| item.to_string()).collect();
     boxed(title, &answer_rows(&items, cursor)[1..])
+}
+
+/// `key` typed into a one-line field holding `text`: a character is added,
+/// backspace takes the last one off, and anything else is ignored. `0x08`
+/// is the backspace many terminals send in place of `DEL`, the same pairing
+/// the queue tab's search reads.
+pub(crate) fn edit(text: &mut String, key: Key) {
+    match key {
+        Key::Backspace | Key::Char('\u{8}') => {
+            text.pop();
+        }
+        Key::Char(c) if !c.is_control() => text.push(c),
+        _ => {}
+    }
 }
 
 /// `cursor` moved by `key` over a list of `answers` answers: up or down

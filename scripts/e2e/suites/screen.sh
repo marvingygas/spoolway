@@ -18,7 +18,11 @@
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
-# menu removes its page after one popup. On the overrides tab a config key no
+# menu removes its page after one popup. Edit pipeline off a pending task's
+# options menu writes the picked pipeline into its pending file, and the
+# tasks pane shows it. Edit lands in off a chain head's options menu writes
+# the picked branch as its `base:`, and the tasks pane shows it. On the
+# overrides tab a config key no
 # file sets is drawn dimmed, two listed config keys are each set through their
 # popup, and both land in the overrides layer, one step field is set on steps
 # in two pipelines, one prompt is copied into the layer, and the active
@@ -546,6 +550,52 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 # Matched with the row's indent: the key line under the frame says
 # `[f] search` too.
 lacks "the plan row has left the list" "    search " "$LAST"
+
+# Edit pipeline on a pending task (`tab`, `o`, `↓`, `enter`) opens the
+# picker over the project's other pipelines. `f` searches it down to
+# bugfix, `enter` leaves the search and `enter` picks it: the task's pending
+# file then names bugfix, and the tasks pane shows it with no popup left.
+# `checkout-page` is the one pending task left, on `default`.
+EDIT_PIPELINE="$LIVE/edit-pipeline.txt"
+on_screen '\to\x1b[B\rfbugfix\r\r' "$EDIT_PIPELINE"
+sed 's/\x1b\[[0-9;]*m//g' "$EDIT_PIPELINE" >"$EDIT_PIPELINE.plain"
+has "a pending task's menu lists edit pipeline after open task" \
+  "│    edit pipeline " "$EDIT_PIPELINE.plain"
+has "edit pipeline opens the picker titled with the task" \
+  "╭─ pipeline for checkout-page ─" "$EDIT_PIPELINE.plain"
+has "under the picker's key row" "[enter] confirm   [f] search   [esc] back" \
+  "$EDIT_PIPELINE.plain"
+has "enter writes the pick into the pending file" "pipeline: bugfix" \
+  "$PENDING/checkout-page.md"
+lacks "over the pipeline it named before" "pipeline: default" "$PENDING/checkout-page.md"
+has "and keeps its other keys" "group: checkout" "$PENDING/checkout-page.md"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$EDIT_PIPELINE" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+works "the tasks pane shows the new pipeline" grep -qE 'pipeline: +bugfix' "$LAST"
+lacks "with no popup left over it" "╭─ pipeline for checkout-page" "$LAST"
+
+# Edit lands in on the same task, a chain head since it depends on nothing in
+# its group (`tab`, `o`, `↓` twice, `enter`), opens the picker over the
+# project's branches, task branches included. `f` searches it down to a task
+# branch made here, `enter` leaves the search and `enter` picks it: the
+# pending file then names it as `base:`, and the tasks pane's `lands in:` row
+# shows it. The project has no `origin`, so the picker lists at once.
+must "a task branch to land in" git branch task/e2e-lands-in
+EDIT_LANDS_IN="$LIVE/edit-lands-in.txt"
+on_screen '\to\x1b[B\x1b[B\rftask/e2e-lands-in\r\r' "$EDIT_LANDS_IN"
+sed 's/\x1b\[[0-9;]*m//g' "$EDIT_LANDS_IN" >"$EDIT_LANDS_IN.plain"
+has "a chain head's menu lists edit lands in after edit pipeline" \
+  "│    edit lands in " "$EDIT_LANDS_IN.plain"
+has "edit lands in opens the picker titled with the task" \
+  "╭─ lands in for checkout-page ─" "$EDIT_LANDS_IN.plain"
+has "enter writes the pick into the pending file" "base: task/e2e-lands-in" \
+  "$PENDING/checkout-page.md"
+has "and keeps its other keys" "pipeline: bugfix" "$PENDING/checkout-page.md"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$EDIT_LANDS_IN" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+works "the tasks pane shows where it lands" grep -qE 'lands in: +task/e2e-lands-in' "$LAST"
+lacks "with no popup left over it" "╭─ lands in for checkout-page" "$LAST"
+must "clean up: the task branch" git branch -D task/e2e-lands-in
 
 # Delete routine on the routines tab (`→`, `o`, down, `enter`) asks with one
 # answer, so its popup draws no `> delete` row: it ends on its body, a blank
