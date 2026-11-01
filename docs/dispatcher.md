@@ -999,7 +999,8 @@ The options menu is titled with the key. It offers `delete override` when the la
 While the `search:` row is open the key line reads `[enter] search   [esc] cancel`. What is
 typed narrows the list to the keys whose dotted name or shown value holds it, so `not set` finds
 exactly the dimmed keys. `enter` keeps the results, and `esc` clears the search. A search that
-leaves no key leaves nothing for `enter` or `o` to open. A list taller than
+leaves no key leaves nothing for `enter` or `o` to open, so the key line drops
+`[enter] set value` and `[o] options` until a key matches again. A list taller than
 the screen keeps the cursor's row in view, and its last row says how many keys are out of sight,
 such as `↑ 3 keys above · ↓ 6 keys below`.
 
@@ -1076,6 +1077,8 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 ```
 
 `↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
+A search that leaves no field drops `[enter] select` and `[o] options` from the key line until a
+field matches again, since neither has a field to act on.
 `w` opens the overrides folder.
 `o` opens the options menu of the field under the cursor. It offers `delete override` when a pipeline patch sets the field. That removes the field from every step of every patch that sets it, after one confirm popup that names each file and key. A patch left with no keys leaves the layer.
 `enter` on a field opens its step selection. It lists every pipeline with a step that takes the
@@ -1117,7 +1120,7 @@ time the step selection opens, the `not set` steps are hidden.
 | `a` | Select every listed step. Pressed again once they all are, clear the selection. |
 | `f` | Open the `search:` row. |
 | `h` | Show the `not set` steps, or hide them again. The key line reads `[h] show not set` while they are hidden and `[h] hide not set` while they are shown. |
-| `enter` | Open the value field. With no step selected it does nothing. |
+| `enter` | Open the value field. With no step selected it does nothing, and the key line leaves `[enter] set value` out until a step is selected. |
 | `esc` | Go back to the field list. |
 
 The search matches pipeline names, step ids and the values shown, `not set` included, so `not
@@ -1199,7 +1202,8 @@ layer already holds a copy of reads `overridden`.
 ```
 
 `↑` and `↓` move the cursor. `f` opens a `search:` row that narrows the list to the prompts whose
-name holds what is typed, and `overridden` finds the prompts the layer holds.
+name holds what is typed, and `overridden` finds the prompts the layer holds. A search that leaves
+no prompt drops `[enter] override` from the key line until a prompt matches again.
 
 A prompt override replaces the whole `PROMPT.md`, so the tab has no field for it and starts no
 editor. `enter` on a prompt the layer does not hold writes its copy to
@@ -1287,6 +1291,9 @@ branch has merged: a promote keeps its entries in the layer until you delete the
 | `o` | Open the menu: `edit`, `promote selected` and `delete selected`. |
 | `w` | Open the overrides folder. |
 | `←` `→` | Move to the previous or the next section. |
+
+An empty layer has no row to select and nothing for the menu to act on. Its key line reads
+`[w] open workspace   [q] quit`, and `space`, `a` and `o` come back once the layer holds a file.
 
 `enter` on the list does nothing: every row is edited through `o`, then `edit`. The menu opens
 on `edit`, which always acts on the row under the cursor. The menu's title says how many keys are

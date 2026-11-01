@@ -56,6 +56,10 @@ work while it shows.
 | `[r]` | Re-read the ledger |
 | `[q]` | Quit |
 
+The key line names a key only while it would act. While the filter panel, the sort popup or the
+calendar is open, it reads every key but `[q]`, and while the `loading…` popup shows only a tab's
+digit and `[q]` work. In each case the key line reads `[q] quit` alone.
+
 The cursor stops at the last row of the table, so one `[↑]` always moves it up. When a read, a
 filter or `[t]` leaves fewer rows than the cursor's position, the cursor moves to the new last
 row.
@@ -385,7 +389,8 @@ The table has no `total` line and no `[e]` export.
 
 `enter` opens the highlighted trial. It sets the lanes table's `trial` filter to it, switches
 `by` to `pipeline`, clears `pipeline` and `version`, and shows the lanes table, so every one of
-the trial's pipelines is a row.
+the trial's pipelines is a row. On an empty trials table there is no trial to open, so the key
+line leaves `[enter] open` out.
 
 `[a]`/`[d]` sort the table the same way as the other two. Its filter panel has only `since` and
 `until`; there is no command-line flag for it, it is read from the screen only.
