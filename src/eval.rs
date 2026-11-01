@@ -5682,8 +5682,8 @@ fn run_screen_with(
     let mut state = ScreenState::new(args);
     let mut loaded: Option<Loaded> = None;
     // The reason the visit's first load failed, once it has. Hosted, the tab
-    // still has a strip and three neighbours to reach, so the reason is held
-    // on it rather than printed on the way out.
+    // still has a strip and other tabs to open, so the reason is held on it
+    // rather than printed on the way out.
     let mut failed: Option<String> = None;
     state.start_loading(&mut start, state.filters.clone(), false);
 
@@ -5726,7 +5726,7 @@ fn run_screen_with(
                 None if crate::screen::shell::hosted().is_some() => {
                     crate::screen::shell::message_tab(&message, input, out)
                 }
-                // Standalone there is no neighbour to reach: the reason was
+                // Standalone there is no other tab to open: the reason was
                 // read on the frame this key answered, and the screen ends.
                 None => Leave::Quit,
             });
@@ -9422,9 +9422,9 @@ mod screen_tests {
     /// them would change the frame, and the frame writer, which skips a
     /// repeat of the last frame, could not hide a frame drawn per key.
     #[test]
-    fn a_burst_of_keys_then_left_switches_after_one_frame() {
+    fn a_burst_of_keys_then_a_digit_switches_after_one_frame() {
         use crate::screen::shell::{Hosting, Leave, Tab};
-        let (repo, _root_guard) = fixture_to_sort("screen-burst-left");
+        let (repo, _root_guard) = fixture_to_sort("screen-burst-digit");
         let _hosting = Hosting::open(Tab::Eval);
         let script = format!("{}1", format!("{DOWN}k").repeat(100));
         let mut input = keys(&script);

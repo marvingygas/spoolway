@@ -174,14 +174,18 @@ pub(crate) fn strip_rows() -> usize {
 /// A digit opens the tab the strip numbers with it, counting from `1`. A
 /// digit past the strip's last tab, and `0`, are `None`: `5` on a home-mode
 /// strip has no tab to open, and reading it as the last one would open a
-/// tab the person did not ask for.
+/// tab the person did not ask for. The open tab's own digit is `None` too:
+/// [`host`] builds a tab afresh each time it opens one, so reading it as a
+/// switch would throw away the cursor, the focused pane and every filter
+/// the person set on the tab they are already looking at.
 pub(crate) fn leave_on(key: Key) -> Option<Leave> {
-    let (_, tabs) = HOSTED.with(Cell::get)?;
+    let (open, tabs) = HOSTED.with(Cell::get)?;
     match key {
         Key::Char('q') => Some(Leave::Quit),
         Key::Char(digit) => {
             let at = digit.to_digit(10)?.checked_sub(1)?;
-            tabs.get(at as usize).copied().map(Leave::Open)
+            let tab = tabs.get(at as usize).copied()?;
+            (tab != open).then_some(Leave::Open(tab))
         }
         _ => None,
     }
@@ -472,9 +476,13 @@ pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
 /// The label of the tab `line` draws lit, when `line` is the strip: the one
 /// label with no dim code in front of it — see [`strip_line`]. `None` for
 /// any other line, so a test can hand it every row of a frame.
+///
+/// `None` too for a strip with no dim code at all: that is a strip whose
+/// codes were already taken out, and every label in it would pass for lit,
+/// so the first, `DISPATCH`, would name every frame it heads.
 #[cfg(test)]
 pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
-    if !plain(line).contains("[1] DISPATCH") {
+    if !plain(line).contains("[1] DISPATCH") || !line.contains(crate::status::DIM) {
         return None;
     }
     TABS.into_iter().map(Tab::label).find(|label| {
@@ -1508,6 +1516,16 @@ mod tests {
         );
     }
 
+    // The test helper that names a frame by its lit tab reads the codes, so
+    // a strip they were taken out of names no tab rather than the first.
+    #[test]
+    fn lit_tab_names_the_lit_label_and_no_tab_on_a_plain_strip() {
+        let line = strip_line(Tab::Overrides, &TABS, 106);
+        assert_eq!(lit_tab(&line), Some("OVERRIDES"));
+        assert_eq!(lit_tab(&plain(&line)), None);
+        assert_eq!(lit_tab("│   dispatch   │"), None);
+    }
+
     // A terminal too narrow for the labels starts them in the drawing
     // area's first column rather than underflowing the centring.
     #[test]
@@ -1520,29 +1538,38 @@ mod tests {
     }
 
     // Each digit opens the tab the strip numbers with it, and a digit with
-    // no tab — `0`, `6`, and `5` on a home-mode strip — opens nothing.
+    // no tab — `0`, `6`, and `5` on a home-mode strip — opens nothing. Nor
+    // does the open tab's own digit, which would only build it afresh.
     #[test]
     fn each_digit_opens_the_tab_the_strip_numbers_with_it() {
-        let _hosting = Hosting::open(Tab::Queue);
+        let hosting = Hosting::open(Tab::Queue);
         let opens = |digit| leave_on(Key::Char(digit));
         assert_eq!(opens('1'), Some(Leave::Open(Tab::Dispatch)));
-        assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
+        assert_eq!(opens('2'), None);
         assert_eq!(opens('3'), Some(Leave::Open(Tab::Routines)));
         assert_eq!(opens('4'), Some(Leave::Open(Tab::Overrides)));
         assert_eq!(opens('5'), Some(Leave::Open(Tab::Eval)));
         assert_eq!(opens('0'), None);
         assert_eq!(opens('6'), None);
+        drop(hosting);
+        let _hosting = Hosting::open(Tab::Dispatch);
+        assert_eq!(opens('1'), None);
+        assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
     }
 
     #[test]
     fn on_a_home_mode_strip_four_opens_eval_and_five_nothing() {
-        let _hosting = Hosting::open_in(Tab::Queue, &HOME_TABS);
+        let hosting = Hosting::open_in(Tab::Queue, &HOME_TABS);
         let opens = |digit| leave_on(Key::Char(digit));
         assert_eq!(opens('1'), Some(Leave::Open(Tab::Dispatch)));
-        assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
+        assert_eq!(opens('2'), None);
         assert_eq!(opens('3'), Some(Leave::Open(Tab::Routines)));
         assert_eq!(opens('4'), Some(Leave::Open(Tab::Eval)));
         assert_eq!(opens('5'), None);
+        drop(hosting);
+        let _hosting = Hosting::open_in(Tab::Eval, &HOME_TABS);
+        assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
+        assert_eq!(opens('4'), None);
     }
 
     // A project is in home mode when its home sits in a workspace's
@@ -2003,6 +2030,22 @@ mod tests {
             last.contains("─ [config]   pipeline   prompts   active (0) ─"),
             "{last}"
         );
+    }
+
+    // The open tab's own digit leaves it as it is: `tab` moves overrides
+    // off its first section, and `4` after it keeps that section in place
+    // rather than opening the tab again on `config`.
+    #[test]
+    fn the_open_tabs_own_digit_keeps_the_tab_as_it_was() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-own-digit");
+        let moved = drive_host(&repo, "4\t");
+        let moved = moved.last().unwrap();
+        assert!(
+            moved.contains("─ config   [pipeline]   prompts   active (0) ─"),
+            "{moved}"
+        );
+        let frames = drive_host(&repo, "4\t4");
+        assert_eq!(frames.last().unwrap(), moved);
     }
 
     #[test]
