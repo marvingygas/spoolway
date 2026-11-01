@@ -413,8 +413,8 @@ without a key.
 
 | Key | What it does |
 |---|---|
-| `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
-| `enter` | Queue every task under every ticked routine as one batch. |
+| `space` | Tick or untick a routine. Over the details pane it ticks the routine whose details are shown, and the tick shows in the list. On a job row it does nothing. |
+| `enter` | Queue every task under every ticked routine as one batch, from either pane. With nothing ticked, or on a job row, it does nothing. |
 | `o` | Open the options menu of the row the focused pane highlights. |
 | `←` `→` | Switch focus between the routine list and the details pane. On a job row they do nothing. |
 | `esc` | Over the details pane, return focus to the list. Over the list, do nothing. |

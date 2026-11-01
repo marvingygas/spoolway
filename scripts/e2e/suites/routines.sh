@@ -93,10 +93,14 @@ works "a nested task queues with its top-level routine" \
 has "still carrying that routine's group" "group: maintenance" \
   "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 
-# A second, solo pick: `3` reaches the routines tab, and `→` moves the
-# cursor onto `maintenance`'s tasks in the details pane, already on `prune`,
-# its one task, nested or not; `space` queues it alone. `prune-1` is taken by
-# the batch above, so this one mints the next number.
+# A second run of `maintenance`, ticked from its details rather than the
+# list: `3` reaches the routines tab, `→` moves into the details pane, `j`
+# moves the task cursor off the first task, and `space` still ticks the
+# routine those details belong to, not that one task; `enter` from there
+# queues the whole routine. `sweep`, added beside the nested `prune` first,
+# is what shows the whole routine went: it depends on `prune`, since a group
+# is one chain. `prune-1` is taken by the batch above, so this one mints the
+# next number.
 #
 # `prune-1` lands first, the way a finished run leaves it: a group is one
 # chain, and `maintenance` still holding `prune-1` in the queue would make a
@@ -107,11 +111,24 @@ sed -i 's/^stage: .*/stage: done/' "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
 must "prune-1 lands, as a finished run would" \
   mv "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md" "$SPOOLWAY_PROJECT_HOME/archive/prune-1.md"
+task_doc .spoolway/routines/maintenance/sweep.md sweep "$BODY" \
+  "group: maintenance" "depends_on: [prune]"
 
-on_screen '3\x1b[C n' /dev/null
+on_screen '3\x1b[Cj \rn' /dev/null
 
-works "→ reaches a nested task under its routine, and a solo pick queues it" \
+works "space on a routine's details ticks it, and enter there queues its nested task" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
+works "and every other task in the routine with it" \
+  test -f "$SPOOLWAY_PROJECT_HOME/queue/sweep-1.md"
+has "— chained onto the nested task's minted id" "prune-2" \
+  "$SPOOLWAY_PROJECT_HOME/queue/sweep-1.md"
+
+# `sweep-1` goes again before the unqueue below, which takes `prune-2` alone:
+# the rest of this suite never queues `maintenance`, and a copy left behind
+# would only refuse the next run of it.
+must "the sweep copy unqueues" "$SPOOLWAY" queue unqueue sweep-1
+must "and its routine file goes, leaving maintenance as it was" \
+  rm .spoolway/routines/maintenance/sweep.md
 
 # Unqueuing that copy deletes it. The routine is still in the checkout for the
 # routines tab to queue again, so a draft in pending would only be a duplicate

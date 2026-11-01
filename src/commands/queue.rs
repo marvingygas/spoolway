@@ -4936,8 +4936,6 @@ enum Resume {
     Selection,
     /// The routines pane's `enter`, over the folders ticked in `nav`.
     Routines(RoutineNav),
-    /// The routines pane's `space`, over the task under `nav`'s cursor.
-    RoutineTask(RoutineNav),
 }
 
 impl Resume {
@@ -4946,7 +4944,7 @@ impl Resume {
     fn back(&self) -> Mode {
         match self {
             Resume::Selection => Mode::Browsing,
-            Resume::Routines(nav) | Resume::RoutineTask(nav) => Mode::Routines(nav.clone()),
+            Resume::Routines(nav) => Mode::Routines(nav.clone()),
         }
     }
 }
@@ -6289,35 +6287,20 @@ fn run_screen_from(
                 // `esc` over the list falls through to `handle_routine_key`,
                 // which reads nothing on it: the pane is the routines tab's
                 // whole screen, with nothing behind it to go back to.
-                // `enter` over a ticked folder — ignored with nothing ticked,
-                // the same way `Mode::Browsing`'s own `enter` does nothing
-                // over an empty `state.selected`.
+                // `enter` queues the ticked folders from either pane, the
+                // way the queue tab's `enter` queues its selection from
+                // either — ignored with nothing ticked, the same way
+                // `Mode::Browsing`'s own `enter` does nothing over an empty
+                // `state.selected`.
                 // Not over a job row, which queues nothing: `enter` there
                 // with routines ticked above it would queue them unseen.
                 Key::Enter
-                    if nav.focus == Focus::Groups
-                        && !nav.selected.is_empty()
+                    if !nav.selected.is_empty()
                         && highlighted_routine_folder(&routines, nav).is_some() =>
                 {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
                     state.mode = begin_routine_queue(
-                        repo,
-                        pipelines,
-                        &base,
-                        &routines,
-                        &nav,
-                        Tracking::Ask,
-                        &mut |_| {},
-                    );
-                }
-                // `space` over a task in the details pane queues it alone
-                // — over the folders pane it is `handle_routine_key`'s own
-                // business instead, ticking the highlighted folder.
-                Key::Char(' ') if nav.focus == Focus::Tasks => {
-                    let nav = nav.clone();
-                    let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_solo(
                         repo,
                         pipelines,
                         &base,
@@ -6528,9 +6511,6 @@ fn resume(
         }
         Resume::Routines(nav) => {
             begin_routine_queue(repo, pipelines, base, routines, nav, tracking, redraw)
-        }
-        Resume::RoutineTask(nav) => {
-            begin_routine_solo(repo, pipelines, base, routines, nav, tracking, redraw)
         }
     }
 }
@@ -7471,15 +7451,20 @@ fn highlighted_routine_task<'a>(
 }
 
 /// One key over the routines pane — everything but `esc` over the tasks
-/// pane, `enter` on a selected folder, `space` over the tasks pane and
-/// `o`, which all need the repo or the pipelines or change this mode
-/// outright, so `run_screen` reads those first and only falls through to
-/// this for the rest, the same split it makes for `handle_browse_key`. `q` is part of
-/// that rest, and does nothing here either.
+/// pane, `enter` on a selected folder and `o`, which all need the repo or
+/// the pipelines or change this mode outright, so `run_screen` reads those
+/// first and only falls through to this for the rest, the same split it
+/// makes for `handle_browse_key`. `q` is part of that rest, and does nothing
+/// here either.
 ///
 /// The list's cursor runs over the routines and then over `orphans` job
 /// rows under them — see [`Orphan`]. A job row has no tick and no tasks, so
 /// `space` and the arrows do nothing on it.
+///
+/// `space` ticks the highlighted routine from either pane, the way the
+/// queue tab's `space` ticks the highlighted group from either: over the
+/// details pane that is the routine whose details are shown, whichever of
+/// its tasks the cursor sits on.
 ///
 /// `←` and `→` are the only keys that move between the two panes, and with
 /// two panes both wrap round to the other one. `tab` reads nothing here.
@@ -7518,9 +7503,7 @@ fn handle_routine_key(routines: &[RoutineFolder], orphans: usize, nav: &mut Rout
                 Focus::Tasks => Focus::Groups,
             };
         }
-        // Selecting a task alone is `space` over the tasks pane instead —
-        // handled by `run_screen`, which is what needs the repo to queue it.
-        Key::Char(' ') if nav.focus == Focus::Groups => {
+        Key::Char(' ') => {
             if let Some(folder) = highlighted_routine_folder(routines, nav) {
                 let path = folder.path.clone();
                 if !nav.selected.remove(&path) {
@@ -9299,11 +9282,11 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
             ..
         }
         | Mode::ToolGate {
-            then: Resume::Routines(nav) | Resume::RoutineTask(nav),
+            then: Resume::Routines(nav),
             ..
         }
         | Mode::IssueQuestion {
-            then: Resume::Routines(nav) | Resume::RoutineTask(nav),
+            then: Resume::Routines(nav),
             ..
         }
         | Mode::Options(OptionsMenu {
@@ -11439,9 +11422,8 @@ fn stamp_routines(tasks: &mut [Task], names: &BTreeMap<String, String>) {
 
 /// The one-entry [`RoutineBatch`] a single routine task queues as, with its
 /// `depends_on` emptied: a lone task names no sibling in this batch, so a
-/// real `depends_on` would be refused by `check_dependencies_set`. Shared by
-/// [`begin_routine_solo`] and a job naming one file in
-/// [`queue_routine_target`].
+/// real `depends_on` would be refused by `check_dependencies_set`. Used by
+/// [`validate_routine_batch`] for a target naming one file.
 fn mint_routine_solo(repo: &Repo, task: &RoutineTask) -> RoutineBatch {
     let id = mint_id(repo, &task.id, &Default::default());
     let mut doc = with_frontmatter_field(&task.doc, "id", &id);
@@ -11737,8 +11719,8 @@ pub(crate) fn check_routine_target(
 /// rather than the screen's nav. `target` is an absolute path under
 /// [`Repo::routines_dir`]: a folder queues every task at or below it as
 /// one batch, exactly as `enter` does, and a single `.md` file queues that
-/// task alone with its `depends_on` emptied, exactly as `space` does on the
-/// routines tab. A job always hands it a top-level routine folder, since
+/// task alone with its `depends_on` emptied, which the routines tab never
+/// does. A job always hands it a top-level routine folder, since
 /// [`crate::jobs::Job::refusal`] stops any other target first. Every
 /// queued task is put on `pipeline` — a job names its own, where the `r`
 /// pane leaves each task on whatever it carried. The batch goes through
@@ -11909,7 +11891,7 @@ fn begin_routine_queue(
     )
 }
 
-/// The end both routine submits share: validate `batch` — the tasks with
+/// The end of [`begin_routine_queue`]: validate `batch` — the tasks with
 /// the routine each was minted from, and the task files behind them — stamp
 /// each task's `routine:`, stop at the tool-requirements gate and the issue
 /// question when each has something to ask, and queue it. `nav`
@@ -11932,12 +11914,7 @@ fn finish_routine_mode(
         Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
     };
     stamp_routines(&mut tasks, names);
-    // Which of the two submits this was, for `enter` on the gate to run
-    // again: a batch built from ticked folders, or one task on its own.
-    let then = match nav.focus {
-        Focus::Groups => Resume::Routines(nav.clone()),
-        Focus::Tasks => Resume::RoutineTask(nav.clone()),
-    };
+    let then = Resume::Routines(nav.clone());
     if let Some(gate) = tool_gate(repo, &tracking, &tasks, then.clone()) {
         return gate;
     }
@@ -11986,51 +11963,6 @@ fn still_queued_panel(live: &[LiveCopy], nav: &RoutineNav) -> Mode {
         ),
         routines: Some(nav.clone()),
     }
-}
-
-/// `space` over a task in the routines pane's details: queue the highlighted
-/// task alone, under a minted id, with its `depends_on` emptied before
-/// [`validate_batch_undescribed`] ever sees it. Emptied here rather than left for
-/// [`check_dependencies_set`] to refuse: a solo pick names no sibling in
-/// this batch for a dependency on one to resolve against, and that check
-/// bails on a `depends_on` naming anything outside the queue or the
-/// archive.
-fn begin_routine_solo(
-    repo: &Repo,
-    pipelines: &Pipelines,
-    base: &str,
-    routines: &[RoutineFolder],
-    nav: &RoutineNav,
-    tracking: Tracking,
-    redraw: &mut dyn FnMut(&[String]),
-) -> Mode {
-    // No task under the cursor leaves the pane as it stands, the same as
-    // `begin_routine_queue` with nothing ticked.
-    let Some(folder) = highlighted_routine_folder(routines, nav) else {
-        return Mode::Routines(nav.clone());
-    };
-    let Some(task) = folder.tasks.get(nav.task_cursor) else {
-        return Mode::Routines(nav.clone());
-    };
-
-    // The same refusal and locks `begin_routine_queue` takes, for this one
-    // routine task.
-    let _routine_locks = match claim_routines(repo, [task.id.as_str()]) {
-        Ok((_, live)) if !live.is_empty() => return still_queued_panel(&live, nav),
-        Ok((locks, _)) => locks,
-        Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
-    };
-    let batch = mint_routine_solo(repo, task);
-    let task_files = readable_task_files(&batch.0);
-    finish_routine_mode(
-        repo,
-        pipelines,
-        base,
-        (&batch, &task_files),
-        nav,
-        tracking,
-        redraw,
-    )
 }
 
 #[cfg(test)]
@@ -21073,7 +21005,7 @@ mod tests {
 
     /// An arm forked from a task already in the archive gets its own
     /// `depends_on` emptied before it is ever validated — the same emptying
-    /// [`begin_routine_solo`] already makes for a solo routine pick — so a
+    /// [`mint_routine_solo`] makes for a job naming one routine file — so a
     /// predecessor `retain` has since swept out of `archive/` cannot refuse
     /// a trial that never needed to resolve it in the first place.
     #[test]
@@ -23981,56 +23913,55 @@ mod tests {
         assert_eq!(scan.front.depends_on, vec!["split-fields-1".to_string()]);
     }
 
-    /// `space` over a single task in the routines pane's own tasks list
-    /// queues that task alone, with its `depends_on` emptied before
-    /// `validate_batch` ever sees it — so a task naming a sibling nobody
-    /// queued is not refused for a dependency this solo pick dropped.
+    /// `space` over the details pane ticks the routine whose details are
+    /// shown, whichever of its tasks the cursor sits on, and the tick shows
+    /// in the list; a second `space` takes it off. Nothing is queued.
     #[test]
-    fn space_on_a_solo_task_queues_it_alone_with_depends_on_emptied() {
-        let (repo, _root_guard) = fixture("routines-solo-space");
-        write_routine(
-            &repo,
-            "chain",
-            "split-fields",
-            &task_text("split-fields", "group: chain\n", BODY),
-        );
-        write_routine(
-            &repo,
-            "chain",
-            "scan-pending",
-            &task_text(
-                "scan-pending",
-                "group: chain\ndepends_on: [split-fields]\n",
-                BODY,
-            ),
-        );
+    fn space_on_the_details_pane_ticks_the_routine_shown() {
+        let (repo, _root_guard) = fixture("routines-details-space");
+        seed_two_routines(&repo);
 
-        // → (focus onto its tasks, already on `scan-pending` — the first
-        // one in filename order), space (queue it alone).
-        let (exit, drawn) = routines_exit(&repo, "\x1b[C ");
-        assert_eq!(exit, ScreenExit::Quit);
-        let last = last_frame(&drawn);
-
-        let queued_files: Vec<String> = std::fs::read_dir(repo.queue_dir())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        assert_eq!(
-            queued_files,
-            vec!["scan-pending-1.md".to_string()],
-            "{queued_files:?} — {last}"
-        );
-        let solo = queued(&repo, "scan-pending-1");
-        assert!(
-            solo.front.depends_on.is_empty(),
-            "{:?}",
-            solo.front.depends_on
-        );
+        // ↓ onto `nightly`, → into its details, ↓ onto its second task.
+        for (input, nightly) in [
+            ("\x1b[B\x1b[C ", "[x] nightly"),
+            ("\x1b[B\x1b[Cj ", "[x] nightly"),
+            ("\x1b[B\x1b[C  ", "[ ] nightly"),
+        ] {
+            let drawn = routines_screen(&repo, input);
+            let last = last_frame(&drawn).to_string();
+            assert!(last.contains(nightly), "{input:?}: {last}");
+            assert!(last.contains("[ ] maintenance"), "{input:?}: {last}");
+            assert!(
+                pane_border(&drawn).contains("┬─ [details] "),
+                "{input:?}: the details kept focus: {last}"
+            );
+            assert!(repo.queued_ids().is_empty(), "{input:?}: {last}");
+        }
     }
 
-    /// Every way a routine reaches the queue — `enter` on its folder, `space`
-    /// on one of its tasks, and a job naming the folder or the one file —
+    /// `enter` queues every ticked routine from either pane: over the list,
+    /// and over the details of a routine other than the one ticked.
+    #[test]
+    fn enter_queues_the_ticked_routines_from_either_pane() {
+        for (name, input) in [
+            ("routines-enter-list", " \x1b[B\r"),
+            ("routines-enter-details", " \x1b[B\x1b[C\r"),
+        ] {
+            let (repo, _root_guard) = fixture(name);
+            seed_two_routines(&repo);
+            let (exit, drawn) = routines_exit(&repo, input);
+            assert_eq!(exit, ScreenExit::Quit);
+            assert_eq!(
+                repo.queued_ids().into_iter().collect::<Vec<_>>(),
+                ["prune-1"],
+                "{input:?}: {}",
+                last_frame(&drawn)
+            );
+        }
+    }
+
+    /// Every way a routine reaches the queue — `enter` on its folder, and a
+    /// job naming the folder or the one file —
     /// writes `routine:` with the routine file's own `id:`, right under the
     /// minted id. The folder is named apart from the id on purpose: the
     /// value is the file's `id:`, never the folder's name.
@@ -24059,10 +23990,6 @@ mod tests {
         let (repo, _root, _) = seed("routine-name-enter");
         routines_exit(&repo, " \r");
         check(&repo, "enter on the folder");
-
-        let (repo, _root, _) = seed("routine-name-space");
-        routines_exit(&repo, "\x1b[C ");
-        check(&repo, "space on the task");
 
         let (repo, _root, _) = seed("routine-name-job-folder");
         let folder = repo.routines_dir().join("nightly");
@@ -24198,8 +24125,8 @@ mod tests {
     }
 
     /// A routine whose copy is still in the queue, blocked here, is refused
-    /// from the routines tab by `enter` on its folder and by `space` on its
-    /// task alike: the popup names the copy's step, and no second copy is
+    /// from the routines tab by `enter` over the list and over its details
+    /// alike: the popup names the copy's step, and no second copy is
     /// queued.
     #[test]
     fn a_routine_with_a_live_copy_is_refused_from_the_routines_tab() {
@@ -24214,8 +24141,8 @@ mod tests {
         put_at(&repo, "audit-deps-1", crate::pipeline::BLOCKED);
 
         for (keys, how) in [
-            (" \r", "enter on the folder"),
-            ("\x1b[C ", "space on the task"),
+            (" \r", "enter over the list"),
+            ("\x1b[C \r", "enter over the details"),
         ] {
             let drawn = routines_screen(&repo, keys);
             let last = last_frame(&drawn);
@@ -27169,49 +27096,6 @@ group_description: audit
                 assert!(hook_calls(&repo).is_empty());
             }
 
-            /// `space` on the routines tab's details pane — one task queued
-            /// alone — asks with the same checklist, and its group left
-            /// unticked opens its ticket.
-            #[test]
-            fn queuing_one_routine_task_asks_the_same_question() {
-                let (repo, _root_guard) = cart("issue-question-routine-solo");
-                write_routine(
-                    &repo,
-                    "nightly",
-                    "audit",
-                    &task_text(
-                        "audit",
-                        "group: nightly
-group_description: audit
-",
-                        BODY,
-                    ),
-                );
-                let drawn = routines_screen(&repo, "\x1b[C ");
-                let rows = popup_rows(last_frame(&drawn), "issue tracking");
-                assert_eq!(rows[3], "> [ ] nightly   1 task", "{rows:?}");
-
-                let drawn = routines_screen(&repo, "\x1b[C \r");
-                assert_eq!(hook_calls(&repo).len(), 1);
-                let ids = repo.queued_ids();
-                assert_eq!(ids.len(), 1, "{ids:?}");
-                let task = queued(&repo, ids.first().unwrap());
-                assert!(!task.tracking_off());
-                assert_ne!(task.extra_str("ticket"), "");
-                // The same two popups the queue tab draws.
-                assert_eq!(
-                    running_popups(&drawn),
-                    [["", bar(0).as_str()], ["", bar(44).as_str()]],
-                    "{drawn}"
-                );
-                let frame = last_frame(&drawn);
-                assert_eq!(
-                    popup_rows(frame, "queued")[..4],
-                    ["", "hook executed successfully", "", "queued 1 task"],
-                    "{frame}"
-                );
-            }
-
             /// A routine task with no `group:` is refused before the
             /// question opens, so no row is ever keyed by a minted id that
             /// `enter` could mint afresh. With `audit-1` queued meanwhile, a
@@ -27222,7 +27106,7 @@ group_description: audit
             fn a_routine_task_with_no_group_never_reaches_the_checklist() {
                 let (repo, _root_guard) = cart("issue-question-routine-no-group");
                 write_routine(&repo, "nightly", "audit", &task_text("audit", "", BODY));
-                let drawn = routines_screen(&repo, "\x1b[C ");
+                let drawn = routines_screen(&repo, " \r");
                 let frame = last_frame(&drawn);
                 assert!(!frame.contains("issue tracking"), "{frame}");
                 // Read across the popup's rows: the refusal leads with the

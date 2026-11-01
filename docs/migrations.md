@@ -12,7 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
-| 0.17.0 to 0.18.0 | Bare `spoolway` opens a tab with its digit, and `←`/`→` no longer switch tabs; the strip numbers every tab and dims all but the open one; `←`/`→` move between sections and panes and `tab` does nothing. | Update pty scripts that press `←` or `→` to switch tabs, press `tab` to change section or pane, or match the strip or a `[tab]` pair. |
+| 0.17.0 to 0.18.0 | Bare `spoolway` opens a tab with its digit, and `←`/`→` no longer switch tabs; the strip numbers every tab and dims all but the open one; `←`/`→` move between sections and panes and `tab` does nothing; `space` on a routine's details ticks the routine, and no key queues one routine task alone. | Update pty scripts that press `←` or `→` to switch tabs, press `tab` to change section or pane, match the strip or a `[tab]` pair, or press `space` on a routine's task to queue it alone. |
 | 0.16.0 to 0.17.0 | The overrides pipeline section lists every step key but `id` under three headers and its cursor starts on `description`; the step picker lists every pipeline's steps and its pipeline rows draw no counts; every empty eval table reads `no data.`. | Run `spoolway sync` and commit what it writes, and update pty scripts that walk the overrides pipeline section or its step picker, or match the eval screen's empty-table lines. |
 | 0.15.0 to 0.16.0 | The dispatcher no longer brings a pane to the front unless `dispatch.autofocus_panes` is on; `override promote` keeps the entry in the layer; bare `spoolway` opens on the dispatch tab and the strip gains `OVERRIDES`; the STATE cell is the state word alone; one-answer popups have no answer row and find is search; the problem log follows `housekeeping.retention_days`; a failed command step's status line names a kept copy of its log; the eval tab's title names its sections. | Run `spoolway sync` and commit what it writes, set `autofocus_panes = true` to keep panes coming forward, drop each promoted override once its branch merges, and update scripts that drive the opening tab, one-answer popups, search or the eval title, read STATE ages, match the promote line or read the failed log path. |
 | 0.14.1 to 0.15.0 | `dispatch.backend` is retired; `gate:` is `on_pass`, `on_fail` or `always`, allowed only on an agent step, and older binaries refuse those values; a `gate_at:` that names a command step is refused; JSON prints `gate` as a string; a report a gate holds needs a `--handoff`; `~/.spoolway/editor.toml` is no longer read; a job runs one whole routine and a routine holds one active job; the jobs tab is gone; home-mode plan pages live in the workspace; a resume onto a step without `session: true` opens a fresh conversation; TUI text and shared messages are lowercase; releases carry bare executables in place of archives; a binary npm did not install never checks for updates. | Run `spoolway sync` in each project and home-mode clone and commit what it writes, upgrade CI and teammates to the same release, move each `gate:` off a command step, set `VISUAL` or `EDITOR`, clear what `spoolway doctor` fails for your jobs, set `session: true` where a resume should continue, and update scripts that set `dispatch.backend`, read `gate` in JSON, report on a gated step, drive the jobs tab, match messages by case or fetch release archives. |
@@ -88,6 +88,14 @@ wsl npm install -g spoolway
   to walk backwards. `→` reaches the same section `tab` did. A script that matched a key line
   with `[tab] tasks`, `[tab] groups`, `[tab] details`, `[tab] routines` or `[tab] section`
   matches it without that pair.
+
+- `space` over the routines tab's details pane ticks the routine whose details are shown, as
+  `space` over the list does. It no longer queues the highlighted task alone with its
+  `depends_on` emptied, and no key does. `enter` queues the ticked routines from either pane,
+  where it read only the list.
+
+  A pty script that pressed `space` on a routine's task to queue it alone queues the whole
+  routine with `space` and then `enter`. See [Routines](planning.md#routines).
 
 ## 0.16.0 to 0.17.0
 
