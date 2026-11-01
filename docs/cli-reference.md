@@ -209,6 +209,7 @@ task, in this order:
 | Item | What it does |
 |---|---|
 | `open task` | Open the task in your editor |
+| `edit pipeline` | Pick another of the project's pipelines and write it into the task's `pipeline:`, when it is pending. `f` searches the list, `enter` writes the pick, and `esc` goes back to the menu. A gate on a step the new pipeline lacks is cleared |
 | `gate` | Set or clear a `gate_at` on the task |
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 

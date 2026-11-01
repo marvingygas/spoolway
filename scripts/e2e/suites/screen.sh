@@ -18,7 +18,9 @@
 # pending task, in any group, that depends on one of its tasks, after one
 # popup. A plan page no task names draws as a row of its own, and the tasks
 # pane beside it says `use /spoolway-tasks`. Delete off that row's options
-# menu removes its page after one popup. On the overrides tab a config key no
+# menu removes its page after one popup. Edit pipeline off a pending task's
+# options menu writes the picked pipeline into its pending file, and the
+# tasks pane shows it. On the overrides tab a config key no
 # file sets is drawn dimmed, two listed config keys are each set through their
 # popup, and both land in the overrides layer, one step field is set on steps
 # in two pipelines, one prompt is copied into the layer, and the active
@@ -546,6 +548,29 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 # Matched with the row's indent: the key line under the frame says
 # `[f] search` too.
 lacks "the plan row has left the list" "    search " "$LAST"
+
+# Edit pipeline on a pending task (`tab`, `o`, `↓`, `enter`) opens the
+# picker over the project's other pipelines. `f` searches it down to
+# bugfix, `enter` leaves the search and `enter` picks it: the task's pending
+# file then names bugfix, and the tasks pane shows it with no popup left.
+# `checkout-page` is the one pending task left, on `default`.
+EDIT_PIPELINE="$LIVE/edit-pipeline.txt"
+on_screen '\to\x1b[B\rfbugfix\r\r' "$EDIT_PIPELINE"
+sed 's/\x1b\[[0-9;]*m//g' "$EDIT_PIPELINE" >"$EDIT_PIPELINE.plain"
+has "a pending task's menu lists edit pipeline after open task" \
+  "│    edit pipeline " "$EDIT_PIPELINE.plain"
+has "edit pipeline opens the picker titled with the task" \
+  "╭─ pipeline for checkout-page ─" "$EDIT_PIPELINE.plain"
+has "under the picker's key row" "[enter] confirm   [f] search   [esc] back" \
+  "$EDIT_PIPELINE.plain"
+has "enter writes the pick into the pending file" "pipeline: bugfix" \
+  "$PENDING/checkout-page.md"
+lacks "over the pipeline it named before" "pipeline: default" "$PENDING/checkout-page.md"
+has "and keeps its other keys" "group: checkout" "$PENDING/checkout-page.md"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$EDIT_PIPELINE" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+works "the tasks pane shows the new pipeline" grep -qE 'pipeline: +bugfix' "$LAST"
+lacks "with no popup left over it" "╭─ pipeline for checkout-page" "$LAST"
 
 # Delete routine on the routines tab (`→`, `o`, down, `enter`) asks with one
 # answer, so its popup draws no `> delete` row: it ends on its body, a blank

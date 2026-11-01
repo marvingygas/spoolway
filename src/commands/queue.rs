@@ -7268,7 +7268,9 @@ impl Picked<'_> {
     /// key's own check, so an item whose row no longer allows it does
     /// nothing. Delete on the pending screen, which had no key, opens its
     /// popup through [`begin_pending_delete`], or [`begin_plan_delete`] on a
-    /// plan row. On the pending screen the menu's row must also still be the
+    /// plan row. Edit pipeline, which had no key either, opens
+    /// [`Mode::EditPipeline`] on a task that is still pending. On the pending
+    /// screen the menu's row must also still be the
     /// highlighted one — see [`OptionsMenu`]'s `row` — or the menu closes
     /// having done nothing.
     fn run(
@@ -16561,7 +16563,7 @@ mod tests {
             let menu = pending_options(&groups, &state).unwrap();
             let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
             assert!(matches!(mode, Mode::Browsing), "{mode:?}");
-            assert_eq!(state.gates.get(&key).is_some(), kept, "{step}");
+            assert_eq!(state.gates.contains_key(&key), kept, "{step}");
             assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some("bugfix"));
         }
     }
