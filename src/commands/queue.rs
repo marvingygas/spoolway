@@ -4791,6 +4791,71 @@ enum Mode {
     /// [`OptionsMenu`]. The arrows move its cursor, `enter` runs the item
     /// under it and `esc` closes it onto the screen it was opened over.
     Options(OptionsMenu),
+    /// The options menu's edit pipeline picker over the pending screen —
+    /// see [`PipelinePick`]. `enter` writes the pick into the task's pending
+    /// file through [`set_pipeline`] and closes to the screen; `esc` goes
+    /// back to the menu it was opened from. Boxed, since a picker is many
+    /// times the size of every other mode.
+    EditPipeline(Box<PipelinePick>),
+}
+
+/// [`Mode::EditPipeline`]'s state: the menu it was opened from, which `esc`
+/// reopens and whose `row` is the task the pick is written to, and the list
+/// of every pipeline but the task's own.
+struct PipelinePick {
+    menu: OptionsMenu,
+    list: crate::screen::picker::Picker<String>,
+}
+
+// By hand, since the picker holds a channel and draws itself rather than
+// print as data; the menu says which task it is open on.
+impl std::fmt::Debug for PipelinePick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelinePick")
+            .field("menu", &self.menu)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The edit pipeline picker's key row, in the popup and under the frame
+/// while nothing is being searched.
+const EDIT_PICK_KEYS: &[(&str, &str)] = &[("enter", "confirm"), ("f", "search"), ("esc", "back")];
+
+/// The columns of text in the edit pipeline picker, between its margins.
+/// Pipeline names are short, so this is narrower than the promote picker's
+/// branch list; a name longer than it widens the popup rather than being
+/// cut.
+const EDIT_PICK_TEXT: usize = 44;
+
+impl PipelinePick {
+    /// The picker over every pipeline `pipelines` defines but `task`'s own,
+    /// in name order, so the cursor opens on the first one that changes
+    /// something. A task naming no pipeline, or one the project lacks, is
+    /// offered them all.
+    fn new(pipelines: &Pipelines, task: &PendingTask, menu: OptionsMenu) -> PipelinePick {
+        let entries = pipelines
+            .names()
+            .into_iter()
+            .filter(|name| task.pipeline.as_deref() != Some(*name))
+            .map(|name| crate::screen::picker::Entry {
+                label: name.to_string(),
+                column: None,
+                value: name.to_string(),
+            })
+            .collect();
+        let look = crate::screen::picker::Look {
+            width: EDIT_PICK_TEXT,
+            column: 0,
+            keys: EDIT_PICK_KEYS,
+            noun: ("pipeline", "pipelines"),
+            empty: "no other pipeline to pick",
+        };
+        let title = format!("pipeline for {}", task.id);
+        PipelinePick {
+            menu,
+            list: crate::screen::picker::Picker::new(title, entries, look),
+        }
+    }
 }
 
 /// [`Mode::Options`]'s state: the row `o` was pressed on, the items it
@@ -4828,12 +4893,16 @@ impl OptionsMenu {
 /// One thing the queue and routines screens' options menu can do to the
 /// focused row. Each runs what its own key used to: `o` open task, `g`
 /// gate, `t` trial, `s` save as routine, and the routines tab's `n`, now
-/// edit schedule, and `x` delete routine. Delete on the pending screen and
-/// open plan never had a key of their own, and neither did the routines
-/// tab's job items.
+/// edit schedule, and `x` delete routine. Delete on the pending screen, edit
+/// pipeline and open plan never had a key of their own, and neither did the
+/// routines tab's job items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RowOption {
     Open,
+    /// A pending task's `pipeline:`, picked from the project's other
+    /// pipelines and written into its pending file — see
+    /// [`Mode::EditPipeline`].
+    EditPipeline,
     /// On the pending screen's group menu, every page the group's tasks
     /// name in `plan:`, and on a plan row, the row's own page. A task's
     /// menu never offers it.
@@ -4873,6 +4942,7 @@ impl RowOption {
         match self {
             RowOption::Open => "open task".to_string(),
             RowOption::OpenPlan => "open plan".to_string(),
+            RowOption::EditPipeline => "edit pipeline".to_string(),
             RowOption::Gate => "gate".to_string(),
             RowOption::Trial => "trial".to_string(),
             RowOption::SaveRoutine => "save as routine".to_string(),
@@ -6128,8 +6198,8 @@ fn run_screen_from(
         // does there. Only the modes with a text field give that character
         // any meaning of its own, appending it the same as any other letter:
         // `Mode::Filter`'s query (see `handle_filter_key`'s own doc comment),
-        // `Mode::SaveRoutine`'s name, and `Mode::NewJob`'s cron expression
-        // and pipeline search.
+        // `Mode::SaveRoutine`'s name, `Mode::NewJob`'s cron expression and
+        // pipeline search, and `Mode::EditPipeline`'s search.
         match &state.mode {
             Mode::Filter => handle_filter_key(&groups, &mut state, key),
             Mode::Gate { cursor, dependents } => {
@@ -6444,6 +6514,32 @@ fn run_screen_from(
                 if key == Key::Esc {
                     state.mode = state.after_popup(Mode::Browsing);
                 }
+            }
+            Mode::EditPipeline(_) => {
+                // Taken out of the mode, since a key over the picker
+                // consumes it; the arm above has just matched it, so the
+                // `else` is never reached.
+                let Mode::EditPipeline(pick) = std::mem::replace(&mut state.mode, Mode::Browsing)
+                else {
+                    continue;
+                };
+                let PipelinePick { menu, list } = *pick;
+                state.mode = match list.handle_key(key) {
+                    crate::screen::picker::Picked::Open(list) => {
+                        Mode::EditPipeline(Box::new(PipelinePick { menu, list: *list }))
+                    }
+                    crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    crate::screen::picker::Picked::Chosen(name) => {
+                        let mode =
+                            set_pipeline(repo, pipelines, &mut groups, &mut state, &menu, &name);
+                        // `groups` was just read again with the new
+                        // pipeline; a reading already in flight could still
+                        // carry the old one back — see
+                        // `refresh_from_reader`.
+                        known_reading = known_reading.max(reader.started_count());
+                        mode
+                    }
+                };
             }
             Mode::Options(menu) => match key {
                 Key::Esc => state.mode = menu.closed(),
@@ -6986,16 +7082,17 @@ fn trial_target<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a Grou
 
 /// `o` on the pending screen: the menu for the row the focused pane
 /// highlights, titled with that row's name. Over the tasks pane a task
-/// offers open task, then gate, and then delete while the task is still a
-/// pending file. Over the groups pane a group offers open plan where
+/// offers open task, then edit pipeline while the task is still a pending
+/// file, then gate, and then delete while it is still a pending file. Over
+/// the groups pane a group offers open plan where
 /// [`super::pending::plan_of`] finds a `plan:` on any of its tasks, then
 /// trial and save as routine, both only where [`trial_target`] allows them,
 /// and then delete while the group holds at least one pending file. Open
 /// plan sits on the group rather than on each task because a group's tasks
 /// almost always name the same page. A plan row there offers open plan and
-/// then delete, both on its page. Delete is never offered on a queued or
-/// done task: those files live in the queue or the archive, which this menu
-/// does not touch. `None`, and no menu, when the focused pane
+/// then delete, both on its page. Neither edit pipeline nor delete is
+/// offered on a queued or done task: those files live in the queue or the
+/// archive, which this menu does not touch. `None`, and no menu, when the focused pane
 /// highlights no row at all: an empty pending directory, a filter that
 /// matched nothing, or a tasks pane with no tasks.
 fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu> {
@@ -7003,8 +7100,13 @@ fn pending_options(groups: &[Group], state: &ScreenState) -> Option<OptionsMenu>
     let (title, row, items) = match state.focus {
         Focus::Tasks => {
             let task = group.tasks.get(state.task_cursor)?;
-            let mut items = vec![RowOption::Open, RowOption::Gate];
-            if task.state == TaskState::Pending {
+            let pending = task.state == TaskState::Pending;
+            let mut items = vec![RowOption::Open];
+            if pending {
+                items.push(RowOption::EditPipeline);
+            }
+            items.push(RowOption::Gate);
+            if pending {
                 items.push(RowOption::Delete);
             }
             (task.id.clone(), task_key(task), items)
@@ -7217,6 +7319,7 @@ impl Picked<'_> {
                 // The pending screen's items are never put on a routine's
                 // menu.
                 RowOption::OpenPlan
+                | RowOption::EditPipeline
                 | RowOption::Gate
                 | RowOption::Trial
                 | RowOption::SaveRoutine
@@ -7229,6 +7332,15 @@ impl Picked<'_> {
         match item {
             RowOption::Open => open_highlighted(self.repo, groups, state),
             RowOption::OpenPlan => open_highlighted_plan(groups, state),
+            RowOption::EditPipeline => highlighted_task(groups, state)
+                .filter(|task| task.state == TaskState::Pending)
+                .map_or(closed, |task| {
+                    Mode::EditPipeline(Box::new(PipelinePick::new(
+                        self.pipelines,
+                        task,
+                        menu.clone(),
+                    )))
+                }),
             RowOption::Gate => Mode::Gate {
                 cursor: 0,
                 dependents: gate_dependents(self.repo, self.pipelines, groups, state),
@@ -7577,8 +7689,13 @@ fn handle_filter_key(groups: &[Group], state: &mut ScreenState, key: Key) {
 }
 
 fn highlighted_task_key(groups: &[Group], state: &ScreenState) -> Option<TaskKey> {
+    highlighted_task(groups, state).map(task_key)
+}
+
+/// The task under the tasks pane's cursor, whichever pane has focus.
+fn highlighted_task<'a>(groups: &'a [Group], state: &ScreenState) -> Option<&'a PendingTask> {
     let group = shown(groups, state).get(state.group_cursor).copied()?;
-    Some(task_key(group.tasks.get(state.task_cursor)?))
+    group.tasks.get(state.task_cursor)
 }
 
 /// The pending screen's open task: open the highlighted task in the editor
@@ -7877,6 +7994,87 @@ fn handle_gate_key(
         Key::Esc => state.mode = Mode::Browsing,
         _ => {}
     }
+}
+
+/// `enter` on the edit pipeline picker: write `pipeline: <name>` into the
+/// pending file of the task `menu` was opened on, read the groups again so
+/// the tasks pane shows it, and close to the screen.
+///
+/// The queue reader can replace the groups while the picker is open, and
+/// another screen can queue the task meanwhile, which moves its file out of
+/// the pending directory. So the task must still be the highlighted one,
+/// still pending, and its file still there, or nothing is written and a
+/// notice names the file. The file is read again rather than taken from the
+/// groups, so a hand edit made while the picker was open is kept, and only
+/// its `pipeline:` line changes — see [`with_frontmatter_field`].
+///
+/// A screen gate names a step of the old pipeline. It is kept when the new
+/// pipeline has a step of that id and dropped otherwise, since a task
+/// queued with a `gate_at:` its pipeline lacks is parked on `paused` before
+/// it starts.
+fn set_pipeline(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    groups: &mut Vec<Group>,
+    state: &mut ScreenState,
+    menu: &OptionsMenu,
+    name: &str,
+) -> Mode {
+    let path = std::path::PathBuf::from(&menu.row);
+    let still_pending = highlighted_task(groups, state)
+        .is_some_and(|task| task_key(task) == menu.row && task.state == TaskState::Pending);
+    if !still_pending || !path.is_file() {
+        return outcome(
+            "pipeline not changed",
+            format!(
+                "{} was not changed: the task was queued, deleted or moved while the picker \
+                 was open. Open its menu again with o to pick a pipeline for it as it is now.",
+                path.display()
+            ),
+        );
+    }
+    let written = std::fs::read_to_string(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|doc| {
+            crate::task::write_atomic(&path, with_frontmatter_field(&doc, "pipeline", name))
+        });
+    if let Err(err) = written {
+        return outcome(
+            "pipeline not changed",
+            format!(
+                "{} was not changed: {err:#}. Fix what stops the file being read or written, \
+                 then pick the pipeline again.",
+                path.display()
+            ),
+        );
+    }
+    let has_step = |step: &str| {
+        pipelines
+            .get(name)
+            .is_ok_and(|pipeline| pipeline.steps.iter().any(|s| s.id == step))
+    };
+    if state
+        .gates
+        .get(&menu.row)
+        .is_some_and(|step| !has_step(step))
+    {
+        state.gates.remove(&menu.row);
+    }
+    match super::pending::list_rows(repo) {
+        Ok(rows) => adopt_groups(rows.groups, groups, state),
+        // The file is written, so the pane shows what it now says; the
+        // queue reader's next pass reads the rest of the list again.
+        Err(_) => {
+            if let Some(task) = groups
+                .iter_mut()
+                .flat_map(|group| &mut group.tasks)
+                .find(|task| task_key(task) == menu.row)
+            {
+                task.pipeline = Some(name.to_string());
+            }
+        }
+    }
+    Mode::Browsing
 }
 
 /// Insert or replace a `<key>: <value>` line right after a task's
@@ -9130,6 +9328,10 @@ fn two_pane_frame(
 fn footer(state: &ScreenState, on_orphan: bool) -> String {
     match &state.mode {
         Mode::Filter => key_hint(SEARCH_KEYS),
+        // The picker's search row reads keys the way the filter box does,
+        // so it names the same two ways out of it.
+        Mode::EditPipeline(pick) if pick.list.searching => key_hint(SEARCH_KEYS),
+        Mode::EditPipeline(_) => key_hint(EDIT_PICK_KEYS),
         // The save panel reads a name the same way the filter box reads a
         // query, so its own line names the same two keys the filter's does
         // to leave it — `enter`/`esc` — rather than any of the ordinary
@@ -9416,6 +9618,7 @@ fn popup(
             (checkbox_row_cap(layout), popup_height(layout)),
         )),
         Mode::ToolGate { panel, .. } | Mode::Queued { panel, .. } => Some(panel.clone()),
+        Mode::EditPipeline(pick) => Some(pick.list.popup(layout.rows)),
         Mode::Options(menu) => {
             let labels: Vec<String> = menu.items.iter().map(RowOption::label).collect();
             let items: Vec<&str> = labels.iter().map(String::as_str).collect();
