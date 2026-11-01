@@ -15698,10 +15698,14 @@ mod tests {
     /// own loop adds around it.
     #[test]
     fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
-        let (baseline_proc, baseline_reads) =
-            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\x1b[B\x1b[B\r");
-        let (measured_proc, measured_reads) =
-            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\x1b[B\x1b[B\rj");
+        let (baseline_proc, baseline_reads) = process_and_read_counts(
+            "queue-reader-thread-gate-baseline",
+            "\to\x1b[B\x1b[B\x1b[B\r",
+        );
+        let (measured_proc, measured_reads) = process_and_read_counts(
+            "queue-reader-thread-gate-measured",
+            "\to\x1b[B\x1b[B\x1b[B\rj",
+        );
 
         assert_eq!(
             measured_proc, baseline_proc,
@@ -17009,6 +17013,317 @@ mod tests {
             "{notice:?}"
         );
         assert!(!path.exists());
+    }
+
+    /// `state`'s edit lands in picker, opened through the menu's own item.
+    fn edit_lands_in_on(repo: &Repo, groups: &[Group], state: &ScreenState) -> Box<LandsInPick> {
+        let picked = Picked {
+            repo,
+            pipelines: &Pipelines::builtin(),
+            routines_dir: &repo.routines_dir(),
+        };
+        let menu = pending_options(groups, state).unwrap();
+        match picked.run(groups, &[], state, &menu, RowOption::EditLandsIn) {
+            Mode::EditLandsIn(pick) => pick,
+            other => panic!("edit lands in opened {other:?}"),
+        }
+    }
+
+    /// `picker`'s popup, its frame and styling kept but its colours taken
+    /// off.
+    fn drawn_picker(picker: &crate::screen::picker::Picker<String>) -> Vec<String> {
+        picker
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect()
+    }
+
+    /// Edit lands in sits after edit pipeline on a chain head's menu, one
+    /// alone in its group or one stacked onto another group's task, and a
+    /// task depending on another task of its own group has none. Counting
+    /// the stacking dependency as one inside the group would take the item
+    /// off the stacked head.
+    #[test]
+    fn edit_lands_in_is_offered_only_on_a_chain_head() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-offered");
+        write_pending(&repo, "login", &task_text("login", "group: auth\n", BODY));
+        write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: pay\ndepends_on: [login]\n", BODY),
+        );
+        write_pending(
+            &repo,
+            "tests",
+            &task_text("tests", "group: pay\ndepends_on: [wire]\n", BODY),
+        );
+        let mut groups = listed(&repo);
+        let head = [
+            RowOption::Open,
+            RowOption::EditPipeline,
+            RowOption::EditLandsIn,
+            RowOption::Gate,
+            RowOption::Delete,
+        ];
+        for id in ["login", "wire"] {
+            let menu = pending_options(&groups, &on_pending_task(&groups, id)).unwrap();
+            assert_eq!(menu.items, head, "{id}");
+        }
+        let menu = pending_options(&groups, &on_pending_task(&groups, "tests")).unwrap();
+        assert_eq!(
+            menu.items,
+            [
+                RowOption::Open,
+                RowOption::EditPipeline,
+                RowOption::Gate,
+                RowOption::Delete
+            ]
+        );
+        assert_eq!(RowOption::EditLandsIn.label(), "edit lands in");
+
+        // Set by hand, as `delete_is_offered_last_exactly_on_rows_with_a_
+        // pending_file` does: a queued head is offered no edit at all.
+        let state = on_pending_task(&groups, "login");
+        let at = state.group_cursor;
+        groups[at].tasks[0].state = TaskState::Queued;
+        let menu = pending_options(&groups, &state).unwrap();
+        assert_eq!(menu.items, [RowOption::Open, RowOption::Gate]);
+    }
+
+    /// The picker opens on `fetching origin…`, then lists every local and
+    /// `origin` branch once, task branches included and the task's current
+    /// lands-in branch left out, with `origin` beside the branch only the
+    /// fetch brought. Another remote's branch is not listed.
+    #[test]
+    fn the_lands_in_picker_lists_every_branch_but_the_current_one() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-list");
+        let origin_guard = crate::scratch::root("commands-screen-edit-lands-in-list-origin");
+        let _ = std::fs::remove_dir_all(&origin_guard);
+        std::fs::create_dir_all(&origin_guard).unwrap();
+        crate::scratch::git_init(&origin_guard, &["--bare", "-b", "main"]);
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["branch", "main"]);
+        git(&["branch", "task/gh-9-wire"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            &origin_guard.display().to_string(),
+        ]);
+        git(&[
+            "push",
+            "-q",
+            "origin",
+            "main",
+            "plan/demo",
+            "main:feature/remote",
+        ]);
+        // Only the fetch on open can bring this one back.
+        git(&["update-ref", "-d", "refs/remotes/origin/feature/remote"]);
+        git(&["update-ref", "refs/remotes/upstream/elsewhere", "HEAD"]);
+        write_pending(&repo, "wire", &task_text("wire", "group: pay\n", BODY));
+        let groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+
+        let mut list = edit_lands_in_on(&repo, &groups, &state).list;
+        assert_eq!(
+            drawn_picker(&list),
+            [
+                "╭─ lands in for wire ────────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│    fetching origin…                            │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let start = std::time::Instant::now();
+        while list.fetching() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            list.settle();
+        }
+        assert_eq!(
+            drawn_picker(&list),
+            [
+                "╭─ lands in for wire ────────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│  > feature/remote                    origin    │",
+                "│    main                                        │",
+                "│    task/gh-9-wire                              │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        drop(origin_guard);
+    }
+
+    /// `enter` writes the branch as `base:` into every pending file of the
+    /// head's group, the later task's included, closes to the screen, and
+    /// the tasks pane's `lands in:` row shows it. The group then passes
+    /// submission's checks with no `--base`, where before it named none.
+    #[test]
+    fn enter_on_the_lands_in_picker_writes_every_pending_file_of_the_group() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-enter");
+        crate::repo::run(&repo.root, "git", &["branch", "main"]).unwrap();
+        let wire = write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: pay\npipeline: default\n", BODY),
+        );
+        let tests = write_pending(
+            &repo,
+            "tests",
+            &task_text(
+                "tests",
+                "group: pay\npipeline: default\ndepends_on: [wire]\n",
+                BODY,
+            ),
+        );
+        let dry_run = |repo: &Repo| {
+            let args = QueueAddArgs {
+                from: vec![repo.pending_dir().display().to_string()],
+                base: None,
+                dry_run: true,
+                no_tracking: Vec::new(),
+            };
+            queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false)
+        };
+        assert!(dry_run(&repo).is_err(), "it named no base before");
+
+        // Tab onto the tasks pane, o, down twice onto edit lands in, enter
+        // to open it, enter on `main`: `plan/demo` is the board's branch,
+        // where the task lands now, so it is left out.
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\r\r");
+        for path in [&wire, &tests] {
+            let after = std::fs::read_to_string(path).unwrap();
+            assert!(after.lines().any(|l| l == "base: main"), "{after}");
+        }
+        let last = crate::screen::shell::plain(last_frame(&drawn));
+        assert!(last.contains("lands in:    main"), "{last}");
+        assert!(!last.contains("lands in for wire"), "{last}");
+        dry_run(&repo).unwrap();
+    }
+
+    /// `esc` on the picker goes back to the options menu, on edit lands in.
+    #[test]
+    fn esc_on_the_lands_in_picker_reopens_the_options_menu() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-esc");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let last = last_frame(&screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\r\x1b")).to_string();
+        assert!(last.contains("> edit lands in"), "{last}");
+        assert!(!last.contains("lands in for wire"), "{last}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// A queued or done task of the group keeps its file, and a task of
+    /// another group is not touched. A head that slid from under the cursor
+    /// writes nothing at all.
+    #[test]
+    fn a_lands_in_pick_writes_only_the_groups_pending_files() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-scope");
+        let other = task_text("other", "group: auth\n", BODY);
+        write_pending(&repo, "other", &other);
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: pay\n", BODY));
+        let queued = task_text("tests", "group: pay\ndepends_on: [wire]\n", BODY);
+        let tests = write_pending(&repo, "tests", &queued);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+
+        state.task_cursor = 1 - state.task_cursor;
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "main");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in not changed");
+        assert!(!std::fs::read_to_string(&wire).unwrap().contains("base:"));
+        state.task_cursor = 1 - state.task_cursor;
+
+        // Set by hand: what the listing gives a task the queue holds.
+        let at = state.group_cursor;
+        let later = 1 - state.task_cursor;
+        groups[at].tasks[later].state = TaskState::Queued;
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "main");
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        assert!(
+            std::fs::read_to_string(&wire)
+                .unwrap()
+                .lines()
+                .any(|l| l == "base: main")
+        );
+        assert_eq!(std::fs::read_to_string(&tests).unwrap(), queued);
+        assert_eq!(
+            std::fs::read_to_string(repo.pending_dir().join("other.md")).unwrap(),
+            other
+        );
+    }
+
+    /// A write that fails part way through the chain names the files it
+    /// changed and the ones it left as they were. The later task's file is
+    /// moved into a folder it can be read from but not written into, so its
+    /// write fails after the head's has landed.
+    #[test]
+    fn a_lands_in_write_that_fails_part_way_names_the_unchanged_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-partial");
+        let wire = write_pending(&repo, "wire", &task_text("wire", "group: pay\n", BODY));
+        let before = task_text("tests", "group: pay\ndepends_on: [wire]\n", BODY);
+        write_pending(&repo, "tests", &before);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        let locked = repo.root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let tests = locked.join("tests.md");
+        std::fs::rename(repo.pending_dir().join("tests.md"), &tests).unwrap();
+        let at = state.group_cursor;
+        let later = 1 - state.task_cursor;
+        groups[at].tasks[later].path = tests.clone();
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&locked, perms.clone()).unwrap();
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "main");
+
+        // Restored before asserting, as the pipeline re-read test does.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in changed in part");
+        let (changed, unchanged) = notice.text.split_once("left unchanged").unwrap();
+        assert!(changed.contains(&wire.display().to_string()), "{changed}");
+        assert!(
+            unchanged.contains(&tests.display().to_string()),
+            "{unchanged}"
+        );
+        assert_eq!(std::fs::read_to_string(&tests).unwrap(), before);
+    }
+
+    /// A branch name YAML would read as something other than a string is
+    /// quoted, so `base:` reads back as the very name picked.
+    #[test]
+    fn a_picked_branch_reads_back_as_written() {
+        for name in ["main", "task/gh-9-wire", "1.0", "true", "123", "null", "#7"] {
+            let doc =
+                with_frontmatter_field("---\nid: wire\n---\nbody\n", "base", &yaml_scalar(name));
+            let front = crate::task::split_fence(&doc).unwrap().0;
+            let yaml: serde_norway::Value = serde_norway::from_str(front).unwrap();
+            assert_eq!(
+                super::super::pending::front_str(&yaml, "base").as_deref(),
+                Some(name),
+                "{doc}"
+            );
+        }
+        assert_eq!(yaml_scalar("task/gh-9-wire"), "task/gh-9-wire");
     }
 
     /// Two groups where deleting `cart-totals` reaches into the other one:
