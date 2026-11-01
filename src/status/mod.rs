@@ -1488,7 +1488,7 @@ impl Board {
     /// A task that never started goes through [`unqueue_in`], the road it
     /// always took. One that started goes through
     /// [`crate::commands::unqueue_stopped`], the teardown `spoolway queue
-    /// unqueue --force` runs, which takes the lock itself and asks the same
+    /// unqueue` runs, which takes the lock itself and asks the same
     /// comparison under it. What its teardown could not do lands in the
     /// problem log after a success, and in the refusal after a failure.
     fn answer_unqueue(
@@ -2850,30 +2850,6 @@ pub(crate) fn not_started(task: &crate::task::Task) -> bool {
     task.stage() == crate::pipeline::QUEUED
 }
 
-/// The other not-started task that names `id` in its own `depends_on`, if
-/// there is one — what `spoolway queue unqueue` still refuses outright,
-/// since it has no panel to list a chain on. The board's own `unqueue` no
-/// longer reads this: it carries `id` and every such dependent back to pending
-/// together instead — see [`unqueue_chain`].
-///
-/// Only a task that has not started can be waiting on `id` at all: `queued`
-/// is the one step a dependency check gates, so nothing past it depends on a
-/// task still active in the queue — see [`crate::graph::Graph::ready`]. The
-/// check is still made explicit here, rather than assumed, so a caller never
-/// has to trust that invariant to read this correctly.
-///
-/// `pub(crate)`: `spoolway queue unqueue` reads this for its own refusal —
-/// see `commands::queue::queue_unqueue_one`. It returns the dependent itself
-/// rather than a bare bool because the command names it in its message.
-pub(crate) fn depended_on_by_queued<'a>(
-    tasks: &'a [crate::task::Task],
-    id: &str,
-) -> Option<&'a crate::task::Task> {
-    tasks
-        .iter()
-        .find(|t| t.id() != id && not_started(t) && t.front.depends_on.iter().any(|d| d == id))
-}
-
 /// Whether the task `id` is stopped in the sense unqueuing a started task
 /// needs: parked on `paused`, `blocked` or `hook_failed`, with no agent lane
 /// mid-turn on it (an unblocker's included) and no worktree cut going.
@@ -2929,7 +2905,7 @@ pub(crate) fn unqueue_dependents(tasks: &[crate::task::Task], id: &str) -> Vec<S
 ///
 /// The started task's own counterpart of [`deleted_on_unqueue`]:
 /// [`drafted_in_batch`] reads only tasks that have not started, so it cannot
-/// answer for this one. `spoolway queue unqueue --force` deletes by it and
+/// answer for this one. `spoolway queue unqueue` deletes by it and
 /// the board's `unqueue` panel marks the copy by it, so the two agree.
 pub(crate) fn forced_routine_file(
     repo: &Repo,
@@ -3024,6 +3000,27 @@ pub(crate) fn skipped_last_steps(
         }
     }
     out
+}
+
+/// The sentences that name `skipped`, one per task and then the closing one:
+/// the `unqueue` panel draws them as lines, and the command joins them into
+/// one.
+pub(crate) fn skipped_last_lines(skipped: &[SkippedLast]) -> Vec<String> {
+    let mut lines: Vec<String> = skipped
+        .iter()
+        .map(|skipped| match skipped.steps.as_slice() {
+            [step] => format!("{} is past its last: step {step}.", skipped.task),
+            steps => format!(
+                "{} is past its last: steps {}.",
+                skipped.task,
+                steps.join(", ")
+            ),
+        })
+        .collect();
+    if !lines.is_empty() {
+        lines.push("unqueueing leaves no other task to run them.".to_string());
+    }
+    lines
 }
 
 /// Whether `task` is past `step` on `pipeline`'s route: `step` is on the
@@ -3203,6 +3200,48 @@ impl UnqueueConfirm {
     }
 }
 
+/// What unqueuing `task` deletes for good: its local branch when one exists,
+/// and the worktree it cut. `None` for a task that borrowed its checkout,
+/// which the teardown spares, and for one with neither.
+///
+/// The panel's [`unqueue_lead`] and the command's `deleted branch` line both
+/// read this, so the two cannot disagree about what is deleted.
+fn unqueue_deletes(
+    repo: &Repo,
+    task: &crate::task::Task,
+) -> Option<(Option<String>, Option<PathBuf>)> {
+    let branch = task
+        .front
+        .branch
+        .as_deref()
+        .filter(|branch| {
+            repo.git(&[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .is_ok()
+        })
+        .map(str::to_string);
+    let worktree = task.front.worktree_path.clone();
+    (!task.front.borrowed && (worktree.is_some() || branch.is_some())).then_some((branch, worktree))
+}
+
+/// The line `spoolway queue unqueue` prints once it has deleted `task`'s
+/// branch or worktree, read before the teardown removes them. `None` when it
+/// deletes neither, which is when the panel's [`unqueue_lead`] is not
+/// [`UnqueueLead::Deletes`].
+pub(crate) fn unqueue_deletion_line(repo: &Repo, task: &crate::task::Task) -> Option<String> {
+    let (branch, worktree) = unqueue_deletes(repo, task)?;
+    Some(match (branch, worktree) {
+        (Some(branch), Some(_)) => format!("deleted branch {branch} and its worktree"),
+        (Some(branch), None) => format!("deleted branch {branch}"),
+        (None, Some(path)) => format!("deleted worktree {}", path.display()),
+        (None, None) => return None,
+    })
+}
+
 /// What the `unqueue` panel says first about `task`. It deletes the task's
 /// worktree when it cut one, and its branch when that is a local branch:
 /// the same two the teardown takes, neither of them for a borrowed checkout
@@ -3210,16 +3249,7 @@ impl UnqueueConfirm {
 /// off `queued` has started by stage but has neither, and nothing has run
 /// for it.
 fn unqueue_lead(repo: &Repo, task: &crate::task::Task) -> UnqueueLead {
-    let branch = task.front.branch.as_deref().is_some_and(|branch| {
-        repo.git(&[
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .is_ok()
-    });
-    if !task.front.borrowed && (task.front.worktree_path.is_some() || branch) {
+    if unqueue_deletes(repo, task).is_some() {
         UnqueueLead::Deletes
     } else if task.front.worktree_path.is_none() && task.front.last_report.is_none() {
         UnqueueLead::NothingRan
@@ -3338,15 +3368,9 @@ fn unqueue_chain(tasks: &[crate::task::Task], id: &str) -> Vec<ChainEntry> {
 /// that mixes both kinds treats each its own way; [`drafted_in_batch`] names the
 /// one exception, a copy that a task drafted alongside it depends on.
 ///
-/// `pub(crate)`: `spoolway queue unqueue` is the third caller, for a task on
-/// `queued` with no `--force` — the same body a keypress and the command
-/// share, exactly as [`resume_task`] is for `r` and `queue resume`. A
-/// task that has already started is a different road: `queue unqueue
-/// --force` goes around this function's own `not_started` gate and calls
-/// [`carry_to_pending`] directly, once its own teardown has cleared the
-/// checkout — see `commands::queue::unqueue_stopped`, which the board's
-/// `unqueue` on a stopped task runs too. The tasks after it that have not
-/// started come through this function.
+/// Tests only: the board and `spoolway queue unqueue` both unqueue a chain, so
+/// they call [`unqueue_in`] with the batch's [`drafted_in_batch`].
+#[cfg(test)]
 pub(crate) fn unqueue_task(repo: &Repo, id: &str) -> Result<Unqueued> {
     unqueue_in(repo, id, &[])
 }
@@ -3457,7 +3481,7 @@ pub(crate) fn deleted_on_unqueue(
         .filter(|_| !drafted.iter().any(|d| d == task.id()))
 }
 
-/// What [`unqueue_task`] did, for the command that tells a person.
+/// What [`unqueue_in`] did, for the command that tells a person.
 pub(crate) enum Unqueued {
     /// Written to pending at this path, the queue file removed.
     Drafted(PathBuf),
@@ -3476,7 +3500,7 @@ pub(crate) enum Unqueued {
 /// `tracking/` stopped and reclaimed. The caller decides whether `task` may
 /// go — [`unqueue_task`] only carries a task that has not started, and
 /// `commands::queue::unqueue_stopped`, which the board's `unqueue` and
-/// `queue unqueue --force` run on a stopped task, one whose checkout it has
+/// `queue unqueue` run on a stopped task, one whose checkout it has
 /// just torn down — and holds the task's lock while it does.
 ///
 /// `None` when a task already sits in `pending/` under this id: that is

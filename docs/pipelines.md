@@ -403,7 +403,7 @@ A build, a test suite, a formatter or a deploy script is a command step.
 - A process a blocking `run:` line starts in the background, such as `(sleep 98 &) ; true`,
   keeps running after the command exits. A `<task> · <step>.group` record under `commands/`
   names its process group. The next arrival at the step stops it. So does cleanup, which
-  stops it before the worktree is deleted. `spoolway queue unqueue --force` stops it too.
+  stops it before the worktree is deleted. `spoolway queue unqueue` stops it too.
 - A blocking command whose task leaves the step by another road, such as a `spoolway report`
   typed by hand or a `last:` walk-past, is stopped on the dispatcher's next pass. Its run files
   are deleted and its exit code never moves the task. Its pane, if it has one, closes.

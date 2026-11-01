@@ -690,132 +690,108 @@ fn queue_add_dry_run(
     Ok(())
 }
 
-/// `spoolway queue unqueue <id>` / `--all`: the command form of the board's
-/// `unqueue` — carry a not-started task back to the pending
-/// directory, with every reserved key stripped, so `queue add --from` takes
-/// it again unchanged. A copy of a routine that still exists is deleted
-/// instead. The move itself is [`crate::status::unqueue_task`]
-/// (or, for `--all`, one call of it per not-started task) — this only adds
-/// the arguments a script needs that a keypress does not: a named refusal
-/// for everything the board's key silently declines, and `--force`, which a
-/// panel with nobody behind it has no way to offer at all.
+/// `spoolway queue unqueue <id>`: the command form of the board's `unqueue`,
+/// with the same rules and no prompt. Any stopped task goes back to the
+/// pending directory, with every reserved key stripped, so `queue add --from`
+/// takes it again unchanged, and every task after it in its group goes with
+/// it. A copy of a routine that still exists is deleted instead.
+///
+/// A task that never left `queued` moves by its file alone. One that has
+/// started has its checkout torn down first, through [`unqueue_stopped`],
+/// which the board's `unqueue` runs too. Only a running task is refused, with
+/// the pause command to run first, whether a dispatcher runs or not: a lane
+/// or a cut at work in the checkout is what the teardown must not race.
 pub fn queue_unqueue(repo: &Repo, pipelines: &Pipelines, args: &QueueUnqueueArgs) -> Result<()> {
-    if args.all && args.force {
-        bail!(
-            "`--all --force` would tear down every checkout still in the queue in one line — \
-             name one task at a time with `--force`, or drop it to unqueue only what has not \
-             started"
-        );
-    }
-
-    if args.all {
-        return queue_unqueue_all(repo);
-    }
-
-    let id = args
-        .task
-        .as_deref()
-        .context("a task id is required, unless `--all` is given")?;
-    queue_unqueue_one(repo, pipelines, id, args.force)
+    unqueue_saying(repo, pipelines, &args.task, &mut |said| match said {
+        Said::Line(line) => println!("{line}"),
+        Said::Problem(problem) => eprintln!("{problem}"),
+    })
 }
 
-/// `--all`: every not-started task at once — no
-/// per-task [`crate::status::depended_on_by_queued`] check, since anything
-/// depending on the set has not started either and is unqueued in the
-/// same batch, a routine copy a drafted task depends on being carried to
-/// pending rather than deleted (see [`crate::status::drafted_in_batch`]). Stops at the first one [`unqueue_or_bail`] cannot carry,
-/// leaving every task after it exactly where it was — the same all-or-
-/// nothing promise a single `--force` unqueue makes, read over the whole
-/// batch rather than one checkout.
-fn queue_unqueue_all(repo: &Repo) -> Result<()> {
-    let ids: Vec<String> = repo
-        .tasks()?
-        .iter()
-        .filter(|t| crate::status::not_started(t))
-        .map(|t| t.id().to_string())
-        .collect();
-    if ids.is_empty() {
-        println!("nothing to unqueue — no task has not started");
-        return Ok(());
-    }
-    let drafted = crate::status::drafted_in_batch(repo, &ids)?;
-    for id in &ids {
-        report_unqueued(repo, id, crate::status::unqueue_in(repo, id, &drafted)?)?;
-    }
-    Ok(())
-}
-
-/// One task, named on the command line: [`crate::status::not_started`]
-/// carries it straight through [`unqueue_or_bail`], refusing a sibling
-/// still queued that names it in `depends_on` — this command has no panel to
-/// list a chain on, unlike the board's own `unqueue`, which carries that
-/// dependent back to pending alongside it instead. Anything further along
-/// is refused unless `force` says to tear its checkout down first — see
-/// [`queue_unqueue_forced`], which carries the tasks after it to pending too.
-fn queue_unqueue_one(repo: &Repo, pipelines: &Pipelines, id: &str, force: bool) -> Result<()> {
+/// [`queue_unqueue`] for task `id`, handing each line it has to say to `say`
+/// as it goes, so a test can read them.
+fn unqueue_saying(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    id: &str,
+    say: &mut dyn FnMut(Said),
+) -> Result<()> {
     let tasks = repo.tasks()?;
     let task = tasks.iter().find(|t| t.id() == id).with_context(|| {
         format!("no queued task `{id}` — `spoolway queue list` names the ones there are")
     })?;
 
     if crate::status::not_started(task) {
-        if let Some(sibling) = crate::status::depended_on_by_queued(&tasks, id) {
-            bail!(
-                "`{}` depends on `{id}` and has not started either — unqueuing `{id}` alone \
-                 would leave it waiting on a dependency the queue no longer shows. unqueue \
-                 `{}` first, or pass `--all` to carry both back together.",
-                sibling.id(),
-                sibling.id(),
-            );
-        }
-        return unqueue_or_bail(repo, id);
+        return unqueue_unstarted(repo, pipelines, &tasks, id, say);
     }
 
-    let stage = task.stage().to_string();
-    let checkout = task.front.worktree_path.clone();
-
-    if !force {
-        let mut message = format!(
-            "`{id}` is on `{stage}`, not `{}`\n",
-            crate::pipeline::QUEUED
-        );
-        if let Some(path) = &checkout {
-            message += &format!(
-                "\n  it has a checkout at {}, and unqueuing it\n  would leave that standing.\n",
-                path.display()
-            );
+    let check = |tasks: &[Task], lanes: &[crate::mux::Lane]| -> Result<()> {
+        if crate::status::stopped_for_unqueue(repo, tasks, pipelines, lanes, id) {
+            return Ok(());
         }
-        message += &format!(
-            "\n  to stop it where it is, keeping the checkout:\n      spoolway queue pause {id}\n"
-        );
-        message += &format!(
-            "\n  to delete the checkout and its branch and unqueue it anyway:\n      spoolway queue unqueue {id} --force\n"
-        );
-        message += "\nnothing was changed.";
-        bail!(message);
+        let stage = tasks
+            .iter()
+            .find(|t| t.id() == id)
+            .map_or("", |t| t.stage());
+        bail!(running_refusal(id, stage));
+    };
+    unqueue_stopped(repo, pipelines, id, &check, say)
+}
+
+/// What a running task is told: unqueue takes a stopped task only, and the
+/// pause command stops it where it is. Nothing was changed, and says so.
+fn running_refusal(id: &str, stage: &str) -> String {
+    let doing = match stage {
+        crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED => {
+            format!("has a lane or a cut still working on `{stage}`")
+        }
+        step => format!("is running step {step}"),
+    };
+    format!(
+        "`{id}` {doing} — unqueue takes a stopped task only.\n\n  to stop it where it is, \
+         then unqueue it:\n      spoolway queue pause {id}\n      spoolway queue unqueue {id}\n\n\
+         nothing was changed."
+    )
+}
+
+/// A task still on `queued`, and every one after it in its group: no checkout
+/// to tear down, so each moves by its file. The lines are the ones
+/// [`unqueue_stopped`] gives for the same chain, less the deletion line, since
+/// nothing was cut.
+///
+/// The tasks are moved one at a time through [`crate::status::unqueue_in`],
+/// which takes each task's lock. If the dispatcher launched the head in the
+/// meantime it stays queued and the refusal comes before any task after it is
+/// moved away from a head that is now running.
+fn unqueue_unstarted(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[Task],
+    id: &str,
+    say: &mut dyn FnMut(Said),
+) -> Result<()> {
+    let mut ids = vec![id.to_string()];
+    ids.extend(crate::status::unqueue_dependents(tasks, id));
+    let skipped = crate::status::skipped_last_steps(repo, pipelines, tasks, &ids);
+    let drafted = crate::status::drafted_in_batch(repo, &ids)?;
+    // The head first: one that stayed queued refuses here, before a line
+    // claims anything was left behind or any task after it moves.
+    let head = unqueued_line(repo, id, crate::status::unqueue_in(repo, id, &drafted)?)?;
+    if !skipped.is_empty() {
+        say(Said::Line(
+            crate::status::skipped_last_lines(&skipped).join(" "),
+        ));
     }
-
-    queue_unqueue_forced(repo, pipelines, id)
-}
-
-/// Unqueue `id` through [`crate::status::unqueue_task`] — the same call the
-/// board's `unqueue` makes — then say what it did. That function is silent
-/// about a newer draft already sitting in pending, right for a keypress with
-/// a board to keep drawing but wrong for a script that named a task by hand
-/// and needs to know its unqueue did not happen.
-fn unqueue_or_bail(repo: &Repo, id: &str) -> Result<()> {
-    report_unqueued(repo, id, crate::status::unqueue_task(repo, id)?)
-}
-
-/// Print what [`crate::status::Unqueued`] says happened to `id`, or refuse
-/// when it stayed queued.
-fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> Result<()> {
-    println!("{}", unqueued_line(repo, id, outcome)?);
+    say(Said::Line(head));
+    for each in &ids[1..] {
+        let outcome = crate::status::unqueue_in(repo, each, &drafted)?;
+        say(Said::Line(unqueued_line(repo, each, outcome)?));
+    }
     Ok(())
 }
 
-/// The line [`report_unqueued`] prints for `outcome`, or the refusal it
-/// gives when `id` stayed queued. The board's `unqueue` refuses with the
+/// The line the command prints for `outcome`, or the refusal it gives when
+/// `id` stayed queued. The board's `unqueue` refuses with the
 /// same words.
 pub(crate) fn unqueued_line(
     repo: &Repo,
@@ -841,39 +817,6 @@ pub(crate) fn unqueued_line(
     }
 }
 
-/// `--force` on a task that has started: [`unqueue_stopped`], refusing a task
-/// that is still moving while a dispatcher runs, with every line it has to
-/// say printed as it goes.
-///
-/// A dispatcher holding the run lock is no obstacle for a stopped task — see
-/// [`crate::status::stopped_for_unqueue`] — because nothing is moving it. A
-/// task that is still running is refused while a dispatcher runs, and torn
-/// down, its live lane stopped with it, when none does.
-fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
-    let check = |tasks: &[Task], lanes: &[crate::mux::Lane]| -> Result<()> {
-        if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())?
-            && !crate::status::stopped_for_unqueue(repo, tasks, pipelines, lanes, id)
-        {
-            let stage = tasks
-                .iter()
-                .find(|t| t.id() == id)
-                .map_or("", |t| t.stage());
-            bail!(
-                "did not unqueue `{id}`: it is on `{stage}` and a dispatcher is running for \
-                 this repo (pid {pid}), which could be moving it right now. a task is only torn \
-                 down under a running dispatcher once it has stopped with no lane or cut at \
-                 work. run `spoolway queue pause {id}`, wait until it shows paused, then run \
-                 this again. nothing was torn down."
-            );
-        }
-        Ok(())
-    };
-    unqueue_stopped(repo, pipelines, id, &check, &mut |said| match said {
-        Said::Line(line) => println!("{line}"),
-        Said::Problem(problem) => eprintln!("{problem}"),
-    })
-}
-
 /// One thing [`unqueue_stopped`] has to tell whoever asked for it, as it
 /// happens: the command prints each, the board keeps the problems.
 pub(crate) enum Said {
@@ -890,7 +833,7 @@ pub(crate) type UnqueueCheck<'a> = dyn Fn(&[Task], &[crate::mux::Lane]) -> Resul
 
 /// Tear a task that has started down the way done-cleanup does, then carry
 /// it, and every task after it in its group, to pending. `spoolway queue
-/// unqueue --force` and the board's `unqueue` both come through here.
+/// unqueue` and the board's `unqueue` both come through here.
 ///
 /// The teardown is [`crate::dispatch::Dispatcher::tear_down_stopped`]. It
 /// stops the task's lanes and runs, banks what they spent, removes the
@@ -917,7 +860,7 @@ pub(crate) fn unqueue_stopped(
     check: &UnqueueCheck,
     say: &mut dyn FnMut(Said),
 ) -> Result<()> {
-    // The same per-task lock `unqueue_task` itself takes, held across the
+    // The same per-task lock `unqueue_in` itself takes, held across the
     // whole teardown rather than just the final move: nothing else may
     // read or write this task's file while its checkout is coming down.
     // Going on without it would make the check below meaningless under a
@@ -990,9 +933,15 @@ pub(crate) fn unqueue_stopped(
         }
     }
 
+    // Read before the teardown removes what they name. The same rules the
+    // board's panel draws its warnings by, so the command and the popup say
+    // the same thing.
+    let mut chain = vec![id.to_string()];
+    chain.extend(dependents.iter().cloned());
+    let deletion = crate::status::unqueue_deletion_line(repo, &tasks[idx]);
+    let skipped = crate::status::skipped_last_steps(repo, pipelines, &tasks, &chain);
+
     let mut task = repo.task(id)?;
-    let checkout = task.front.worktree_path.clone();
-    let borrowed = task.front.borrowed;
     let mux_ref = mux.as_ref();
     let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref);
     let mut report = crate::dispatch::Report::default();
@@ -1006,22 +955,15 @@ pub(crate) fn unqueue_stopped(
              task is still queued. clear what is in the way, then run this again."
         );
     }
-    // A borrowed checkout is spared on purpose and its folder stays, so what
-    // happened to it is read back off the filesystem and told to the person.
-    if let Some(path) = &checkout {
-        if path.exists() {
-            let why = if borrowed {
-                "it is borrowed, not spoolway's own"
-            } else {
-                "it could not be removed"
-            };
-            say(Said::Line(format!(
-                "kept worktree {} — {why}",
-                path.display()
-            )));
-        } else {
-            say(Said::Line(format!("removed worktree {}", path.display())));
-        }
+    // A borrowed checkout is spared and nothing was deleted for it, so
+    // `deletion` is `None` and nothing is said.
+    if let Some(line) = deletion {
+        say(Said::Line(line));
+    }
+    if !skipped.is_empty() {
+        say(Said::Line(
+            crate::status::skipped_last_lines(&skipped).join(" "),
+        ));
     }
 
     // `tear_down_checkout` gives back the workspace and the worktree but
@@ -13817,28 +13759,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&archived).unwrap(), before);
     }
 
-    /// Without `--force`, a started task is told the route that tears it down
-    /// even when a queued task depends on it, since that task now goes to
-    /// pending with it.
-    #[test]
-    fn unqueue_without_force_names_the_force_route_when_a_dependent_waits() {
-        let (repo, _root_guard) = fixture("unqueue-no-force-dependent");
-        let pipelines = Pipelines::builtin();
-        add(&repo, "parent", &[]);
-        add(&repo, "child", &["parent"]);
-        let mut task = queued(&repo, "parent");
-        task.front.stage = "implement".to_string();
-        task.save().unwrap();
-
-        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("parent")).unwrap_err();
-        let said = format!("{err:#}");
-        assert!(
-            said.contains("spoolway queue unqueue parent --force"),
-            "{said}"
-        );
-        assert!(repo.queue_dir().join("parent.md").exists());
-    }
-
     /// A task stopped on `paused` with a worktree of its own: the checkout is
     /// cut under the project's worktree root on a fresh `task/<id>` branch, the
     /// way a lane's cut leaves it, and the task is parked on `paused`.
@@ -13880,7 +13800,7 @@ mod tests {
     /// commit of the file it left uncommitted, and leaves a task that
     /// `queue add` takes again with no leftover branch to refuse it over.
     #[test]
-    fn a_forced_unqueue_deletes_the_worktree_and_a_branch_no_remote_has() {
+    fn unqueue_deletes_the_worktree_and_a_branch_no_remote_has() {
         let (repo, _root_guard) = fixture("unqueue-forced-deletes");
         let pipelines = Pipelines::builtin();
         let origin = repo.root.display().to_string();
@@ -13895,7 +13815,7 @@ mod tests {
         .unwrap();
         std::fs::write(worktree.join("left.txt"), "unrecorded").unwrap();
 
-        queue_unqueue_forced(&repo, &pipelines, "solo").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap();
 
         assert!(!worktree.exists(), "the worktree is removed");
         assert!(!branch_exists(&repo, "task/solo"), "the branch is deleted");
@@ -13920,7 +13840,7 @@ mod tests {
     /// of a rebase is torn down like any other. The branch it was standing on
     /// instead is not the task's and stays.
     #[test]
-    fn a_forced_unqueue_tears_down_a_worktree_off_its_branch() {
+    fn unqueue_tears_down_a_worktree_off_its_branch() {
         for (state, name) in [
             ("other", "on-other"),
             ("detached", "detached"),
@@ -13944,7 +13864,7 @@ mod tests {
                 }
             }
 
-            queue_unqueue_forced(&repo, &pipelines, "solo").unwrap();
+            queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap();
 
             assert!(!worktree.exists(), "{name}: the worktree is removed");
             assert!(
@@ -13962,7 +13882,7 @@ mod tests {
     /// A checkout the task borrowed is a person's own: unqueuing leaves the
     /// folder and the branch it was on standing, as done-cleanup does.
     #[test]
-    fn a_forced_unqueue_leaves_a_borrowed_checkout_alone() {
+    fn unqueue_leaves_a_borrowed_checkout_alone() {
         let (repo, _root_guard) = fixture("unqueue-forced-borrowed");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
@@ -13973,7 +13893,7 @@ mod tests {
         task.front.branch = Some("task/solo".to_string());
         task.front.worktree_path = Some(repo.root.to_path_buf());
         task.save().unwrap();
-        queue_unqueue_forced(&repo, &pipelines, "solo").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap();
 
         assert!(repo.root.exists(), "the borrowed folder stays");
         assert!(branch_exists(&repo, "task/solo"), "and so does its branch");
@@ -13985,7 +13905,7 @@ mod tests {
     /// hops down, keeping `group:` and `depends_on:`; the one before it is not
     /// touched.
     #[test]
-    fn a_forced_unqueue_carries_every_task_after_it_in_its_group() {
+    fn unqueue_carries_every_task_after_it_in_its_group() {
         let (repo, _root_guard) = fixture("unqueue-forced-chain");
         let pipelines = Pipelines::builtin();
         add(&repo, "first", &[]);
@@ -13996,7 +13916,7 @@ mod tests {
         first.save().unwrap();
         let worktree = paused_with_worktree(&repo, "middle");
 
-        queue_unqueue_forced(&repo, &pipelines, "middle").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("middle")).unwrap();
 
         assert!(!worktree.exists());
         assert!(repo.task("first").is_ok(), "the task before it stays");
@@ -14010,9 +13930,10 @@ mod tests {
 
     /// With a dispatcher holding the run lock, a stopped task is still torn
     /// down: nothing is moving it. A task that is still running is refused
-    /// instead, untouched, since the dispatcher may be moving it right now.
+    /// instead, untouched, with the pause command to run first, since the
+    /// dispatcher may be moving it right now.
     #[test]
-    fn a_forced_unqueue_works_under_a_running_dispatcher_only_for_a_stopped_task() {
+    fn unqueue_works_under_a_running_dispatcher_only_for_a_stopped_task() {
         let (repo, _root_guard) = fixture("unqueue-forced-locked");
         let pipelines = Pipelines::builtin();
         // One group is one chain, so the stopped task follows the running one.
@@ -14024,13 +13945,13 @@ mod tests {
         running.save().unwrap();
         let _held = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
-        let err = queue_unqueue_forced(&repo, &pipelines, "running").unwrap_err();
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("running")).unwrap_err();
         let said = format!("{err:#}");
         assert!(said.contains("spoolway queue pause running"), "{said}");
-        assert!(said.contains("nothing was torn down"), "{said}");
+        assert!(said.contains("nothing was changed"), "{said}");
         assert!(repo.task("running").is_ok(), "the running task stays");
 
-        queue_unqueue_forced(&repo, &pipelines, "stopped").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("stopped")).unwrap();
         assert!(!stopped_worktree.exists());
         assert!(repo.pending_dir().join("stopped.md").exists());
     }
@@ -14038,7 +13959,7 @@ mod tests {
     /// A worktree that cannot be removed leaves the task exactly where it was:
     /// still queued, nothing in pending, its branch standing.
     #[test]
-    fn a_forced_unqueue_carries_nothing_when_the_worktree_cannot_be_removed() {
+    fn unqueue_carries_nothing_when_the_worktree_cannot_be_removed() {
         let (repo, _root_guard) = fixture("unqueue-forced-stuck");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
@@ -14053,7 +13974,7 @@ mod tests {
         task.front.worktree_path = Some(stuck.to_path_buf());
         task.save().unwrap();
 
-        let err = queue_unqueue_forced(&repo, &pipelines, "solo").unwrap_err();
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap_err();
 
         assert!(format!("{err:#}").contains("still queued"), "{err:#}");
         assert!(repo.task("solo").is_ok());
@@ -14061,13 +13982,13 @@ mod tests {
         assert!(branch_exists(&repo, "task/solo"));
     }
 
-    /// A forced unqueue stops a hook run still going for the task before its
+    /// An unqueue stops a hook run still going for the task before its
     /// files under `tracking/` go, and leaves no run file under `tracking/` or
     /// `commands/` and no lane alias behind. Fails when the files are reclaimed
     /// first: the hook then outlives the unqueue and writes an exit code for
     /// the task's next run.
     #[test]
-    fn a_forced_unqueue_stops_a_running_hook_and_reclaims_the_task_files() {
+    fn unqueue_stops_a_running_hook_and_reclaims_the_task_files() {
         let (repo, _root_guard) = fixture("unqueue-forced-hook");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
@@ -14094,7 +14015,7 @@ mod tests {
         )
         .unwrap();
 
-        queue_unqueue_forced(&repo, &pipelines, "solo").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap();
 
         assert!(
             !crate::headless::alive(pid),
@@ -14124,16 +14045,16 @@ mod tests {
         );
     }
 
-    /// A forced unqueue brings the worktree down, so a process a finished
+    /// An unqueue brings the worktree down, so a process a finished
     /// command step backgrounded — recorded only in a `.group` file — has to
     /// be stopped first, or it keeps its cwd in a directory that is gone.
     #[test]
-    fn a_forced_unqueue_stops_what_a_finished_command_step_backgrounded() {
+    fn unqueue_stops_what_a_finished_command_step_backgrounded() {
         let (repo, _root_guard) = fixture("unqueue-forced-group");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let mut task = queued(&repo, "solo");
-        task.front.stage = "implement".to_string();
+        task.front.stage = "paused".to_string();
         task.save().unwrap();
 
         let runs = crate::command_step::Runs::new(&repo.commands_dir());
@@ -14161,7 +14082,7 @@ mod tests {
         runs.forget(&key).unwrap();
         assert!(crate::headless::alive(child));
 
-        queue_unqueue_forced(&repo, &pipelines, "solo").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap();
 
         assert!(
             !crate::headless::alive(child),
@@ -14170,10 +14091,10 @@ mod tests {
     }
 
     /// A started copy of a routine that still has its file is deleted by a
-    /// forced unqueue, and a draft already in pending under the same id is no
+    /// unqueue, and a draft already in pending under the same id is no
     /// reason to refuse: nothing is written there for it to collide with.
     #[test]
-    fn a_forced_unqueue_deletes_a_started_routine_copy_past_a_pending_draft() {
+    fn unqueue_deletes_a_started_routine_copy_past_a_pending_draft() {
         let (repo, _root_guard) = fixture("unqueue-forced-routine-copy");
         let pipelines = Pipelines::builtin();
         let routine = repo.routines_dir().join("nightly").join("nightly.md");
@@ -14185,7 +14106,7 @@ mod tests {
         .unwrap();
         add(&repo, "nightly-3", &[]);
         let mut copy = queued(&repo, "nightly-3");
-        copy.front.stage = "implement".to_string();
+        copy.front.stage = "paused".to_string();
         copy.front.routine = Some("nightly".into());
         copy.save().unwrap();
         let draft = repo.pending_dir().join("nightly-3.md");
@@ -14193,7 +14114,7 @@ mod tests {
         std::fs::write(&draft, "a newer draft\n").unwrap();
         crate::repo::run(&repo.root, "git", &["branch", "task/nightly-3"]).unwrap();
 
-        queue_unqueue_forced(&repo, &pipelines, "nightly-3").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("nightly-3")).unwrap();
 
         assert!(
             !branch_exists(&repo, "task/nightly-3"),
@@ -14205,28 +14126,28 @@ mod tests {
     }
 
     /// A started copy whose routine file is gone is the only record of the
-    /// task, so a forced unqueue carries it to pending as any other task,
+    /// task, so an unqueue carries it to pending as any other task,
     /// and a draft already there still refuses it before anything is torn
     /// down.
     #[test]
-    fn a_forced_unqueue_carries_a_started_copy_whose_routine_is_gone() {
+    fn unqueue_carries_a_started_copy_whose_routine_is_gone() {
         let (repo, _root_guard) = fixture("unqueue-forced-routine-gone");
         let pipelines = Pipelines::builtin();
         add(&repo, "nightly-3", &[]);
         let mut copy = queued(&repo, "nightly-3");
-        copy.front.stage = "implement".to_string();
+        copy.front.stage = "paused".to_string();
         copy.front.routine = Some("nightly".into());
         copy.save().unwrap();
         let draft = repo.pending_dir().join("nightly-3.md");
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         std::fs::write(&draft, "a newer draft\n").unwrap();
 
-        let err = queue_unqueue_forced(&repo, &pipelines, "nightly-3").unwrap_err();
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("nightly-3")).unwrap_err();
         assert!(format!("{err:#}").contains("newer draft"), "{err:#}");
         assert!(copy.path.exists(), "the copy stays queued");
 
         std::fs::remove_file(&draft).unwrap();
-        queue_unqueue_forced(&repo, &pipelines, "nightly-3").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("nightly-3")).unwrap();
         assert!(!copy.path.exists());
         assert!(draft.exists(), "the copy was carried to pending");
     }
@@ -14236,7 +14157,7 @@ mod tests {
     /// keeps naming the copy in `depends_on:`, and `queue add` refuses a task
     /// whose dependency is nowhere. Fails when the copy is deleted.
     #[test]
-    fn a_forced_unqueue_carries_a_routine_copy_a_dependent_leans_on() {
+    fn unqueue_carries_a_routine_copy_a_dependent_leans_on() {
         let (repo, _root_guard) = fixture("unqueue-forced-routine-dependent");
         let pipelines = Pipelines::builtin();
         let routine = repo.routines_dir().join("nightly").join("nightly.md");
@@ -14253,7 +14174,7 @@ mod tests {
         copy.front.routine = Some("nightly".into());
         copy.save().unwrap();
 
-        queue_unqueue_forced(&repo, &pipelines, "nightly-3").unwrap();
+        queue_unqueue(&repo, &pipelines, &unqueue_args("nightly-3")).unwrap();
 
         assert!(!copy.path.exists());
         let carried = std::fs::read_to_string(repo.pending_dir().join("nightly-3.md")).unwrap();
@@ -14267,7 +14188,7 @@ mod tests {
     /// refuses the whole unqueue while the checkout still stands: nothing is
     /// torn down and no task moves. Fails when the check is left to the move.
     #[test]
-    fn a_forced_unqueue_refuses_before_teardown_over_a_dependents_newer_draft() {
+    fn unqueue_refuses_before_teardown_over_a_dependents_newer_draft() {
         let (repo, _root_guard) = fixture("unqueue-forced-dependent-draft");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
@@ -14277,7 +14198,7 @@ mod tests {
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         std::fs::write(&draft, "a newer draft\n").unwrap();
 
-        let err = queue_unqueue_forced(&repo, &pipelines, "solo").unwrap_err();
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap_err();
 
         let said = format!("{err:#}");
         assert!(said.contains("a newer draft of `after`"), "{said}");
@@ -28118,26 +28039,20 @@ body\n";
 
     fn unqueue_args(task: &str) -> QueueUnqueueArgs {
         QueueUnqueueArgs {
-            task: Some(task.to_string()),
-            all: false,
-            force: false,
+            task: task.to_string(),
         }
     }
 
-    fn unqueue_all_args(force: bool) -> QueueUnqueueArgs {
-        QueueUnqueueArgs {
-            task: None,
-            all: true,
-            force,
-        }
-    }
-
-    fn unqueue_forced_args(task: &str) -> QueueUnqueueArgs {
-        QueueUnqueueArgs {
-            task: Some(task.to_string()),
-            all: false,
-            force: true,
-        }
+    /// [`unqueue_saying`] for `id`, with every line it said, joined by
+    /// newlines the way the command prints them, beside its result.
+    fn unqueue_said(repo: &Repo, pipelines: &Pipelines, id: &str) -> (Result<()>, String) {
+        let mut lines = Vec::new();
+        let result = unqueue_saying(repo, pipelines, id, &mut |said| {
+            if let Said::Line(line) = said {
+                lines.push(line);
+            }
+        });
+        (result, lines.join("\n"))
     }
 
     /// `queue unqueue` on a task that has not started: the task goes
@@ -28221,100 +28136,132 @@ body\n";
         assert_eq!(task.front.missing_start_branch, None);
     }
 
-    /// `--all` carries every not-started task back at once, with no
-    /// dependency check between them.
+    /// A task on `queued` carries every task after it in its group to pending
+    /// with it, however many hops down, and says so with one `unqueued` line
+    /// each, the task named first. Nothing but those lines is said: no
+    /// checkout was deleted and no `last:` step was passed.
     #[test]
-    fn queue_unqueue_all_carries_every_not_started_task() {
-        let (repo, _root_guard) = fixture("queue-unqueue-all");
-        add(&repo, "base", &[]);
-        add(&repo, "dependent", &["base"]);
-
-        queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_all_args(false)).unwrap();
-
-        assert!(!repo.queue_dir().join("base.md").exists());
-        assert!(!repo.queue_dir().join("dependent.md").exists());
-        assert!(repo.pending_dir().join("base.md").exists());
-        assert!(repo.pending_dir().join("dependent.md").exists());
-    }
-
-    /// `--all --force` is refused outright, in either flag order — tearing
-    /// down every checkout in the queue in one line is not a command a
-    /// script should be able to reach by accident.
-    #[test]
-    fn queue_unqueue_all_force_is_refused() {
-        let (repo, _root_guard) = fixture("queue-unqueue-all-force");
-        add(&repo, "login", &[]);
-
-        let err = queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_all_args(true)).unwrap_err();
-        assert!(format!("{err:#}").contains("--all --force"));
-        assert!(repo.queue_dir().join("login.md").exists());
-    }
-
-    /// A task on `queued` names a sibling that depends on it in the
-    /// refusal — this command has no panel to carry the two back together,
-    /// unlike the board's own `unqueue` — and a task the queue does not have
-    /// names itself.
-    #[test]
-    fn queue_unqueue_refuses_a_queued_dependency_and_an_unknown_id() {
-        let (repo, _root_guard) = fixture("queue-unqueue-refusal");
+    fn queue_unqueue_carries_the_tasks_after_a_queued_one() {
+        let (repo, _root_guard) = fixture("queue-unqueue-chain");
         let pipelines = Pipelines::builtin();
         add(&repo, "base", &[]);
         add(&repo, "dependent", &["base"]);
+        add(&repo, "last", &["dependent"]);
 
-        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("base")).unwrap_err();
-        let said = format!("{err:#}");
-        assert!(
-            said.contains("dependent") && said.contains("--all"),
-            "{said}"
+        let (result, said) = unqueue_said(&repo, &pipelines, "base");
+
+        result.unwrap();
+        let line = |id: &str| {
+            format!(
+                "unqueued `{id}` → {}",
+                repo.pending_dir().join(format!("{id}.md")).display()
+            )
+        };
+        assert_eq!(
+            said,
+            [line("base"), line("dependent"), line("last")].join("\n")
         );
-        assert!(repo.queue_dir().join("base.md").exists());
+        for id in ["base", "dependent", "last"] {
+            assert!(!repo.queue_dir().join(format!("{id}.md")).exists(), "{id}");
+            assert!(repo.pending_dir().join(format!("{id}.md")).exists(), "{id}");
+        }
+    }
 
-        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("nope")).unwrap_err();
+    /// `--force` and `--all` are gone: passing either is the argument parser's
+    /// unknown-argument error, not a flag that does nothing.
+    #[test]
+    fn queue_unqueue_takes_no_flags() {
+        use clap::Parser;
+        for flag in ["--force", "--all"] {
+            let err =
+                crate::cli::Cli::try_parse_from(["spoolway", "queue", "unqueue", "login", flag])
+                    .expect_err(flag);
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag}"
+            );
+        }
+        assert!(
+            crate::cli::Cli::try_parse_from(["spoolway", "queue", "unqueue"]).is_err(),
+            "a task id is required"
+        );
+    }
+
+    /// A task the queue does not have names itself.
+    #[test]
+    fn queue_unqueue_refuses_an_unknown_id() {
+        let (repo, _root_guard) = fixture("queue-unqueue-unknown");
+
+        let err = queue_unqueue(&repo, &Pipelines::builtin(), &unqueue_args("nope")).unwrap_err();
+
         assert!(format!("{err:#}").contains("no queued task"), "{err:#}");
     }
 
-    /// A task that has started is refused without `--force`, naming its
-    /// stage, its checkout, and both routes onward — and nothing on disk
-    /// moves. The same task with `--force` tears the checkout down and
-    /// unqueues it, leaving no checkout field behind on the task that
-    /// reaches pending.
+    /// A running task is refused in the words drawn for the command line,
+    /// naming the pause command, and nothing is changed — with or without a
+    /// dispatcher holding the run lock.
     #[test]
-    fn queue_unqueue_refuses_a_started_task_without_force_and_tears_down_with_it() {
+    fn queue_unqueue_refuses_a_running_task_naming_the_pause_command() {
+        let (repo, _root_guard) = fixture("queue-unqueue-running");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        add(&repo, "after", &["solo"]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "implement".to_string();
+        task.save().unwrap();
+        let before = std::fs::read_to_string(&task.path).unwrap();
+
+        for held in [false, true] {
+            let _lock =
+                held.then(|| crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap());
+            let (result, said) = unqueue_said(&repo, &pipelines, "solo");
+            let err = format!("{:#}", result.unwrap_err());
+            assert_eq!(
+                err,
+                "`solo` is running step implement — unqueue takes a stopped task only.\n\n  \
+                 to stop it where it is, then unqueue it:\n      spoolway queue pause solo\n      \
+                 spoolway queue unqueue solo\n\nnothing was changed."
+            );
+            assert_eq!(said, "", "nothing is claimed done");
+            assert_eq!(std::fs::read_to_string(&task.path).unwrap(), before);
+            assert!(repo.task("after").is_ok(), "the task after it stays");
+            assert!(!repo.pending_dir().join("solo.md").exists());
+        }
+    }
+
+    /// A stopped task with a branch and a worktree says what it deleted, then
+    /// one `unqueued` line per task, the task named first and each task after
+    /// it following, leaving no checkout field on the task that reaches
+    /// pending.
+    #[test]
+    fn queue_unqueue_says_what_it_deleted_and_each_task_it_moved() {
         let (repo, _root_guard) = fixture("queue-unqueue-started");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
+        add(&repo, "after", &["solo"]);
+        let worktree = paused_with_worktree(&repo, "solo");
 
-        // No workspace recorded, no real worktree cut: `tear_down_checkout`
-        // treats an already-gone checkout as a fine outcome rather than an
-        // error, and this test's own job is only the road around it — that
-        // the reserved fields are cleared before the task reaches
-        // pending — not the removal itself, which `teardown.rs`'s own
-        // callers already cover.
-        let worktree = repo.root.join("wt-solo");
+        let (result, said) = unqueue_said(&repo, &pipelines, "solo");
 
-        let mut task = queued(&repo, "solo");
-        task.front.stage = "implement".to_string();
-        task.front.worktree_path = Some(worktree.clone());
-        task.save().unwrap();
-
-        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap_err();
-        let said = format!("{err:#}");
-        assert!(
-            said.contains("is on `implement`, not `queued`")
-                && said.contains(&worktree.display().to_string())
-                && said.contains("spoolway queue pause solo")
-                && said.contains("spoolway queue unqueue solo --force"),
-            "{said}"
+        result.unwrap();
+        let line = |id: &str| {
+            format!(
+                "unqueued `{id}` → {}",
+                repo.pending_dir().join(format!("{id}.md")).display()
+            )
+        };
+        assert_eq!(
+            said,
+            [
+                "deleted branch task/solo and its worktree".to_string(),
+                line("solo"),
+                line("after")
+            ]
+            .join("\n")
         );
-        assert!(
-            repo.queue_dir().join("solo.md").exists(),
-            "a refused unqueue must leave the queue file where it is"
-        );
-
-        queue_unqueue(&repo, &pipelines, &unqueue_forced_args("solo")).unwrap();
-        assert!(!repo.queue_dir().join("solo.md").exists());
-        let pending = repo.pending_dir().join("solo.md");
-        let text = std::fs::read_to_string(&pending).unwrap();
+        assert!(!worktree.exists());
+        let text = std::fs::read_to_string(repo.pending_dir().join("solo.md")).unwrap();
         for key in ["worktree_path", "workspace_id", "pane_id", "tab_id"] {
             assert!(
                 !text.contains(&format!("\n{key}:")),
@@ -28323,10 +28270,113 @@ body\n";
         }
     }
 
+    /// A stopped task that borrowed its checkout has nothing deleted, so the
+    /// `deleted branch` line is not said at all.
+    #[test]
+    fn queue_unqueue_says_nothing_was_deleted_for_a_borrowed_checkout() {
+        let (repo, _root_guard) = fixture("queue-unqueue-borrowed-quiet");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = "paused".to_string();
+        task.front.borrowed = true;
+        task.front.branch = Some("task/solo".to_string());
+        task.front.worktree_path = Some(repo.root.to_path_buf());
+        task.save().unwrap();
+
+        let (result, said) = unqueue_said(&repo, &Pipelines::builtin(), "solo");
+
+        result.unwrap();
+        assert!(!said.contains("deleted"), "{said}");
+        assert!(said.starts_with("unqueued `solo`"), "{said}");
+    }
+
+    /// The `last:` line is said between the deletion and the `unqueued`
+    /// lines, in the words the board's popup uses, when the task left at the
+    /// end of the group walked past a `last:` step. Fails when the line is
+    /// left out, or built from other words than [`skipped_last_lines`].
+    #[test]
+    fn queue_unqueue_names_a_last_step_the_task_left_behind_is_past() {
+        let (repo, _root_guard) = fixture("queue-unqueue-last");
+        let pipelines = with_last_step();
+        let last_step = "suite";
+        add(&repo, "login", &[]);
+        add(&repo, "sessions", &["login"]);
+        let mut done = queued(&repo, "login");
+        done.front.stage = crate::pipeline::DONE.to_string();
+        done.save().unwrap();
+        let worktree = paused_with_worktree(&repo, "sessions");
+
+        let (result, said) = unqueue_said(&repo, &pipelines, "sessions");
+
+        result.unwrap();
+        let mut lines = said.lines();
+        assert_eq!(
+            lines.next(),
+            Some("deleted branch task/sessions and its worktree")
+        );
+        assert_eq!(
+            lines.next(),
+            Some(
+                format!(
+                    "login is past its last: step {last_step}. unqueueing leaves no other \
+                     task to run them."
+                )
+                .as_str()
+            ),
+            "{said}"
+        );
+        assert!(lines.next().unwrap().starts_with("unqueued `sessions`"));
+        assert!(!worktree.exists());
+    }
+
+    /// The built-in pipelines, with `default` replaced by one whose `suite`
+    /// step is `last:`, so a task in a group walks past it while a task after
+    /// it still runs it.
+    fn with_last_step() -> Pipelines {
+        let yaml = "steps:\n  \
+             - id: implement\n    agent: pi\n    on_pass: suite\n  \
+             - id: suite\n    run: 'true'\n    last: true\n    on_pass: done\n  \
+             - id: blocked\n    agent: pi\n    session: true\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        pipelines
+    }
+
+    /// The same line is said for tasks that never started, since the popup
+    /// shows it for them too, and there is no `deleted branch` line before
+    /// it: nothing was cut.
+    #[test]
+    fn queue_unqueue_names_a_last_step_for_a_task_that_never_started() {
+        let (repo, _root_guard) = fixture("queue-unqueue-last-unstarted");
+        let pipelines = with_last_step();
+        add(&repo, "login", &[]);
+        add(&repo, "sessions", &["login"]);
+        let mut done = queued(&repo, "login");
+        done.front.stage = crate::pipeline::DONE.to_string();
+        done.save().unwrap();
+
+        let (result, said) = unqueue_said(&repo, &pipelines, "sessions");
+
+        result.unwrap();
+        let mut lines = said.lines();
+        assert!(
+            lines
+                .next()
+                .unwrap()
+                .starts_with("login is past its last: step"),
+            "{said}"
+        );
+        assert!(lines.next().unwrap().starts_with("unqueued `sessions`"));
+        assert_eq!(lines.next(), None);
+    }
+
     /// A newer draft already sitting in pending under the same id refuses
     /// the bare road, leaving the queue file exactly where it was —
-    /// `unqueue_or_bail`'s own reason for existing over bare
-    /// `status::unqueue_task`, which is silent about this.
+    /// the word `did not unqueue` that the board's bare
+    /// `unqueue_in` does not say.
     #[test]
     fn queue_unqueue_refuses_a_task_already_drafted_in_pending() {
         let (repo, _root_guard) = fixture("queue-unqueue-pending-conflict");
@@ -28351,18 +28401,18 @@ body\n";
         );
     }
 
-    /// The same conflict, with `--force` on a task that has started: caught
+    /// The same conflict, on a task that has started: caught
     /// before anything is torn down, so the checkout is left standing and
     /// the queue file untouched — "all or nothing" over the whole move, not
     /// just the final write.
     #[test]
-    fn queue_unqueue_force_refuses_a_task_already_drafted_in_pending_before_tearing_down() {
+    fn queue_unqueue_started_refuses_a_task_already_drafted_in_pending_before_tearing_down() {
         let (repo, _root_guard) = fixture("queue-unqueue-force-pending-conflict");
         let pipelines = Pipelines::builtin();
         add(&repo, "solo", &[]);
         let worktree = repo.root.join("wt-solo");
         let mut task = queued(&repo, "solo");
-        task.front.stage = "implement".to_string();
+        task.front.stage = "paused".to_string();
         task.front.worktree_path = Some(worktree.clone());
         task.save().unwrap();
 
@@ -28373,7 +28423,7 @@ body\n";
         )
         .unwrap();
 
-        let err = queue_unqueue(&repo, &pipelines, &unqueue_forced_args("solo")).unwrap_err();
+        let err = queue_unqueue(&repo, &pipelines, &unqueue_args("solo")).unwrap_err();
         let said = format!("{err:#}");
         assert!(
             said.contains("did not unqueue") && said.contains("nothing was torn down"),
@@ -28381,7 +28431,7 @@ body\n";
         );
         assert!(
             repo.queue_dir().join("solo.md").exists(),
-            "a refused forced unqueue must leave the queue file where it is"
+            "a refused unqueue must leave the queue file where it is"
         );
         let text = std::fs::read_to_string(repo.queue_dir().join("solo.md")).unwrap();
         assert!(

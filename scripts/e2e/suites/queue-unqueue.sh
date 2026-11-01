@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# `spoolway queue unqueue`, the command form of the board's `u`/`U` keys.
+# `spoolway queue unqueue`, the command form of the board's `unqueue`.
 #
 # The move itself — carrying a document back to pending with every reserved
-# key stripped — is `status::unqueue_task`, already proven against the board
-# by `board-pause.sh`'s own `U` case. What is only true of the command, and
+# key stripped — is `status::unqueue_in`, already proven against the board
+# by `board-pause.sh`'s own unqueue case. What is only true of the command, and
 # needs a real process to prove, is everything a script gets that a keypress
 # does not: `--help` actually listing the word, `queue remove` actually
 # getting nothing but clap's own unknown-subcommand error, a refusal that
-# names two routes which both actually work, and `--force` actually
-# stopping a real lane and deleting a real worktree and branch before the move,
-# also under a running dispatcher for a stopped task — not a description of any
-# of that, the thing itself.
+# names a route which actually works, the command actually deleting a real
+# worktree and branch for a stopped task and carrying every task after it, with
+# a dispatcher running or not, and `--force` and `--all` actually gone — not a
+# description of any of that, the thing itself.
 #
 # No `covers:` tag — the coverage map enumerates `config.toml` keys and
 # pipeline step keys, and a queue subcommand is neither.
@@ -34,24 +34,24 @@ BODY="$LIVE/body.md"
 task_body "$BODY"
 
 # ------------------------------------------------------- the round trip out and back
-# A dependency still queued refuses a bare unqueue of the task it depends on
-# — this command has no panel to list a chain on, unlike the board's own `u`,
-# which now carries that dependent back to pending alongside it instead.
-# `--all` carries both back together, with no per-task check, exactly as `U`
-# does.
+# A task still on `queued` goes back to pending with every task after it in
+# its group, as the board's unqueue does, and says one `unqueued` line each.
 task_doc "$LIVE/base.md" base "$BODY" "group: unq"
 must "base queues" "$SPOOLWAY" queue add --from "$LIVE/base.md"
 task_doc "$LIVE/dependent.md" dependent "$BODY" "group: unq" \
   "depends_on: [base]"
 must "a sibling that depends on it queues too" "$SPOOLWAY" queue add --from "$LIVE/dependent.md"
 
-refuses "unqueuing base alone, with dependent still queued behind it" "dependent" \
-  "$SPOOLWAY" queue unqueue base
-works "base is still queued — the refusal changed nothing" \
-  test -f "$SPOOLWAY_PROJECT_HOME/queue/base.md"
-
-must "--all carries every not-started task back at once" \
-  "$SPOOLWAY" queue unqueue --all
+BASE_OUT="$LIVE/unqueue-base.out"
+if "$SPOOLWAY" queue unqueue base >"$BASE_OUT" 2>&1; then
+  ok "unqueuing base carries dependent with it"
+else
+  bad "unqueuing base carries dependent with it"
+  sed 's/^/        /' "$BASE_OUT"
+fi
+has "it says base moved" "unqueued \`base\` → " "$BASE_OUT"
+has "and that dependent moved" "unqueued \`dependent\` → " "$BASE_OUT"
+lacks "it deleted nothing, so says no branch" "deleted branch" "$BASE_OUT"
 works "base landed in pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/base.md"
 works "dependent landed in pending with it" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/dependent.md"
@@ -76,8 +76,8 @@ refuses "unqueuing a task the queue does not have" "no queued task" \
   "$SPOOLWAY" queue unqueue nope
 
 # ------------------------------------------------------- a task that has started
-# A real lane, hung mid-turn, so the checkout the refusal names is a real one
-# and the teardown `--force` runs is a real teardown, not a description of it.
+# A real lane, hung mid-turn, so the task the refusal names is really running
+# and the teardown after `pause` is a real teardown, not a description of it.
 echo hang > "$CTL/solo"
 # A group of its own: `base` and `dependent` are still queued in `unq`, and a
 # group is one chain, so an unrelated task there would be a second root.
@@ -97,32 +97,37 @@ else
 fi
 
 # Nothing carries `solo` past `implement` on its own from here: the lane is
-# genuinely hung and never reports, so the refusal and the forced teardown
+# genuinely hung and never reports, so the refusal and the teardown
 # below race nothing.
+# A running task is refused while the suite's own dispatcher holds the run
+# lock: the dispatcher re-reads the queue every pass and may be moving it.
 UNQUEUE_OUT="$LIVE/unqueue-refused.out"
 if "$SPOOLWAY" queue unqueue solo >"$UNQUEUE_OUT" 2>&1; then
-  bad "an unqueue with no --force is refused"
+  bad "a running task is refused"
   sed 's/^/        /' "$UNQUEUE_OUT"
 else
-  ok "an unqueue with no --force is refused"
+  ok "a running task is refused"
 fi
-has "naming the stage it is actually on" "is on \`implement\`, not \`queued\`" "$UNQUEUE_OUT"
-has "the checkout holding it back" "$SOLO_WORKTREE" "$UNQUEUE_OUT"
+has "naming the step it is running" "\`solo\` is running step implement" "$UNQUEUE_OUT"
+has "and that unqueue takes a stopped task only" "unqueue takes a stopped task only." "$UNQUEUE_OUT"
 has "the route that stops it where it stands" "spoolway queue pause solo" "$UNQUEUE_OUT"
-has "and the route that tears it down" "spoolway queue unqueue solo --force" "$UNQUEUE_OUT"
+has "and the unqueue to run after it" "spoolway queue unqueue solo" "$UNQUEUE_OUT"
 has "and says plainly that nothing moved" "nothing was changed." "$UNQUEUE_OUT"
 works "the refusal changed nothing: still queued" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
 if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
 else bad "and the lane is still running"; fi
 
-# Both routes the refusal named actually work. `pause` first, over a copy of
-# the same hang, so the refusal's other route is proven too without spending
-# the one lane the forced case below still needs.
+# The route the refusal named actually works. `pause` first, over a copy of
+# the same hang, so a stopped task with a task after it is proven under the
+# running dispatcher without spending the one lane the case below still needs.
 echo hang > "$CTL/paused-route"
 task_doc "$LIVE/paused-route.md" paused-route "$BODY" "group: paused-route"
-must "a second task, to prove the other route" \
+must "a second task, to prove the route" \
   "$SPOOLWAY" queue add --from "$LIVE/paused-route.md"
+task_doc "$LIVE/paused-dep.md" paused-dep "$BODY" "group: paused-route" \
+  "depends_on: [paused-route]"
+must "and a task that waits on it" "$SPOOLWAY" queue add --from "$LIVE/paused-dep.md"
 if drive paused-route implement 120; then ok "it reaches implement too"
 else bad "it reaches implement too (at \`$(stage_of paused-route)\`)"; fi
 must "the route the refusal names first actually works" \
@@ -132,38 +137,26 @@ else bad "and the task really does stop, checkout kept (at \`$(stage_of paused-r
 works "with its checkout still standing" \
   test -n "$(worktree_of paused-route)"
 
-# While the suite's own dispatcher holds the run lock, `--force` refuses a task
-# that is still running, naming its pid: the dispatcher re-reads the queue
-# every pass and may be moving it right now.
-LOCK_OUT="$LIVE/unqueue-force-locked.out"
-if "$SPOOLWAY" queue unqueue solo --force >"$LOCK_OUT" 2>&1; then
-  bad "\`--force\` refuses a running task while a dispatcher holds the lock"
-  sed 's/^/        /' "$LOCK_OUT"
-else
-  ok "\`--force\` refuses a running task while a dispatcher holds the lock"
-fi
-has "naming the pid holding it" "a dispatcher is running for this repo (pid " "$LOCK_OUT"
-has "and the pause to run first" "spoolway queue pause solo" "$LOCK_OUT"
-works "solo is untouched: still queued, lane still running" \
-  test -f "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
-if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
-else bad "and the lane is still running"; fi
-
 # A stopped task is torn down although the dispatcher still runs: nothing is
 # moving it. Its worktree and branch are deleted, whatever commits the branch
 # holds, with no commit made first, and it lands in pending ready to queue
-# again with no leftover branch to refuse it.
+# again with no leftover branch to refuse it. The task after it goes with it.
 PAUSED_WORKTREE=$(worktree_of paused-route)
 must "the stopped task's branch holds a commit no remote has" \
   git -C "$PAUSED_WORKTREE" commit -q --allow-empty -m "work no remote has"
 PAUSED_OUT="$LIVE/unqueue-paused-route.out"
-if "$SPOOLWAY" queue unqueue paused-route --force >"$PAUSED_OUT" 2>&1; then
-  ok "\`--force\` unqueues a stopped task while a dispatcher runs"
+if "$SPOOLWAY" queue unqueue paused-route >"$PAUSED_OUT" 2>&1; then
+  ok "unqueue takes a stopped task while a dispatcher runs"
 else
-  bad "\`--force\` unqueues a stopped task while a dispatcher runs"
+  bad "unqueue takes a stopped task while a dispatcher runs"
   sed 's/^/        /' "$PAUSED_OUT"
 fi
+has "it says what it deleted" \
+  "deleted branch task/paused-route and its worktree" "$PAUSED_OUT"
 has "it says it unqueued" "unqueued \`paused-route\`" "$PAUSED_OUT"
+has "and the task after it" "unqueued \`paused-dep\`" "$PAUSED_OUT"
+works "the task after it is in pending too" \
+  test -f "$SPOOLWAY_PROJECT_HOME/pending/paused-dep.md"
 lacks "and names no kept branch" "kept branch" "$PAUSED_OUT"
 works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/paused-route.md"
 works "the task reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/paused-route.md"
@@ -182,22 +175,37 @@ must "and queues again with no leftover branch to refuse it" \
 # Not left queued: the running dispatcher would start it again on a fresh lane.
 must "and is unqueued again before the dispatcher can start it" \
   "$SPOOLWAY" queue unqueue paused-route
+works "the dependent that went to pending is not in the queue" \
+  test ! -e "$SPOOLWAY_PROJECT_HOME/queue/paused-dep.md"
 
-# The dispatcher stops, so the running `solo` can be torn down by `--force`
-# as well.
+# The dispatcher stops, and a running `solo` is still refused: a lane at work
+# in the checkout is what the teardown must not race, dispatcher or not.
 dispatcher_stop
-
-# The forced route, over `solo` and its live lane: stop it, bank it, tear down
-# and unqueue — all in one command, and nothing left of the checkout on the
-# document that reaches pending.
-FORCE_OUT="$LIVE/unqueue-forced.out"
-if "$SPOOLWAY" queue unqueue solo --force >"$FORCE_OUT" 2>&1; then
-  ok "\`--force\` stops the lane, tears down and unqueues"
+NODISP_OUT="$LIVE/unqueue-refused-nodispatcher.out"
+if "$SPOOLWAY" queue unqueue solo >"$NODISP_OUT" 2>&1; then
+  bad "a running task is refused with no dispatcher too"
 else
-  bad "\`--force\` stops the lane, tears down and unqueues"
+  ok "a running task is refused with no dispatcher too"
+fi
+has "naming the pause command again" "spoolway queue pause solo" "$NODISP_OUT"
+if kill -0 "$LANE_PID" 2>/dev/null; then ok "and the lane is still running"
+else bad "and the lane is still running"; fi
+
+# Pausing it, as the refusal says, stops the lane; the unqueue after it tears
+# down and unqueues in one command, and nothing is left of the checkout on the
+# document that reaches pending.
+must "pausing it stops the lane" "$SPOOLWAY" queue pause solo
+solo_paused() { [ "$(stage_of solo)" = paused ]; }
+if poll_until 30 solo_paused; then ok "and the task parks on paused"
+else bad "and the task parks on paused (at \`$(stage_of solo)\`)"; fi
+FORCE_OUT="$LIVE/unqueue-solo.out"
+if "$SPOOLWAY" queue unqueue solo >"$FORCE_OUT" 2>&1; then
+  ok "unqueue tears down the paused task and unqueues it"
+else
+  bad "unqueue tears down the paused task and unqueues it"
   sed 's/^/        /' "$FORCE_OUT"
 fi
-has "it says it removed the worktree" "removed worktree " "$FORCE_OUT"
+has "it says what it deleted" "deleted branch task/solo and its worktree" "$FORCE_OUT"
 has "and that it unqueued" "unqueued \`solo\`" "$FORCE_OUT"
 works "its branch is deleted" test -z "$(git branch --list task/solo)"
 works "the queue file is gone" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/solo.md"
@@ -222,10 +230,10 @@ fi
 # first run finished: the task is no longer in the queue, so the command
 # refuses cleanly and the pending document the first run wrote stays as it was.
 BEFORE_AGAIN=$(cksum <"$SPOOLWAY_PROJECT_HOME/pending/solo.md")
-if "$SPOOLWAY" queue unqueue solo --force >"$LIVE/unqueue-again.out" 2>&1; then
-  bad "a second \`--force\` over the same task refuses"
+if "$SPOOLWAY" queue unqueue solo >"$LIVE/unqueue-again.out" 2>&1; then
+  bad "a second unqueue over the same task refuses"
 else
-  ok "a second \`--force\` over the same task refuses"
+  ok "a second unqueue over the same task refuses"
 fi
 works "and leaves the pending document untouched" \
   test "$BEFORE_AGAIN" = "$(cksum <"$SPOOLWAY_PROJECT_HOME/pending/solo.md")"
@@ -235,7 +243,7 @@ works "and its branch stays deleted" test -z "$(git branch --list task/solo)"
 # `queue add` stamps `branch: task/<id>` before anything is cut, so a task
 # can name a branch that does not exist. Deleting the real one afterwards
 # leaves the same shape on disk. Only a repo with a remote asks
-# whether a branch is pushed at all, so one is added here. `--force` must then
+# whether a branch is pushed at all, so one is added here. The unqueue must then
 # say nothing about a kept branch: there is no branch to keep, rename or
 # delete, and the line would send a person after one.
 echo hang > "$CTL/ghost"
@@ -253,15 +261,17 @@ must "and its branch deleted, as if it had never been cut" \
   git branch -D task/ghost
 works "so the branch it names does not exist" \
   test -z "$(git branch --list task/ghost)"
+must "pausing it, as an unqueue of a running task says" "$SPOOLWAY" queue pause ghost
 GHOST_OUT="$LIVE/unqueue-ghost.out"
-if "$SPOOLWAY" queue unqueue ghost --force >"$GHOST_OUT" 2>&1; then
-  ok "\`--force\` unqueues it"
+if "$SPOOLWAY" queue unqueue ghost >"$GHOST_OUT" 2>&1; then
+  ok "unqueue takes it"
 else
-  bad "\`--force\` unqueues it"
+  bad "unqueue takes it"
   sed 's/^/        /' "$GHOST_OUT"
 fi
 has "it says it unqueued" "unqueued \`ghost\`" "$GHOST_OUT"
 lacks "and prints no kept-branch line" "kept branch" "$GHOST_OUT"
+lacks "and no deleted-branch line, since there was no branch" "deleted branch" "$GHOST_OUT"
 works "the task reached pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/ghost.md"
 if [ -n "$GHOST_WORKTREE" ] && [ ! -d "$GHOST_WORKTREE" ]; then
   ok "and its worktree is gone"
@@ -271,7 +281,7 @@ fi
 
 # ----------------------------------------------- a started copy of a routine
 # The routine is still under `.spoolway/routines/` to queue again, so
-# `--force` tears the copy's checkout down and deletes the copy rather than
+# unqueue tears the copy's checkout down and deletes the copy rather than
 # drafting a duplicate of the routine into pending. Only the routines tab mints
 # a copy, so a queued task is given the `routine:` line it would have carried,
 # once its dispatcher has stopped. A commit is made on its branch first: the
@@ -288,13 +298,16 @@ must "its branch holds a commit no remote has" \
   git -C "$RT_WORKTREE" commit -q --allow-empty -m "work no remote has"
 must "it is stamped as a copy of the routine" \
   sed -i 's/^group: rt$/group: rt\nroutine: rt/' "$SPOOLWAY_PROJECT_HOME/queue/rt-1.md"
+must "pausing it, as an unqueue of a running task says" "$SPOOLWAY" queue pause rt-1
 RT_OUT="$LIVE/unqueue-routine-copy.out"
-if "$SPOOLWAY" queue unqueue rt-1 --force >"$RT_OUT" 2>&1; then
-  ok "\`--force\` unqueues the started copy"
+if "$SPOOLWAY" queue unqueue rt-1 >"$RT_OUT" 2>&1; then
+  ok "unqueue takes the started copy"
 else
-  bad "\`--force\` unqueues the started copy"
+  bad "unqueue takes the started copy"
   sed 's/^/        /' "$RT_OUT"
 fi
+has "it says it deleted the copy's branch and worktree" \
+  "deleted branch task/rt-1 and its worktree" "$RT_OUT"
 has "it says the copy was deleted" "deleted \`rt-1\`" "$RT_OUT"
 has "naming the routine file" ".spoolway/routines/rt/rt.md" "$RT_OUT"
 lacks "and names no kept branch" "kept branch" "$RT_OUT"
@@ -359,13 +372,13 @@ else
 fi
 dispatcher_stop
 
-# ------------------------------------------------------------- --all --force
-# Refused outright, in either flag order — tearing down every checkout in the
-# queue is not a command a script should reach by accident.
-refuses "\`--all --force\` is refused" "--all --force" \
-  "$SPOOLWAY" queue unqueue --all --force
-refuses "in the other flag order too" "--all --force" \
-  "$SPOOLWAY" queue unqueue --force --all
+# ---------------------------------------------------- the removed flags
+# `--force` and `--all` are gone, not flags that do nothing: clap's own
+# unknown-argument error.
+refuses "\`--force\` is an unknown argument" "unexpected argument '--force'" \
+  "$SPOOLWAY" queue unqueue base --force
+refuses "\`--all\` is an unknown argument" "unexpected argument '--all'" \
+  "$SPOOLWAY" queue unqueue --all
 
 # ------------------------------------------------- a hook-failed task, requeued
 # A failing `queued` hook moves the task to `hook_failed` and leaves
@@ -401,7 +414,7 @@ works "and the hook's exit file on disk" \
 dispatcher_stop
 
 must "a hook-failed task unqueues" \
-  "$SPOOLWAY" queue unqueue hook-requeue --force
+  "$SPOOLWAY" queue unqueue hook-requeue
 lacks "the pending copy carries no hook_paused" "hook_paused:" \
   "$SPOOLWAY_PROJECT_HOME/pending/hook-requeue.md"
 lacks "and no hook_error" "hook_error:" \

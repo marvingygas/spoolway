@@ -1280,45 +1280,27 @@ pub enum QueueCommand {
     Resume { task: String },
 
     /// What `unqueue` in the board's options menu does to a row, from a
-    /// script: carry a not-started task back to the pending directory, stripped
-    /// of every reserved key, so `queue add --from` takes it again
-    /// unchanged.
+    /// script, with no prompt: take any stopped task, and every task after it
+    /// in its group, back to the pending directory, stripped of every
+    /// reserved key, so `queue add --from` takes it again unchanged.
     ///
-    /// A task that has started is refused, naming its stage and both routes
-    /// onward, unless `--force` says to tear it down the way done-cleanup
-    /// does: its worktree and its local `task/<id>` branch are deleted
-    /// whatever they hold, with no commit first, all or nothing. The tasks
-    /// after it in its group go back to pending with it.
+    /// A task that has started has its worktree and its local `task/<id>`
+    /// branch deleted whatever they hold, with no commit first, all or
+    /// nothing. The command says what it deleted, names any `last:` step the
+    /// task left at the end of the group walked past, and prints one line per
+    /// task it moved. A running task is refused, naming the pause command to
+    /// run first.
     ///
     /// A copy of a routine whose file is still under `.spoolway/routines/` is
-    /// deleted instead of carried to pending, with or without `--force`: the
-    /// routine is there to queue again.
+    /// deleted instead of carried to pending: the routine is there to queue
+    /// again.
     Unqueue(QueueUnqueueArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct QueueUnqueueArgs {
-    /// Task id to unqueue. Omitted only with `--all`.
-    pub task: Option<String>,
-
-    /// Every not-started task at once — with no
-    /// per-task dependency check, since anything depending on the set has
-    /// not started either and is in the set too. Refused together with
-    /// `--force`, in either flag order: that pair would tear down every
-    /// checkout in the queue in one line.
-    #[arg(long)]
-    pub all: bool,
-
-    /// Stop the task's lanes and runs, bank what they spent, and delete its
-    /// worktree and local branch through `Dispatcher::tear_down_stopped`
-    /// before unqueuing a task that has started. Work nobody pushed is lost.
-    /// With a dispatcher holding the run lock, only a task stopped on
-    /// `paused`, `blocked` or `hook_failed` with nothing running is accepted;
-    /// anything else is refused with the pause command to run first. A no-op
-    /// flag on a task still on `queued` — the bare command already unqueues
-    /// it, with no checkout to tear down.
-    #[arg(long)]
-    pub force: bool,
+    /// Task id to unqueue.
+    pub task: String,
 }
 
 #[derive(Debug, Args)]

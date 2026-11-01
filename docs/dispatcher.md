@@ -667,8 +667,8 @@ On the queue screen, a group lists `open plan` when any of its tasks sets `plan:
 
 `enter` runs exactly what the item names, through the same check that decided the list. A row
 that changed state while the menu was open gets nothing done to it. Resume is never in the menu.
-The board has no key that unqueues every task at once: `spoolway queue unqueue --all` does that
-from a shell.
+The board has no key that unqueues every task at once. Name each task to `spoolway queue unqueue
+<task>` from a shell.
 
 ### Editor
 
@@ -904,8 +904,12 @@ The panel names a `last:` step and does nothing else about it. No task runs the 
 
 | Key | What it does |
 |---|---|
-| `enter` | Unqueue the task and every unstarted task that depends on it. A task that has started is torn down first, as `spoolway queue unqueue --force` does it, with or without a dispatcher running. |
+| `enter` | Unqueue the task and every unstarted task that depends on it. A task that has started is torn down first, as `spoolway queue unqueue` does it, with or without a dispatcher running. |
 | `esc` | Close the panel and change nothing. |
+
+`spoolway queue unqueue <task>` takes the same tasks without asking. It prints the deletion and
+`last:` sentences from the first rows of this table as one line each, then one line for each task
+it moved. See [`spoolway queue unqueue <task>`](cli-reference.md#spoolway-queue-unqueue-task).
 
 When anything the panel drew has changed since it opened, `enter` redraws the panel with the line `this changed since it opened, so nothing was unqueued.` and changes nothing. A task that resumed, a new unblocker lane and a different `last:` result all count. A refusal `enter` meets stays in the panel, above the key line. On a short pane the panel folds its task lists under `… and n more` before it drops anything else. The warnings, the count and the key line always show.
 
@@ -2126,7 +2130,7 @@ runs again when the task reaches `done`. A borrowed checkout is not checked, bec
 
 ### Tearing down a stopped task
 
-`spoolway queue unqueue <task> --force` tears a task that has started down the way cleanup does,
+`spoolway queue unqueue <task>` tears a task that has stopped down the way cleanup does,
 with these differences. It makes no `wip` commit and deletes `task/<id>` whatever the branch
 holds. It tears down a worktree in any state listed under
 [A worktree that is off its branch](#a-worktree-that-is-off-its-branch). It writes no `removing/`
@@ -2176,7 +2180,7 @@ step that leaves a read-only tree does not hold the task on `done`. The task is 
 first pass after the worktree is gone. Removing a worktree deletes the folder directly only when it
 sits under `worktrees/`.
 
-If `spoolway queue unqueue --force` cannot remove a worktree, it prints the first message on
+If `spoolway queue unqueue` cannot remove a worktree, it prints the first message on
 standard error and leaves the task queued. Run the command again once the worktree is gone.
 
 ### The archive index

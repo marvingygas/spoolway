@@ -2729,7 +2729,7 @@ pub(crate) fn skip_hook_quietly(
 /// resume popup.
 ///
 /// A task whose last step can never pass has no way to finish. A plain resume
-/// runs that step again, and `spoolway queue unqueue --force` takes the task
+/// runs that step again, and `spoolway queue unqueue` takes the task
 /// out of the queue to start it over, where this closes it as done. Only a
 /// person reaches this: [`resume_checked`] refuses `--stage` to every lane, and [`report`]
 /// refuses an unblocker's `--pass --stage done`, so no agent can skip work

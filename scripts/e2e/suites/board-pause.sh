@@ -18,7 +18,7 @@
 # unqueue. The menu runs the action's own check again on `enter`, so each
 # section picks its item and then answers the panel it opens. `p`, `s`, `u`
 # and `U` are no longer board keys; `U` gets one pass that proves it does
-# nothing, and `spoolway queue unqueue --all` does its job.
+# nothing, and `spoolway queue unqueue <task>` does its job.
 #
 # Open task is checked once, for the popup a refused open shows: an editor
 # that is not on `PATH` is refused before anything is started. Open plan is
@@ -741,10 +741,10 @@ lacks "carrying no leftover \`parked_from\`" "parked_from:" \
 lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 
 # --------------------------------------------- `U` is no longer a board key
-# Unqueueing everything unstarted is `spoolway queue unqueue --all` now. Two
-# tasks sit on `queued`: `stalled`, and `never-run` back where its resume put
-# it. `U` on the board opens nothing and writes nothing; the command still
-# carries both back to pending.
+# Unqueueing is `spoolway queue unqueue <task>` now. Two tasks sit on
+# `queued`: `stalled`, and `never-run` back where its resume put it. `U` on
+# the board opens nothing and writes nothing; the command still carries both
+# back to pending.
 queue_idle stalled never-run
 MARK=$(wc -l < "$BOARD_LOG")
 # `U`, then `o`, whose menu is drawn only once every key before it has been
@@ -760,7 +760,11 @@ stage_stays "and writes nothing" stalled queued
 stage_stays "to any queued task" never-run queued
 
 _gone() { [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/$1.md" ]; }
-must "unqueue --all carries out what U used to" "$SPOOLWAY" queue unqueue --all
+must "unqueue carries out what U used to" "$SPOOLWAY" queue unqueue stalled
+# `never-run` goes with `stalled` when it comes after it in the group.
+if [ -e "$SPOOLWAY_PROJECT_HOME/queue/never-run.md" ]; then
+  must "and the one that never ran" "$SPOOLWAY" queue unqueue never-run
+fi
 if poll_until 25 _gone stalled; then ok "the task leaves the queue"
 else bad "the task leaves the queue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 has "the task lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"

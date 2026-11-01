@@ -567,59 +567,83 @@ A task that is still `queued`, has a live lane or running command on its step, o
 
 ### `spoolway queue unqueue <task>`
 
-Carry a not-started task back to the pending directory, with every reserved key,
-`hook_paused:`, `hook_error:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
+Take any stopped task back to the pending directory, with no prompt, whether a dispatcher runs or
+not. It takes exactly the tasks the board's `unqueue` takes: a task on `queued`, and a task on
+`paused`, `blocked` or `hook_failed` with no live agent lane, no unblocker lane at work and no
+worktree cut going. Every task after it in its group goes with it, directly or through another
+task. Each keeps its `group:` and `depends_on:`, with every reserved key, `hook_paused:`,
+`hook_error:` and `missing_start_branch:` stripped. The tasks' running hooks are stopped and their
 files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
-`unqueue` in the board's options menu carries the same task and every unstarted task that depends
-on it. For a task that has not started, this command has no panel to list a chain on, so it
-refuses when a queued task depends on it. `--force` carries the dependents along.
+
+```
+spoolway queue unqueue <task>
+```
+
+The command takes no flags. `--force` and `--all` were removed, and passing either is the
+argument parser's unknown-argument error.
+
+A task that has started has its checkout torn down first, the way cleanup does for a finished
+task. The command stops the task's lanes and runs, adds what the lanes spent to the usage ledger,
+removes the worktree and deletes the local `task/<id>` branch, even when the branch holds commits
+no remote has. It makes no commit, so work nobody pushed is lost. The worktree goes whichever
+branch it is on, including another branch, a detached HEAD, or the middle of a rebase, merge,
+cherry-pick or revert. Only `task/<id>` is deleted. Any other branch, the remote branch and any
+pull request stay. A borrowed checkout is left standing.
+
+The command prints what it did, in this order. The board's popup draws the same sentences.
+
+- `deleted branch <branch> and its worktree`, only when it deleted a branch or a worktree. A task
+  that never started, or that ran in a borrowed checkout, prints no such line.
+- `<task> is past its last: step <step>. unqueueing leaves no other task to run them.`, only when
+  the popup would show it. The task left at the end of the group walked past a `last:` step that
+  no task is left to run. Several tasks or steps are named in the one line. Nothing runs the step
+  again. See [Unqueue panel](dispatcher.md#unqueue-panel).
+- One line for each task it moved, the task you named first.
+
+```
+$ spoolway queue pause sessions
+paused `sessions`
+$ spoolway queue unqueue sessions
+deleted branch task/sessions and its worktree
+login is past its last: step suite. unqueueing leaves no other task to run them.
+unqueued `sessions` → /home/you/.spoolway/shop/pending/sessions.md
+unqueued `profile` → /home/you/.spoolway/shop/pending/profile.md
+unqueued `settings` → /home/you/.spoolway/shop/pending/settings.md
+```
+
+A running task is the one refusal. The command names the pause command to run first and changes
+nothing:
+
+```
+$ spoolway queue unqueue sessions
+`sessions` is running step implement — unqueue takes a stopped task only.
+
+  to stop it where it is, then unqueue it:
+      spoolway queue pause sessions
+      spoolway queue unqueue sessions
+
+nothing was changed.
+```
 
 A copy of a routine is deleted instead, when a routine file under `.spoolway/routines/` has the
 copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
-the routine file's path, and the routine stays there to queue again. `--force` does the same for a
-copy that has started, after it tears the checkout down and deletes its local branch.
+the routine file's path, and the routine stays there to queue again. A copy that has started loses
+its checkout and branch first, like any other task.
 
 ```
 $ spoolway queue unqueue prune-1
 deleted `prune-1`, a copy of the routine in /path/to/repo/.spoolway/routines/maintenance/weekly/prune.md — it is still there to queue again
 ```
 
-A copy whose routine file is gone goes to the pending directory like any other task. A copy that a
-task going to pending in the same `--all` batch depends on goes there too. See
+A copy whose routine file is gone goes to the pending directory like any other task. So does a
+copy that a task going to pending in the same unqueue depends on. See
 [Routines](planning.md#routines).
 
-```
-spoolway queue unqueue <task>
-spoolway queue unqueue --all
-spoolway queue unqueue <task> --force
-```
-
-| Flag | Default | What it does |
-|---|---|---|
-| `--all` | | Every not-started task at once. Refused together with `--force` |
-| `--force` | | Tear down a task that has started: stop its lanes and runs, add what they spent to the usage ledger, remove its worktree and delete its local `task/<id>` branch, then unqueue it and every task that depends on it. Makes no commit, so work nobody pushed is lost. No-op on a task still `queued` |
-
-A task that has started is refused, naming its stage, its checkout when it has one, and both
-routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear it down and
-unqueue it anyway. A task already sitting in pending under the same id refuses the move and leaves
-the queue file in place. A copy of a routine is deleted whatever sits in pending. If `--force`
-cannot remove the worktree, the task stays queued. Remove the worktree by hand, then run the
-command again.
-
-`--force` tears the worktree down whichever branch it is on, including another branch, a detached
-HEAD, or the middle of a rebase, merge, cherry-pick or revert. Only `task/<id>` is deleted. Any
-other branch, the remote branch and any pull request stay. A borrowed checkout is left standing.
-
-While a dispatcher runs, `--force` accepts only a task on `paused`, `blocked` or `hook_failed`
-with no lane or worktree cut at work. Any other task is refused with `spoolway queue pause <task>`
-as the fix. With no dispatcher running, `--force` also stops a running task's lane. `--force` is
-also refused when the multiplexer cannot list its lanes, for example
-when it is not running, and when another process holds the task's lock. Nothing is torn down in
-either case. Run the command again once the cause is gone.
-
-The task goes to pending with every not-started task that depends on it, each keeping its `group:`
-and `depends_on:`. A draft already in pending for any of them refuses the whole move before
-anything is torn down. `spoolway queue add --from` takes the carried tasks again.
+A draft already in pending for the task or for any task carried with it refuses the whole move
+before anything is torn down. If the worktree cannot be removed, the task stays queued. Remove the
+worktree by hand, then run the command again. The command is also refused when the multiplexer
+cannot list its lanes, for example when it is not running, and when another process holds the
+task's lock. Nothing is torn down in either case. Run the command again once the cause is gone.
 
 ### `spoolway group list`
 

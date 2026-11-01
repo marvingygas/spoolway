@@ -295,7 +295,7 @@ pipeline's first step.
 | `spoolway queue add --from <path>` | Queues tasks. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
-| `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. A copy of a routine is deleted instead, and the command names the routine file, when that file still exists. `--all` reaches every not-started task. `--force` tears down a task that has started. |
+| `spoolway queue unqueue <task>` | Moves any stopped task, and every task after it in its group, back to the pending directory, deleting a started task's worktree and branch. A copy of a routine is deleted instead, and the command names the routine file, when that file still exists. A running task is refused. |
 
 A queue file that does not parse is skipped. A queue file that holds an id another file holds is
 skipped too, as is a queue file whose id is already in the archive. The file whose name is the id
@@ -544,17 +544,19 @@ spoolway resume cart-totals
 `resume`, and `r` on the board, clear `missing_start_branch:` and put the task back on `queued`.
 It prints `cart-totals: -> queued`. A pass that still finds no start branch pauses it again.
 
-Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolway queue unqueue
---force` removes that value, so a task sent again is cut again from its start branch. A
-`starts_from:` you set before the cut stays.
+Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolway queue unqueue`
+removes that value from a task it tears down, so a task sent again is cut again from its start
+branch. A `starts_from:` you set before the cut stays.
 
-`unqueue --force` tears a started task down the way cleanup does for a finished one. It stops the
+`spoolway queue unqueue` tears a started task down the way cleanup does for a finished one, once
+it has stopped. A running task is refused, with `spoolway queue pause <task>` to run first.
+The teardown stops the
 task's lanes, hook runs and command runs, and adds what the lanes spent to the usage ledger. It
 removes the worktree and deletes the local `task/<id>` branch, even when the branch holds commits
 no remote has. It makes no commit first, so work nobody pushed is lost. The task can be queued
 again at once.
 
-`--force` tears down a task whose worktree is on another branch, on a detached HEAD, or in the
+The teardown also takes a task whose worktree is on another branch, on a detached HEAD, or in the
 middle of a rebase, merge, cherry-pick or revert. Only `task/<id>` is deleted. Any other branch,
 the remote branch and any pull request stay. A checkout the task borrowed is left alone. See
 [Where work happens on disk](dispatcher.md#where-work-happens-on-disk).
@@ -563,7 +565,7 @@ The task goes to the pending directory, and so does every not-started task that 
 directly or through another task. Each keeps its `group:` and `depends_on:`. If a worktree
 cannot be removed, nothing moves and the task stays queued.
 
-A started copy of a routine is handled differently. `unqueue --force` tears its checkout down and
+A started copy of a routine is handled differently. `unqueue` tears its checkout down and
 deletes its branch, then deletes the copy, because the routine is still under
 `.spoolway/routines/` to queue again. It writes nothing to the pending directory and names the
 routine file. A copy whose routine file is gone, or that a task carried with it depends on, is

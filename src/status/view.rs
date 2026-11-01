@@ -845,19 +845,7 @@ pub(super) fn unqueue_confirm_panel(
         super::UnqueueLead::Neither => {}
     }
     if !confirm.skipped_last.is_empty() {
-        let mut lines: Vec<String> = confirm
-            .skipped_last
-            .iter()
-            .map(|skipped| match skipped.steps.as_slice() {
-                [step] => format!("{} is past its last: step {step}.", skipped.task),
-                steps => format!(
-                    "{} is past its last: steps {}.",
-                    skipped.task,
-                    steps.join(", ")
-                ),
-            })
-            .collect();
-        lines.push("unqueueing leaves no other task to run them.".to_string());
+        let lines = super::skipped_last_lines(&confirm.skipped_last);
         paragraphs.push((lines, false));
     }
 

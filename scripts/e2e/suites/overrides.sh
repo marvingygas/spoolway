@@ -244,10 +244,11 @@ must "unattended off again, so nothing later in this file inherits it" \
 # Taken back out rather than left behind: the three runs above each started
 # a real lane on it and were stopped mid-turn, so it is sitting on
 # `implement` with a worktree of its own, and nothing below this line is
-# about it. `--force` because of exactly that — a plain `unqueue` refuses a
-# task that has left `queued`, and tearing the checkout down is the point.
+# about it. Paused first because of exactly that — `unqueue` takes a stopped
+# task only, and tearing the checkout down is the point.
+must "the dispatched-against task is stopped" "$SPOOLWAY" queue pause gate
 must "the dispatched-against task is taken back out" \
-  "$SPOOLWAY" queue unqueue gate --force
+  "$SPOOLWAY" queue unqueue gate
 
 # ------------------------------------------------------------ a stale override
 # The incident the group's own task describes: a step's own shape changes
