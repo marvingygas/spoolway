@@ -4,9 +4,10 @@
 //! A promote changes the project's setup, and that change usually goes
 //! through a feature branch and a pull request. The board runs in the main
 //! checkout, so a write there would land on whatever branch it has out.
-//! The picker lists the local branches and the branches `origin` had at
-//! the last fetch, task branches left out, and the files go into whichever
-//! checkout holds the picked one. When none does, a worktree is made for it
+//! The picker fetches `origin` as it opens, then lists the local branches
+//! and `origin`'s, task branches left out. A fetch that fails leaves the
+//! branches the last fetch saw, under rows saying why. The files go into
+//! whichever checkout holds the picked one. When none does, a worktree is made for it
 //! beside the main checkout first, with a local branch tracking `origin`'s
 //! for one only the remote has. Nothing is committed, and the layer keeps
 //! every promoted entry, as `override promote` keeps them.
@@ -54,7 +55,8 @@ pub(super) struct Promoted {
 ///
 /// Task branches are left out. Lanes push many of them, and the checkout of
 /// one is a lane's, which [`Repo::tracked_write_root`] refuses. `origin`'s
-/// branches are the ones the last fetch saw; nothing here fetches.
+/// branches are the ones the last fetch saw: the picker fetches before it
+/// reads this again, and this itself fetches nothing.
 pub(super) fn branches(repo: &Repo) -> Result<Vec<Branch>> {
     let listing = repo.git(&[
         "for-each-ref",
@@ -189,7 +191,7 @@ impl Picker {
     pub(super) fn handle_key(self, key: Key) -> Picked {
         let Picker { files, list } = self;
         match list.handle_key(key) {
-            picker::Picked::Open(list) => Picked::Open(Picker { files, list }),
+            picker::Picked::Open(list) => Picked::Open(Picker { files, list: *list }),
             picker::Picked::Closed => Picked::Closed,
             picker::Picked::Chosen(branch) => Picked::Branch(files, branch),
         }

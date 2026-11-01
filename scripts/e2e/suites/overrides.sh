@@ -633,6 +633,102 @@ must "clean up: drop the layer entry" "$SPOOLWAY" override drop default
 must "remove the worktree" git worktree remove --force "$LIVE/wt"
 must "and its branch" git branch -D feature/promote
 
+# --------------------------------------- the promote picker fetches origin
+# `promote selected` on the overrides tab opens a branch picker that fetches
+# `origin` as it opens: a `fetching origin…` row while the fetch runs, then
+# the branches it brought, a branch only `origin` has marked `origin`. With
+# `origin` out of reach it lists the branches the last fetch saw, under rows
+# giving git's reason. The fixture has no `origin`, so one is made here, and
+# a branch pushed to it is forgotten locally so only the fetch brings it back.
+must "a bare origin for the picker case" \
+  git init -q --bare -b main "$LIVE/origin.git"
+must "point origin at it" git remote add origin "$LIVE/origin.git"
+must "push a branch only origin will have" \
+  git push -q origin HEAD:refs/heads/feature/e2e-remote
+must "forget it here, so only a fetch brings it back" \
+  git update-ref -d refs/remotes/origin/feature/e2e-remote
+must "fork a knob for the picker case" \
+  "$SPOOLWAY" pipeline override default --set implement.model=fake-pick
+
+# The popup's own rows in the last frame, its borders and margins taken off
+# and joined with spaces, so a sentence wrapped over several rows reads as
+# one. Cut at the popup's own columns: the list drawn either side of it
+# shares each row.
+picker_text() {
+  screen_last_frame | sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' | python3 -I -c '
+import sys
+rows = sys.stdin.read().splitlines()
+top = next(i for i, r in enumerate(rows) if "╭─ promote " in r)
+left = rows[top].index("╭─ promote ")
+right = rows[top].index("╮", left)
+words = []
+for row in rows[top + 1:]:
+    cut = row[left:right + 1]
+    if cut.startswith("╰"):
+        break
+    words.extend(cut.strip("│").split())
+print(" ".join(words))
+'
+}
+picker_says() { picker_text | grep -qF -- "$1"; }
+picker_open() { screen_last_frame | grep -qF "╭─ promote "; }
+# `bad`, with the popup as it was last drawn, so a failure shows what it saw.
+picker_bad() { bad "$1"; picker_text | sed 's/^/        /' >&2; }
+
+PICK_LOG="$LIVE/picker.out"
+screen_start "$PICK_LOG"
+# Queue tab, `→` twice onto the overrides tab, then `tab` three times onto
+# the active section, its cursor on the default pipeline's file.
+PICK_MARK=$(wc -l < "$PICK_LOG")
+screen_press $'\x1b[C\x1b[C'
+poll_until 10 screen_drew_since "$PICK_MARK" "[config]" || bad "the overrides tab never drew"
+screen_press $'\t\t\t'
+poll_until 10 screen_drew_since "$PICK_MARK" "pipelines/default.yml" || bad "the active section never drew"
+
+PICK_MARK=$(wc -l < "$PICK_LOG")
+screen_press $'o\x1b[B\r'
+if poll_until 10 screen_drew_since "$PICK_MARK" "fetching origin…"; then
+  ok "the picker opens on its fetching origin… row"
+else
+  bad "the picker opens on its fetching origin… row"
+fi
+if poll_until 15 picker_says "feature/e2e-remote origin"; then
+  ok "and lists the branch the fetch brought, marked origin"
+else
+  picker_bad "and lists the branch the fetch brought, marked origin"
+fi
+works "a reachable origin draws no failure rows" \
+  bash -c '! grep -qaF "fetch failed:" < <(tail -n "+$(($2 + 1))" "$1")' _ "$PICK_LOG" "$PICK_MARK"
+
+# Waited for before the next key: an `o` landing within the screen's escape
+# timeout of this `esc` would be read with it as one sequence.
+screen_press $'\x1b'
+poll_while 10 picker_open
+must "point origin out of reach" git remote set-url origin "$LIVE/nowhere.git"
+PICK_MARK=$(wc -l < "$PICK_LOG")
+screen_press $'o\x1b[B\r'
+if poll_until 10 screen_drew_since "$PICK_MARK" "fetching origin…"; then
+  ok "the reopened picker waits on its fetching origin… row again"
+else
+  bad "the reopened picker waits on its fetching origin… row again"
+fi
+if poll_until 15 picker_says "showing the last fetch's branches. esc and reopen to try again."; then
+  ok "an unreachable origin says the fetch failed and what is shown"
+else
+  picker_bad "an unreachable origin says the fetch failed and what is shown"
+fi
+# Not the path git names: a long one is broken across rows, which the join
+# reads as two words.
+works "the failure rows give git's reason" \
+  picker_says "does not appear to be a git repository. showing"
+works "under the words fetch failed" picker_says "fetch failed: "
+works "and the list keeps the branch the last fetch saw" \
+  picker_says "feature/e2e-remote origin"
+screen_stop
+
+must "clean up: drop the picker case's layer entry" "$SPOOLWAY" override drop default
+must "and its origin" git remote remove origin
+
 # ------------------------------------------- a patch that still says headless:
 # `headless:` is the retired name of `hide: true`. A patch naming it is left
 # out of the merge with a notice, like any key a step cannot take, so a private

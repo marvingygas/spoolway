@@ -101,7 +101,8 @@ pub(crate) struct Picker<T> {
 
 /// What a key over the picker leads to.
 pub(crate) enum Picked<T> {
-    Open(Picker<T>),
+    /// Boxed, since a picker is many times the size of anything else here.
+    Open(Box<Picker<T>>),
     Closed,
     /// `enter` on an entry: its value.
     Chosen(T),
@@ -224,7 +225,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
             other if self.searching => super::overrides::edit(&mut self.filter, other),
             Key::Enter => {
                 let Some(value) = self.matches().get(self.cursor).map(|e| e.value.clone()) else {
-                    return Picked::Open(self);
+                    return Picked::Open(Box::new(self));
                 };
                 return Picked::Chosen(value);
             }
@@ -235,7 +236,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
         let len = self.matches().len();
         self.cursor = self.cursor.min(len.saturating_sub(1));
         self.offset = scrolled(self.offset, self.cursor, PICKER_ROWS);
-        Picked::Open(self)
+        Picked::Open(Box::new(self))
     }
 
     /// The popup, its list cut to fit the `rows` the list box has.
@@ -413,7 +414,7 @@ mod tests {
     fn press(picker: Picker<String>, keys: &[Key]) -> Picker<String> {
         keys.iter()
             .fold(picker, |picker, key| match picker.handle_key(*key) {
-                Picked::Open(picker) => picker,
+                Picked::Open(picker) => *picker,
                 _ => panic!("the picker closed on {key:?}"),
             })
     }
@@ -532,7 +533,7 @@ mod tests {
             ]
         );
         let picker = match picker.handle_key(Key::Enter) {
-            Picked::Open(picker) => picker,
+            Picked::Open(picker) => *picker,
             _ => panic!("enter picked from the waiting row"),
         };
         let picker = settled(picker);

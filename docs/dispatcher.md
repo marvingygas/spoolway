@@ -1348,9 +1348,25 @@ editor cannot start, a `not opened` popup names the file and why, and `enter` cl
 `promote selected` writes the selected files into the tracked setup of a branch you pick, as
 `spoolway override promote` does in that branch's checkout. It opens a branch picker first. The
 picker lists local branches and `origin`'s in one list, sorted by name. A branch only `origin`
-has carries `origin`. Task branches are left out, and the default branch stays. The remote
-branches are the ones the last `git fetch` saw, since the tab fetches nothing. `f` searches the
-list, and `esc` closes the picker.
+has carries `origin`. Task branches are left out, and the default branch stays. The picker
+fetches `origin` as it opens. It shows a `fetching origin…` row until the fetch ends, then lists
+the branches. `esc` closes the picker while the fetch runs.
+
+```
+╭─ promote pipelines/bugfix.yml to ────────────────────────╮
+│  search: ▏                                               │
+│                                                          │
+│    fetching origin…                                      │
+│                                                          │
+│  [enter] pick   [f] search   [esc] close                 │
+╰──────────────────────────────────────────────────────────╯
+```
+
+A fetch that fails, offline or with `origin` out of reach, lists the branches the last fetch saw.
+Rows above the list give git's reason, such as `fetch failed: Could not resolve host: github.com.
+showing the last fetch's branches. esc and reopen to try again.` The fetch asks for no
+credentials, and one still running after 30 seconds is stopped. A checkout with no `origin`
+lists its branches at once. `f` searches the list, and `esc` closes the picker.
 
 ```
 ╭─ promote pipelines/bugfix.yml to ────────────────────────╮
