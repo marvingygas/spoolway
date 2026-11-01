@@ -18459,7 +18459,8 @@ mod tests {
             .set_modified(long_ago)
             .unwrap();
         let mut groups = listed(&repo);
-        // Set by hand, as `stack_targets_leave_out_the_current_stack_and_every_group_above`
+        // Set by hand, as the test
+        // `stack_targets_leave_out_the_current_stack_and_every_group_above`
         // does: what the listing gives a queued group.
         for group in groups.iter_mut().filter(|g| g.name == "cart") {
             group.state = GroupState::Queued;
