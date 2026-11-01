@@ -844,15 +844,46 @@ impl Pr {
 /// when that branch has none at all — the one outcome that is not a failure
 /// here. Callers that need a live pull request check `is_open` themselves.
 fn pr_view(gh: &str, worktree: &Path, branch: &str) -> Result<Option<Pr>> {
+    Ok(pr_view_or_refusal(gh, worktree, branch)?.unwrap_or(None))
+}
+
+/// `gh pr view <branch>` as [`pr_view`] runs it, but with a refusal kept as
+/// the inner `Err`, holding what `gh` printed on stderr. `pr_view` reads
+/// every refusal as no pull request; [`pr_is_open`] has to tell a branch
+/// with none from a `gh` that could not ask at all.
+fn pr_view_or_refusal(
+    gh: &str,
+    worktree: &Path,
+    branch: &str,
+) -> Result<std::result::Result<Option<Pr>, String>> {
     let view = Command::new(gh)
         .args(["pr", "view", branch, "--json", "number,url,state"])
         .current_dir(worktree)
         .output()
         .with_context(|| format!("running `{gh} pr view {branch}`"))?;
     if !view.status.success() {
-        return Ok(None);
+        return Ok(Err(String::from_utf8_lossy(&view.stderr).into_owned()));
     }
-    parse_pr_view(&view.stdout)
+    parse_pr_view(&view.stdout).map(Ok)
+}
+
+/// Whether `branch` has a pull request still open, asked of `gh` in `dir`:
+/// `false` for a merged or closed one, and for a branch that never had one.
+/// An error, with `gh`'s own first line of stderr, when `gh` could not
+/// answer: not logged in, offline, or not installed. The queue tab's edit
+/// depends on picker asks this of each done group's last task, and leaves
+/// every done group out when it cannot be answered.
+pub(crate) fn pr_is_open(gh: &str, dir: &Path, branch: &str) -> Result<bool> {
+    match pr_view_or_refusal(gh, dir, branch)? {
+        Ok(pr) => Ok(pr.is_some_and(|pr| pr.is_open())),
+        // What `gh pr view` prints for a branch that has no pull request,
+        // the one refusal that is an answer rather than a failure.
+        Err(stderr) if stderr.contains("no pull requests found") => Ok(false),
+        Err(stderr) => match crate::fmt::first_line(&stderr) {
+            "" => bail!("`{gh} pr view {branch}` failed and printed nothing"),
+            line => bail!("{line}"),
+        },
+    }
 }
 
 /// The parsing half of `pr_view`, split out so it can be tested without `gh`.

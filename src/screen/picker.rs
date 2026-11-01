@@ -13,6 +13,11 @@
 //! closes it while the fetch runs. When the fetch ends the list is read
 //! again. A fetch that fails leaves the list as the last fetch saw it,
 //! under rows giving git's reason.
+//!
+//! A list that takes long to read for some other reason, such as one that
+//! asks GitHub about each entry, can be read the same way through
+//! [`Picker::loading`]: on its own thread, behind a waiting row the list
+//! names, with `esc` still closing the popup while it runs.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -64,7 +69,7 @@ pub(crate) struct Look {
     pub(crate) empty: &'static str,
 }
 
-/// Where the fetch on open stands.
+/// Where the fetch or load on open stands.
 enum Fetch<T> {
     /// None was started, since none was asked for or the checkout has no
     /// `origin`, or it succeeded and the list was read again.
@@ -80,13 +85,18 @@ enum Fetch<T> {
     /// It succeeded, but the list could not be read again after it, for
     /// this reason, so the list is still the one from before the fetch.
     Unread(String),
+    /// A load read its list but left something out, and says what in this
+    /// sentence, worded by the list itself.
+    Noted(String),
 }
 
-/// What the fetch's thread answers: why the fetch failed, if it did, and
-/// the list read again after it, or why that read failed.
+/// What the fetch's or load's thread answers: why the fetch failed, if it
+/// did, the list read again after it, or why that read failed, and what a
+/// load says it left out.
 struct Fetched<T> {
     failure: Option<String>,
     entries: std::result::Result<Vec<Entry<T>>, String>,
+    notice: Option<String>,
 }
 
 /// A picker over a list of entries.
@@ -103,6 +113,8 @@ pub(crate) struct Picker<T> {
     /// when the cursor would leave it.
     offset: usize,
     fetch: Fetch<T>,
+    /// The row drawn in place of the list while the fetch or load runs.
+    waiting: &'static str,
 }
 
 /// What a key over the picker leads to.
@@ -125,6 +137,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
             cursor: 0,
             offset: 0,
             fetch: Fetch::Off,
+            waiting: "",
         }
     }
 
@@ -148,15 +161,52 @@ impl<T: Clone + Send + 'static> Picker<T> {
         std::thread::spawn(move || {
             let failure = fetch_origin(&root);
             let entries = reload().map_err(|err| format!("{err:#}"));
+            let fetched = Fetched {
+                failure,
+                entries,
+                notice: None,
+            };
             // A picker closed while the fetch ran has dropped its end, so
             // the answer goes nowhere and nothing is signalled.
-            if send.send(Fetched { failure, entries }).is_ok()
+            if send.send(fetched).is_ok()
                 && let Some(signal) = signal
             {
                 signal.notify();
             }
         });
         self.fetch = Fetch::Running { answer, wake };
+        self.waiting = "fetching origin…";
+        self
+    }
+
+    /// The picker, showing `waiting` in place of its list while `load`
+    /// reads the list on a thread of its own, then listing what it read.
+    /// `load` also answers what it left out, as a sentence the popup draws
+    /// over the list, or `None` when it left nothing out.
+    pub(crate) fn loading(
+        mut self,
+        waiting: &'static str,
+        load: impl FnOnce() -> (Vec<Entry<T>>, Option<String>) + Send + 'static,
+    ) -> Picker<T> {
+        let (send, answer) = std::sync::mpsc::channel();
+        let wake = Wake::new().map(Arc::new);
+        let signal = wake.clone();
+        std::thread::spawn(move || {
+            let (entries, notice) = load();
+            let fetched = Fetched {
+                failure: None,
+                entries: Ok(entries),
+                notice,
+            };
+            // As in `fetching_origin`: a closed picker takes no answer.
+            if send.send(fetched).is_ok()
+                && let Some(signal) = signal
+            {
+                signal.notify();
+            }
+        });
+        self.fetch = Fetch::Running { answer, wake };
+        self.waiting = waiting;
         self
     }
 
@@ -169,7 +219,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
         }
     }
 
-    /// Whether the fetch on open is still running.
+    /// Whether the fetch or load on open is still running.
     #[cfg(test)]
     pub(crate) fn fetching(&self) -> bool {
         matches!(self.fetch, Fetch::Running { .. })
@@ -188,6 +238,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
             Err(TryRecvError::Disconnected) => Fetched {
                 failure: Some("the fetch stopped without an answer".to_string()),
                 entries: Err("the fetch stopped without an answer".to_string()),
+                notice: None,
             },
         };
         // A failed fetch is named first: the list from before it is then
@@ -202,7 +253,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
             }
             (None, Ok(entries)) => {
                 self.entries = entries;
-                Fetch::Off
+                fetched.notice.map_or(Fetch::Off, Fetch::Noted)
             }
             (None, Err(reason)) => Fetch::Unread(reason),
         };
@@ -263,14 +314,14 @@ impl<T: Clone + Send + 'static> Picker<T> {
             String::new(),
         ];
         if matches!(self.fetch, Fetch::Running { .. }) {
-            body.push(pad_to("  fetching origin…", width));
+            body.push(pad_to(&format!("  {}", self.waiting), width));
             return crate::screen::panel(&self.title, &body, &keys(self.look.keys));
         }
         let (one, many) = self.look.noun;
         // Indented two columns, so every wrapped row of the reason lines up
         // under the entries' names rather than under their cursor mark. It
         // says branches whatever noun the list uses, since what a fetch
-        // brings is branches.
+        // brings is branches. A load's notice comes worded by its list.
         let failure: Vec<String> = match &self.fetch {
             Fetch::Failed(reason) => crate::screen::wrap(
                 &format!(
@@ -288,7 +339,8 @@ impl<T: Clone + Send + 'static> Picker<T> {
                 ),
                 width,
             ),
-            _ => Vec::new(),
+            Fetch::Noted(notice) => crate::screen::wrap(&format!("  {notice}"), width),
+            Fetch::Off | Fetch::Running { .. } => Vec::new(),
         };
         if !failure.is_empty() {
             body.extend(failure.iter().cloned());
