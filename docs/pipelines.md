@@ -500,6 +500,10 @@ the step to its `on_pass`. Each group gets its own `last:` run, whatever stacks 
 If the top task of a chain uses a pipeline with no `last:` step, the next task down that has
 one runs it, once.
 
+Unqueuing a task from the board can leave a task last that is already past a `last:` step. The
+unqueue panel names that step. Nothing runs it again. See
+[Unqueue panel](dispatcher.md#unqueue-panel).
+
 ### `first:` — a step only a chain's root runs
 
 The root task of a chain carries no declared dependency, so setup that a whole stack needs

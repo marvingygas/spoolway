@@ -643,12 +643,12 @@ item:
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
 | `focus` | A row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. Never under the headless backend, and never for a kept pane, a finished step or a queued or paused row. | Bring that pane in front of you, maximized, with `herdr pane zoom <pane> --on`. The pane stays zoomed until you unzoom it in herdr. |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
-| `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A copy of a routine is deleted instead, when its routine file still exists. Asks first. For such a copy the panel is titled with the routine's name, says the copy is deleted, names the routine file that stays (relative to the repository root), and says the routines tab queues it again. When several tasks go, the panel lists the ones going back to the pending directory apart from the routine copies being deleted, each group with its own closing line. |
+| `unqueue` | A `queued` row, and a `paused`, `blocked` or `hook_failed` row with no live agent lane, no unblocker lane at work and no worktree cut going. Never a running or `done` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A task that has started is torn down first: its runs stop, its worktree is removed and its local `task/<id>` branch is deleted. A copy of a routine is deleted instead, when its routine file still exists. Asks first. The panel names the task and what happens to it. See [Unqueue panel](#unqueue-panel). |
 
 So a running row lists `open task`, `pause` and `restart`, and `focus` between `pause` and
 `restart` when its step's pane can be found. A paused row that can be resumed
-lists `open task` and `restart`, and is resumed with `r`. A queued row lists `open task`, `pause`
-and `unqueue`, and a done row lists `open task` alone. A row whose task sets `plan:` also lists
+lists `open task`, `restart` and `unqueue`, and is resumed with `r`. A queued row lists
+`open task`, `pause` and `unqueue`, and a done row lists `open task` alone. A row whose task sets `plan:` also lists
 `open plan`, directly under `open task`. A row whose task file is gone opens the menu with
 `nothing to do here` over `[esc] close`.
 
@@ -867,6 +867,47 @@ For a failed `queued` or `started` hook the panel names the step the task starts
 | `esc` | Close the panel and change nothing. The task stays on `hook_failed`. |
 
 When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the key row. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
+
+### Unqueue panel
+
+`unqueue` in the options menu opens a panel titled `unqueue <task>`. A copy of a routine puts the routine's name in the title. The panel says what happens to the task before `enter` runs it.
+
+```
+╭─ unqueue sessions ─────────────────────────────╮
+│                                                │
+│  sessions has a branch and a worktree.         │
+│  both are deleted and cannot be recovered.     │
+│                                                │
+│  login is past its last: step suite.           │
+│  unqueueing leaves no other task to run them.  │
+│                                                │
+│  3 tasks go back to:                           │
+│  ~/.spoolway/shop/pending/                     │
+│                                                │
+│    sessions                                    │
+│    profile    (depends on sessions)            │
+│    settings   (depends on profile)             │
+│                                                │
+│  [enter] confirm   [esc] close                 │
+╰────────────────────────────────────────────────╯
+```
+
+| Part of the panel | When it shows |
+|---|---|
+| `<task> has a branch and a worktree.` and `both are deleted and cannot be recovered.` | A task being unqueued has a worktree or a local branch. A task that ran in a borrowed checkout gets neither line. |
+| `nothing has run for it yet.` or `nothing has run for these yet.` | No task being unqueued has started. |
+| `<task> is past its last: step <step>.` or `<task> is past its last: steps <a>, <b>.`, then `unqueueing leaves no other task to run them.` | The task that the unqueued one depends on, in its group, is past one or more `last:` steps without having run them. A task that is `done` or archived counts as past every `last:` step. |
+| `the task goes back to:` or a count of tasks that go back to the pending directory, with the tasks listed | Every task that is not a routine copy being deleted. |
+| `1 routine copy is deleted:` or `<n> routine copies are deleted:`, then `the routines tab queues it again.` | A routine copy whose routine file still exists. |
+
+The panel names a `last:` step and does nothing else about it. No task runs the step afterwards.
+
+| Key | What it does |
+|---|---|
+| `enter` | Unqueue the task and every unstarted task that depends on it. A task that has started is torn down first, as `spoolway queue unqueue --force` does it, with or without a dispatcher running. |
+| `esc` | Close the panel and change nothing. |
+
+When anything the panel drew has changed since it opened, `enter` redraws the panel with the line `this changed since it opened, so nothing was unqueued.` and changes nothing. A task that resumed, a new unblocker lane and a different `last:` result all count. A refusal `enter` meets stays in the panel, above the key line. On a short pane the panel folds its task lists under `… and n more` before it drops anything else. The warnings, the count and the key line always show.
 
 ### Footer
 
