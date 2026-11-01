@@ -2140,16 +2140,16 @@ or of a task carried with it refuses the command before anything is torn down.
 
 | Step | What happens |
 |---|---|
-| 1 | The task lock is taken. With a dispatcher running, the task is checked again under the lock. |
+| 1 | The task lock is taken, and the task is checked again under the lock. |
 | 2 | Every lane of the task in a checkout of this project is stopped, and its spend is banked. |
 | 3 | Its hook runs, command runs and panes end. |
 | 4 | The worktree is removed, unless it was borrowed, and `task/<id>` is deleted. |
 | 5 | Its run files, lane aliases, lane records and session homes are deleted. |
 | 6 | The task and every not-started task that depends on it go to pending. A copy of a routine whose file exists is deleted instead. |
 
-With a dispatcher running, a task counts as stopped when it is on `paused`, `blocked` or
-`hook_failed` and has no live lane and no worktree cut. Any other task is refused. A pass that is
-running drops a task that leaves the queue, as described in
+A task counts as stopped when it is on `queued`, or on `paused`, `blocked` or `hook_failed` with
+no live lane and no worktree cut, whether a dispatcher runs or not. Any other task is refused. A
+pass that is running drops a task that leaves the queue, as described in
 [What a pass does](#what-a-pass-does). If the worktree or branch cannot be removed, the task stays
 queued with its run files in place.
 

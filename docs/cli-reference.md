@@ -579,8 +579,8 @@ files under `tracking/` are removed. `spoolway queue add --from` takes the resul
 spoolway queue unqueue <task>
 ```
 
-The command takes no flags. `--force` and `--all` were removed, and passing either is the
-argument parser's unknown-argument error.
+The command takes no flags. Passing `--force` or `--all` is the argument parser's
+unknown-argument error.
 
 A task that has started has its checkout torn down first, the way cleanup does for a finished
 task. The command stops the task's lanes and runs, adds what the lanes spent to the usage ledger,
@@ -615,7 +615,7 @@ unqueued `profile` → /home/you/.spoolway/shop/pending/profile.md
 unqueued `settings` → /home/you/.spoolway/shop/pending/settings.md
 ```
 
-A running task is the one refusal. The command names the pause command to run first and changes
+A running task is refused. The command names the pause command to run first and changes
 nothing:
 
 ```
@@ -635,6 +635,16 @@ progress, because the plain pause refuses to do that. A task whose worktree is s
 told to wait for the cut to finish, because pausing does not stop it. If that task is on a working
 step rather than a stopped one, it is told to pause it as well, so the step does not start when
 the cut ends.
+
+A task on `done` is refused too, with no pause command, because the dispatcher archives a done
+task on its own:
+
+```
+$ spoolway queue unqueue login
+`login` is done — unqueue takes a stopped task only, and a done task is archived on its own.
+
+nothing was changed.
+```
 
 A copy of a routine is deleted instead, when a routine file under `.spoolway/routines/` has the
 copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
