@@ -718,7 +718,8 @@ sed 's/\x1b\[[0-9;]*m//g' "$ON_FAIL_TAB" >"$ON_FAIL_TAB.plain"
 has "the step picker's key line names h on a field some step sets" \
   "[space] select   [a] select all   [h] show not set   [esc] back" \
   "$ON_FAIL_TAB.plain"
-lacks "and no enter with no step selected" "[enter] set value" "$ON_FAIL_TAB.plain"
+lacks "and no enter with no step selected" "[a] select all   [enter] set value" \
+  "$ON_FAIL_TAB.plain"
 lacks "a step that leaves on_fail out starts hidden" "[ ] reproduce " "$ON_FAIL_TAB.plain"
 
 # The overrides tab's prompts section copies one prompt into the layer.
