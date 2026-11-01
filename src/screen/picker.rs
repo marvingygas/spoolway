@@ -128,8 +128,9 @@ impl<T: Clone + Send + 'static> Picker<T> {
 
     /// The picker, fetching `origin` in the checkout at `root` and then
     /// listing what `reload` reads. The entries it was made with stay when
-    /// `reload` fails, under a row saying so. A checkout with no `origin` has nothing to fetch, so
-    /// its picker lists at once rather than failing a fetch every time.
+    /// `reload` fails, under a row saying so. A checkout with no `origin`
+    /// has nothing to fetch, so its picker lists at once rather than failing
+    /// a fetch every time.
     pub(crate) fn fetching_origin(
         mut self,
         root: &Path,
