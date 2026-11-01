@@ -1916,10 +1916,9 @@ pipeline has no `blocked` step, an agent step runs again at once instead of wait
 A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
 the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
 In an unattended run the `blocked` lane meets the same failure, and the task then stops on
-`paused`. The message names the branch. The branch is either left over from an earlier task with the same
-id, or it holds this task's own work saved by `spoolway queue unqueue --force`. A dispatcher
-stopped in the middle of a cut does not count: the task records the cut before the branch is made,
-so the next dispatcher re-cuts onto it. Otherwise, choose one:
+`paused`. The message names the branch. The branch is left over from an earlier task with the same
+id. A dispatcher stopped in the middle of a cut does not count: the task records the cut before
+the branch is made, so the next dispatcher re-cuts onto it. Otherwise, choose one:
 
 | Goal | Steps |
 |---|---|
@@ -2084,6 +2083,30 @@ the command that resumes the task:
 Put the work on `task/<id>`, or finish or abort the operation, then resume the task. Cleanup
 runs again when the task reaches `done`. A borrowed checkout is not checked, because it is yours.
 
+### Tearing down a stopped task
+
+`spoolway queue unqueue <task> --force` tears a task that has started down the way cleanup does,
+with these differences. It makes no `wip` commit and deletes `task/<id>` whatever the branch
+holds. It tears down a worktree in any state listed under
+[A worktree that is off its branch](#a-worktree-that-is-off-its-branch). It writes no `removing/`
+file, no `## Handover` section, no archive entry and no patch measure. A pending draft of the task
+or of a task carried with it refuses the command before anything is torn down.
+
+| Step | What happens |
+|---|---|
+| 1 | The task lock is taken. With a dispatcher running, the task is checked again under the lock. |
+| 2 | Every lane of the task in a checkout of this project is stopped, and its spend is banked. |
+| 3 | Its hook runs, command runs and panes end. |
+| 4 | The worktree is removed, unless it was borrowed, and `task/<id>` is deleted. |
+| 5 | Its run files, lane aliases, lane records and session homes are deleted. |
+| 6 | The task and every not-started task that depends on it go to pending. A copy of a routine whose file exists is deleted instead. |
+
+With a dispatcher running, a task counts as stopped when it is on `paused`, `blocked` or
+`hook_failed` and has no live lane and no worktree cut. Any other task is refused. A pass that is
+running drops a task that leaves the queue, as described in
+[What a pass does](#what-a-pass-does). If the worktree or branch cannot be removed, the task stays
+queued with its run files in place.
+
 ### A removal that was stopped or failed
 
 A dispatcher killed during step 4 leaves a tree with most of its files gone. On the next pass the
@@ -2112,9 +2135,8 @@ step that leaves a read-only tree does not hold the task on `done`. The task is 
 first pass after the worktree is gone. Removing a worktree deletes the folder directly only when it
 sits under `worktrees/`.
 
-`spoolway queue unqueue --force` prints the first message on standard error and carries the task
-to `pending`. It does not try again. A copy of a routine whose worktree cannot be removed stays
-queued, and the command can be run again once the worktree is gone.
+If `spoolway queue unqueue --force` cannot remove a worktree, it prints the first message on
+standard error and leaves the task queued. Run the command again once the worktree is gone.
 
 ### The archive index
 

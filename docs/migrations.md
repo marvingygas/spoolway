@@ -619,8 +619,6 @@ more: the `Run spoolway sync to apply the last update.` line and the update popu
   git branch -m task/<id> <name>    # keep it, then set starts_from: <name> in the task
   git branch -D task/<id>           # drop it
   ```
-
-  This also covers a task sent again after `spoolway queue unqueue --force` kept its branch.
 - Delete `~/.spoolway/<label>-<id>/sync-stamp`. Nothing reads it now.
 - Expect `spoolway doctor` to exit non-zero while a task hook has failed. Hook failures left the
   board and are `FAIL` rows labelled `issue_tracking hooks` in `doctor` and in the popup before
@@ -790,8 +788,7 @@ edit. `spoolway pipeline check` names any pipeline that no longer loads.
   `/tmp/.spoolway`. New project labels are cut to 64 characters; existing labels are kept.
 - Handle exit 1 in any script that runs `spoolway resume <id>`, with or without `--stage`, on a
   queued or running task. Use `spoolway queue pause <task>` to stop a running task first.
-  `--stage` also refuses while a `depends_on` task is not done, and
-  `spoolway queue unqueue <id> --force` refuses a started task that a queued task depends on.
+  `--stage` also refuses while a `depends_on` task is not done.
 - Rust projects: once every task cut before the upgrade has finished, run
   `rm -rf ~/.spoolway/<label>-<id>/.cargo-target`. Each worktree now builds into its own
   `target/`, and spoolway never removes the old folder. Deleting it earlier makes cargo fail with

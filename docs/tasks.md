@@ -295,7 +295,7 @@ pipeline's first step.
 | `spoolway queue add --from <path>` | Queues tasks. |
 | `spoolway queue pause <task>` | Stops the task's lane and parks it on `paused`. |
 | `spoolway queue resume <task>` | Same as `r` on the board. |
-| `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. A copy of a routine is deleted instead, and the command names the routine file, when that file still exists. `--all` and `--force` reach the rest. |
+| `spoolway queue unqueue <task>` | Moves a not-started task back to the pending directory. A copy of a routine is deleted instead, and the command names the routine file, when that file still exists. `--all` reaches every not-started task. `--force` tears down a task that has started. |
 
 A queue file that does not parse is skipped. A queue file that holds an id another file holds is
 skipped too, as is a queue file whose id is already in the archive. The file whose name is the id
@@ -548,21 +548,26 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 --force` removes that value, so a task sent again is cut again from its start branch. A
 `starts_from:` you set before the cut stays.
 
-`unqueue --force` keeps the task's branch when it has commits no remote has. In a repo with no
-remote, it keeps the branch when the task's base branch does not contain it. Sending the task
-again with that branch in place is refused by `queue add`, because its first cut never uses a
-branch that already exists. Nothing is queued. Rename the branch with `git branch -m task/<id>
-<name>` and set `starts_from: <name>` to keep the work, or run `git branch -D task/<id>` to drop
-it. Then send the task again. See [Where work happens on
-disk](dispatcher.md#where-work-happens-on-disk).
+`unqueue --force` tears a started task down the way cleanup does for a finished one. It stops the
+task's lanes, hook runs and command runs, and adds what the lanes spent to the usage ledger. It
+removes the worktree and deletes the local `task/<id>` branch, even when the branch holds commits
+no remote has. It makes no commit first, so work nobody pushed is lost. The task can be queued
+again at once.
 
-A started copy of a routine is handled differently. `unqueue --force` tears its checkout down, then
-deletes the copy, because the routine is still under `.spoolway/routines/` to queue again. It
-writes nothing to the pending directory and names the routine file. If the copy's branch has
-commits no remote has, the branch is kept and the command prints its name. In a repo with no
-remote, the branch is kept when the copy's base branch does not contain it. Nothing sends that
-branch back to a draft, so merge or push it, or run `git branch -D` on it. A copy whose routine
-file is gone is carried to pending as any other task.
+`--force` tears down a task whose worktree is on another branch, on a detached HEAD, or in the
+middle of a rebase, merge, cherry-pick or revert. Only `task/<id>` is deleted. Any other branch,
+the remote branch and any pull request stay. A checkout the task borrowed is left alone. See
+[Where work happens on disk](dispatcher.md#where-work-happens-on-disk).
+
+The task goes to the pending directory, and so does every not-started task that depends on it,
+directly or through another task. Each keeps its `group:` and `depends_on:`. If a worktree
+cannot be removed, nothing moves and the task stays queued.
+
+A started copy of a routine is handled differently. `unqueue --force` tears its checkout down and
+deletes its branch, then deletes the copy, because the routine is still under
+`.spoolway/routines/` to queue again. It writes nothing to the pending directory and names the
+routine file. A copy whose routine file is gone, or that a task carried with it depends on, is
+carried to pending as any other task.
 
 Deleting a running task's queue file takes the task off the board and leaves its worktree and
 `task/<id>` branch behind. Nothing removes them, and a command step already running in that

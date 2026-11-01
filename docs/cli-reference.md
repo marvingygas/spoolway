@@ -571,15 +571,13 @@ Carry a not-started task back to the pending directory, with every reserved key,
 `hook_paused:`, `hook_error:` and `missing_start_branch:` stripped. The task's running hooks are stopped and its
 files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
 `unqueue` in the board's options menu carries the same task and every unstarted task that depends
-on it; this command has no panel
-to list a chain on, so it refuses instead.
+on it. For a task that has not started, this command has no panel to list a chain on, so it
+refuses when a queued task depends on it. `--force` carries the dependents along.
 
 A copy of a routine is deleted instead, when a routine file under `.spoolway/routines/` has the
 copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
 the routine file's path, and the routine stays there to queue again. `--force` does the same for a
-copy that has started, after it tears the checkout down. A branch with commits no remote has is
-kept, and the command prints its name. In a repo with no remote, a branch the task's base branch
-does not contain is kept.
+copy that has started, after it tears the checkout down and deletes its local branch.
 
 ```
 $ spoolway queue unqueue prune-1
@@ -599,21 +597,29 @@ spoolway queue unqueue <task> --force
 | Flag | Default | What it does |
 |---|---|---|
 | `--all` | | Every not-started task at once. Refused together with `--force` |
-| `--force` | | Interrupt any live lane, stop every command run the task left, record uncommitted work, tear the checkout down, then unqueue a task that has started. No-op on a task still `queued` |
+| `--force` | | Tear down a task that has started: stop its lanes and runs, add what they spent to the usage ledger, remove its worktree and delete its local `task/<id>` branch, then unqueue it and every task that depends on it. Makes no commit, so work nobody pushed is lost. No-op on a task still `queued` |
 
 A task that has started is refused, naming its stage, its checkout when it has one, and both
-routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear the
-checkout down and unqueue it anyway. A task another queued sibling names in `depends_on` is
-refused too, with or without `--force`, naming that sibling. Unqueue the sibling first. A task already sitting in pending under the same id
-refuses the move and leaves the queue file in place. A copy of a routine is deleted whatever sits in
-pending. If `--force` cannot remove the copy's worktree, the copy stays queued. Remove the worktree
-by hand, then run the command again.
+routes onward: `spoolway queue pause <task>` to stop it in place, or `--force` to tear it down and
+unqueue it anyway. A task already sitting in pending under the same id refuses the move and leaves
+the queue file in place. A copy of a routine is deleted whatever sits in pending. If `--force`
+cannot remove the worktree, the task stays queued. Remove the worktree by hand, then run the
+command again.
 
-`--force` is refused when the task's worktree is on another branch than `task/<id>`, on a
-detached HEAD, or in the middle of a rebase, merge, cherry-pick or revert. The refusal names what
-it found and the worktree. Nothing is interrupted, committed or torn down. Put the work back on
-the task's branch, or finish or abort the operation, then run the command again. A borrowed
-checkout is not checked.
+`--force` tears the worktree down whichever branch it is on, including another branch, a detached
+HEAD, or the middle of a rebase, merge, cherry-pick or revert. Only `task/<id>` is deleted. Any
+other branch, the remote branch and any pull request stay. A borrowed checkout is left standing.
+
+While a dispatcher runs, `--force` accepts only a task on `paused`, `blocked` or `hook_failed`
+with no lane or worktree cut at work. Any other task is refused with `spoolway queue pause <task>`
+as the fix. With no dispatcher running, `--force` also stops a running task's lane. `--force` is
+also refused when the multiplexer cannot list its lanes, for example
+when it is not running, and when another process holds the task's lock. Nothing is torn down in
+either case. Run the command again once the cause is gone.
+
+The task goes to pending with every not-started task that depends on it, each keeping its `group:`
+and `depends_on:`. A draft already in pending for any of them refuses the whole move before
+anything is torn down. `spoolway queue add --from` takes the carried tasks again.
 
 ### `spoolway group list`
 
