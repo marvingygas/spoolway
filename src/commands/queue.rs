@@ -815,8 +815,13 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
 }
 
 /// The line [`report_unqueued`] prints for `outcome`, or the refusal it
-/// gives when `id` stayed queued.
-fn unqueued_line(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> Result<String> {
+/// gives when `id` stayed queued. The board's `unqueue` refuses with the
+/// same words.
+pub(crate) fn unqueued_line(
+    repo: &Repo,
+    id: &str,
+    outcome: crate::status::Unqueued,
+) -> Result<String> {
     use crate::status::Unqueued;
     match outcome {
         Unqueued::Deleted { routine_file } => Ok(format!(
@@ -5375,9 +5380,9 @@ fn not_queued_lines(not_queued: &[NotQueued]) -> Vec<String> {
 const STILL_QUEUED_WRAP: usize = 60;
 
 /// One sentence per live task named after a refused routine, naming the
-/// step that task is at, then what lifts the refusal. A started task cannot
-/// be unqueued, so the advice names the board for a copy that has stopped as
-/// well as `unqueue` for one that has not started.
+/// step that task is at, then what lifts the refusal: the copy finishing, or
+/// the board's `unqueue`, which takes a copy that has stopped as well as one
+/// that has not started.
 fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
     let mut lines = Vec::new();
     for copy in live {
@@ -5385,9 +5390,8 @@ fn still_queued_lines(live: &[LiveCopy]) -> Vec<String> {
     }
     lines.push(String::new());
     lines.extend(crate::screen::wrap(
-        "a routine runs one copy at a time. let it finish, resume or restart it from the \
-         board if it has stopped, or unqueue it if it has not started. then queue the routine \
-         again.",
+        "a routine runs one copy at a time. let it finish, or unqueue it from the board if it \
+         has stopped, or if it has not started yet. then queue the routine again.",
         STILL_QUEUED_WRAP,
     ));
     lines
@@ -24364,9 +24368,9 @@ mod tests {
                 "",
                 "release-spoolway is still in the queue, at step ship.",
                 "",
-                "a routine runs one copy at a time. let it finish, resume or",
-                "restart it from the board if it has stopped, or unqueue it",
-                "if it has not started. then queue the routine again.",
+                "a routine runs one copy at a time. let it finish, or unqueue",
+                "it from the board if it has stopped, or if it has not",
+                "started yet. then queue the routine again.",
                 "",
                 "[enter] close",
             ],

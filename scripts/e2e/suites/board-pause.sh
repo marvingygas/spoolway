@@ -851,7 +851,7 @@ draws "unqueue on a routine copy is titled by the routine's name" "unqueue night
 draws "and says the copy is deleted" "this copy is deleted. the"
 draws "naming the routine file that stays" ".spoolway/routines/nightly/nightly.md"
 draws "and where it is queued again" "the routines tab queues it again."
-never_draws "and does not promise a draft in pending" "the queue tab is what sends it again." "$MARK"
+never_draws "and does not promise a draft in pending" "goes back to:" "$MARK"
 stage_stays "nothing moves while the panel is open" nightly-1 queued
 
 press $'\r'
@@ -877,6 +877,8 @@ if [ -n "$UNQ_PID" ]; then ok "the lane to pause is really mid-turn"
 else bad "the lane to pause is really mid-turn"; fi
 UNQ_TREE=$(sed -n 's/^worktree_path: *//p' "$SPOOLWAY_PROJECT_HOME/queue/unq-head.md")
 works "and has a worktree of its own" test -d "$UNQ_TREE"
+UNQ_BRANCH=$(sed -n 's/^branch: *//p' "$SPOOLWAY_PROJECT_HOME/queue/unq-head.md")
+works "and a branch of its own" git show-ref --verify --quiet "refs/heads/$UNQ_BRANCH"
 must "pausing it by hand" "$SPOOLWAY" queue pause unq-head
 stage_reaches "it parks" unq-head paused 25
 
@@ -897,7 +899,7 @@ else bad "enter carries the paused task to pending"; tail -30 "$BOARD_LOG" | sed
 if poll_until 25 _gone unq-tail; then ok "and the task after it"
 else bad "and the task after it"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 works "its worktree is removed" test ! -e "$UNQ_TREE"
-works "its branch is deleted" test -z "$(git branch --list task/unq-head)"
+refuses "its branch is deleted" "" git show-ref --verify --quiet "refs/heads/$UNQ_BRANCH"
 has "the task lands in pending" "id: unq-head" "$SPOOLWAY_PROJECT_HOME/pending/unq-head.md"
 has "and so does the one after it" "id: unq-tail" "$SPOOLWAY_PROJECT_HOME/pending/unq-tail.md"
 

@@ -1415,11 +1415,13 @@ impl Board {
     /// The options menu's `unqueue`: open [`BoardMode::ConfirmUnqueue`] for
     /// task `id` and every task after it in its group — see
     /// [`unqueue_confirm`]. A no-op on a task the queue no longer has, or
-    /// one that is neither unstarted nor stopped; also when the lanes cannot
-    /// be listed, since a live unblocker lane could not then be ruled out.
+    /// one that is neither unstarted nor stopped; also on a started task
+    /// whose lanes cannot be listed, since a live unblocker lane could not
+    /// then be ruled out. A task that never started needs no listing.
     fn begin_unqueue(&mut self, repo: &Repo, pipelines: &Pipelines, id: String) -> Result<()> {
         let tasks = repo.tasks()?;
-        let Ok(lanes) = crate::mux::backend(repo)?.list_lanes() else {
+        let mux = crate::mux::backend(repo)?;
+        let Ok(lanes) = unqueue_lanes(&tasks, &id, || mux.list_lanes()) else {
             return Ok(());
         };
         if let Some(confirm) = unqueue_confirm(repo, pipelines, &tasks, &lanes, &id)? {
@@ -1524,13 +1526,40 @@ impl Board {
         if !confirm.started {
             let ids: Vec<String> = confirm.chain.iter().map(|e| e.id.clone()).collect();
             {
-                let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&head.id))?;
-                let lanes = crate::mux::backend(repo)?.list_lanes()?;
-                unchanged(&repo.tasks()?, &lanes)?;
+                let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&head.id))
+                    .with_context(|| {
+                        format!(
+                            "did not unqueue `{}`: its task lock could not be taken, because \
+                             another process holds it or the lock file could not be written \
+                             (its cause follows). press enter again in a moment. nothing was \
+                             unqueued.",
+                            head.name
+                        )
+                    })?;
+                let tasks = repo.tasks()?;
+                let lanes =
+                    unqueue_lanes(&tasks, &head.id, || crate::mux::backend(repo)?.list_lanes())
+                        .with_context(|| {
+                            format!(
+                                "did not unqueue `{}`: it has started since this opened, and the \
+                         multiplexer would not list its lanes, so it cannot tell whether one \
+                         is working on it. check that the multiplexer is running, then press \
+                         enter again. nothing was unqueued.",
+                                head.name
+                            )
+                        })?;
+                unchanged(&tasks, &lanes)?;
             }
+            // The head's lock is let go above, since `unqueue_in` takes it
+            // again, so the dispatcher can launch the head in the gap. Its
+            // `unqueue_in` then leaves it queued, and the refusal comes
+            // before any task after it is carried away from a head still
+            // running. A dependent refused later stops the rest the same
+            // way, as `unqueue_stopped` does for a started head.
             let drafted = drafted_in_batch(repo, &ids)?;
             for id in &ids {
-                unqueue_in(repo, id, &drafted)?;
+                let outcome = unqueue_in(repo, id, &drafted)?;
+                crate::commands::unqueued_line(repo, id, outcome)?;
             }
             return Ok(());
         }
@@ -3089,6 +3118,22 @@ enum UnqueueLead {
     /// deletes: it ran in a checkout it borrowed, which stays. Neither line
     /// is true of it, so the panel says neither.
     Neither,
+}
+
+/// The lanes the `unqueue` panel for task `id` is read against: `list`'s
+/// answer when `id` has started, and none, without asking `list`, when it
+/// has not or has left the queue. Only a started task can have a lane at
+/// work, so a multiplexer that will not list its lanes keeps no task that
+/// never started from being unqueued.
+fn unqueue_lanes(
+    tasks: &[crate::task::Task],
+    id: &str,
+    list: impl FnOnce() -> Result<Vec<crate::mux::Lane>>,
+) -> Result<Vec<crate::mux::Lane>> {
+    match tasks.iter().find(|t| t.id() == id) {
+        Some(task) if !not_started(task) => list(),
+        _ => Ok(Vec::new()),
+    }
 }
 
 /// The `unqueue` panel for task `id`, from the queue `tasks` and the
@@ -16839,6 +16884,80 @@ mod tests {
         };
         assert_eq!(confirm.chain.len(), 2, "{confirm:?}");
         assert!(repo.task("solo").is_ok() && repo.task("after").is_ok());
+    }
+
+    /// The lanes an `unqueue` panel is read against are listed only for a
+    /// task that has started. A task that never started, or one the queue no
+    /// longer has, gets none without the multiplexer being asked, so one that
+    /// will not list keeps nothing unstarted from being unqueued. Fails on a
+    /// board that lists the lanes before looking at the task, as
+    /// `begin_unqueue` did, which then opened no panel at all.
+    #[test]
+    fn the_unqueue_lanes_are_listed_only_for_a_started_task() {
+        let (repo, _root_guard) = fixture("unqueue-lanes-started-only");
+        add_to(&repo, "waiting", &[], None, Some("a"));
+        add_to(
+            &repo,
+            "paused",
+            &[],
+            Some(crate::pipeline::PAUSED),
+            Some("b"),
+        );
+        let tasks = repo.tasks().unwrap();
+        let refused = || -> Result<Vec<crate::mux::Lane>> {
+            anyhow::bail!("herdr agent list: the server is not running")
+        };
+
+        assert!(
+            unqueue_lanes(&tasks, "waiting", refused)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(unqueue_lanes(&tasks, "gone", refused).unwrap().is_empty());
+        assert!(unqueue_lanes(&tasks, "paused", refused).is_err());
+    }
+
+    /// `enter` on an unstarted task's panel keeps the panel open with a
+    /// refusal when a task in it stays queued, here because a newer draft
+    /// of it already sits in pending. A head that stays is refused before
+    /// the task after it is carried away from it, and a dependent that
+    /// stays is named. Fails before the change, which threw each outcome
+    /// away, carried the rest and closed the panel as if all had gone.
+    #[test]
+    fn enter_on_an_unstarted_unqueue_panel_refuses_a_task_that_stays_queued() {
+        use crate::screen::Key;
+        for stays in ["solo", "after"] {
+            let (repo, _root_guard) = fixture(&format!("unqueue-unstarted-{stays}-stays"));
+            let pipelines = Pipelines::builtin();
+            add(&repo, "solo", &[], None);
+            add(&repo, "after", &["solo"], None);
+
+            let mut board = Board::for_test();
+            board.cursor = Some("solo".into());
+            pick(&mut board, &repo, &pipelines, RowAction::Unqueue);
+            std::fs::create_dir_all(repo.pending_dir()).unwrap();
+            let draft = repo.pending_dir().join(format!("{stays}.md"));
+            std::fs::write(&draft, "a newer draft\n").unwrap();
+            board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+            let BoardMode::ConfirmUnqueue(confirm) = &board.mode else {
+                panic!("{stays}: the panel closed over a task that stayed queued");
+            };
+            let refusal = format!("did not unqueue `{stays}`: a newer draft is already at");
+            assert!(
+                confirm
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains(&refusal)),
+                "{stays}: {confirm:?}"
+            );
+            assert!(repo.task(stays).is_ok(), "{stays} is still queued");
+            assert_eq!(std::fs::read_to_string(&draft).unwrap(), "a newer draft\n");
+            if stays == "solo" {
+                assert!(repo.task("after").is_ok(), "after stays with its head");
+                assert!(!repo.pending_dir().join("after.md").exists());
+            }
+        }
     }
 
     /// `unqueue` on a task a still-queued task depends on opens a panel naming
