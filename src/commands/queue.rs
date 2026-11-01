@@ -4847,11 +4847,12 @@ const EDIT_PICK_TEXT: usize = 44;
 const LANDS_IN_COLUMN: usize = 36;
 
 /// The column the group's name starts at on the edit depends on picker's
-/// rows, counted from the cursor mark. It fits a task id of up to fifteen
-/// characters with two spaces after it, so most groups line up in one
-/// column; a longer id pushes only its own group along, one space past its
-/// end.
-const DEPENDS_ON_COLUMN: usize = 19;
+/// rows, counted from the cursor mark. It fits a task id of up to
+/// twenty-six characters with two spaces after it, so most groups line up
+/// in one column, and leaves fourteen columns for the group's name inside
+/// [`EDIT_PICK_TEXT`]; a longer id pushes only its own group along, one
+/// space past its end.
+const DEPENDS_ON_COLUMN: usize = 30;
 
 impl PipelinePick {
     /// The picker over every pipeline `pipelines` defines but `task`'s own,
@@ -18172,9 +18173,9 @@ mod tests {
                 "│  search: ▏                                     │",
                 "│                                                │",
                 "│  > none                                        │",
-                "│    export-csv       billing-export             │",
-                "│    ship-cart        cart                       │",
-                "│    refresh-guide    docs-refresh               │",
+                "│    export-csv                  billing-export  │",
+                "│    ship-cart                   cart            │",
+                "│    refresh-guide               docs-refresh    │",
                 "│                                                │",
                 "│  [enter] confirm   [f] search   [esc] back     │",
                 "╰────────────────────────────────────────────────╯",
@@ -18236,7 +18237,7 @@ mod tests {
                 "│    run gh auth login, then reopen.             │",
                 "│                                                │",
                 "│  > none                                        │",
-                "│    ship-cart        cart                       │",
+                "│    ship-cart                   cart            │",
                 "│                                                │",
                 "│  [enter] confirm   [f] search   [esc] back     │",
                 "╰────────────────────────────────────────────────╯",
