@@ -3820,16 +3820,16 @@ fn trials_table(rows: &[TrialRow], sort: Option<&Sort>) -> Vec<Line> {
 // the moment either runs out.
 //
 // Three tables: `→` cycles from the lanes to the watched directories to
-// the trials and back, `←` the other way, which `by` and which filter are rows on the filter
-// panel, and the sort is the popup `a` or `d` opens. The one drill-in is
-// `enter` on a trial, which is nothing but a filter set for the person: the
-// lanes table, narrowed to that trial and grouped by pipeline. Every lanes
-// and directory table is built by the same functions the
-// printing path uses (`lanes_table`, `dirs_table`, `sessions_table`), so the
-// screen and a pasted `spoolway eval --by step` can never disagree about a
-// column. Rendered without colour throughout: `pad_to` counts every
-// character as one column, and an ANSI escape slipped into a row would throw
-// the frame's own border out of line with it.
+// the trials and back, and `←` walks them the other way. Which `by` and
+// which filter are rows on the filter panel, and the sort is the popup `a`
+// or `d` opens. The one drill-in is `enter` on a trial, which is nothing
+// but a filter set for the person: the lanes table, narrowed to that trial
+// and grouped by pipeline. Every lanes and directory table is built by the
+// same functions the printing path uses (`lanes_table`, `dirs_table`,
+// `sessions_table`), so the screen and a pasted `spoolway eval --by step`
+// can never disagree about a column. Rendered without colour throughout:
+// `pad_to` counts every character as one column, and an ANSI escape slipped
+// into a row would throw the frame's own border out of line with it.
 
 /// Which of the three tables is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5299,9 +5299,9 @@ fn filter_fields(table: TableKind) -> &'static [FilterField] {
 /// A copy of [`Filters`] a person is editing in the filter panel, plus which
 /// row the cursor is on and which table's rows it draws — fixed at the
 /// moment `f` opened the panel, since nothing in [`Mode::Filter`] lets the
-/// arrows change the table while it is up: there they change a row's value. `esc` drops this untouched; `enter`
-/// turns it back into the real `Filters` and reloads — see `run_screen_with`'s
-/// own handling of [`Mode::Filter`].
+/// arrows change the table while it is up: there they change a row's value.
+/// `esc` drops this untouched; `enter` turns it back into the real `Filters`
+/// and reloads — see `run_screen_with`'s own handling of [`Mode::Filter`].
 #[derive(Debug, Clone)]
 struct Draft {
     field: usize,

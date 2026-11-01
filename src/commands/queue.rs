@@ -20516,7 +20516,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // Tab onto the tasks pane, space to select the one group, enter to
+        // → onto the tasks pane, space to select the one group, enter to
         // submit it.
         screen(&repo, groups, "\x1b[C \r");
 
@@ -20590,7 +20590,7 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // Tab onto tasks, space to select, o, down onto gate and enter to
+        // → onto tasks, space to select, o, down onto gate and enter to
         // open the gate picker, down onto the pipeline's second step
         // (`review`), enter to pick it, enter to submit.
         screen(&repo, groups, "\x1b[C o\x1b[B\r\x1b[B\r\r");
@@ -21730,7 +21730,7 @@ mod tests {
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        // `Tab` moves focus onto the tasks pane, whose menu offers open task
+        // `→` moves focus onto the tasks pane, whose menu offers open task
         // first — see `pending_options`.
         let drawn = screen(&repo, groups, "\x1b[Co\r");
 
@@ -24005,7 +24005,7 @@ mod tests {
             ),
         );
 
-        // tab (focus onto its tasks, already on `scan-pending` — the first
+        // → (focus onto its tasks, already on `scan-pending` — the first
         // one in filename order), space (queue it alone).
         let (exit, drawn) = routines_exit(&repo, "\x1b[C ");
         assert_eq!(exit, ScreenExit::Quit);
