@@ -385,7 +385,7 @@ impl ActiveSection {
     }
 
     /// Whether the list has the keys, with nothing open over it: the only
-    /// time `tab`, `q`, `w` and the digits reach past the section.
+    /// time the arrows, `q`, `w` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::List)
     }
@@ -828,7 +828,6 @@ impl ActiveSection {
                     ("a", "select all"),
                     super::OPTIONS,
                     super::OPEN_WORKSPACE,
-                    ("tab", "section"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -1227,7 +1226,7 @@ mod tests {
     /// The tab, opened on its active section.
     fn on_active(repo: &Repo) -> State {
         let mut state = State::new(repo);
-        type_keys(repo, &mut state, "\t\t\t");
+        type_keys(repo, &mut state, "\x1b[D");
         assert_eq!(state.section, Section::Active);
         state
     }
@@ -1295,7 +1294,7 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [space] select   [a] select all   [o] options   [w] open workspace   [tab] section"
+            " [space] select   [a] select all   [o] options   [w] open workspace"
         );
     }
 
@@ -1759,7 +1758,7 @@ mod tests {
             "steps:\n  implement:\n    model: claude-opus-5-5\n  test:\n    timeout: 90m\n",
         );
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\tfmodel\ro\r");
+        type_keys(&repo, &mut state, "\x1b[Cfmodel\ro\r");
         let drawn = popup(&state);
         assert!(
             drawn.iter().any(|l| l.contains("3 keys in 2 files")),

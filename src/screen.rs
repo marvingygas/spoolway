@@ -1677,12 +1677,12 @@ mod tests {
             routines.into(),
             // Queue tab: panes, filters, the options menu and what each
             // item asks, then what answering it says.
-            "\t".into(),
+            "\x1b[C".into(),
             "f".into(),
             "fwire".into(),
             "fzzz".into(),
             "h".into(),
-            "h\t".into(),
+            "h\x1b[C".into(),
             " ".into(),
             " \r".into(),
             "\r".into(),
@@ -1700,11 +1700,11 @@ mod tests {
             // Routines tab: the list, its details pane, the job and the
             // routine without a job or without a routine, and the options
             // each has.
-            format!("{routines}\t"),
+            format!("{routines}\x1b[C"),
             format!("{routines}\r"),
             format!("{routines}{down}"),
             format!("{routines}{down}{down}"),
-            format!("{routines}{down}{down}\t"),
+            format!("{routines}{down}{down}\x1b[C"),
             format!("{routines}o"),
             format!("{routines}o\r"),
             format!("{routines}o\r\r"),
@@ -1728,15 +1728,15 @@ mod tests {
             // section's step selection, searched, and its value field. The
             // prompts section's own walks are below.
             format!("{overrides}"),
-            format!("{overrides}\t"),
-            format!("{overrides}\t\t\t"),
+            format!("{overrides}\x1b[C"),
+            format!("{overrides}\x1b[C\x1b[C\x1b[C"),
             format!("{overrides}fdispatch"),
             format!("{overrides}fzzz"),
             format!("{overrides}\rdispatch.x\t5"),
             format!("{overrides}{down}\r"),
-            format!("{overrides}\t\r"),
-            format!("{overrides}\t\rfnot set"),
-            format!("{overrides}\t\ra\rx"),
+            format!("{overrides}\x1b[C\r"),
+            format!("{overrides}\x1b[C\rfnot set"),
+            format!("{overrides}\x1b[C\ra\rx"),
             // Dispatch tab: the board's rows, their options and the
             // resume and skip-a-hook questions. Never `enter` outside a
             // popup, and never an option that opens a file.
@@ -1759,10 +1759,10 @@ mod tests {
         // search, both popups `enter` opens, and the `open workspace` popup
         // `w` opens when the folder cannot be opened.
         let prompt_walks = [
-            format!("{overrides}\t\t"),
-            format!("{overrides}\t\tfimpl"),
-            format!("{overrides}\t\t\r"),
-            format!("{overrides}\t\t\r\r\r"),
+            format!("{overrides}\x1b[C\x1b[C"),
+            format!("{overrides}\x1b[C\x1b[Cfimpl"),
+            format!("{overrides}\x1b[C\x1b[C\r"),
+            format!("{overrides}\x1b[C\x1b[C\r\r\r"),
             format!("{overrides}w"),
         ];
         crate::browser::refuse_opens("could not open the overrides folder: no display is set");

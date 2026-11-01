@@ -525,7 +525,7 @@ impl PipelineSection {
     }
 
     /// Whether the field list has the keys, with nothing open over it: the
-    /// only time `tab`, `q` and the digits reach past the section.
+    /// only time the arrows, `q` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::Fields)
     }
@@ -998,7 +998,6 @@ impl PipelineSection {
                     ("f", "search"),
                     super::OPTIONS,
                     super::OPEN_WORKSPACE,
-                    ("tab", "section"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -1321,7 +1320,7 @@ mod tests {
     /// on `model`, the field most of these tests set.
     fn on_pipeline(repo: &Repo) -> State {
         let mut state = State::new(repo);
-        type_keys(repo, &mut state, "\t");
+        type_keys(repo, &mut state, "\x1b[C");
         type_keys(repo, &mut state, &"\x1b[B".repeat(at_field("model")));
         state
     }
@@ -1394,7 +1393,7 @@ mod tests {
         write_patch(&repo, "gamma", "steps:\n  build:\n    timeout: 5m\n");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let rows = rows_of(&state);
         assert_eq!(
             &rows[..25],
@@ -1433,7 +1432,7 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [enter] select   [f] search   [o] options   [w] open workspace   [tab] section"
+            " [enter] select   [f] search   [o] options   [w] open workspace"
         );
     }
 
@@ -1471,11 +1470,11 @@ mod tests {
             " [space] select   [a] select all   [enter] set value   [h] show not set   [esc] back"
         );
 
-        // `esc` goes back to the fields, and `tab` only then leaves.
-        type_keys(&repo, &mut state, "\t");
-        assert!(!state.pipeline.at_rest(), "tab does not leave a pick");
+        // `esc` goes back to the fields, and `→` only then leaves.
+        type_keys(&repo, &mut state, "\x1b[C");
+        assert!(!state.pipeline.at_rest(), "`→` does not leave a pick");
         esc(&repo, &mut state);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         assert_eq!(state.section, super::super::Section::Prompts);
     }
 
@@ -1594,7 +1593,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("all-steps");
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("on_pass"));
         type_keys(&repo, &mut state, &format!("{down}\r"));
         assert_eq!(
@@ -1638,7 +1637,7 @@ mod tests {
     fn a_route_to_a_missing_step_is_written_and_reported_as_ignored() {
         let (repo, _guard) = pipelines_project("missing-route");
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("on_pass"));
         let erase = "\x7f".repeat(20);
         type_keys(
@@ -1677,7 +1676,7 @@ mod tests {
         );
         let _terminal = crate::screen::test_terminal((80, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         assert_eq!(rows_of(&state)[2], ">   description          2 overridden");
 
         type_keys(&repo, &mut state, "o\r");
@@ -2312,7 +2311,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("nobody-sets");
         let _terminal = crate::screen::test_terminal((100, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("background"));
         type_keys(&repo, &mut state, &format!("{down}\r"));
         let all = [
@@ -2377,7 +2376,7 @@ mod tests {
         let (repo, _guard) = pipelines_project("partial-hidden");
         let _terminal = crate::screen::test_terminal((100, 40));
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t");
+        type_keys(&repo, &mut state, "\x1b[C");
         let down = "\x1b[B".repeat(at_field("background"));
         type_keys(
             &repo,

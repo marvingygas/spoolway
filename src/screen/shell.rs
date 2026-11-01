@@ -1727,8 +1727,9 @@ mod tests {
         const ROUTINES: &str = "─ [routines] ─";
         // Its key line rather than its title: with no terminal to measure
         // the whole config list is drawn, and its top runs off the screen.
-        // Not `[tab] section` alone, which the eval tab's key line reads too.
-        const OVERRIDES: &str = "[w] open workspace   [tab] section";
+        // Not `[w] open workspace` alone, which every overrides section's
+        // key line reads, ending in `[q] quit` only on the config list.
+        const OVERRIDES: &str = "[o] options   [w] open workspace   [q] quit";
         let eval: &str = &format!("{TOP_LEFT}─ [eval]   directories   trials ");
         let visited = [
             QUEUE, DISPATCH, QUEUE, ROUTINES, OVERRIDES, eval, OVERRIDES, ROUTINES, QUEUE,
@@ -2018,9 +2019,7 @@ mod tests {
         assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
-            last.contains(
-                " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
-            ),
+            last.contains(" [space] select   [enter] queue   [o] options   [q] quit"),
             "{last}"
         );
 
@@ -2032,19 +2031,19 @@ mod tests {
         );
     }
 
-    // The open tab's own digit leaves it as it is: `tab` moves overrides
+    // The open tab's own digit leaves it as it is: `→` moves overrides
     // off its first section, and `4` after it keeps that section in place
     // rather than opening the tab again on `config`.
     #[test]
     fn the_open_tabs_own_digit_keeps_the_tab_as_it_was() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-own-digit");
-        let moved = drive_host(&repo, "4\t");
+        let moved = drive_host(&repo, "4\x1b[C");
         let moved = moved.last().unwrap();
         assert!(
             moved.contains("─ config   [pipeline]   prompts   active (0) ─"),
             "{moved}"
         );
-        let frames = drive_host(&repo, "4\t4");
+        let frames = drive_host(&repo, "4\x1b[C4");
         assert_eq!(frames.last().unwrap(), moved);
     }
 

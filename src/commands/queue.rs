@@ -7381,11 +7381,12 @@ fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
 /// character and does nothing, and so do `g`, `t` and `s`, which used to
 /// run what the menu's gate, trial and save as routine now do.
 ///
-/// `tab` is the one key that moves focus between the two panes. `←` and `→`
-/// used to as well, and do nothing here now. `esc` is the
-/// other way back from the tasks pane to the groups pane, the same "back" it
-/// means on the routines pane's key line; over the groups pane there is
-/// nowhere further back to go, so it does nothing there.
+/// `←` and `→` are the keys that move focus between the two panes. With
+/// two panes either one leads to the other, so both wrap round. `tab` used
+/// to do this and does nothing now. `esc` is the other way back from the
+/// tasks pane to the groups pane, the same "back" it means on the routines
+/// pane; over the groups pane there is nowhere further back to go, so it
+/// does nothing there.
 fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
     match key {
         Key::Char('h') => {
@@ -7393,14 +7394,14 @@ fn handle_browse_key(groups: &[Group], state: &mut ScreenState, key: Key) {
             clamp_cursors(groups, state);
         }
         Key::Char('f') => state.mode = Mode::Filter,
-        Key::Tab => {
+        Key::Left | Key::Right => {
             state.focus = match state.focus {
                 Focus::Groups => Focus::Tasks,
                 Focus::Tasks => Focus::Groups,
             };
         }
         // Only the focus moves: `group_cursor` stays on the group whose
-        // tasks were just being read, as it does when `tab` goes back.
+        // tasks were just being read, as it does when an arrow goes back.
         Key::Esc => state.focus = Focus::Groups,
         Key::Up | Key::Char('k') => match state.focus {
             Focus::Groups => {
@@ -7478,11 +7479,12 @@ fn highlighted_routine_task<'a>(
 ///
 /// The list's cursor runs over the routines and then over `orphans` job
 /// rows under them — see [`Orphan`]. A job row has no tick and no tasks, so
-/// `space` and `tab` do nothing on it.
+/// `space` and the arrows do nothing on it.
 ///
-/// `tab` is the only key that moves between the two panes. `←` and `→`
-/// read nothing here. `esc` is not read here either: it means "back to the
-/// list" over the details pane, which `run_screen` reads itself.
+/// `←` and `→` are the only keys that move between the two panes, and with
+/// two panes both wrap round to the other one. `tab` reads nothing here.
+/// `esc` is not read here either: it means "back to the list" over the
+/// details pane, which `run_screen` reads itself.
 fn handle_routine_key(routines: &[RoutineFolder], orphans: usize, nav: &mut RoutineNav, key: Key) {
     let last = (routines.len() + orphans).saturating_sub(1);
     match key {
@@ -7505,12 +7507,12 @@ fn handle_routine_key(routines: &[RoutineFolder], orphans: usize, nav: &mut Rout
                 nav.task_cursor = (nav.task_cursor + 1).min(last);
             }
         },
-        // Only the focus moves, as `tab` on the pending screen does: the
+        // Only the focus moves, as an arrow on the pending screen does: the
         // list's cursor stays on the routine whose tasks are shown, and
         // coming back to the tasks pane finds its cursor where it was left.
         // Not on a job row, whose details hold no task to land on; with no
         // rows at all it moves as it always has.
-        Key::Tab if nav.folder_cursor < routines.len() || orphans == 0 => {
+        Key::Left | Key::Right if nav.folder_cursor < routines.len() || orphans == 0 => {
             nav.focus = match nav.focus {
                 Focus::Groups => Focus::Tasks,
                 Focus::Tasks => Focus::Groups,
@@ -9109,14 +9111,12 @@ fn two_pane_frame(
 /// either. Inside bare `spoolway` it does quit, while browsing on the queue
 /// tab and over the routines tab's pane, and those two lines name it there.
 ///
-/// The ordinary line follows focus. It always leads with `space select`
-/// then `enter queue`, and the pane's own keys come after them, `o options`
-/// first: every action on a row is in that menu, which acts on the row the
-/// focused pane highlights. The order is the same in both panes, `tab`
-/// straight after `o options` and then `f search`, so a key stays in the same
-/// spot when focus moves; only the label on `tab` changes. `tab` is named
-/// as the pane it leads to — the one way into the tasks pane — and the one
-/// way to a group's actions from the tasks pane.
+/// The ordinary line is the same in both panes. It always leads with
+/// `space select` then `enter queue`, and `o options` comes after them:
+/// every action on a row is in that menu, which acts on the row the focused
+/// pane highlights. `f search` follows, then `h`. The `←`/`→` that move
+/// between the panes are not named, because the bracketed pane title
+/// already shows where focus is.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
@@ -9160,7 +9160,7 @@ fn footer(state: &ScreenState, on_orphan: bool) -> String {
             TrialStage::ChooseSkips => key_hint(SKIP_KEYS),
         },
         // A job row under the routines can be neither ticked, queued nor
-        // tabbed into, so its line is `o` and `q` alone.
+        // moved into, so its line is `o` and `q` alone.
         _ if on_orphan && routines_beneath(&state.mode).is_some() => key_hint(
             &[
                 [("o", "options")].as_slice(),
@@ -9175,42 +9175,36 @@ fn footer(state: &ScreenState, on_orphan: bool) -> String {
         // line per pane, as the pending screen's is, each naming the menu
         // for its own row: the routine's job items and delete routine over
         // the list, open over a task in the details pane — see
-        // `routine_options`. `tab` over the
-        // list is named `details`, the pane it leads to, whose cursor stops
-        // on the routine's tasks. No `esc`: over the list it does nothing,
-        // since this pane is the routines tab's whole screen, and over the
-        // details pane it goes back to the list, which `tab` already names.
-        // The same line under a notice or the options menu drawn over the
-        // pane.
-        _ if let Some(nav) = routines_beneath(&state.mode) => {
-            let pane: &[(&str, &str)] = match nav.focus {
-                Focus::Groups => &[("o", "options"), ("tab", "details")],
-                Focus::Tasks => &[("o", "options"), ("tab", "routines")],
-            };
-            key_hint(
-                &[
-                    [("space", "select"), ("enter", "queue")].as_slice(),
-                    pane,
-                    crate::screen::shell::quit_hint(),
-                ]
-                .concat(),
-            )
-        }
+        // `routine_options`. The arrows that move between the panes are
+        // not named: the bracketed title already shows which pane has
+        // them. No `esc` either: over the list it does nothing, since this
+        // pane is the routines tab's whole screen, and over the details
+        // pane it goes back to the list, as the arrows do. The same line
+        // under a notice or the options menu drawn over the pane.
+        _ if routines_beneath(&state.mode).is_some() => key_hint(
+            &[
+                [("space", "select"), ("enter", "queue"), ("o", "options")].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
+        ),
         _ => {
             let hide = match state.hide_scope {
                 HideScope::Pending => "show done tasks",
                 HideScope::PlusDone => "hide done tasks",
             };
             // `q` only inside bare `spoolway`'s queue tab, the one place it
-            // quits — see `crate::screen::shell::quit_hint`.
-            let pane: &[(&str, &str)] = match state.focus {
-                Focus::Groups => &[("o", "options"), ("tab", "tasks"), ("f", "search")],
-                Focus::Tasks => &[("o", "options"), ("tab", "groups"), ("f", "search")],
-            };
+            // quits — see `crate::screen::shell::quit_hint`. The arrows that
+            // move between the panes are not named, as on the routines line.
             let keys = [
-                [("space", "select"), ("enter", "queue")].as_slice(),
-                pane,
-                [("h", hide)].as_slice(),
+                [
+                    ("space", "select"),
+                    ("enter", "queue"),
+                    ("o", "options"),
+                    ("f", "search"),
+                    ("h", hide),
+                ]
+                .as_slice(),
                 crate::screen::shell::quit_hint(),
             ]
             .concat();
@@ -15173,9 +15167,9 @@ mod tests {
     #[test]
     fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
         let (baseline_proc, baseline_reads) =
-            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\r");
+            process_and_read_counts("queue-reader-thread-gate-baseline", "\x1b[Co\x1b[B\r");
         let (measured_proc, measured_reads) =
-            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\rj");
+            process_and_read_counts("queue-reader-thread-gate-measured", "\x1b[Co\x1b[B\rj");
 
         assert_eq!(
             measured_proc, baseline_proc,
@@ -15681,21 +15675,27 @@ mod tests {
         drawn.rsplit("\x1b[?2026h\x1b[H").next().unwrap_or(drawn)
     }
 
-    /// `←` and `→` do not move focus between the two panes — `tab` is the
-    /// one key for that.
+    /// `→` and `←` each move focus to the other pane, wrapping round from
+    /// either one, and `tab` moves nothing.
     #[test]
-    fn only_tab_moves_focus_between_the_two_panes() {
-        let (repo, _root_guard) = fixture("screen-focus-tab-only");
+    fn the_arrows_move_focus_between_the_two_panes_and_tab_does_not() {
+        let (repo, _root_guard) = fixture("screen-focus-arrows");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let groups = listed(&repo);
         let mut state = ScreenState::new();
 
-        handle_browse_key(&groups, &mut state, Key::Right);
+        handle_browse_key(&groups, &mut state, Key::Tab);
         assert_eq!(state.focus, Focus::Groups);
+        handle_browse_key(&groups, &mut state, Key::Right);
+        assert_eq!(state.focus, Focus::Tasks);
         handle_browse_key(&groups, &mut state, Key::Tab);
         assert_eq!(state.focus, Focus::Tasks);
+        handle_browse_key(&groups, &mut state, Key::Right);
+        assert_eq!(state.focus, Focus::Groups);
         handle_browse_key(&groups, &mut state, Key::Left);
         assert_eq!(state.focus, Focus::Tasks);
+        handle_browse_key(&groups, &mut state, Key::Left);
+        assert_eq!(state.focus, Focus::Groups);
     }
 
     /// The top border of the two-pane frame `drawn` last painted — the one
@@ -15708,8 +15708,8 @@ mod tests {
     }
 
     /// The queue tab brackets the focused pane's title: `[groups]` as it
-    /// opens, `[tasks]` once `tab` moves focus, and `[groups]` again once
-    /// `esc` brings it back.
+    /// opens, `[tasks]` once `→` or `←` moves focus, `[groups]` again once
+    /// `esc` or the other arrow brings it back, and no change for `tab`.
     #[test]
     fn the_queue_tabs_brackets_follow_focus() {
         let (repo, _root_guard) = fixture("screen-focus-brackets");
@@ -15717,8 +15717,11 @@ mod tests {
 
         for (input, left, right) in [
             ("", "─ [groups] ", "─ tasks "),
-            ("\t", "─ groups ", "─ [tasks] "),
-            ("\t\x1b", "─ [groups] ", "─ tasks "),
+            ("\t", "─ [groups] ", "─ tasks "),
+            ("\x1b[C", "─ groups ", "─ [tasks] "),
+            ("\x1b[D", "─ groups ", "─ [tasks] "),
+            ("\x1b[C\x1b", "─ [groups] ", "─ tasks "),
+            ("\x1b[C\x1b[D", "─ [groups] ", "─ tasks "),
         ] {
             let drawn = screen(&repo, listed(&repo), input);
             let top = pane_border(&drawn);
@@ -15746,52 +15749,44 @@ mod tests {
         assert_eq!(state.group_cursor, 1);
         assert!(matches!(state.mode, Mode::Browsing));
 
-        handle_browse_key(&groups, &mut state, Key::Tab);
+        handle_browse_key(&groups, &mut state, Key::Right);
         assert_eq!(state.focus, Focus::Tasks);
         handle_browse_key(&groups, &mut state, Key::Esc);
         assert_eq!(state.focus, Focus::Groups);
         assert_eq!(state.group_cursor, 1);
     }
 
-    /// The key line follows focus: hosted, both lines lead with `space` then
-    /// `enter` and then `o` options; the groups pane's line names the way
-    /// into the tasks pane, the tasks pane's names the way back, and neither
-    /// names a row key the menu took over; `esc` brings the first line back.
+    /// The key line is the same in both panes: hosted, it leads with
+    /// `space` then `enter` and then `o` options, names no row key the menu
+    /// took over, and names neither `tab` nor the arrows that move focus.
     #[test]
-    fn hosted_the_key_line_follows_focus_between_the_two_panes() {
+    fn hosted_the_key_line_is_the_same_in_both_panes() {
         use crate::screen::shell::{Hosting, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-footer-focus");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
-        let groups_line = "[space] select   [enter] queue   [o] options   [tab] tasks   [f] search   \
-                           [h] show done tasks   [q] quit";
-        let tasks_line = "[space] select   [enter] queue   [o] options   [tab] groups   [f] search   \
-                          [h] show done tasks   [q] quit";
+        let keys = "[space] select   [enter] queue   [o] options   [f] search   \
+                    [h] show done tasks   [q] quit";
 
         // `key_hint` opens every key line on one column of indent.
         let mut state = ScreenState::new();
         let line = crate::status::strip_ansi(&footer(&state, false));
-        assert_eq!(line, format!(" {groups_line}"));
+        assert_eq!(line, format!(" {keys}"));
         state.focus = Focus::Tasks;
         let line = crate::status::strip_ansi(&footer(&state, false));
-        assert_eq!(line, format!(" {tasks_line}"));
+        assert_eq!(line, format!(" {keys}"));
 
-        let drawn = screen(&repo, listed(&repo), "\t");
-        let last = crate::status::strip_ansi(last_frame(&drawn));
-        assert!(last.contains("[o] options   [tab] groups"), "{last}");
-        let drawn = screen(&repo, listed(&repo), "\t\x1b");
-        let last = crate::status::strip_ansi(last_frame(&drawn));
-        assert!(
-            last.contains("[o] options   [tab] tasks   [f] search"),
-            "{last}"
-        );
+        for input in ["\x1b[C", "\x1b[C\x1b"] {
+            let drawn = screen(&repo, listed(&repo), input);
+            let last = crate::status::strip_ansi(last_frame(&drawn));
+            assert!(last.contains(keys), "{input:?}: {last}");
+            assert!(!last.contains("[tab]"), "{input:?}: {last}");
+        }
     }
 
     /// The key line keeps one order whichever pane has focus: `o` options,
-    /// then `tab`, then `f` search, then `h`. Only the label on `tab` changes —
-    /// `tasks` over the groups pane, `groups` over the tasks pane — so a key
-    /// sits in the same spot when focus moves. Unhosted, so the line ends at
-    /// `[h]`.
+    /// then `f` search, then `h`, and only `h`'s label changes with what the
+    /// list shows. Unhosted, so the line ends at `[h]`.
     #[test]
     fn the_key_line_keeps_one_order_in_both_panes() {
         let line = |focus, hide_scope| {
@@ -15803,29 +15798,16 @@ mod tests {
 
         let groups = line(Focus::Groups, HideScope::Pending);
         let tasks = line(Focus::Tasks, HideScope::Pending);
-        let rest = "[o] options   [tab] {}   [f] search   [h] show done tasks";
-        assert!(
-            groups.starts_with(" [space] select   [enter] queue   ")
-                && groups.contains(&rest.replace("{}", "tasks")),
-            "{groups}"
+        assert_eq!(
+            groups,
+            " [space] select   [enter] queue   [o] options   [f] search   [h] show done tasks"
         );
-        assert!(
-            tasks.starts_with(" [space] select   [enter] queue   ")
-                && tasks.contains(&rest.replace("{}", "groups")),
-            "{tasks}"
-        );
+        assert_eq!(groups, tasks);
 
         let shown = line(Focus::Tasks, HideScope::PlusDone);
-        assert!(
-            shown.contains("[o] options   [tab] groups   [f] search   [h] hide done tasks"),
-            "{shown}"
-        );
-
-        // Same keys in the same order; only the `tab` label differs.
         assert_eq!(
-            groups.replace("[tab] tasks", "[tab] groups"),
-            tasks,
-            "the two lines may differ only in the `tab` label"
+            shown,
+            " [space] select   [enter] queue   [o] options   [f] search   [h] hide done tasks"
         );
     }
 
@@ -16119,12 +16101,12 @@ mod tests {
         let (repo, _root_guard) = fixture("screen-options-draws");
         write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
 
-        let last = last_frame(&screen(&repo, listed(&repo), "\to")).to_string();
+        let last = last_frame(&screen(&repo, listed(&repo), "\x1b[Co")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ wire ")), "{last}");
         assert!(last.contains("│  > open task  "), "{last}");
         assert!(last.contains("│    gate  "), "{last}");
         assert!(last.contains("[enter] confirm   [esc] close"), "{last}");
-        assert!(last.contains("[o] options   [tab] groups"), "{last}");
+        assert!(last.contains("[o] options   [f] search"), "{last}");
 
         let last = last_frame(&screen(&repo, listed(&repo), "o")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ cart ")), "{last}");
@@ -16147,9 +16129,9 @@ mod tests {
             ("g", ""),
             ("t", ""),
             ("s", ""),
-            ("\tg", "\t"),
-            ("\tt", "\t"),
-            ("\ts", "\t"),
+            ("\x1b[Cg", "\x1b[C"),
+            ("\x1b[Ct", "\x1b[C"),
+            ("\x1b[Cs", "\x1b[C"),
         ] {
             let pressed = last_frame(&screen(&repo, listed(&repo), input)).to_string();
             let unpressed = last_frame(&screen(&repo, listed(&repo), before)).to_string();
@@ -16926,15 +16908,16 @@ mod tests {
         );
         assert!(last.contains("│  > edit schedule  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
-        assert!(last.contains("[o] options   [tab] details"), "{last}");
-        let last = last_frame(&routines_screen(&repo, "\to")).to_string();
+        assert!(last.contains("[o] options"), "{last}");
+        let last = last_frame(&routines_screen(&repo, "\x1b[Co")).to_string();
         assert!(last.contains(&format!("{TOP_LEFT}─ prune ")), "{last}");
         assert!(last.contains("│  > open task  "), "{last}");
-        assert!(last.contains("[o] options   [tab] routines"), "{last}");
+        assert!(last.contains("[o] options"), "{last}");
+        assert!(!last.contains("[tab]"), "{last}");
     }
 
     /// Hosted, a tab's digit leaves for that tab from the tasks pane too —
-    /// `tab` moving focus there does not hand the digits to the screen.
+    /// an arrow moving focus there does not hand the digits to the screen.
     #[test]
     fn hosted_a_digit_leaves_the_tab_from_the_tasks_pane_too() {
         use crate::screen::shell::{Hosting, Leave, Tab};
@@ -16942,15 +16925,16 @@ mod tests {
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
-        let (exit, _) = screen_exit(&repo, listed(&repo), "\t1");
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[C1");
         assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Dispatch)));
-        let (exit, _) = screen_exit(&repo, listed(&repo), "\t3");
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[C3");
         assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Routines)));
     }
 
     /// Hosted as bare `spoolway`'s queue tab, a tab's digit and `q` while
     /// browsing hand the screen back to the shell, and the frame opens under
-    /// the strip. The arrows no longer leave: the input runs out on the tab.
+    /// the strip. One arrow moves focus to the tasks pane and does not leave:
+    /// the input runs out on the tab.
     #[test]
     fn hosted_a_digit_and_q_leave_the_tab_while_browsing() {
         use crate::screen::shell::{Hosting, Leave, Tab};
@@ -16965,8 +16949,9 @@ mod tests {
 
         let (exit, _) = screen_exit(&repo, listed(&repo), "5");
         assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Eval)));
-        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[D\x1b[C");
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[C");
         assert_eq!(exit, ScreenExit::Quit, "the input ran out on the tab");
+        assert!(pane_border(&drawn).contains("┬─ [tasks] "), "{drawn}");
         let (exit, _) = screen_exit(&repo, listed(&repo), "q");
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
     }
@@ -16990,9 +16975,7 @@ mod tests {
         let (exit, drawn) = routines_exit(&repo, "q");
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
         assert!(
-            last_frame(&drawn).contains(
-                " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
-            ),
+            last_frame(&drawn).contains(" [space] select   [enter] queue   [o] options   [q] quit"),
             "{drawn}"
         );
         assert!(last_frame(&drawn).contains("[3] ROUTINES"), "{drawn}");
@@ -17000,8 +16983,11 @@ mod tests {
         assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Queue)));
         let (exit, _) = routines_exit(&repo, "4");
         assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Overrides)));
-        let (exit, _) = routines_exit(&repo, "\t4");
+        let (exit, _) = routines_exit(&repo, "\x1b[C4");
         assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Overrides)));
+        let (exit, drawn) = routines_exit(&repo, "\x1b[C");
+        assert_eq!(exit, ScreenExit::Quit, "one arrow keeps the tab open");
+        assert!(pane_border(&drawn).contains("┬─ [details] "), "{drawn}");
     }
 
     /// A popup over the routines tab keeps the digits and `q` for itself, the
@@ -17021,7 +17007,7 @@ mod tests {
         );
         let _hosting = Hosting::open(Tab::Routines);
 
-        let (exit, drawn) = routines_exit(&repo, "\to\r24q");
+        let (exit, drawn) = routines_exit(&repo, "\x1b[Co\r24q");
         assert_eq!(exit, ScreenExit::Quit, "the input ran out under the popup");
         assert!(
             last_frame(&drawn).contains(&format!("{TOP_LEFT}─ open task ")),
@@ -17360,7 +17346,7 @@ mod tests {
     /// Hosted in a terminal 100 by 24, the queue tab lays out against the
     /// drawing area, not the terminal: the frame is two columns narrower,
     /// and its rows are what is left of 23 once the strip and the key line —
-    /// two rows at this width — have theirs.
+    /// one row at this width — have theirs.
     #[test]
     fn a_hosted_layout_fills_the_drawing_area_and_not_the_terminal() {
         let _terminal = crate::screen::test_terminal((100, 24));
@@ -17368,8 +17354,8 @@ mod tests {
         let footer = footer(&ScreenState::new(), false);
         let layout = layout(&footer);
         assert_eq!(layout.left + layout.right + PANE_CHROME_COLUMNS, 98);
-        assert_eq!(crate::screen::key_rows(&footer).len(), 2);
-        assert_eq!(layout.rows, Some(23 - 3 - 1 - PANE_CHROME_ROWS));
+        assert_eq!(crate::screen::key_rows(&footer).len(), 1);
+        assert_eq!(layout.rows, Some(23 - 3 - PANE_CHROME_ROWS));
     }
 
     /// The groups pane counts groups: the blank row between two states and
@@ -20317,7 +20303,7 @@ mod tests {
         let groups = listed(&repo);
         let mut state = ScreenState::new();
 
-        handle_browse_key(&groups, &mut state, Key::Tab);
+        handle_browse_key(&groups, &mut state, Key::Right);
         assert_eq!(state.focus, Focus::Tasks);
 
         // Space selects the group, not the task under the cursor — and it does
@@ -20447,7 +20433,7 @@ mod tests {
         assert!(opening.contains("nothing to queue"), "{opening}");
         assert!(
             opening.contains(
-                "[space] select   [enter] queue   [o] options   [tab] tasks   [f] search   \
+                "[space] select   [enter] queue   [o] options   [f] search   \
                  [h] show done tasks"
             ),
             "the groups pane's line must lead with `space` and `enter`:\n{opening}"
@@ -20532,7 +20518,7 @@ mod tests {
 
         // Tab onto the tasks pane, space to select the one group, enter to
         // submit it.
-        screen(&repo, groups, "\t \r");
+        screen(&repo, groups, "\x1b[C \r");
 
         assert!(
             repo.queue_dir().join("wire.md").exists(),
@@ -20560,7 +20546,7 @@ mod tests {
 
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
 
-        let (exit, drawn) = screen_exit(&repo, groups, "\t \r");
+        let (exit, drawn) = screen_exit(&repo, groups, "\x1b[C \r");
 
         assert!(repo.queue_dir().join("wire.md").exists());
         assert_eq!(exit, ScreenExit::Quit);
@@ -20607,7 +20593,7 @@ mod tests {
         // Tab onto tasks, space to select, o, down onto gate and enter to
         // open the gate picker, down onto the pipeline's second step
         // (`review`), enter to pick it, enter to submit.
-        screen(&repo, groups, "\t o\x1b[B\r\x1b[B\r\r");
+        screen(&repo, groups, "\x1b[C o\x1b[B\r\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");
@@ -21198,7 +21184,7 @@ mod tests {
         write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
         let groups = listed(&repo);
 
-        screen(&repo, groups, "\t ");
+        screen(&repo, groups, "\x1b[C ");
 
         assert!(!repo.queue_dir().join("wire.md").exists());
     }
@@ -21746,7 +21732,7 @@ mod tests {
 
         // `Tab` moves focus onto the tasks pane, whose menu offers open task
         // first — see `pending_options`.
-        let drawn = screen(&repo, groups, "\to\r");
+        let drawn = screen(&repo, groups, "\x1b[Co\r");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -21941,7 +21927,7 @@ mod tests {
     }
 
     /// The routines tab opens on the routine list, and its own footer names
-    /// `space`/`enter`/`tab` rather than the pending screen's keys.
+    /// `space`/`enter`/`o` rather than the pending screen's keys.
     #[test]
     fn the_routines_tab_opens_on_the_routine_list() {
         let (repo, _root_guard) = fixture("routines-tab-opens");
@@ -21963,7 +21949,7 @@ mod tests {
         assert!(last.contains("nightly"), "{last}");
         assert!(!last.contains("1 task"), "no task count on the row: {last}");
         assert!(
-            last.contains("[space] select   [enter] queue   [o] options   [tab] details"),
+            last.contains("[space] select   [enter] queue   [o] options"),
             "{last}"
         );
         assert!(!last.contains("[esc] back"), "{last}");
@@ -22013,9 +21999,9 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        // `tab` focuses the tasks pane on `audit-deps`, and open off its
+        // `→` focuses the tasks pane on `audit-deps`, and open off its
         // menu tries to open it.
-        let drawn = routines_screen(&repo, "\to\r");
+        let drawn = routines_screen(&repo, "\x1b[Co\r");
 
         let last = last_frame(&drawn);
         assert!(last.contains("o:"), "{last}");
@@ -22055,11 +22041,11 @@ mod tests {
         assert!(last.contains("  prune"), "{last}");
     }
 
-    /// `tab` moves between the two panes and back again, keeping each
-    /// pane's cursor where it was, and the arrows move nothing at all —
-    /// they belong to the tab strip.
+    /// `→` and `←` each move between the two panes, wrapping round from
+    /// either one and keeping each pane's cursor where it was, and `tab`
+    /// moves nothing at all.
     #[test]
-    fn tab_moves_between_the_panes_and_the_arrows_do_nothing() {
+    fn the_arrows_move_between_the_panes_and_tab_does_nothing() {
         let (repo, _root_guard) = fixture("routines-tab-nav");
         write_routine(
             &repo,
@@ -22082,29 +22068,30 @@ mod tests {
         let routines = super::routines::list_routines(&repo).unwrap();
 
         let mut nav = RoutineNav::new();
-        for key in [Key::Right, Key::Left, Key::Right] {
-            handle_routine_key(&routines, 0, &mut nav, key);
-        }
-        assert_eq!(nav.focus, Focus::Groups, "the arrows move no focus");
+        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
+        assert_eq!(nav.focus, Focus::Groups, "`tab` moves no focus");
         assert_eq!(nav.folder_cursor, 0, "nor the cursor");
 
-        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
+        handle_routine_key(&routines, 0, &mut nav, Key::Right);
         assert_eq!(nav.focus, Focus::Tasks);
         handle_routine_key(&routines, 0, &mut nav, Key::Down);
         assert_eq!(nav.task_cursor, 1);
-        handle_routine_key(&routines, 0, &mut nav, Key::Left);
-        assert_eq!(nav.focus, Focus::Tasks, "`←` does not go back either");
+        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
+        assert_eq!(nav.focus, Focus::Tasks, "`tab` does not go back either");
 
-        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
-        assert_eq!(nav.focus, Focus::Groups);
+        handle_routine_key(&routines, 0, &mut nav, Key::Right);
+        assert_eq!(nav.focus, Focus::Groups, "`→` wraps round to the list");
         assert_eq!(nav.folder_cursor, 0, "still on `nightly`");
-        handle_routine_key(&routines, 0, &mut nav, Key::Tab);
+        handle_routine_key(&routines, 0, &mut nav, Key::Left);
+        assert_eq!(nav.focus, Focus::Tasks, "`←` wraps round to the details");
         assert_eq!(nav.task_cursor, 1, "the tasks pane's cursor kept");
+        handle_routine_key(&routines, 0, &mut nav, Key::Left);
+        assert_eq!(nav.focus, Focus::Groups);
     }
 
     /// The routines tab brackets the focused pane's title the same way:
-    /// `[routines]` over the list, `[details]` once `tab` moves focus, and
-    /// `[routines]` again once `esc` brings it back.
+    /// `[routines]` over the list, `[details]` once `→` or `←` moves focus,
+    /// and `[routines]` again once `esc` brings it back.
     #[test]
     fn the_routines_tabs_brackets_follow_focus() {
         let (repo, _root_guard) = fixture("routines-focus-brackets");
@@ -22117,8 +22104,9 @@ mod tests {
 
         for (input, left, right) in [
             ("", "─ [routines] ", "─ details "),
-            ("\t", "─ routines ", "─ [details] "),
-            ("\t\x1b", "─ [routines] ", "─ details "),
+            ("\x1b[C", "─ routines ", "─ [details] "),
+            ("\x1b[D", "─ routines ", "─ [details] "),
+            ("\x1b[C\x1b", "─ [routines] ", "─ details "),
         ] {
             let drawn = routines_screen(&repo, input);
             let top = pane_border(&drawn);
@@ -22129,8 +22117,8 @@ mod tests {
         }
     }
 
-    /// Over the tasks pane the key line names `o` and `tab` back to the
-    /// routines, and `esc` moves the cursor back to the list.
+    /// Over the tasks pane the key line is the list's own, naming no way
+    /// back, and `esc` moves the cursor back to the list.
     #[test]
     fn esc_over_the_tasks_pane_goes_back_to_the_list() {
         use crate::screen::shell::{Hosting, Tab};
@@ -22143,22 +22131,18 @@ mod tests {
         );
         let _hosting = Hosting::open(Tab::Routines);
 
-        let tasks = last_frame(&routines_screen(&repo, "\t")).to_string();
+        let tasks = last_frame(&routines_screen(&repo, "\x1b[C")).to_string();
         assert!(
-            tasks.contains(
-                " [space] select   [enter] queue   [o] options   [tab] routines   [q] quit"
-            ),
+            tasks.contains(" [space] select   [enter] queue   [o] options   [q] quit"),
             "{tasks}"
         );
         assert!(tasks.contains("> audit-deps"), "{tasks}");
 
-        let back = last_frame(&routines_screen(&repo, "\t\x1b")).to_string();
+        let back = last_frame(&routines_screen(&repo, "\x1b[C\x1b")).to_string();
         assert!(back.contains("─ [routines] ─"), "still in the view: {back}");
         assert!(back.contains("> [ ] nightly"), "{back}");
         assert!(
-            back.contains(
-                " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
-            ),
+            back.contains(" [space] select   [enter] queue   [o] options   [q] quit"),
             "{back}"
         );
     }
@@ -22564,7 +22548,7 @@ mod tests {
         let (repo, _root_guard) = fixture("routine-delete-tasks-pane");
         seed_two_routines(&repo);
 
-        for input in ["x", "n", "\tx", "\tn"] {
+        for input in ["x", "n", "\x1b[Cx", "\x1b[Cn"] {
             let last = last_frame(&routines_screen(&repo, input)).to_string();
             assert!(!last.contains("delete this routine"), "{input:?}: {last}");
             assert!(!last.contains("when does"), "{input:?}: {last}");
@@ -22620,10 +22604,10 @@ mod tests {
         crate::mux::force_headless_for_test();
         seed_two_routines(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "\to")).to_string();
+        let last = last_frame(&routines_screen(&repo, "\x1b[Co")).to_string();
         assert!(!last.contains("edit schedule"), "{last}");
 
-        let last = last_frame(&routines_screen(&repo, "\to\x1b[B\r")).to_string();
+        let last = last_frame(&routines_screen(&repo, "\x1b[Co\x1b[B\r")).to_string();
         assert!(!last.contains("when does"), "{last}");
         assert!(last.contains("o:"), "{last}");
         assert!(
@@ -22694,7 +22678,8 @@ mod tests {
         let back = last_frame(&routines_screen(&repo, "o\r0 3 * * 1-5\rbug\r\r")).to_string();
         assert!(!back.contains("job saved"), "{back}");
         assert!(back.contains("> [ ] maintenance"), "{back}");
-        assert!(back.contains("[o] options   [tab] details"), "{back}");
+        assert!(back.contains("[o] options"), "{back}");
+        assert!(!back.contains("[tab]"), "{back}");
     }
 
     /// A routine whose job name is taken is refused at the save, and the job
@@ -23466,7 +23451,7 @@ mod tests {
     }
 
     /// On a job row the key line is `o` and `q` alone, since the row can be
-    /// neither ticked, queued nor tabbed into; on a routine it is the
+    /// neither ticked, queued nor moved into; on a routine it is the
     /// routine's own line.
     #[test]
     fn hosted_a_job_rows_key_line_is_options_and_quit() {
@@ -23496,26 +23481,34 @@ mod tests {
         assert_eq!(line(3), " [o] options   [q] quit");
         assert_eq!(
             line(1),
-            " [space] select   [enter] queue   [o] options   [tab] details   [q] quit"
+            " [space] select   [enter] queue   [o] options   [q] quit"
         );
     }
 
-    /// `space`, `enter` and `tab` do nothing on a job row: it takes no
-    /// tick, and `enter` there does not queue the routine ticked above it.
+    /// `space`, `enter` and both arrows do nothing on a job row: it takes
+    /// no tick, `enter` there does not queue the routine ticked above it,
+    /// and focus stays on the list, whose details hold no task to land on.
     #[test]
-    fn space_enter_and_tab_do_nothing_on_a_job_row() {
+    fn space_enter_and_the_arrows_do_nothing_on_a_job_row() {
         let (repo, _root_guard) = fixture("routines-orphan-keys");
         seed_orphans(&repo);
 
-        let last = last_frame(&routines_screen(&repo, " jj \r\t")).to_string();
-        assert!(!last.contains("queued"), "{last}");
-        assert!(repo.task("prune").is_err(), "nothing was queued");
-        assert!(last.contains("[x] maintenance"), "{last}");
-        assert!(
-            last.contains("> nightly-old"),
-            "the list kept focus: {last}"
-        );
-        assert!(!last.contains("[x] nightly-old"), "{last}");
+        for arrow in ["\x1b[C", "\x1b[D"] {
+            let drawn = routines_screen(&repo, &format!(" jj \r{arrow}"));
+            let last = last_frame(&drawn).to_string();
+            assert!(!last.contains("queued"), "{last}");
+            assert!(repo.task("prune").is_err(), "nothing was queued");
+            assert!(last.contains("[x] maintenance"), "{last}");
+            assert!(
+                last.contains("> nightly-old"),
+                "the list kept its cursor: {last}"
+            );
+            assert!(
+                pane_border(&drawn).contains(&format!("{TOP_LEFT}─ [routines] ")),
+                "{arrow:?}: the list kept focus: {last}"
+            );
+            assert!(!last.contains("[x] nightly-old"), "{last}");
+        }
     }
 
     /// `o` on a job row offers edit schedule alone, titled with the row's
@@ -24014,7 +24007,7 @@ mod tests {
 
         // tab (focus onto its tasks, already on `scan-pending` — the first
         // one in filename order), space (queue it alone).
-        let (exit, drawn) = routines_exit(&repo, "\t ");
+        let (exit, drawn) = routines_exit(&repo, "\x1b[C ");
         assert_eq!(exit, ScreenExit::Quit);
         let last = last_frame(&drawn);
 
@@ -24068,7 +24061,7 @@ mod tests {
         check(&repo, "enter on the folder");
 
         let (repo, _root, _) = seed("routine-name-space");
-        routines_exit(&repo, "\t ");
+        routines_exit(&repo, "\x1b[C ");
         check(&repo, "space on the task");
 
         let (repo, _root, _) = seed("routine-name-job-folder");
@@ -24220,7 +24213,10 @@ mod tests {
         routines_exit(&repo, " \r");
         put_at(&repo, "audit-deps-1", crate::pipeline::BLOCKED);
 
-        for (keys, how) in [(" \r", "enter on the folder"), ("\t ", "space on the task")] {
+        for (keys, how) in [
+            (" \r", "enter on the folder"),
+            ("\x1b[C ", "space on the task"),
+        ] {
             let drawn = routines_screen(&repo, keys);
             let last = last_frame(&drawn);
             assert!(last.contains("not queued"), "{how}: {last}");
@@ -27191,11 +27187,11 @@ group_description: audit
                         BODY,
                     ),
                 );
-                let drawn = routines_screen(&repo, "\t ");
+                let drawn = routines_screen(&repo, "\x1b[C ");
                 let rows = popup_rows(last_frame(&drawn), "issue tracking");
                 assert_eq!(rows[3], "> [ ] nightly   1 task", "{rows:?}");
 
-                let drawn = routines_screen(&repo, "\t \r");
+                let drawn = routines_screen(&repo, "\x1b[C \r");
                 assert_eq!(hook_calls(&repo).len(), 1);
                 let ids = repo.queued_ids();
                 assert_eq!(ids.len(), 1, "{ids:?}");
@@ -27226,7 +27222,7 @@ group_description: audit
             fn a_routine_task_with_no_group_never_reaches_the_checklist() {
                 let (repo, _root_guard) = cart("issue-question-routine-no-group");
                 write_routine(&repo, "nightly", "audit", &task_text("audit", "", BODY));
-                let drawn = routines_screen(&repo, "\t ");
+                let drawn = routines_screen(&repo, "\x1b[C ");
                 let frame = last_frame(&drawn);
                 assert!(!frame.contains("issue tracking"), "{frame}");
                 // Read across the popup's rows: the refusal leads with the

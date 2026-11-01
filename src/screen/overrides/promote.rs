@@ -788,7 +788,7 @@ mod tests {
     /// `pipelines/impl.yml`.
     fn on_active(repo: &Repo) -> State {
         let mut state = State::new(repo);
-        type_keys(repo, &mut state, "\t\t\t");
+        type_keys(repo, &mut state, "\x1b[D");
         assert_eq!(state.section, Section::Active);
         state
     }

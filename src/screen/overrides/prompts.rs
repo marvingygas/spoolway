@@ -93,7 +93,7 @@ impl PromptsSection {
     }
 
     /// Whether the list has the keys, with nothing open over it: the only
-    /// time `tab`, `q` and the digits reach past the section.
+    /// time the arrows, `q` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::List)
     }
@@ -292,7 +292,6 @@ impl PromptsSection {
                     ("enter", "override"),
                     ("f", "search"),
                     super::OPEN_WORKSPACE,
-                    ("tab", "section"),
                 ]
                 .as_slice(),
                 crate::screen::shell::quit_hint(),
@@ -334,7 +333,7 @@ mod tests {
             std::fs::write(&path, format!("{name}\n")).unwrap();
         }
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t\t");
+        type_keys(&repo, &mut state, "\x1b[C\x1b[C");
         assert_eq!(state.section, Section::Prompts);
         (repo, guard, state)
     }
@@ -387,7 +386,7 @@ mod tests {
         assert_eq!(drawn[4], row("> implementer"));
         assert_eq!(
             drawn.last().unwrap(),
-            " [enter] override   [f] search   [w] open workspace   [tab] section"
+            " [enter] override   [f] search   [w] open workspace"
         );
     }
 
@@ -500,7 +499,7 @@ mod tests {
         std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::write(&folder, "").unwrap();
         let mut state = State::new(&repo);
-        type_keys(&repo, &mut state, "\t\t");
+        type_keys(&repo, &mut state, "\x1b[C\x1b[C");
         let note = lines(&state)
             .iter()
             .map(|l| l.trim_matches('│').trim().to_string())

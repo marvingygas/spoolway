@@ -2,7 +2,7 @@
 //! screen instead of one `override` command per key.
 //!
 //! The tab has four sections, named in its list box's own title — config,
-//! pipeline, prompts and active — and `tab` moves between them. A second bar
+//! pipeline, prompts and active — and `←`/`→` move between them. A second bar
 //! under the strip would read as a second strip, so the box title carries
 //! them, bracketed the way the strip brackets the open tab.
 //!
@@ -47,7 +47,7 @@ use crate::config::Config;
 use crate::repo::Repo;
 use crate::status::{DIM, RESET};
 
-/// The sections, in the order the box title draws them and `tab` walks them.
+/// The sections, in the order the box title draws them and `→` walks them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     Config,
@@ -64,12 +64,18 @@ const SECTIONS: [Section; 4] = [
 ];
 
 impl Section {
-    /// The section after this one, wrapping from active back to config:
-    /// `tab` is the only key that moves between them, so the far end has to
-    /// lead somewhere.
-    fn next(self) -> Section {
+    /// The section `key` moves to: `→` the one after this, `←` the one
+    /// before, and `None` for any other key. Both wrap round, active to
+    /// config and back: the arrows are the only keys that move between
+    /// sections, so either end has to lead somewhere.
+    fn moved_by(self, key: Key) -> Option<Section> {
         let at = SECTIONS.iter().position(|s| *s == self).unwrap_or(0);
-        SECTIONS[(at + 1) % SECTIONS.len()]
+        let len = SECTIONS.len();
+        match key {
+            Key::Right => Some(SECTIONS[(at + 1) % len]),
+            Key::Left => Some(SECTIONS[(at + len - 1) % len]),
+            _ => None,
+        }
     }
 }
 
@@ -249,7 +255,8 @@ impl State {
     }
 
     /// Whether the open section's list has the keys, with nothing open over
-    /// it: the only time `tab`, `q` and the digits reach past the section.
+    /// it: the only time the arrows, `q` and the digits reach past the
+    /// section.
     fn at_rest(&self) -> bool {
         matches!(self.mode, Mode::Browsing)
             && match self.section {
@@ -453,7 +460,7 @@ pub(crate) fn tab(
 
 /// One key, read by whatever is open: the list, the search row, a popup or
 /// a notice. The pipeline, prompts and active sections read their own keys,
-/// all but the `tab` that leaves them, the `w` that opens the overrides
+/// all but the arrows that leave them, the `w` that opens the overrides
 /// folder, and the `o` that opens the pipeline section's field menu.
 fn handle_key(repo: &Repo, state: &mut State, key: Key) {
     // An editor `edit` opened saves in its own pane or window, which sends
@@ -475,24 +482,30 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
         return;
     }
     if state.section == Section::Pipeline && matches!(state.mode, Mode::Browsing) {
-        if key == Key::Tab && state.pipeline.at_rest() {
-            state.section = state.section.next();
+        if let Some(section) = state.section.moved_by(key)
+            && state.pipeline.at_rest()
+        {
+            state.section = section;
         } else if state.pipeline.handle_key(repo, key) {
             state.reload(repo);
         }
         return;
     }
     if state.section == Section::Prompts && matches!(state.mode, Mode::Browsing) {
-        if key == Key::Tab && state.prompts.at_rest() {
-            state.section = state.section.next();
+        if let Some(section) = state.section.moved_by(key)
+            && state.prompts.at_rest()
+        {
+            state.section = section;
         } else if state.prompts.handle_key(repo, key) {
             state.reload(repo);
         }
         return;
     }
     if state.section == Section::Active && matches!(state.mode, Mode::Browsing) {
-        if key == Key::Tab && state.layer.at_rest() {
-            state.section = state.section.next();
+        if let Some(section) = state.section.moved_by(key)
+            && state.layer.at_rest()
+        {
+            state.section = section;
             return;
         }
         match state.layer.handle_key(repo, key) {
@@ -572,8 +585,11 @@ fn handle_key(repo: &Repo, state: &mut State, key: Key) {
 /// One key over the config list, with nothing open on it. The other
 /// sections read their own keys.
 fn browse(state: &mut State, key: Key) {
+    if let Some(section) = state.section.moved_by(key) {
+        state.section = section;
+        return;
+    }
     match key {
-        Key::Tab => state.section = state.section.next(),
         Key::Up | Key::Down => move_cursor(state, key),
         Key::Char('f') => state.mode = Mode::Search,
         // A search that leaves no key leaves nothing for `enter` to open.
@@ -937,7 +953,6 @@ fn footer(state: &State) -> String {
                 ("f", "search"),
                 OPTIONS,
                 OPEN_WORKSPACE,
-                ("tab", "section"),
             ]
             .as_slice(),
             shell::quit_hint(),
@@ -1003,20 +1018,28 @@ mod tests {
         state.cursor = state.matches().iter().position(|s| s.key() == key).unwrap();
     }
 
-    // `tab` moves the brackets through the four sections in the box title
+    // `→` moves the brackets through the four sections in the box title
     // and wraps from active back to config, which is where the tab opens.
+    // `←` walks them the other way, wrapping from config to active.
     #[test]
-    fn tab_walks_the_sections_in_the_box_title_and_wraps_to_config() {
+    fn the_arrows_walk_the_sections_in_the_box_title_and_wrap() {
         let (repo, _guard) = project("sections");
-        let mut state = State::new(&repo);
-        let mut titles = vec![top_border(&state, 80)];
-        for _ in 0..4 {
-            type_keys(&repo, &mut state, "\t");
-            titles.push(top_border(&state, 80));
-        }
+        let walk = |arrow: &str| {
+            let mut state = State::new(&repo);
+            let mut titles = vec![top_border(&state, 80)];
+            for _ in 0..4 {
+                type_keys(&repo, &mut state, arrow);
+                titles.push(top_border(&state, 80));
+            }
+            titles
+        };
+        let forward = walk("\x1b[C");
+        let mut backward = walk("\x1b[D");
+        backward.reverse();
+        assert_eq!(backward, forward, "`←` walks the same ring backwards");
         let dashes = |n| "─".repeat(n);
         assert_eq!(
-            titles,
+            forward,
             [
                 format!(
                     "╭─ [config]   pipeline   prompts   active (0) {}╮",
@@ -1042,6 +1065,57 @@ mod tests {
         );
     }
 
+    // `tab` moves no section any more, and an arrow typed while a search
+    // row or a popup is open stays with it: only a section at rest hands
+    // the arrows to the section walk.
+    #[test]
+    fn tab_and_an_arrow_inside_a_search_or_popup_move_no_section() {
+        let (repo, _guard) = project("sections-held");
+        let mut state = State::new(&repo);
+        type_keys(&repo, &mut state, "\t");
+        assert_eq!(state.section, Section::Config);
+
+        type_keys(&repo, &mut state, "fx\x1b[C\x1b[D");
+        assert_eq!(state.section, Section::Config);
+        assert!(matches!(state.mode, Mode::Search));
+        assert_eq!(state.filter, "x");
+        type_keys(&repo, &mut state, "\x1b");
+
+        type_keys(&repo, &mut state, "\x1b[Cf\x1b[C");
+        assert_eq!(state.section, Section::Pipeline, "the pipeline search");
+        type_keys(&repo, &mut state, "\x1b");
+        type_keys(&repo, &mut state, "\x1b[C\x1b[C\t");
+        assert_eq!(state.section, Section::Active, "`tab` in active");
+        type_keys(&repo, &mut state, "\x1b[Df\x1b[D");
+        assert_eq!(state.section, Section::Prompts, "the prompts search");
+    }
+
+    // Hosted, one `→` moves one section and the tab stays open: the shell
+    // reads no arrow, so the input runs out on the tab rather than leaving
+    // it, and the last frame has prompts bracketed after two.
+    #[test]
+    fn hosted_one_arrow_moves_one_section_and_keeps_the_tab_open() {
+        let (repo, _guard) = project("hosted-arrows");
+        let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+        let mut input = std::io::Cursor::new(b"\x1b[C\x1b[C".to_vec());
+        let mut out = Vec::new();
+        let leave = tab(
+            &repo,
+            &mut super::super::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(leave, Leave::Quit, "the input ran out on the tab");
+        let drawn = String::from_utf8(out).unwrap();
+        let last = shell::plain(drawn.rsplit("\x1b[?2026h").next().unwrap());
+        assert!(last.contains("[4] OVERRIDES"), "{last}");
+        assert!(
+            last.contains("╭─ config   pipeline   [prompts]   active (0) ─"),
+            "{last}"
+        );
+    }
+
     // `w` opens the overrides folder from every section and from both
     // prompt popups, which it closes, creating the folder first. Typed into
     // a search row it is a letter.
@@ -1058,7 +1132,7 @@ mod tests {
         // Config, then pipeline, then prompts.
         type_keys(&repo, &mut state, "w");
         assert!(dir.is_dir(), "created before it is opened");
-        type_keys(&repo, &mut state, "\tw\tw");
+        type_keys(&repo, &mut state, "\x1b[Cw\x1b[Cw");
         assert_eq!(
             crate::browser::opened(),
             [dir.clone(), dir.clone(), dir.clone()]
@@ -1076,7 +1150,7 @@ mod tests {
         assert!(lines(&state)[1].starts_with("│ search: w▏"));
         type_keys(&repo, &mut state, "\x1b");
         assert_eq!(crate::browser::opened().len(), 5);
-        type_keys(&repo, &mut state, "\tw");
+        type_keys(&repo, &mut state, "\x1b[Cw");
         assert_eq!(state.section, Section::Active);
         assert_eq!(crate::browser::opened().len(), 6);
         assert!(matches!(state.mode, Mode::Browsing));
@@ -1189,7 +1263,7 @@ mod tests {
         assert!(!drawn.iter().any(|l| l.contains("new key")), "{drawn:#?}");
         assert_eq!(
             key_line(&state),
-            " [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section"
+            " [enter] set value   [f] search   [o] options   [w] open workspace"
         );
     }
 
@@ -1234,7 +1308,7 @@ mod tests {
         );
         assert_eq!(
             key_line(&state),
-            " [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section"
+            " [enter] set value   [f] search   [o] options   [w] open workspace"
         );
     }
 
@@ -1534,8 +1608,7 @@ mod tests {
         assert!(drawn.contains("[4] OVERRIDES"), "{drawn}");
         assert!(drawn.contains("╭─ [config]   pipeline   prompts   active (0) ─"));
         assert!(drawn.contains(
-            "[enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   \
-             [q] quit"
+            "[enter] set value   [f] search   [o] options   [w] open workspace   [q] quit"
         ));
     }
 
@@ -1661,7 +1734,8 @@ mod tests {
     }
 
     /// Input that stays quiet for three poll slices, resizing the terminal
-    /// on the second, and then types `→`.
+    /// on the second, and then types `tab`, which changes nothing on the
+    /// frame.
     struct ResizedWhileIdle {
         slices: std::cell::Cell<usize>,
         keys: std::io::Cursor<Vec<u8>>,
@@ -1695,7 +1769,7 @@ mod tests {
         let _hosting = shell::Hosting::open(shell::Tab::Overrides);
         let mut input = ResizedWhileIdle {
             slices: std::cell::Cell::new(0),
-            keys: std::io::Cursor::new(b"\x1b[C".to_vec()),
+            keys: std::io::Cursor::new(b"\t".to_vec()),
         };
         let mut out = Vec::new();
         tab(
