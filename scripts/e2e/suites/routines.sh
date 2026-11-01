@@ -336,6 +336,7 @@ on_screen '\x1b[C' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the routines tab's right pane is titled details" "─ details ─" "$LAST"
+has "beside the focused list's bracketed title" "─ [routines] ─" "$LAST"
 has "a routine with no job says its schedule is none" "schedule:    none" "$LAST"
 has "and the list's key line names tab details" "[tab] details" "$LAST"
 lacks "a routine row carries no task count" "1 task" "$LAST"
@@ -344,6 +345,13 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "a routine with a job draws the job's schedule" "schedule:    0 3 * * 1-5" "$LAST"
 has "and names the job" "job:         release" "$LAST"
+
+# `tab` moves focus, and the brackets with it, onto the details pane.
+on_screen '\x1b[C\t' "$DETAILS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "tab brackets the details pane's title" "─ [details] ─" "$LAST"
+has "and leaves the list's plain" "─ routines ─" "$LAST"
 
 # Deactivate job (`o`, down, `enter`) writes the job back disabled, to the
 # user store it lives in and nowhere else, and the details pane says it is

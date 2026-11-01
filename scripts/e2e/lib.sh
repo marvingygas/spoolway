@@ -517,7 +517,7 @@ screen_start() {
   # `groups` pane keeps that opening board from standing in for a frame the
   # caller's own keys draw.
   screen_press $'\x1b[C'
-  poll_until 10 screen_drew_since "$mark" "─ groups" || {
+  poll_until 10 queue_tab_drew_since "$mark" || {
     printf '  \033[31mSETUP\033[0m the screen never drew the queue tab\n' >&2
     tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
     exit 2
@@ -539,6 +539,14 @@ screen_frames() { grep -aoF $'\x1b[?2026h\x1b[H' "$E2E_SCREEN_LOG" 2>/dev/null |
 # What the screen has drawn since line `mark` of its log says `want`.
 screen_drew_since() {
   grep -qaF -- "$2" < <(tail -n "+$(($1 + 1))" "$E2E_SCREEN_LOG")
+}
+
+# queue_tab_drew_since <line>: the queue tab's top border is past <line>,
+# whichever of its panes has focus. The focused pane's title is bracketed,
+# so the groups pane's reads `[groups]` while it has the keys and `groups`
+# while the tasks pane does.
+queue_tab_drew_since() {
+  screen_drew_since "$1" "─ [groups]" || screen_drew_since "$1" "─ groups"
 }
 
 # Onto the dispatch tab, one `←` from the queue tab `screen_start` hands over, and

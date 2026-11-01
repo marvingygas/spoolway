@@ -110,13 +110,25 @@ has "the strip names all five tabs in order" \
   "[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL" "$FIRST"
 has "it opens on the dispatch tab's board" "dispatcher stopped" "$FIRST"
 lacks "drawn inside a box with no title" "─ dispatch" "$FIRST"
-lacks "not on the queue tab" "─ groups ─" "$FIRST"
+# Both spellings, since the queue tab brackets whichever pane has focus.
+lacks "not on the queue tab" "─ [groups] ─" "$FIRST"
+lacks "under either spelling of its title" "─ groups ─" "$FIRST"
 
-has "→ reaches the queue tab" "─ groups ─" "$LAST"
+has "→ reaches the queue tab, its groups pane focused" "─ [groups] ─" "$LAST"
+has "beside the tasks pane's plain title" "─ tasks ─" "$LAST"
 has "with the pending group listed" "cart" "$LAST"
 has "with queue the open tab on the strip" \
   "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
 lacks "which is no longer the dispatch tab" "dispatcher" "$LAST"
+
+# `tab` moves focus, and the brackets with it, onto the tasks pane.
+FOCUS="$LIVE/focus.txt"
+works "tab on the queue tab ends when its keys run out" \
+  script -qec "printf '\\033[C\\t' | '$SPOOLWAY'" "$FOCUS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FOCUS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "tab brackets the tasks pane's title" "─ [tasks] ─" "$LAST"
+has "and leaves the groups pane's plain" "─ groups ─" "$LAST"
 
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
 # again, with no step running, stops it at once and draws no stop popup.
@@ -338,7 +350,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
 has "naming the reserved key" "stage" "$LAST"
 has "answered by enter" "[enter] confirm" "$LAST"
-has "over the queue tab, still drawn under it" "─ groups" "$LAST"
+has "over the queue tab, still drawn under it" "─ [groups]" "$LAST"
 has "under the strip" "DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
@@ -420,7 +432,7 @@ sed 's/\x1b\[[0-9;]*m//g' "$ALL_TABS" >"$ALL_TABS.plain"
 # require every tab this walk visits actually drew, so the check above is
 # proof about frames that were really there.
 has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS.plain"
-has "and the queue tab" "─ groups" "$ALL_TABS.plain"
+has "and the queue tab" "─ [groups]" "$ALL_TABS.plain"
 has "and the routines tab" "QUEUE       [ROUTINES]       OVERRIDES" "$ALL_TABS.plain"
 has "and the overrides tab" "ROUTINES       [OVERRIDES]       EVAL" "$ALL_TABS.plain"
 has "and the eval tab, → from overrides" "OVERRIDES       [EVAL]" "$ALL_TABS.plain"
@@ -439,7 +451,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "→ twice reaches the routines tab" \
   "DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL" "$LAST"
-has "titled routines" "─ routines ─" "$LAST"
+has "titled routines, bracketed while the list has focus" "─ [routines] ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
   "[space] select   [enter] queue   [o] options   [tab] details   [q] quit" "$LAST"
