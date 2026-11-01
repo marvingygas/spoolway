@@ -181,7 +181,7 @@ Six prompts ship. None of them is named in the binary.
 | `reviewer` | Reviews one task's diff and gives a verdict. Fixes nothing. A mitigation under the task's `## Risks` that the change does not carry out is a finding. |
 | `reproducer` | Writes a failing repro for a bug and runs it. The bugfix pipeline runs it before and after the fix. |
 | `archivist` | Updates the domain documents for its own task's diff. |
-| `create-pr` | Pushes the task's branch and opens its pull request with a plain-English summary of the diff. The title starts with the task's issue: `KAN-11`, `#1410`, or `owner/repo#N` for an issue in another repo. A task with no `ticket:` keeps its `title:` alone. Squashes, rebases, force-pushes and merges nothing. |
+| `create-pr` | Pushes the task's branch and opens its pull request with a plain-English summary of the diff. The title starts with the task's issue: `KAN-11`, `#1410`, or `owner/repo#N` for an issue in another repo. A task with no `ticket:` keeps its `title:` alone. A pull request already open for the branch is updated, and its title gets the issue put in front when it does not start with it. Squashes, rebases, force-pushes and merges nothing. |
 | `unblocker` | Staffs `blocked` in an unattended run. Clears the obstacle or pauses the task for a person. See [Staffing `blocked`](pipelines.md#staffing-blocked). |
 
 ## Writing your own
