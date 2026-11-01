@@ -134,6 +134,19 @@ has "with the pending group listed" "cart" "$LAST"
 has "with queue the open tab on the strip" "$(lit '[2] QUEUE')" "$LAST.raw"
 has "and dispatch dimmed beside it" "$(dimmed '[1] DISPATCH')" "$LAST.raw"
 lacks "which is no longer the dispatch tab" "dispatcher" "$LAST"
+# A key is named only while it would act: with nothing selected `enter`
+# queues nothing, so the line leaves it out until `space` ticks the group.
+has "with nothing selected the key line names space and o" \
+  "[space] select   [o] options   [f] search   [h] show done tasks" "$LAST"
+lacks "and no enter, which would queue nothing" "[enter] queue" "$LAST"
+SPACE="$LIVE/space.txt"
+works "2 then space ends when its keys run out" \
+  script -qec "printf '2 ' | '$SPOOLWAY'" "$SPACE"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$SPACE" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "space ticks the group" "> [x] cart" "$LAST"
+has "and the key line names enter once something is selected" \
+  "[space] select   [enter] queue   [o] options   [f] search" "$LAST"
 
 # The arrows no longer switch tabs: both of them, in either order, leave the
 # screen on the dispatch tab it opened on.
@@ -155,7 +168,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "→ brackets the tasks pane's title" "─ [tasks] ─" "$LAST"
 has "and leaves the groups pane's plain" "─ groups ─" "$LAST"
 has "the key line is the same over the tasks pane" \
-  "[space] select   [enter] queue   [o] options   [f] search" "$LAST"
+  "[space] select   [o] options   [f] search" "$LAST"
 lacks "and names no tab" "[tab]" "$LAST"
 works "→ then ← on the queue tab ends when its keys run out" \
   script -qec "printf '2\\033[C\\033[D\\t' | '$SPOOLWAY'" "$FOCUS"
@@ -250,6 +263,8 @@ has "under the stop popup's title" "─ stop dispatching " "$LAST"
 has "the cursor on the stop" "> stop dispatching" "$LAST"
 has "with keeping it running under it" "keep it running" "$LAST"
 lacks "not the popup for a running step" "let running steps finish" "$LAST"
+lacks "and the key line drops enter, which answers the popup" \
+  "[enter] stop dispatching" "$LAST"
 screen_press $'\x1b'
 if poll_until 10 now_lacks "keep it running"; then ok "esc closes it"
 else bad "esc closes it"; fi
@@ -487,8 +502,8 @@ sed 's/\x1b\[[0-9;]*m//g' "$LAST.raw" >"$LAST"
 has "3 reaches the routines tab" "$(lit '[3] ROUTINES')" "$LAST.raw"
 has "titled routines, bracketed while the list has focus" "─ [routines] ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
-has "under its own key line" \
-  "[space] select   [enter] queue   [o] options   [q] quit" "$LAST"
+has "under its own key line, naming no enter with nothing ticked" \
+  "[space] select   [o] options   [q] quit" "$LAST"
 
 # A full board in a short pane scrolls its task table rather than cutting the
 # frame off at the bottom. Thirty queued tasks in six groups are more than a

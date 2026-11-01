@@ -356,8 +356,8 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the routines tab's right pane is titled details" "─ details ─" "$LAST"
 has "beside the focused list's bracketed title" "─ [routines] ─" "$LAST"
 has "a routine with no job says its schedule is none" "schedule:    none" "$LAST"
-has "and the list's key line names no tab" \
-  "[space] select   [enter] queue   [o] options   [q] quit" "$LAST"
+has "and the list's key line names no tab, nor enter with nothing ticked" \
+  "[space] select   [o] options   [q] quit" "$LAST"
 lacks "nor any tab pair" "[tab]" "$LAST"
 lacks "a routine row carries no task count" "1 task" "$LAST"
 on_screen '3jj' "$DETAILS"
@@ -374,7 +374,7 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "→ brackets the details pane's title" "─ [details] ─" "$LAST"
 has "and leaves the list's plain" "─ routines ─" "$LAST"
 has "under the same key line, naming no tab" \
-  "[space] select   [enter] queue   [o] options   [q] quit" "$LAST"
+  "[space] select   [o] options   [q] quit" "$LAST"
 on_screen '3\x1b[D' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
