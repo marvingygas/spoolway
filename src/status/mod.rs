@@ -16953,7 +16953,7 @@ mod tests {
         );
         assert!(frame.contains("unqueue alpha"), "{frame}");
         assert!(frame.contains("3 tasks go back to:"), "{frame}");
-        assert!(frame.contains("beta   (depends on alpha)"), "{frame}");
+        assert!(frame.contains("beta    (depends on alpha)"), "{frame}");
         assert!(frame.contains("gamma   (depends on beta)"), "{frame}");
 
         board

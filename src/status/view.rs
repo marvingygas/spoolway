@@ -884,8 +884,10 @@ pub(super) fn unqueue_confirm_panel(
         }
     } else {
         // A dependency is named the way its own line in the panel names it,
-        // so the annotation can be matched to a line by eye.
-        let line = |entry: &ChainEntry| {
+        // so the annotation can be matched to a line by eye. `width` is the
+        // widest name in the entry's list, so every `(depends on …)` in it
+        // starts in one column.
+        let line = |entry: &ChainEntry, width: usize| {
             let name = shown(entry);
             if entry.depends_on.is_empty() {
                 return format!("  {name}");
@@ -900,7 +902,21 @@ pub(super) fn unqueue_confirm_panel(
                         .map_or_else(|| id.clone(), shown)
                 })
                 .collect();
-            format!("  {name}{GUTTER}(depends on {})", depends_on.join(", "))
+            format!(
+                "  {name:<width$}{GUTTER}(depends on {})",
+                depends_on.join(", ")
+            )
+        };
+        let list = |entries: &[&ChainEntry]| {
+            let width = entries
+                .iter()
+                .map(|entry| shown(entry).chars().count())
+                .max()
+                .unwrap_or(0);
+            entries
+                .iter()
+                .map(|entry| line(entry, width))
+                .collect::<Vec<String>>()
         };
         let (deleted, drafted): (Vec<&ChainEntry>, Vec<&ChainEntry>) =
             chain.iter().partition(|entry| entry.routine_file.is_some());
@@ -915,7 +931,7 @@ pub(super) fn unqueue_confirm_panel(
                 ],
                 false,
             ));
-            paragraphs.push((drafted.iter().map(|entry| line(entry)).collect(), true));
+            paragraphs.push((list(&drafted), true));
         }
         if !deleted.is_empty() {
             paragraphs.push((
@@ -925,7 +941,7 @@ pub(super) fn unqueue_confirm_panel(
                 }],
                 false,
             ));
-            paragraphs.push((deleted.iter().map(|entry| line(entry)).collect(), true));
+            paragraphs.push((list(&deleted), true));
             paragraphs.push((
                 vec!["the routines tab queues them again.".to_string()],
                 false,
@@ -5673,12 +5689,12 @@ mod tests {
     /// A started task's panel says its branch and worktree are deleted for
     /// good, names the `last:` step the task left at the end of the group
     /// walked past, and lists the chain, with no line about the queue tab.
-    /// Fails before the change, which drew neither warning.
+    /// Each name is padded to the widest in its list, so the `(depends on`
+    /// notes start in one column. Fails before the change, which drew neither
+    /// warning and put the notes right after each name.
     #[test]
     fn the_unqueue_panel_for_a_started_task_says_what_is_deleted_for_good() {
         let panel = unqueue_confirm_panel(&started_chain_panel(), None);
-        let profile = format!("profile{GUTTER}(depends on sessions)");
-        let settings = format!("settings{GUTTER}(depends on profile)");
         assert_eq!(
             panel_text(&panel)[..15],
             [
@@ -5694,8 +5710,8 @@ mod tests {
                 "~/.spoolway/shop/pending/",
                 "",
                 "sessions",
-                profile.as_str(),
-                settings.as_str(),
+                "profile    (depends on sessions)",
+                "settings   (depends on profile)",
                 "",
             ]
             .map(String::from),
