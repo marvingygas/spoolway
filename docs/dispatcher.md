@@ -1365,7 +1365,9 @@ the branches. `esc` closes the picker while the fetch runs.
 A fetch that fails, offline or with `origin` out of reach, lists the branches the last fetch saw.
 Rows above the list give git's reason, such as `fetch failed: Could not resolve host: github.com.
 showing the last fetch's branches. esc and reopen to try again.` The fetch asks for no
-credentials, and one still running after 30 seconds is stopped. A checkout with no `origin`
+credentials, and one still running after 30 seconds is stopped. When the fetch works but the
+branches cannot be read afterwards, a row reads `branches not read again: <reason>. showing the
+branches from before the fetch. esc and reopen to try again.` A checkout with no `origin`
 lists its branches at once. `f` searches the list, and `esc` closes the picker.
 
 ```
