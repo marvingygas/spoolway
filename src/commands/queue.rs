@@ -4990,8 +4990,8 @@ impl DependsOnPick {
     /// requests…` row while a thread of its own asks `gh`, the program run
     /// as GitHub's command line, which done groups still have their pull
     /// request open, so the key loop never waits on it and `esc` still goes
-    /// back while it asks. With no done group there is nothing to ask, so it
-    /// lists at once, as a fetch with no `origin` does.
+    /// back while it asks. With no done group nothing is asked, and the row
+    /// gives way to the list as soon as the thread has answered.
     fn new(
         repo: &Repo,
         groups: &[Group],
@@ -5011,11 +5011,6 @@ impl DependsOnPick {
         let title = format!("depends on for {}", head.id);
         let (ready, done) = stack_targets(groups, state, group, head);
         let stacked = stack_dependency(group, head).is_some();
-        if done.is_empty() {
-            let list =
-                crate::screen::picker::Picker::new(title, depends_on_entries(stacked, ready), look);
-            return DependsOnPick { menu, list };
-        }
         let repo = repo.clone();
         let list = crate::screen::picker::Picker::new(title, Vec::new(), look).loading(
             "checking pull requests…",
@@ -18265,6 +18260,10 @@ mod tests {
     /// the head's group. The group stacked onto names no `base:`, so the
     /// branch copied is the board's, which its `lands in:` row shows. The
     /// screen closes to the tasks pane, which shows both.
+    ///
+    /// Driven key by key rather than through [`screen`], whose keys all
+    /// arrive at once: the picker lists only once its thread has answered,
+    /// and an `enter` pressed before that picks nothing.
     #[test]
     fn enter_on_the_depends_on_picker_stacks_the_chain_onto_the_pick() {
         let (repo, _root_guard) = fixture("screen-edit-depends-on-enter");
@@ -18285,10 +18284,23 @@ mod tests {
             ),
         );
 
-        // Tab onto the tasks pane, o, down three times onto edit depends on,
-        // enter to open it, enter on `ship-cart`, its only entry: `wire`
-        // stacks on nothing, so there is no `none` row.
-        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\x1b[B\r\r");
+        let gh_dir = crate::scratch::root("commands-screen-edit-depends-on-enter-gh");
+        let gh = super::super::stack::stand_in_gh(&gh_dir, &[], &[]);
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+        let pick = edit_depends_on_on(&repo, &groups, &state, &gh);
+        let DependsOnPick { menu, mut list } = *pick;
+        settled_picker(&mut list);
+        // `enter` on `ship-cart`, its only entry: `wire` stacks on nothing,
+        // so there is no `none` row.
+        let crate::screen::picker::Picked::Chosen(target) = list.handle_key(Key::Enter) else {
+            panic!("enter picked nothing");
+        };
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, target.as_ref());
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
         let after = std::fs::read_to_string(&wire).unwrap();
         assert!(
             after.lines().any(|l| l == "depends_on: [ship-cart]"),
@@ -18299,10 +18311,18 @@ mod tests {
         assert!(after.lines().any(|l| l == "base: plan/demo"), "{after}");
         assert!(after.lines().any(|l| l == "depends_on: [wire]"), "{after}");
         assert_eq!(std::fs::read_to_string(&cart_path).unwrap(), cart);
-        let last = crate::screen::shell::plain(last_frame(&drawn));
-        assert!(last.contains("depends on:  ship-cart"), "{last}");
-        assert!(last.contains("lands in:    plan/demo"), "{last}");
-        assert!(!last.contains("depends on for wire"), "{last}");
+        let pane = tasks_pane_lines(&groups, &Pipelines::builtin(), &state, 80)
+            .0
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(pane.contains("depends on:  ship-cart"), "{pane}");
+        assert!(pane.contains("lands in:    plan/demo"), "{pane}");
+        assert!(
+            gh_dir.join("asked").metadata().is_err(),
+            "no done group to ask about"
+        );
     }
 
     /// `none` drops the head's `depends_on:`, a block list's items with it,
