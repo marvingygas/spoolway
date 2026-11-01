@@ -8306,6 +8306,36 @@ fn stacked_on(groups: &[Group], state: &ScreenState) -> Option<(String, String, 
         })
 }
 
+/// A pending task of another group stacked onto the highlighted head's
+/// chain that would not land in `branch`: its id, the pending task of this
+/// group it depends on, and where it lands now — its own `base:`, else the
+/// board's branch. `None` when no such task depends on a task this pick
+/// rewrites. A queued or done task of this group keeps its `base:`, so a
+/// task stacked on one of those is left out.
+fn stacked_onto(
+    groups: &[Group],
+    state: &ScreenState,
+    branch: &str,
+) -> Option<(String, String, String)> {
+    let group = shown(groups, state).get(state.group_cursor).copied()?;
+    let rewritten = |id: &String| {
+        group
+            .tasks
+            .iter()
+            .any(|t| &t.id == id && t.state == TaskState::Pending)
+    };
+    groups
+        .iter()
+        .filter(|other| other.name != group.name)
+        .flat_map(|other| &other.tasks)
+        .filter(|task| task.state == TaskState::Pending)
+        .find_map(|task| {
+            let dep = task.depends_on.iter().find(|dep| rewritten(dep))?;
+            let lands = lands_in(task, state).filter(|lands| lands != branch)?;
+            Some((task.id.clone(), dep.clone(), lands))
+        })
+}
+
 /// `enter` on the edit lands in picker: write `base: <branch>` into every
 /// pending file of the group whose chain head `menu` was opened on, read the
 /// groups again so the tasks pane shows it, and close to the screen.
@@ -8328,7 +8358,11 @@ fn stacked_on(groups: &[Group], state: &ScreenState) -> Option<(String, String, 
 /// A head stacked on another group's last task keeps the item, but a pick
 /// other than where that task lands changes nothing and says why — see
 /// [`stacked_on`]. Submission refuses a stacked pair whose bases differ, and
-/// the group stacked on is not this pick's to rewrite.
+/// the group stacked on is not this pick's to rewrite. For the same reason
+/// a pick changes nothing while another group's pending task stacks onto
+/// this chain and lands elsewhere — see [`stacked_onto`]: that group would
+/// be left on the old branch, depending on a task that no longer lands
+/// there.
 fn set_lands_in(
     repo: &Repo,
     groups: &mut Vec<Group>,
@@ -8369,6 +8403,17 @@ fn set_lands_in(
                  another lands where that one does: its work is cut from that branch and only \
                  merges into its own base. No file was changed. To land in `{branch}`, change \
                  what `{id}` depends on first, or pick the lands-in branch of `{dep}`'s group."
+            ),
+        );
+    }
+    if let Some((id, dep, lands)) = stacked_onto(groups, state, branch) {
+        return outcome(
+            "lands in not changed",
+            format!(
+                "`{id}` of another group stacks on `{dep}` and lands in `{lands}`, and a chain \
+                 stacked on another lands where that one does: moving `{dep}`'s chain alone would \
+                 leave `{id}` waiting on work that never merges into its base. No file was changed. \
+                 To land in `{branch}`, change what `{id}` depends on first."
             ),
         );
     }
@@ -16375,10 +16420,10 @@ mod tests {
 
     /// `o` lists what the focused row can do, titled with its name: over
     /// the tasks pane a pending chain head offers open task, edit pipeline,
-    /// edit lands in, gate then delete, over the groups pane a group with a pending task offers trial, save as
-    /// routine then delete. A group with no tasks has none of them and opens
-    /// the menu with nothing in it, and a pane with no row under its cursor
-    /// opens no menu at all.
+    /// edit lands in, gate then delete, over the groups pane a group with a
+    /// pending task offers trial, save as routine then delete. A group with
+    /// no tasks has none of them and opens the menu with nothing in it, and
+    /// a pane with no row under its cursor opens no menu at all.
     #[test]
     fn the_options_menu_lists_what_the_focused_row_can_do() {
         let (repo, _root_guard) = fixture("screen-options-lists");
@@ -17126,8 +17171,9 @@ mod tests {
         );
         assert_eq!(RowOption::EditLandsIn.label(), "edit lands in");
 
-        // Set by hand, as `delete_is_offered_last_exactly_on_rows_with_a_
-        // pending_file` does: a queued head is offered no edit at all.
+        // Set by hand, as
+        // `delete_is_offered_last_exactly_on_rows_with_a_pending_file` does:
+        // a queued head is offered no edit at all.
         let state = on_pending_task(&groups, "login");
         let at = state.group_cursor;
         groups[at].tasks[0].state = TaskState::Queued;
@@ -17349,6 +17395,56 @@ mod tests {
                 .lines()
                 .any(|l| l == "base: plan/live")
         );
+    }
+
+    /// A head another group's chain stacks onto keeps edit lands in, but a
+    /// pick changes no file while that chain lands where the head does now:
+    /// the head's group would move and leave the stacked group depending on
+    /// a task that no longer lands in its base, which submission refuses.
+    #[test]
+    fn a_head_stacked_onto_lands_nowhere_its_stack_does_not() {
+        let (repo, _root_guard) = fixture("screen-edit-lands-in-stacked-onto");
+        let mut paths = Vec::new();
+        for (id, extra) in [
+            ("login", "group: auth\n"),
+            ("wire", "group: pay\ndepends_on: [login]\n"),
+            ("tests", "group: pay\ndepends_on: [wire]\n"),
+        ] {
+            let front = format!("{extra}pipeline: default\nbase: plan/demo\n");
+            let text = task_text(id, &front, BODY);
+            paths.push((write_pending(&repo, id, &text), text));
+        }
+        let dry_run = |repo: &Repo| {
+            let args = QueueAddArgs {
+                from: vec![repo.pending_dir().display().to_string()],
+                base: None,
+                dry_run: true,
+                no_tracking: Vec::new(),
+            };
+            queue_add(repo, &Pipelines::builtin(), &args, &repo.root, false)
+        };
+        dry_run(&repo).unwrap();
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "login");
+        let menu = pending_options(&groups, &state).unwrap();
+        assert!(menu.items.contains(&RowOption::EditLandsIn));
+
+        let mode = set_lands_in(&repo, &mut groups, &mut state, &menu, "1.0");
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "lands in not changed");
+        assert!(
+            notice
+                .text
+                .contains("`wire` of another group stacks on `login` and lands in `plan/demo`"),
+            "{}",
+            notice.text
+        );
+        for (path, before) in &paths {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), before);
+        }
+        dry_run(&repo).unwrap();
     }
 
     /// A write that fails part way through the chain names the files it
