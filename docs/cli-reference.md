@@ -229,6 +229,18 @@ page says `nothing to do here`. To reach them from the tasks pane, press `tab` f
 
 `edit pipeline` opens a picker of every pipeline the project defines except the task's current one. The picker is titled `pipeline for <task>` and its key row reads `[enter] confirm   [f] search   [esc] back`. `f` searches the list. `enter` writes the pick into the `pipeline:` line of the task's pending file and closes to the queue screen, where the tasks pane shows the new pipeline. `esc` goes back to the options menu. A gate set on the screen stays when the gate picker would offer the same step on the new pipeline. Otherwise the gate is cleared. If the pending file is gone or the task is no longer pending, nothing is written and a popup names the file.
 
+`edit lands in` opens a picker titled `lands in for <task>`. It opens on a `fetching origin…` row while `origin` is fetched, then lists every local branch and every `origin` branch once each, task branches included. A branch only `origin` has shows `origin` beside it. The task's current lands-in branch is left out. If the fetch fails, the list shows the failure and the branches of the last fetch. The key row reads `[enter] confirm   [f] search   [esc] back`. `enter` writes the pick as `base:` into every pending task file of the head's group and closes to the queue screen, where the `lands in:` rows show it. `esc` goes back to the options menu. Tasks of the group that are queued or done are not changed.
+
+Three cases write nothing and open a `lands in not changed` popup that says what to do instead:
+
+| Case | What the popup says |
+|---|---|
+| The head depends on a task of another group and the pick is not the branch that task lands in. | Change what the head depends on first, or pick that branch. |
+| A pending task of another group depends on a pending task of this group, and the pick is not the branch that task lands in. | Change what that other task depends on first. |
+| The task was queued, deleted or moved while the picker was open. | Open the options menu again. |
+
+If a file cannot be written, the popup names the files already changed and the files left unchanged. Pick the branch again once the cause is fixed.
+
 `gate` opens a picker of the agent steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
 with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while a task above this one in its group runs a `last:` step of its own, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
