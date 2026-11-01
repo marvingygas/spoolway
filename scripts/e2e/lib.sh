@@ -583,6 +583,15 @@ screen_board() {
 screen_dispatch() {
   local seen i
   screen_board
+  # A dispatcher just stopped can read `dispatcher stopped` a frame before the
+  # tab has let go of the stop, and until then `enter` reads nothing. The key
+  # line names `[enter] start dispatching` only once it would act, so the key
+  # waits for that rather than for the header (board-pause on #1453's CI).
+  poll_until 10 screen_offers_start || {
+    printf '  \033[31mSETUP\033[0m the dispatch tab never offered to start dispatching\n' >&2
+    tail -30 "$E2E_SCREEN_LOG" | sed 's/^/        /' >&2
+    exit 2
+  }
   seen=$(screen_frames)
   screen_press $'\r'
   for ((i = 0; i < 200; i++)); do
@@ -625,6 +634,13 @@ screen_last_frame() {
   fi
   frame=$(tail -c "+$((at + ${#start} + 1))" "$E2E_SCREEN_LOG")
   printf '%s\n' "${frame%%"$start"*}"
+}
+
+# Whether the open screen's last frame names `[enter] start dispatching` on
+# its key line: the dispatch tab with no dispatcher of its own, and `enter`
+# free to start one.
+screen_offers_start() {
+  screen_last_frame | sed 's/\x1b\[[0-9;]*m//g' | grep -qF "[enter] start dispatching"
 }
 
 # Quit the open screen: `esc` closes whatever panel is up, `q` quits, and
