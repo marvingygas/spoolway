@@ -1542,8 +1542,8 @@ fn plan_page(task: &crate::task::Task) -> Option<&str> {
     (!plan.is_empty()).then_some(plan)
 }
 
-/// The options menu's `focus`: bring the pane [`step_pane`] finds for task
-/// `id` in front of the person, maximized, through
+/// The options menu's `focus`: bring the pane [`focus_target`] finds for
+/// task `id` in front of the person, maximized, through
 /// [`crate::mux::Mux::focus_pane`]. Nothing unzooms it again; that stays the
 /// person's, in herdr.
 ///
@@ -1551,12 +1551,15 @@ fn plan_page(task: &crate::task::Task) -> Option<&str> {
 /// opened: the lane or the run can end in between, and a step with no pane
 /// left gets nothing done and no popup, the same as every other item asks
 /// its own check again. A herdr refusal comes back as the popup
-/// [`BoardMode::Outcome`] draws, for the reason [`open_task`] gives. On a
-/// running row it says what to do about it: a pane that is gone most likely
-/// went with the step, and `restart` is the item that starts the step again
-/// in a new one. On a [`stopped`] row it ends after saying the pane may have
-/// been closed: nothing is running there to start again, and what resumes a
-/// stopped task is the person's call, not advice this popup can give.
+/// [`BoardMode::Outcome`] draws, for the reason [`open_task`] gives. For the
+/// pane of a running step it says what to do about it: a pane that is gone
+/// most likely went with the step, and `restart` is the item that starts the
+/// step again in a new one. For a pane [`stopped_pane`] found it ends after
+/// saying the pane may have been closed: nothing is running there to start
+/// again, and what resumes a stopped task is the person's call, not advice
+/// this popup can give. The text follows which lookup found the pane, not
+/// the row's stage alone, so a blocked row an unblocker lane is working on
+/// keeps the running row's advice.
 fn focus_step(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -1564,12 +1567,11 @@ fn focus_step(
     mux: &dyn crate::mux::Mux,
 ) -> Option<crate::screen::Notice> {
     let tasks = repo.tasks().ok()?;
-    let pane = step_pane(repo, pipelines, &tasks, id, mux)?;
-    let stopped_row = tasks.iter().any(|t| t.id() == id && stopped(t));
+    let (pane, found) = focus_target(repo, pipelines, &tasks, id, mux)?;
     mux.focus_pane(&pane).err().map(|err| {
-        let advice = match stopped_row {
-            true => "The step's pane may have been closed.",
-            false => {
+        let advice = match found {
+            FoundBy::Stopped => "The step's pane may have been closed.",
+            FoundBy::Step => {
                 "The step's pane may have been closed. restart in this menu \
                  starts the step again in a new pane."
             }
@@ -1578,9 +1580,10 @@ fn focus_step(
     })
 }
 
-/// Whether `task` sits on `paused`, `blocked` or `hook_failed`: a row with
-/// no step running, whose `focus` finds its pane through [`stopped_pane`]
-/// rather than by the step it is on.
+/// Whether `task` sits on `paused`, `blocked` or `hook_failed`: a row whose
+/// `focus` falls back to [`stopped_pane`] when no step of it is running in a
+/// pane. A blocked row usually has none, but an unattended run that staffs
+/// `blocked` runs an unblocker lane on it, which [`focus_target`] finds first.
 fn stopped(task: &crate::task::Task) -> bool {
     [
         crate::pipeline::PAUSED,
@@ -1591,21 +1594,8 @@ fn stopped(task: &crate::task::Task) -> bool {
 }
 
 /// The pane `focus` brings forward for task `id`, when `mux` can bring one
-/// forward: whether the options menu lists `focus`, and what [`focus_step`]
-/// focuses.
-///
-/// On a running row it is the pane of the step the task is running right
-/// now. An agent step's pane is its live lane's, found by the rule
-/// [`live_agent_lane_tasks`] answers on, so a lane waiting on a person counts
-/// and a kept one does not. A command step's is the pane its run recorded,
-/// while [`running_command_steps`] still has the run going; a run that never
-/// landed in a pane has none. A queued task, a finished step and a task the
-/// queue no longer has find nothing. A [`stopped`] row has no step running,
-/// and finds its newest open pane through [`stopped_pane`] instead.
-///
-/// The capability check comes first, and the lane list is only read for a
-/// task on an agent step or a stopped one, so headless and every other row
-/// cost no multiplexer call when the menu opens.
+/// forward: whether the options menu lists `focus`. [`focus_target`] finds
+/// it, and says which lookup did.
 fn step_pane(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -1613,14 +1603,66 @@ fn step_pane(
     id: &str,
     mux: &dyn crate::mux::Mux,
 ) -> Option<String> {
+    focus_target(repo, pipelines, tasks, id, mux).map(|(pane, _)| pane)
+}
+
+/// Which lookup [`focus_target`] found its pane by, which decides the advice
+/// [`focus_step`] gives when herdr refuses the zoom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoundBy {
+    /// The pane of the step the task is running right now.
+    Step,
+    /// A [`stopped`] task's newest open pane, from [`stopped_pane`].
+    Stopped,
+}
+
+/// The pane `focus` brings forward for task `id`, and how it was found.
+///
+/// First the pane of the step the task is running right now. An agent
+/// step's pane is its live lane's, found by the rule
+/// [`live_agent_lane_tasks`] answers on, so a lane waiting on a person counts
+/// and a kept one does not; that includes an unblocker lane on a staffed
+/// `blocked` step. A command step's is the pane its run recorded, while
+/// [`running_command_steps`] still has the run going; a run that never
+/// landed in a pane has none. A queued task, a finished step and a task the
+/// queue no longer has find nothing. Only when that finds nothing does a
+/// [`stopped`] row fall back to its newest open pane, through
+/// [`stopped_pane`].
+///
+/// The capability check comes first, and the lane list is only read for a
+/// task on an agent step or a stopped one, so headless and every other row
+/// cost no multiplexer call when the menu opens.
+fn focus_target(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+    id: &str,
+    mux: &dyn crate::mux::Mux,
+) -> Option<(String, FoundBy)> {
     if !mux.can_focus_pane() {
         return None;
     }
     let i = tasks.iter().position(|t| t.id() == id)?;
     let task = &tasks[i];
-    if stopped(task) {
-        return stopped_pane(repo, tasks, task, mux);
+    if let Some(pane) = running_step_pane(repo, pipelines, tasks, i, mux) {
+        return Some((pane, FoundBy::Step));
     }
+    if !stopped(task) {
+        return None;
+    }
+    stopped_pane(repo, tasks, task, mux).map(|pane| (pane, FoundBy::Stopped))
+}
+
+/// The pane of the step `tasks[i]` is running right now: the first lookup
+/// [`focus_target`] makes.
+fn running_step_pane(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+    i: usize,
+    mux: &dyn crate::mux::Mux,
+) -> Option<String> {
+    let task = &tasks[i];
     let step = pipelines.for_task(task).ok()?.step(task.stage())?;
     match step.kind() {
         crate::pipeline::StepKind::Agent => {
@@ -1639,7 +1681,8 @@ fn step_pane(
 }
 
 /// The pane of stopped `task` that started last among those still open:
-/// what `focus` zooms on a paused, blocked or hook_failed row.
+/// what `focus` zooms on a paused, blocked or hook_failed row with no step
+/// running in a pane.
 ///
 /// Under herdr a finished step's lane is kept with its pane open until the
 /// task is done, so a stopped task can have several. Every one counts: its
@@ -3201,7 +3244,8 @@ pub(crate) fn live_agent_lane_tasks(
 /// [`live_agent_lane_tasks`], with the lane each task was found by: the one
 /// rule both answer on, so the options menu's `focus` on a running row brings
 /// forward exactly the lane `pause` would interrupt — see [`step_pane`]. A
-/// stopped row's `focus` does not come through here: see [`stopped_pane`].
+/// stopped row with no step running finds its pane through [`stopped_pane`]
+/// instead.
 fn live_agent_lanes<'a>(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -12766,6 +12810,53 @@ mod tests {
             notice.text,
             "o: herdr pane zoom w2:p3 --on: no pane w2:p3\n\n\
              The step's pane may have been closed."
+        );
+    }
+
+    /// A blocked row an unblocker lane is working on keeps the running row's
+    /// rule: `focus` zooms that live lane, not the task's newer kept pane,
+    /// and a refused zoom still names `restart`.
+    #[test]
+    fn a_staffed_blocked_row_focuses_its_unblocker_lane() {
+        let (mut repo, _root_guard) = fixture("options-focus-unblocker");
+        repo.config.unattended.enabled = true;
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "stuck", &[], Some("implement"), Some("stuck"));
+        let mut stuck = repo.task("stuck").unwrap();
+        stuck.front.blocked_from = Some("implement".into());
+        stuck.set_stage(crate::pipeline::BLOCKED, Some("blocked by hand"));
+        stuck.save().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        write_lane_records(
+            &repo,
+            &[
+                ("stuck · blocked", now - 500, false),
+                ("stuck · implement", now - 100, true),
+            ],
+        );
+        let lanes = vec![
+            lane_in(&repo, "stuck", "implement", "w2:p3"),
+            lane_in(&repo, "stuck", "blocked", "w2:p5"),
+        ];
+        let tasks = repo.tasks().unwrap();
+
+        let mux = FocusMux::with(lanes.clone());
+        assert_eq!(
+            step_pane(&repo, &pipelines, &tasks, "stuck", &mux).as_deref(),
+            Some("w2:p5")
+        );
+
+        let refusing = FocusMux {
+            refuse: Some(r#"{"error":{"code":"pane_not_found","message":"no pane w2:p5"}}"#),
+            ..FocusMux::with(lanes)
+        };
+        let notice = focus_step(&repo, &pipelines, "stuck", &refusing).unwrap();
+        assert_eq!(refusing.focused(), ["w2:p5"]);
+        assert_eq!(
+            notice.text,
+            "o: herdr pane zoom w2:p5 --on: no pane w2:p5\n\n\
+             The step's pane may have been closed. restart in this menu \
+             starts the step again in a new pane."
         );
     }
 
