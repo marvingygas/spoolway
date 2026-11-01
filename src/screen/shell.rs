@@ -797,6 +797,17 @@ impl DispatchTab {
         self.child.is_some()
     }
 
+    /// The tab's popup for the board to draw: `panel`, which is
+    /// [`Popup::panel`] of it, along with whether it reads keys — under one
+    /// that does, the key line drops `enter`, which answers the popup
+    /// rather than reaching [`DispatchTab::enter`].
+    fn drawn<'a>(&self, panel: Option<&'a [String]>) -> Option<crate::status::TabPopup<'a>> {
+        Some(crate::status::TabPopup {
+            panel: panel?,
+            reads_keys: self.popup.as_ref().is_some_and(Popup::reads_keys),
+        })
+    }
+
     /// Forget a child that has exited, and open the popup saying why if it
     /// ended without being asked to — over `Starting`, if the child ended
     /// before its first pass. A child still running closes `Starting` once
@@ -1343,9 +1354,9 @@ fn board_frame_rows(
     board: &mut crate::status::Board,
     tab: &DispatchTab,
 ) -> Option<Vec<String>> {
-    let popup = tab.popup.as_ref().map(Popup::panel);
+    let panel = tab.popup.as_ref().map(Popup::panel);
     let frame = board
-        .hosted_frame(repo, pipelines, tab.dispatching(), popup.as_deref())
+        .hosted_frame(repo, pipelines, tab.dispatching(), tab.drawn(panel.as_deref()))
         .ok()?;
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));
@@ -1365,9 +1376,13 @@ fn draw_board_from_memory(
     writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl Write,
 ) {
-    let popup = tab.popup.as_ref().map(Popup::panel);
-    let frame =
-        board.hosted_frame_from_memory(repo, pipelines, tab.dispatching(), popup.as_deref());
+    let panel = tab.popup.as_ref().map(Popup::panel);
+    let frame = board.hosted_frame_from_memory(
+        repo,
+        pipelines,
+        tab.dispatching(),
+        tab.drawn(panel.as_deref()),
+    );
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));
     writer.write_frame(&rows, pane_size, out);
@@ -1871,6 +1886,51 @@ mod tests {
         crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
 
         crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
+    }
+
+    /// The dispatch tab's key line names `enter` only while `enter` would
+    /// reach [`DispatchTab::enter`]. A popup that reads keys — `Ended`
+    /// idle, `Stop` over a running child — takes `enter` first, so the pair
+    /// goes; a popup that closes on its own — `Loaded` idle, `Starting`
+    /// over a running child — passes `enter` through, so the pair stays.
+    /// Before the key line asked, it named the pair under every popup.
+    #[test]
+    fn the_dispatch_key_line_names_enter_only_where_it_reaches_the_tab() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-enter-hint-popups");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let key_line = |tab: &DispatchTab| {
+            let mut board = crate::status::Board::hosted();
+            let rows = board_frame_rows(&repo, &pipelines, &mut board, tab)
+                .expect("the board's own frame must build");
+            crate::status::strip_ansi(rows.last().unwrap())
+        };
+
+        let mut idle = DispatchTab::default();
+        assert!(key_line(&idle).contains("[enter] start dispatching"));
+        idle.popup = Some(Popup::Loaded(Instant::now()));
+        assert!(!idle.popup.as_ref().unwrap().reads_keys());
+        let line = key_line(&idle);
+        assert!(line.contains("[enter] start dispatching"), "{line}");
+        idle.popup = Some(Popup::Ended(super::super::dispatcher::popup(
+            true,
+            "unattended.max_cost_usd reached",
+        )));
+        assert!(idle.popup.as_ref().unwrap().reads_keys());
+        let line = key_line(&idle);
+        assert!(!line.contains("[enter]"), "{line}");
+        assert!(line.contains("[o] options"), "{line}");
+
+        let mut running = running_tab();
+        running.popup = Some(Popup::Starting {
+            panel: starting_panel(),
+            since: std::time::SystemTime::now(),
+        });
+        let line = key_line(&running);
+        assert!(line.contains("[enter] stop dispatching"), "{line}");
+        running.popup = Some(Popup::Stop(0));
+        let line = key_line(&running);
+        assert!(!line.contains("[enter]"), "{line}");
     }
 
     /// The same acceptance criterion for `message_frame`.
