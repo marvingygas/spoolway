@@ -380,6 +380,33 @@ refuses "\`--force\` is an unknown argument" "unexpected argument '--force'" \
 refuses "\`--all\` is an unknown argument" "unexpected argument '--all'" \
   "$SPOOLWAY" queue unqueue --all
 
+# ------------------------------------------------- the same command, twice at once
+# Two shells run `unqueue` on one stopped task with a branch and a worktree.
+# The second must find the task gone or be refused; neither may leave a
+# half-torn-down task, a copy in both places, or a worktree behind.
+echo hang > "$CTL/race"
+task_doc "$LIVE/race.md" race "$BODY" "group: race"
+must "a task to unqueue twice" "$SPOOLWAY" queue add --from "$LIVE/race.md"
+if drive_and_hold race implement 120; then ok "it reaches implement, then the dispatcher stops"
+else bad "it reaches implement, then the dispatcher stops (at \`$(stage_of race)\`)"; fi
+RACE_WORKTREE=$(worktree_of race)
+must "paused, so the board's rule offers unqueue" "$SPOOLWAY" queue pause race
+"$SPOOLWAY" queue unqueue race >"$LIVE/race-a.out" 2>&1 & RACE_A=$!
+"$SPOOLWAY" queue unqueue race >"$LIVE/race-b.out" 2>&1 & RACE_B=$!
+wait "$RACE_A"; RACE_A_RC=$?
+wait "$RACE_B"; RACE_B_RC=$?
+if [ $((RACE_A_RC == 0)) -eq 1 ] || [ $((RACE_B_RC == 0)) -eq 1 ]; then
+  ok "at least one of the two unqueues succeeded"
+else
+  bad "at least one of the two unqueues succeeded (exits $RACE_A_RC and $RACE_B_RC)"
+  sed 's/^/        /' "$LIVE/race-a.out" "$LIVE/race-b.out"
+fi
+works "the task is in pending" test -f "$SPOOLWAY_PROJECT_HOME/pending/race.md"
+works "and gone from the queue" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/race.md"
+works "its branch is gone" test -z "$(git branch --list task/race)"
+if [ -n "$RACE_WORKTREE" ] && [ ! -d "$RACE_WORKTREE" ]; then ok "and its worktree is gone"
+else bad "and its worktree is gone (\"$RACE_WORKTREE\" still exists)"; fi
+
 # ------------------------------------------------- a hook-failed task, requeued
 # A failing `queued` hook moves the task to `hook_failed` and leaves
 # `hook_paused:`, `hook_error:` and the hook's exit file behind. Unqueued and queued again, the task has to start
