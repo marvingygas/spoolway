@@ -453,9 +453,9 @@ not queued
 
   release-spoolway is still in the queue, at step ship.
 
-  a routine runs one copy at a time. let it finish, resume or
-  restart it from the board if it has stopped, or unqueue it
-  if it has not started. then queue the routine again.
+  a routine runs one copy at a time. let it finish, or unqueue
+  it from the board if it has stopped, or if it has not started
+  yet. then queue the routine again.
 
   [enter] close
 ```
@@ -474,11 +474,11 @@ board's TASK column and the `queued` popup show that name in place of the number
 whose `routine:` line is removed shows its id and still runs. `spoolway queue list` always prints
 the numbered id.
 
-Unqueuing a copy that has not started deletes it, from the board or with `spoolway queue
-unqueue`. `spoolway queue unqueue --force` deletes a copy that has started, after it tears the
-checkout down. The routine is still in `.spoolway/routines/`, so a draft in the pending directory would
-only duplicate it. The copy goes to the pending directory instead, with its `routine:` line
-removed, when no routine file has that `id:` any more. It is then the only record of the task.
+Unqueuing a copy deletes it, from the board or with `spoolway queue unqueue`. A copy that has
+started is deleted after its checkout is torn down and its branch deleted. The routine is still in
+`.spoolway/routines/`, so a draft in the pending directory would only duplicate it. The copy goes
+to the pending directory instead, with its `routine:` line removed, when no routine file has that
+`id:`. It is then the only record of the task.
 It also goes to the pending directory when a task that goes there in the same batch depends on it,
 so the two queue again together.
 

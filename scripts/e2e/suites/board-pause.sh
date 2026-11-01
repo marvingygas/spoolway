@@ -18,12 +18,14 @@
 # unqueue. The menu runs the action's own check again on `enter`, so each
 # section picks its item and then answers the panel it opens. `p`, `s`, `u`
 # and `U` are no longer board keys; `U` gets one pass that proves it does
-# nothing, and `spoolway queue unqueue --all` does its job.
+# nothing, and `spoolway queue unqueue <task>` does its job.
 #
 # Open task is checked once, for the popup a refused open shows: an editor
 # that is not on `PATH` is refused before anything is started. Open plan is
 # checked only for being listed, under open task, on a task with a `plan:`:
-# picking it would start the machine's real browser.
+# picking it would start the machine's real browser. Unqueue is checked on a
+# chain that never started, on a routine copy, and on a paused task whose
+# branch and worktree it deletes.
 #
 # Pausing from the menu and the dispatch tab's stop popup carry most of the
 # suite, since pausing and stopping with `i` are the two answers that can
@@ -739,10 +741,10 @@ lacks "carrying no leftover \`parked_from\`" "parked_from:" \
 lacks "or \`resume:\`" "resume:" "$SPOOLWAY_PROJECT_HOME/queue/never-run.md"
 
 # --------------------------------------------- `U` is no longer a board key
-# Unqueueing everything unstarted is `spoolway queue unqueue --all` now. Two
-# tasks sit on `queued`: `stalled`, and `never-run` back where its resume put
-# it. `U` on the board opens nothing and writes nothing; the command still
-# carries both back to pending.
+# Unqueueing is `spoolway queue unqueue <task>` now. Two tasks sit on
+# `queued`: `stalled`, and `never-run` back where its resume put it. `U` on
+# the board opens nothing and writes nothing; the command still carries both
+# back to pending.
 queue_idle stalled never-run
 MARK=$(wc -l < "$BOARD_LOG")
 # `U`, then `o`, whose menu is drawn only once every key before it has been
@@ -758,7 +760,11 @@ stage_stays "and writes nothing" stalled queued
 stage_stays "to any queued task" never-run queued
 
 _gone() { [ ! -e "$SPOOLWAY_PROJECT_HOME/queue/$1.md" ]; }
-must "unqueue --all carries out what U used to" "$SPOOLWAY" queue unqueue --all
+must "unqueue carries out what U used to" "$SPOOLWAY" queue unqueue stalled
+# `never-run` goes with `stalled` when it comes after it in the group.
+if [ -e "$SPOOLWAY_PROJECT_HOME/queue/never-run.md" ]; then
+  must "and the one that never ran" "$SPOOLWAY" queue unqueue never-run
+fi
 if poll_until 25 _gone stalled; then ok "the task leaves the queue"
 else bad "the task leaves the queue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 has "the task lands back in pending" "id: stalled" "$SPOOLWAY_PROJECT_HOME/pending/stalled.md"
@@ -849,7 +855,7 @@ draws "unqueue on a routine copy is titled by the routine's name" "unqueue night
 draws "and says the copy is deleted" "this copy is deleted. the"
 draws "naming the routine file that stays" ".spoolway/routines/nightly/nightly.md"
 draws "and where it is queued again" "the routines tab queues it again."
-never_draws "and does not promise a draft in pending" "the queue tab is what sends it again." "$MARK"
+never_draws "and does not promise a draft in pending" "goes back to:" "$MARK"
 stage_stays "nothing moves while the panel is open" nightly-1 queued
 
 press $'\r'
@@ -857,6 +863,49 @@ if poll_until 25 _gone nightly-1; then ok "enter removes the copy from the queue
 else bad "enter removes the copy from the queue"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
 works "no draft lands in pending" test ! -e "$SPOOLWAY_PROJECT_HOME/pending/nightly-1.md"
 works "and the routine file is untouched" test -f .spoolway/routines/nightly/nightly.md
+
+# ------------------- unqueue from a paused row's menu tears it down
+# A task that ran and was paused lists unqueue too, while the dispatcher
+# runs. Its panel says the branch and worktree go for good, in place of the
+# line saying nothing has run, and `enter` deletes both and carries the task
+# and the one after it to pending. `unq-head` gets a hang lane of its own so
+# it is genuinely cut and mid-turn before `queue pause` stops it; `unq-tail`
+# waits on it in the same group.
+mkdir -p "$CTL"
+echo hang > "$CTL/unq-head"
+task_doc "$LIVE/unq-head.md" unq-head "$BODY" "group: 0-unq"
+must "unq-head queues" "$SPOOLWAY" queue add --from "$LIVE/unq-head.md"
+queue_idle unq-tail unq-head
+UNQ_PID=$(lane_pid "unq-head · implement" 30)
+if [ -n "$UNQ_PID" ]; then ok "the lane to pause is really mid-turn"
+else bad "the lane to pause is really mid-turn"; fi
+UNQ_TREE=$(sed -n 's/^worktree_path: *//p' "$SPOOLWAY_PROJECT_HOME/queue/unq-head.md")
+works "and has a worktree of its own" test -d "$UNQ_TREE"
+UNQ_BRANCH=$(sed -n 's/^branch: *//p' "$SPOOLWAY_PROJECT_HOME/queue/unq-head.md")
+works "and a branch of its own" git show-ref --verify --quiet "refs/heads/$UNQ_BRANCH"
+must "pausing it by hand" "$SPOOLWAY" queue pause unq-head
+stage_reaches "it parks" unq-head paused 25
+
+MARK=$(wc -l < "$BOARD_LOG")
+cursor_to unq-head
+pick_item unqueue
+draws "unqueue on the paused row opens its panel" "unqueue unq-head"
+draws "saying it has a branch and a worktree" "unq-head has a branch and a worktree."
+draws "that are deleted for good" "both are deleted and cannot be recovered."
+draws "and listing the task after it" "unq-tail   (depends on unq-head)"
+never_draws "with no line saying nothing has run" "nothing has run" "$MARK"
+never_draws "and no line about the queue tab" "the queue tab is what sends" "$MARK"
+stage_stays "nothing moves while the panel is open" unq-head paused
+
+press $'\r'
+if poll_until 25 _gone unq-head; then ok "enter carries the paused task to pending"
+else bad "enter carries the paused task to pending"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+if poll_until 25 _gone unq-tail; then ok "and the task after it"
+else bad "and the task after it"; tail -30 "$BOARD_LOG" | sed 's/^/        /'; fi
+works "its worktree is removed" test ! -e "$UNQ_TREE"
+refuses "its branch is deleted" "" git show-ref --verify --quiet "refs/heads/$UNQ_BRANCH"
+has "the task lands in pending" "id: unq-head" "$SPOOLWAY_PROJECT_HOME/pending/unq-head.md"
+has "and so does the one after it" "id: unq-tail" "$SPOOLWAY_PROJECT_HOME/pending/unq-tail.md"
 
 # ------------------------- pause reaches a blocked row with a live lane
 #

@@ -1283,6 +1283,16 @@ pub fn reclaim(repo: &Repo, task_id: &str) {
     runs(repo).reclaim_task(task_id);
 }
 
+/// Stop every hook run of this task that is still going, and leave its files.
+/// For a caller that must end the runs before something else can fail, and
+/// reclaims the files itself only once that has not.
+pub fn stop(repo: &Repo, task_id: &str) {
+    let runs = runs(repo);
+    for key in runs.keys_for_task(task_id) {
+        runs.stop(&key);
+    }
+}
+
 /// [`reclaim`], after first stopping every hook run of this task that is still
 /// going — what moving a task back to `pending/` calls.
 ///
@@ -1292,11 +1302,8 @@ pub fn reclaim(repo: &Repo, task_id: &str) {
 /// the task's next run. With no pid file left, [`fire`] would also see the
 /// event as [`RunState::Fresh`] and start a second copy beside the first.
 pub fn stop_and_reclaim(repo: &Repo, task_id: &str) {
-    let runs = runs(repo);
-    for key in runs.keys_for_task(task_id) {
-        runs.stop(&key);
-    }
-    runs.reclaim_task(task_id);
+    stop(repo, task_id);
+    reclaim(repo, task_id);
 }
 
 /// One task hook run whose `.exit` file holds a non-zero code — what

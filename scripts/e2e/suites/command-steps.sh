@@ -88,17 +88,21 @@ add_command_step() {
 # than on their own pipeline.
 #
 # Taken out the way the case at the herdr stub does it: `dispatcher_stop`
-# first, because `unqueue` refuses while a dispatcher is up that could be
-# mid-turn on the task and a running one could write a deleted file back, then
-# `--force` because a task that got as far as `blocked` has a worktree of its
-# own. Deleting the queue file instead left that worktree and any live lane
-# behind it. The next `drive` starts a dispatcher again.
+# first, because a running dispatcher could write a deleted file back. The
+# task is paused where it can be, because a task that got as far as `blocked`
+# has a worktree of its own, which the unqueue deletes. Deleting the queue file
+# instead left that worktree and any live lane behind it. The next `drive`
+# starts a dispatcher again.
 forget() {
   local id
   dispatcher_stop
   for id in "$@"; do
     [ -e "$SPOOLWAY_PROJECT_HOME/queue/$id.md" ] || continue
-    must "$id is taken out of the queue" "$SPOOLWAY" queue unqueue "$id" --force
+    # Paused first: unqueue takes a stopped task only. `--force` because a
+    # command step a case left running makes the pause refuse without it,
+    # and its work is being thrown away with the task.
+    must "$id is paused" "$SPOOLWAY" queue pause --force "$id"
+    must "$id is taken out of the queue" "$SPOOLWAY" queue unqueue "$id"
   done
 }
 
@@ -1362,13 +1366,14 @@ fi
 # the whole run when one of them names a pipeline that is not there: left
 # queued, this one task refuses every `spoolway dispatch` for the rest of
 # the file. Taken out here rather than at the end of the suite, and with
-# `--force` because it has a worktree of its own by now, and
-# `dispatcher_stop` ahead of it because `unqueue` refuses outright while a
-# dispatcher is up that could be mid-turn on the task. The next scenario
-# starts its own with `dispatcher_restart`, so nothing is left without one.
+# paused first because it has a worktree of its own by now, and
+# `dispatcher_stop` ahead of it so no pass is running while the pipeline is
+# taken out from under the queue. The next scenario starts its own with
+# `dispatcher_restart`, so nothing is left without one.
 dispatcher_stop
+must "the failing-pane task is paused" "$SPOOLWAY" queue pause --force panedfail
 must "the failing-pane task is taken back out before its pipeline goes" \
-  "$SPOOLWAY" queue unqueue panedfail --force
+  "$SPOOLWAY" queue unqueue panedfail
 
 "$HERDRBIN/herdr" shutdown state >/dev/null 2>&1 || true
 unset HERDR_STUB_STATE

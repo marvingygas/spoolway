@@ -643,18 +643,19 @@ item:
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
 | `focus` | A row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. A blocked row an unblocker lane is working on counts as running. Otherwise, a `paused`, `blocked` or `hook_failed` row whose task still has a pane open: an agent lane, a kept one included, or a command step's pane. Never under the headless backend, never on a queued row, and never on a running row for a kept pane or a finished step. | Bring that pane in front of you, maximized, with `herdr pane zoom <pane> --on`. On a `paused`, `blocked` or `hook_failed` row with no step running, it is the task's open pane that started last. The pane stays zoomed until you unzoom it in herdr. |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
-| `unqueue` | A `queued` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A copy of a routine is deleted instead, when its routine file still exists. Asks first. For such a copy the panel is titled with the routine's name, says the copy is deleted, names the routine file that stays (relative to the repository root), and says the routines tab queues it again. When several tasks go, the panel lists the ones going back to the pending directory apart from the routine copies being deleted, each group with its own closing line. |
+| `unqueue` | A `queued` row, and a `paused`, `blocked` or `hook_failed` row with no live agent lane, no unblocker lane at work and no worktree cut going. Never a running or `done` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A task that has started is torn down first: its runs stop, its worktree is removed and its local `task/<id>` branch is deleted. A copy of a routine is deleted instead, when its routine file still exists. Asks first. The panel names the task and what happens to it. See [Unqueue panel](#unqueue-panel). |
 
 So a running row lists `open task`, `pause` and `restart`, and `focus` between `pause` and
 `restart` when its step's pane can be found. A paused row that can be resumed
-lists `open task` and `restart`, and `focus` between them while its task has a pane open. It is
-resumed with `r`:
+lists `open task`, `restart` and `unqueue`, and `focus` between `open task` and `restart` while
+its task has a pane open. It is resumed with `r`:
 
 ```
 ╭─ cart-empty-state ──────────────╮
 │  > open task                    │
 │    focus                        │
 │    restart                      │
+│    unqueue                      │
 │                                 │
 │  [enter] confirm   [esc] close  │
 ╰─────────────────────────────────╯
@@ -695,8 +696,8 @@ On the queue screen, a group lists `open plan` when any of its tasks sets `plan:
 
 `enter` runs exactly what the item names, through the same check that decided the list. A row
 that changed state while the menu was open gets nothing done to it. Resume is never in the menu.
-The board has no key that unqueues every task at once: `spoolway queue unqueue --all` does that
-from a shell.
+The board has no key that unqueues every task at once. Name each task to `spoolway queue unqueue
+<task>` from a shell.
 
 ### Editor
 
@@ -895,6 +896,52 @@ For a failed `queued` or `started` hook the panel names the step the task starts
 | `esc` | Close the panel and change nothing. The task stays on `hook_failed`. |
 
 When the dispatcher's copy of the pipelines refuses the task, the panel opens with the refusal in it, and the step is read from the board's own copy. When no copy can place the task, `k` shows the refusal in a popup instead. A skip that is refused leaves the panel open and prints the reason above the key row. When the task is no longer held by the hook the panel named, `enter` skips nothing and says so.
+
+### Unqueue panel
+
+`unqueue` in the options menu opens a panel titled `unqueue <task>`. A copy of a routine puts the routine's name in the title. The panel says what happens to the task before `enter` runs it.
+
+```
+╭─ unqueue sessions ─────────────────────────────╮
+│                                                │
+│  sessions has a branch and a worktree.         │
+│  both are deleted and cannot be recovered.     │
+│                                                │
+│  login is past its last: step suite.           │
+│  unqueueing leaves no other task to run them.  │
+│                                                │
+│  3 tasks go back to:                           │
+│  ~/.spoolway/shop/pending/                     │
+│                                                │
+│    sessions                                    │
+│    profile    (depends on sessions)            │
+│    settings   (depends on profile)             │
+│                                                │
+│  [enter] confirm   [esc] close                 │
+╰────────────────────────────────────────────────╯
+```
+
+| Part of the panel | When it shows |
+|---|---|
+| `<task> has a branch and a worktree.` and `both are deleted and cannot be recovered.` | A task being unqueued has a worktree or a local branch. A task that ran in a borrowed checkout gets neither line. |
+| `nothing has run for it yet.` or `nothing has run for these yet.` | No task being unqueued has started. |
+| `<task> is past its last: step <step>.` or `<task> is past its last: steps <a>, <b>.`, then `unqueueing leaves no other task to run them.` | The task that the unqueued one depends on, in its group, is past one or more `last:` steps without having run them. A task that is `done` or archived counts as past every `last:` step. |
+| `the task goes back to:` or a count of tasks that go back to the pending directory, with the tasks listed | Every task that is not a routine copy being deleted. |
+| `1 routine copy is deleted:` or `<n> routine copies are deleted:`, then `the routines tab queues it again.` | A routine copy whose routine file still exists. |
+
+The panel names a `last:` step and does nothing else about it. No task runs the step afterwards.
+
+| Key | What it does |
+|---|---|
+| `enter` | Unqueue the task and every unstarted task that depends on it. A task that has started is torn down first, as `spoolway queue unqueue` does it, with or without a dispatcher running. |
+| `esc` | Close the panel and change nothing. |
+
+`spoolway queue unqueue <task>` takes the same tasks without asking. It decides
+what it deleted by the same rule as the first row of the parts table above, and prints it as one
+line in its own words. It prints the `last:` sentence from the third row as one line, then one line
+for each task it moved. See [`spoolway queue unqueue <task>`](cli-reference.md#spoolway-queue-unqueue-task).
+
+When anything the panel drew has changed since it opened, `enter` redraws the panel with the line `this changed since it opened, so nothing was unqueued.` and changes nothing. A task that resumed, a new unblocker lane and a different `last:` result all count. A refusal `enter` meets stays in the panel, above the key line. On a short pane the panel folds its task lists under `… and n more` before it drops anything else. The warnings, the count and the key line always show.
 
 ### Footer
 
@@ -1962,10 +2009,9 @@ pipeline has no `blocked` step, an agent step runs again at once instead of wait
 A task's first worktree is never cut onto a branch that already exists. If `task/<id>` exists and
 the task has no checkout on record, the start fails and the task retries, then moves to `blocked`.
 In an unattended run the `blocked` lane meets the same failure, and the task then stops on
-`paused`. The message names the branch. The branch is either left over from an earlier task with the same
-id, or it holds this task's own work saved by `spoolway queue unqueue --force`. A dispatcher
-stopped in the middle of a cut does not count: the task records the cut before the branch is made,
-so the next dispatcher re-cuts onto it. Otherwise, choose one:
+`paused`. The message names the branch. The branch is left over from an earlier task with the same
+id. A dispatcher stopped in the middle of a cut does not count: the task records the cut before
+the branch is made, so the next dispatcher re-cuts onto it. Otherwise, choose one:
 
 | Goal | Steps |
 |---|---|
@@ -2130,6 +2176,30 @@ the command that resumes the task:
 Put the work on `task/<id>`, or finish or abort the operation, then resume the task. Cleanup
 runs again when the task reaches `done`. A borrowed checkout is not checked, because it is yours.
 
+### Tearing down a stopped task
+
+`spoolway queue unqueue <task>` tears a task that has stopped down the way cleanup does,
+with these differences. It makes no `wip` commit and deletes `task/<id>` whatever the branch
+holds. It tears down a worktree in any state listed under
+[A worktree that is off its branch](#a-worktree-that-is-off-its-branch). It writes no `removing/`
+file, no `## Handover` section, no archive entry and no patch measure. A pending draft of the task
+or of a task carried with it refuses the command before anything is torn down.
+
+| Step | What happens |
+|---|---|
+| 1 | The task lock is taken, and the task is checked again under the lock. |
+| 2 | Every lane of the task in a checkout of this project is stopped, and its spend is banked. |
+| 3 | Its hook runs, command runs and panes end. |
+| 4 | The worktree is removed, unless it was borrowed, and `task/<id>` is deleted. |
+| 5 | Its run files, lane aliases, lane records and session homes are deleted. |
+| 6 | The task and every not-started task that depends on it go to pending. A copy of a routine whose file exists is deleted instead. |
+
+A task counts as stopped when it is on `queued`, or on `paused`, `blocked` or `hook_failed` with
+no live lane and no worktree cut, whether a dispatcher runs or not. Any other task is refused. A
+pass that is running drops a task that leaves the queue, as described in
+[What a pass does](#what-a-pass-does). If the worktree or branch cannot be removed, the task stays
+queued with its run files in place.
+
 ### A removal that was stopped or failed
 
 A dispatcher killed during step 4 leaves a tree with most of its files gone. On the next pass the
@@ -2158,9 +2228,8 @@ step that leaves a read-only tree does not hold the task on `done`. The task is 
 first pass after the worktree is gone. Removing a worktree deletes the folder directly only when it
 sits under `worktrees/`.
 
-`spoolway queue unqueue --force` prints the first message on standard error and carries the task
-to `pending`. It does not try again. A copy of a routine whose worktree cannot be removed stays
-queued, and the command can be run again once the worktree is gone.
+If `spoolway queue unqueue` cannot remove a worktree, it prints the first message on
+standard error and leaves the task queued. Run the command again once the worktree is gone.
 
 ### The archive index
 

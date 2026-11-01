@@ -11787,6 +11787,109 @@ mod tests {
         );
     }
 
+    /// Unqueuing a stopped task banks what its lane spent and deletes its
+    /// branch although that holds a commit no remote has, which is the one
+    /// case `clean_up` keeps a branch for. No problem line is left about a
+    /// kept branch, since nothing is kept. Its lane record is gone from
+    /// `lanes.json` too, which this teardown writes itself, and another
+    /// task's stays.
+    #[test]
+    fn a_stopped_task_banks_its_lane_and_loses_a_branch_no_remote_has() {
+        let (mut repo, _root_guard) = fixture("stopped-teardown-banks");
+        priced(&mut repo, "priced-model");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        crate::repo::run(&repo.root, "git", &["checkout", "-q", "-b", "task/demo"]).unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "work no remote has"],
+        )
+        .unwrap();
+        crate::repo::run(&repo.root, "git", &["checkout", "-q", "work"]).unwrap();
+        let path = add_task(&repo, "demo", "paused");
+        let mut task = reload(&path);
+        task.front.branch = Some("task/demo".into());
+        task.save().unwrap();
+
+        let session = "stopped-lane";
+        let mut records = HashMap::new();
+        records.insert(
+            "demo · implement".to_string(),
+            LaneRecord {
+                kept: true,
+                session: session.into(),
+                kind: local_kind(&repo),
+                agent: "pi".into(),
+                model: "priced-model".into(),
+                ..LaneRecord::adopted(1)
+            },
+        );
+        records.insert("demo-two · implement".to_string(), LaneRecord::adopted(1));
+        save_lane_records(&repo, &records).unwrap();
+        let lane = lane_in(&repo, "demo · implement", LaneStatus::Done, "w1:p7");
+        let mux = FakeMux::new(vec![lane.clone()]);
+        let home = pi_home_with(session, 6_000);
+        let mut report = Report::default();
+        let gone = with_home(&home, || {
+            Dispatcher::new(&repo, &Pipelines::builtin(), &mux).tear_down_stopped(
+                &mut task,
+                &[lane],
+                &mut report,
+            )
+        });
+
+        assert!(gone, "{:?}", report.problems);
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert!(!has_branch(&repo, "task/demo"), "the branch goes with it");
+        let banked = crate::usage::read(&repo).unwrap();
+        let lines: Vec<_> = banked.iter().filter(|e| e.session == session).collect();
+        assert_eq!(lines.len(), 1, "its spend is banked once: {banked:?}");
+        assert_eq!(lines[0].tokens.input, 6_000);
+        assert!(path.exists(), "carrying the task on is the caller's");
+        let left = load_lane_records(&repo);
+        assert!(
+            !left.contains_key("demo · implement"),
+            "the task's lane record is still on disk: {:?}",
+            left.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            left.contains_key("demo-two · implement"),
+            "another task's record was removed"
+        );
+    }
+
+    /// Unqueuing a stopped task removes the session homes made for its lanes,
+    /// a lane that never banked a ledger line included, and no one else's.
+    #[test]
+    fn a_stopped_task_takes_its_session_homes_with_it() {
+        let (repo, _root_guard) = fixture("stopped-teardown-homes");
+        let path = add_task(&repo, "demo", "paused");
+        let home = crate::scratch::root("dispatch-stopped-teardown-homes");
+        let _ = std::fs::remove_dir_all(&home);
+        crate::platform::test_home::with_home(&home, || {
+            let ours = crate::agent::session_home("codex", "stopped-ours").unwrap();
+            let theirs = crate::agent::session_home("codex", "stopped-theirs").unwrap();
+            std::fs::create_dir_all(&ours).unwrap();
+            std::fs::create_dir_all(&theirs).unwrap();
+            crate::agent::tag_session_home("codex", "stopped-ours", repo.home(), "demo");
+            crate::agent::tag_session_home("codex", "stopped-theirs", repo.home(), "demo-two");
+
+            let mux = FakeMux::new(vec![]);
+            let mut report = Report::default();
+            let gone = Dispatcher::new(&repo, &Pipelines::builtin(), &mux).tear_down_stopped(
+                &mut reload(&path),
+                &[],
+                &mut report,
+            );
+
+            assert!(gone, "{:?}", report.problems);
+            assert!(!ours.exists(), "the task's session home was left behind");
+            assert!(theirs.exists(), "another task's home was removed");
+        });
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// Acceptance criterion: a trial's archived arms are not removed while a
     /// sibling of the same trial is still active — only once every arm has
     /// settled does the disposal in `a_trial_removes_every_arms_archive_

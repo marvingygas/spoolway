@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.17.0 to 0.18.0 | `spoolway queue unqueue <task>` unqueues any stopped task and every task after it, prints what it deleted and moved, and refuses only a running task; `--force` and `--all` are removed. | Replace `unqueue <task> --force` with `queue pause <task>` then `queue unqueue <task>`, replace `unqueue --all` with one `queue unqueue <task>` for each task, and update scripts that read its output. |
 | 0.16.0 to 0.17.0 | The overrides pipeline section lists every step key but `id` under three headers and its cursor starts on `description`; the step picker lists every pipeline's steps and its pipeline rows draw no counts; every empty eval table reads `no data.`. | Run `spoolway sync` and commit what it writes, and update pty scripts that walk the overrides pipeline section or its step picker, or match the eval screen's empty-table lines. |
 | 0.15.0 to 0.16.0 | The dispatcher no longer brings a pane to the front unless `dispatch.autofocus_panes` is on; `override promote` keeps the entry in the layer; bare `spoolway` opens on the dispatch tab and the strip gains `OVERRIDES`; the STATE cell is the state word alone; one-answer popups have no answer row and find is search; the problem log follows `housekeeping.retention_days`; a failed command step's status line names a kept copy of its log; the eval tab's title names its sections. | Run `spoolway sync` and commit what it writes, set `autofocus_panes = true` to keep panes coming forward, drop each promoted override once its branch merges, and update scripts that drive the opening tab, one-answer popups, search or the eval title, read STATE ages, match the promote line or read the failed log path. |
 | 0.14.1 to 0.15.0 | `dispatch.backend` is retired; `gate:` is `on_pass`, `on_fail` or `always`, allowed only on an agent step, and older binaries refuse those values; a `gate_at:` that names a command step is refused; JSON prints `gate` as a string; a report a gate holds needs a `--handoff`; `~/.spoolway/editor.toml` is no longer read; a job runs one whole routine and a routine holds one active job; the jobs tab is gone; home-mode plan pages live in the workspace; a resume onto a step without `session: true` opens a fresh conversation; TUI text and shared messages are lowercase; releases carry bare executables in place of archives; a binary npm did not install never checks for updates. | Run `spoolway sync` in each project and home-mode clone and commit what it writes, upgrade CI and teammates to the same release, move each `gate:` off a command step, set `VISUAL` or `EDITOR`, clear what `spoolway doctor` fails for your jobs, set `session: true` where a resume should continue, and update scripts that set `dispatch.backend`, read `gate` in JSON, report on a gated step, drive the jobs tab, match messages by case or fetch release archives. |
@@ -57,6 +58,37 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.17.0 to 0.18.0
+
+Nothing to sync. Update the scripts that call `spoolway queue unqueue`.
+
+- `spoolway queue unqueue <task>` takes any stopped task, as the board's `unqueue` does, with no
+  prompt and with a dispatcher running or not. A stopped task is one on `queued`, or on `paused`,
+  `blocked` or `hook_failed` with no live lane and no worktree cut going. Every task after it in
+  its group goes to the pending directory with it. A started task has its worktree and its local
+  `task/<id>` branch deleted first. A running task is refused with the pause command to run first,
+  and nothing is changed. See [`spoolway queue unqueue <task>`](cli-reference.md#spoolway-queue-unqueue-task).
+- `--force` is removed. Passing it is the argument parser's unknown-argument error. A task that
+  was running must now be paused first.
+
+  | Task | 0.17.0 | 0.18.0 |
+  |---|---|---|
+  | stopped on `paused`, `blocked` or `hook_failed` | `spoolway queue unqueue <task> --force` | `spoolway queue unqueue <task>` |
+  | running | `spoolway queue unqueue <task> --force`, with no dispatcher running | `spoolway queue pause <task>`, then `spoolway queue unqueue <task>` |
+
+- `--all` is removed, and passing it is the same error. It took every task that had not started.
+  Name each task instead, and a task that depends on one you name goes with it. A task that never
+  started is now also unqueued together with the tasks after it, where 0.17.0 refused it while a
+  queued task depended on it.
+- The output changes. The command no longer prints `removed worktree <path>` or `kept worktree
+  <path>`. A started task prints one deletion line instead, only when it deleted a branch or
+  a worktree: `deleted branch <branch> and its worktree`, `deleted branch <branch>` when it had no
+  worktree, or `deleted worktree <path>` when it had no local branch. A task left at the end of its group after it walked past a
+  `last:` step prints `<task> is past its last: step <step>. unqueueing leaves no other task to run
+  them.`. Each task it moved prints `unqueued `<task>` → <path>`. A running task's refusal now
+  reads `` `<task>` is running step <step> — unqueue takes a stopped task only. `` and no
+  longer names `--force`.
 
 ## 0.16.0 to 0.17.0
 
@@ -619,8 +651,6 @@ more: the `Run spoolway sync to apply the last update.` line and the update popu
   git branch -m task/<id> <name>    # keep it, then set starts_from: <name> in the task
   git branch -D task/<id>           # drop it
   ```
-
-  This also covers a task sent again after `spoolway queue unqueue --force` kept its branch.
 - Delete `~/.spoolway/<label>-<id>/sync-stamp`. Nothing reads it now.
 - Expect `spoolway doctor` to exit non-zero while a task hook has failed. Hook failures left the
   board and are `FAIL` rows labelled `issue_tracking hooks` in `doctor` and in the popup before
@@ -790,8 +820,7 @@ edit. `spoolway pipeline check` names any pipeline that no longer loads.
   `/tmp/.spoolway`. New project labels are cut to 64 characters; existing labels are kept.
 - Handle exit 1 in any script that runs `spoolway resume <id>`, with or without `--stage`, on a
   queued or running task. Use `spoolway queue pause <task>` to stop a running task first.
-  `--stage` also refuses while a `depends_on` task is not done, and
-  `spoolway queue unqueue <id> --force` refuses a started task that a queued task depends on.
+  `--stage` also refuses while a `depends_on` task is not done.
 - Rust projects: once every task cut before the upgrade has finished, run
   `rm -rf ~/.spoolway/<label>-<id>/.cargo-target`. Each worktree now builds into its own
   `target/`, and spoolway never removes the old folder. Deleting it earlier makes cargo fail with
