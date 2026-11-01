@@ -29,8 +29,8 @@ screen over the same rows.
 <img src="screenshots/readme/eval.png" alt="the eval screen">
 
 The screen holds three tables. The lanes table groups dispatched lanes. The directory table
-groups sessions run by hand in a watched directory. The trials table lists every trial. `tab`
-cycles through them, lanes to directories to trials and back.
+groups sessions run by hand in a watched directory. The trials table lists every trial. `→`
+cycles through them, lanes to directories to trials and back, and `←` cycles the other way.
 
 A table with no rows shows the single line `no data.`, whatever left it empty. The directory
 table shows it under both `by dir` and `by session`.
@@ -75,13 +75,13 @@ names the view `[t]` switches to.
 
 | View | Border's right side | Key line |
 |---|---|---|
-| Totals | `by pipeline · totals` | `[d] descending   [t] per task   [tab] section` |
-| Per task | `by pipeline · per task` | `[d] descending   [t] totals   [tab] section` |
+| Totals | `by pipeline · totals` | `[d] descending   [t] per task` |
+| Per task | `by pipeline · per task` | `[d] descending   [t] totals` |
 
 On the directory table the same view is named `per session`, as in `by dir · per session`.
 
-The view survives `[tab]`, `[r]`, a change of `by` and the filter panel. Every new visit to the
-eval tab opens on totals. The trials table has no `[t]`.
+The view survives a move between sections, `[r]`, a change of `by` and the filter panel. Every
+new visit to the eval tab opens on totals. The trials table has no `[t]`.
 
 After the grouping and the view, the top border's right side names the scope only for
 `--project` and `--all`, then lists the filters in force. The trials table has no grouping, so
@@ -108,7 +108,7 @@ The sort reads each row's raw figure, not its drawn cell, so `1h 20m` sorts corr
 `—` or an unpriced cost, sorts last in both directions, and the `total` or `average` line always
 stays last.
 
-The sort survives a change of `by`, the filter panel, `[tab]` and `[r]`. Each table keeps its
+The sort survives a change of `by`, the filter panel, a move between sections and `[r]`. Each table keeps its
 own sort. Pressing `[t]` moves a sort on a figure column to the matching column of the other
 view, such as `IN` to `IN/TASK` and `TIME` to `TIME/TASK`. `IN USD` moves to `IN USD/TASK`, and the other three class costs move the same way. A sort on `USD/TASK` moves to `USD`.
 
@@ -310,7 +310,7 @@ reached, ran nothing and banks nothing.
 
 ## The directory table
 
-`[tab]` switches to the directory table. A second `[tab]` opens the trials table, below. The
+`→` switches to the directory table. A second `→` opens the trials table, below. The
 directory table covers every watched root, this project's own directory included, even one
 with no sessions yet. It opens on `by dir`, one row per watched directory.
 
@@ -369,7 +369,7 @@ directory table; it is read from the screen only.
 
 ## The trials table
 
-A second `[tab]` from the directory table opens the trials table, one row per trial that
+A second `→` from the directory table opens the trials table, one row per trial that
 banked a lane in the window, newest first. A trial groups the arms the `trial` item on a group forked, one
 per ticked pipeline, under one trial id. See [Trials](planning.md#trials).
 

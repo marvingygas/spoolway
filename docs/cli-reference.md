@@ -196,7 +196,7 @@ board's branch.
 | Key | What it does |
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
-| `tab` | Switch focus between the groups and tasks panes, and move the brackets with it |
+| `←` `→` | Switch focus between the groups and tasks panes, and move the brackets with it |
 | `esc` | With the tasks pane focused, return focus to the groups pane |
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
@@ -214,7 +214,7 @@ task, in this order:
 | `delete` | Delete the task, when it is pending. See [Deleting pending tasks](planning.md#deleting-pending-tasks) |
 
 Over the groups pane it offers these for the highlighted group. A group with no tasks and no plan
-page says `nothing to do here`. To reach them from the tasks pane, press `tab` first.
+page says `nothing to do here`. To reach them from the tasks pane, press `←` first.
 
 | Item | What it does |
 |---|---|
@@ -912,7 +912,7 @@ Bare `spoolway`'s eval tab draws the interactive eval screen instead.
 
 | Key | What it does |
 |---|---|
-| `[tab]` | Cycle through the lanes, directory and trials tables |
+| `[←→]` | Cycle through the lanes, directory and trials tables |
 | `[↑↓]` | Move the cursor |
 | `[a]` / `[d]` | Open the sort popup, ascending or descending |
 | `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |

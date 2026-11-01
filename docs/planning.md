@@ -144,7 +144,7 @@ Bare `spoolway` opens the screen on the dispatch tab, and `2` opens the queue ta
 pane, titled `groups`, lists one row per group in the pending directory, and one per plan page no
 task names yet. The right pane, titled `tasks`, lists the highlighted group's tasks and what each
 waits on. The focused pane's title is drawn in square brackets, such as `[groups]`, so you can see
-which pane the keys act on. `tab` moves the brackets to the other pane.
+which pane the keys act on. `←` and `→` move the brackets to the other pane.
 
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in
@@ -216,7 +216,7 @@ A plan line always reads `0 open — plan <path>`, so a script that counts group
 `o` opens a menu for the row the focused pane highlights, titled with that row's name. With
 the tasks pane focused it acts on the highlighted task. With the groups pane focused it acts
 on the highlighted group, even though the tasks pane shows that group's tasks too. To reach a
-group's actions from the tasks pane, press `tab` first. The cursor opens on the first item.
+group's actions from the tasks pane, press `←` first. The cursor opens on the first item.
 A group whose tasks name a plan page lists `open plan` first:
 
 ```
@@ -368,7 +368,7 @@ Bare `spoolway` has a routines tab, between the queue and overrides tabs. Its le
 titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
 pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
 As on the queue tab, the focused pane's title is drawn in square brackets, such as `[routines]`,
-and `tab` moves the brackets to the other pane.
+and `←` and `→` move the brackets to the other pane.
 
 ```
 ╭─ [routines] ─────────────┬─ details ─────────────────────────────────────────────────────────────╮
@@ -387,7 +387,7 @@ and `tab` moves the brackets to the other pane.
 │                          │       description: chore(deps): review and merge open Dependabot pull │
 │                          │                    requests                                           │
 ╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯
- [space] select   [enter] queue   [o] options   [tab] details   [q] quit
+ [space] select   [enter] queue   [o] options   [q] quit
 ```
 
 What the job rows say depends on how many jobs point at the routine:

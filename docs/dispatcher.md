@@ -926,7 +926,7 @@ to `4`, and `4` opens eval.
 The tab has four sections, named in its list box's title. The open one is bracketed. The tab
 always opens on config. `→` moves the brackets one section right, wrapping from active back to
 config, and `←` moves them one section left, wrapping from config to active. They move the
-section only while its list has the keys: inside a search row or a popup they do nothing there.
+section only while the section is at rest. They do nothing inside a search row or a popup.
 
 ```
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮

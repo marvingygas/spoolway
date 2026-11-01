@@ -340,7 +340,7 @@ spoolway eval
 
 `spoolway eval` prints the lanes table, grouped by pipeline. `spoolway eval --by version`
 compares a pipeline's versions. Bare `spoolway`'s eval tab opens the same table interactively:
-`tab` cycles to the directory table and the trials table, `t` switches between totals and per-task
+`→` cycles to the directory table and the trials table, `t` switches between totals and per-task
 figures, `f` filters, and `e` exports CSV.
 
 <img src="docs/screenshots/readme/eval.png" alt="the eval tab" width="100%">
