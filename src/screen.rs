@@ -958,6 +958,20 @@ pub(crate) fn options(title: &str, items: &[&str], cursor: usize) -> Vec<String>
     boxed(title, &answer_rows(&items, cursor)[1..])
 }
 
+/// `key` typed into a one-line field holding `text`: a character is added,
+/// backspace takes the last one off, and anything else is ignored. `0x08`
+/// is the backspace many terminals send in place of `DEL`, the same pairing
+/// the queue tab's search reads.
+pub(crate) fn edit(text: &mut String, key: Key) {
+    match key {
+        Key::Backspace | Key::Char('\u{8}') => {
+            text.pop();
+        }
+        Key::Char(c) if !c.is_control() => text.push(c),
+        _ => {}
+    }
+}
+
 /// `cursor` moved by `key` over a list of `answers` answers: up or down
 /// one row, held at either end, and unchanged by any other key.
 pub(crate) fn move_cursor(cursor: usize, answers: usize, key: Key) -> usize {

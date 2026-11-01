@@ -42,7 +42,7 @@ use std::io::Write;
 use anyhow::Result;
 
 use super::shell::{self, Leave};
-use super::{Key, Notice, PollableRead, keys, pad_to, pad_visible};
+use super::{Key, Notice, PollableRead, edit, keys, pad_to, pad_visible};
 use crate::config::Config;
 use crate::repo::Repo;
 use crate::status::{DIM, RESET};
@@ -602,21 +602,6 @@ fn browse(state: &mut State, key: Key) {
 /// either end.
 fn move_cursor(state: &mut State, key: Key) {
     state.cursor = super::move_cursor(state.cursor, state.matches().len(), key);
-}
-
-/// `key` typed into a one-line field holding `text`: a character is added,
-/// backspace takes the last one off, and anything else is ignored. `0x08`
-/// is the backspace many terminals send in place of `DEL`, the same pairing
-/// the queue tab's search reads. [`crate::screen::picker`]'s search row
-/// types through it too.
-pub(crate) fn edit(text: &mut String, key: Key) {
-    match key {
-        Key::Backspace | Key::Char('\u{8}') => {
-            text.pop();
-        }
-        Key::Char(c) if !c.is_control() => text.push(c),
-        _ => {}
-    }
 }
 
 /// Write `key` as `value` into the layer, as typed. An empty key, or a

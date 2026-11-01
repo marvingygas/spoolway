@@ -64,7 +64,8 @@ pub(crate) struct Look {
 
 /// Where the fetch on open stands.
 enum Fetch<T> {
-    /// None was asked for, or it succeeded.
+    /// None was started, since none was asked for or the checkout has no
+    /// `origin`, or it succeeded and the list was read again.
     Off,
     /// Running on its own thread, which answers on `answer` and then
     /// signals `wake`.
@@ -74,13 +75,16 @@ enum Fetch<T> {
     },
     /// It failed, for git's reason.
     Failed(String),
+    /// It succeeded, but the list could not be read again after it, for
+    /// this reason, so the list is still the one from before the fetch.
+    Unread(String),
 }
 
 /// What the fetch's thread answers: why the fetch failed, if it did, and
-/// the list read again after it, unless that read failed.
+/// the list read again after it, or why that read failed.
 struct Fetched<T> {
     failure: Option<String>,
-    entries: Option<Vec<Entry<T>>>,
+    entries: std::result::Result<Vec<Entry<T>>, String>,
 }
 
 /// A picker over a list of entries.
@@ -124,7 +128,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
 
     /// The picker, fetching `origin` in the checkout at `root` and then
     /// listing what `reload` reads. The entries it was made with stay when
-    /// `reload` fails. A checkout with no `origin` has nothing to fetch, so
+    /// `reload` fails, under a row saying so. A checkout with no `origin` has nothing to fetch, so
     /// its picker lists at once rather than failing a fetch every time.
     pub(crate) fn fetching_origin(
         mut self,
@@ -140,7 +144,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
         let root = root.to_path_buf();
         std::thread::spawn(move || {
             let failure = fetch_origin(&root);
-            let entries = reload().ok();
+            let entries = reload().map_err(|err| format!("{err:#}"));
             // A picker closed while the fetch ran has dropped its end, so
             // the answer goes nowhere and nothing is signalled.
             if send.send(Fetched { failure, entries }).is_ok()
@@ -169,7 +173,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
     }
 
     /// Take the fetch's answer, if it has come: the list read after it, and
-    /// why it failed when it did.
+    /// why the fetch or the read failed when one did.
     pub(crate) fn settle(&mut self) {
         let Fetch::Running { answer, .. } = &self.fetch else {
             return;
@@ -180,15 +184,24 @@ impl<T: Clone + Send + 'static> Picker<T> {
             // The thread ended without answering, which only a panic does.
             Err(TryRecvError::Disconnected) => Fetched {
                 failure: Some("the fetch stopped without an answer".to_string()),
-                entries: None,
+                entries: Err("the fetch stopped without an answer".to_string()),
             },
         };
-        if let Some(entries) = fetched.entries {
-            self.entries = entries;
-        }
-        self.fetch = match fetched.failure {
-            Some(reason) => Fetch::Failed(reason),
-            None => Fetch::Off,
+        // A failed fetch is named first: the list from before it is then
+        // what the last fetch saw too, so its rows hold whether or not the
+        // read after it worked.
+        self.fetch = match (fetched.failure, fetched.entries) {
+            (Some(reason), entries) => {
+                if let Ok(entries) = entries {
+                    self.entries = entries;
+                }
+                Fetch::Failed(reason)
+            }
+            (None, Ok(entries)) => {
+                self.entries = entries;
+                Fetch::Off
+            }
+            (None, Err(reason)) => Fetch::Unread(reason),
         };
         self.cursor = 0;
         self.offset = 0;
@@ -222,7 +235,7 @@ impl<T: Clone + Send + 'static> Picker<T> {
                 self.filter.clear();
                 self.searching = false;
             }
-            other if self.searching => super::overrides::edit(&mut self.filter, other),
+            other if self.searching => crate::screen::edit(&mut self.filter, other),
             Key::Enter => {
                 let Some(value) = self.matches().get(self.cursor).map(|e| e.value.clone()) else {
                     return Picked::Open(Box::new(self));
@@ -260,6 +273,14 @@ impl<T: Clone + Send + 'static> Picker<T> {
                 &format!(
                     "  fetch failed: {}. showing the last fetch's branches. esc and reopen to \
                      try again.",
+                    reason.trim_end_matches('.')
+                ),
+                width,
+            ),
+            Fetch::Unread(reason) => crate::screen::wrap(
+                &format!(
+                    "  branches not read again: {}. showing the branches from before the \
+                     fetch. esc and reopen to try again.",
                     reason.trim_end_matches('.')
                 ),
                 width,
@@ -604,6 +625,27 @@ mod tests {
                 "╰────────────────────────────────────────────────╯",
             ]
         );
+    }
+
+    // A fetch that succeeds with a read after it that fails keeps the list
+    // from before the fetch, under rows saying the list was not read again
+    // and why.
+    #[test]
+    fn a_failed_read_after_the_fetch_says_the_list_is_from_before_it() {
+        let (root, _guard) = with_origin("unread");
+        let picker = settled(
+            Picker::new("lands in for wire", entries(&["main"]), LOOK)
+                .fetching_origin(&root, || anyhow::bail!("git for-each-ref broke")),
+        );
+        let rows = inside(&picker);
+        let blank = rows.iter().skip(2).position(String::is_empty).unwrap() + 2;
+        let said: Vec<&str> = rows[2..blank].iter().map(|l| l.trim()).collect();
+        assert_eq!(
+            said.join(" "),
+            "branches not read again: git for-each-ref broke. showing the branches from \
+             before the fetch. esc and reopen to try again."
+        );
+        assert_eq!(rows[blank + 1], "  > main");
     }
 
     // `esc` closes the picker while the fetch still runs, and the fetch's

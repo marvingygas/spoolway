@@ -7,10 +7,11 @@
 //! The picker fetches `origin` as it opens, then lists the local branches
 //! and `origin`'s, task branches left out. A fetch that fails leaves the
 //! branches the last fetch saw, under rows saying why. The files go into
-//! whichever checkout holds the picked one. When none does, a worktree is made for it
-//! beside the main checkout first, with a local branch tracking `origin`'s
-//! for one only the remote has. Nothing is committed, and the layer keeps
-//! every promoted entry, as `override promote` keeps them.
+//! whichever checkout holds the picked one. When none does, a worktree is
+//! made for it beside the main checkout first, with a local branch
+//! tracking `origin`'s for one only the remote has. Nothing is committed,
+//! and the layer keeps every promoted entry, as `override promote` keeps
+//! them.
 //!
 //! The write itself is `override promote`'s, file by file, into the folder
 //! [`Repo::tracked_write_root`] answers for that checkout, so the tab
