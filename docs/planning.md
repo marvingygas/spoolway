@@ -143,7 +143,8 @@ runs `spoolway task contract --from` over the directory to check the set.
 Bare `spoolway` opens the screen on the dispatch tab, and `→` reaches the queue tab. The left
 pane, titled `groups`, lists one row per group in the pending directory, and one per plan page no
 task names yet. The right pane, titled `tasks`, lists the highlighted group's tasks and what each
-waits on.
+waits on. The focused pane's title is drawn in square brackets, such as `[groups]`, so you can see
+which pane the keys act on. `tab` moves the brackets to the other pane.
 
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in
@@ -153,7 +154,7 @@ groups. A plan row shows only its name, without the date in front of it, with no
 no tail. With a plan row highlighted, the tasks pane says only `use /spoolway-tasks`:
 
 ```
-╭─ groups ───────────────┬─ tasks ────────────────────────────────────────────╮
+╭─ [groups] ─────────────┬─ tasks ────────────────────────────────────────────╮
 │   [ ] checkout         │                                                    │
 │   [ ] cart             │   use /spoolway-tasks                              │
 │ >     search           │                                                    │
@@ -366,9 +367,11 @@ never a task template: it holds finished tasks, not a skeleton with a placeholde
 Bare `spoolway` has a routines tab, between the queue and overrides tabs. Its left pane,
 titled `routines`, lists one row per routine, with a tick box and the routine's name. Its right
 pane, titled `details`, shows the highlighted routine's job, then its tasks under a `tasks` line.
+As on the queue tab, the focused pane's title is drawn in square brackets, such as `[routines]`,
+and `tab` moves the brackets to the other pane.
 
 ```
-┌ routines ────────────────┬ details ──────────────────────────────────────────────────────────────┐
+╭─ [routines] ─────────────┬─ details ─────────────────────────────────────────────────────────────╮
 │ > [ ] dependabot         │                                                                       │
 │   [ ] release-spoolway   │   schedule:    0 */2 * * *                                            │
 │                          │   pipeline:    dependabot                                             │
@@ -383,7 +386,7 @@ pane, titled `details`, shows the highlighted routine's job, then its tasks unde
 │                          │       depends on:  -                                                  │
 │                          │       description: chore(deps): review and merge open Dependabot pull │
 │                          │                    requests                                           │
-└──────────────────────────┴───────────────────────────────────────────────────────────────────────┘
+╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯
  [space] select   [enter] queue   [o] options   [tab] details   [q] quit
 ```
 
