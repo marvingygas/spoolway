@@ -1727,8 +1727,7 @@ mod tests {
         const ROUTINES: &str = "─ [routines] ─";
         // Its key line rather than its title: with no terminal to measure
         // the whole config list is drawn, and its top runs off the screen.
-        // Not `[w] open workspace` alone, which every overrides section's
-        // key line reads, ending in `[q] quit` only on the config list.
+        // No other tab's key line names `[w] open workspace`.
         const OVERRIDES: &str = "[o] options   [w] open workspace   [q] quit";
         let eval: &str = &format!("{TOP_LEFT}─ [eval]   directories   trials ");
         let visited = [
