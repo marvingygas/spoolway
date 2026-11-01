@@ -1363,9 +1363,9 @@ fi
 # queued, this one task refuses every `spoolway dispatch` for the rest of
 # the file. Taken out here rather than at the end of the suite, and with
 # `--force` because it has a worktree of its own by now, and
-# `dispatcher_stop` ahead of it because `unqueue` refuses outright while a
-# dispatcher is up that could be mid-turn on the task. The next scenario
-# starts its own with `dispatcher_restart`, so nothing is left without one.
+# `dispatcher_stop` ahead of it so no pass is running while the pipeline is
+# taken out from under the queue. The next scenario starts its own with
+# `dispatcher_restart`, so nothing is left without one.
 dispatcher_stop
 must "the failing-pane task is taken back out before its pipeline goes" \
   "$SPOOLWAY" queue unqueue panedfail --force

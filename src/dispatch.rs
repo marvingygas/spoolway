@@ -11777,7 +11777,9 @@ mod tests {
     /// Unqueuing a stopped task banks what its lane spent and deletes its
     /// branch although that holds a commit no remote has, which is the one
     /// case `clean_up` keeps a branch for. No problem line is left about a
-    /// kept branch, since nothing is kept.
+    /// kept branch, since nothing is kept. Its lane record is gone from
+    /// `lanes.json` too, which no pass follows to write, and another task's
+    /// stays.
     #[test]
     fn a_stopped_task_banks_its_lane_and_loses_a_branch_no_remote_has() {
         let (mut repo, _root_guard) = fixture("stopped-teardown-banks");
@@ -11810,6 +11812,7 @@ mod tests {
                 ..LaneRecord::adopted(1)
             },
         );
+        records.insert("demo-two · implement".to_string(), LaneRecord::adopted(1));
         save_lane_records(&repo, &records).unwrap();
         let lane = lane_in(&repo, "demo · implement", LaneStatus::Done, "w1:p7");
         let mux = FakeMux::new(vec![lane.clone()]);
@@ -11831,6 +11834,16 @@ mod tests {
         assert_eq!(lines.len(), 1, "its spend is banked once: {banked:?}");
         assert_eq!(lines[0].tokens.input, 6_000);
         assert!(path.exists(), "carrying the task on is the caller's");
+        let left = load_lane_records(&repo);
+        assert!(
+            !left.contains_key("demo · implement"),
+            "the task's lane record is still on disk: {:?}",
+            left.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            left.contains_key("demo-two · implement"),
+            "another task's record was removed"
+        );
     }
 
     /// Unqueuing a stopped task removes the session homes made for its lanes,

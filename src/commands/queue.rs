@@ -864,7 +864,16 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
     // The same per-task lock `unqueue_task` itself takes, held across the
     // whole teardown rather than just the final move: nothing else may
     // read or write this task's file while its checkout is coming down.
-    let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(id));
+    // Going on without it would make the stopped recheck below meaningless
+    // under a running dispatcher, so a holder that outlasts the wait refuses.
+    let _task_lock =
+        crate::lock::TaskLock::acquire(&repo.task_lock_file(id)).with_context(|| {
+            format!(
+                "did not unqueue `{id}`: its task lock could not be taken, because another \
+                 process holds it or the lock file could not be written (see the cause below). \
+                 run this again in a moment. nothing was torn down."
+            )
+        })?;
 
     let tasks = repo.tasks()?;
     let idx = tasks
@@ -874,14 +883,28 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
     let stage = tasks[idx].stage().to_string();
 
     let mux = crate::mux::backend(repo)?;
-    let lanes = mux.list_lanes().unwrap_or_default();
+    // A failed listing is not "no lanes": the lanes gate the teardown below,
+    // and reading none would let an unblocker keep running in a worktree that
+    // is about to be deleted, its spend never banked.
+    let mut lanes = mux.list_lanes().with_context(|| {
+        format!(
+            "did not unqueue `{id}`: the multiplexer would not list its lanes, so it cannot \
+             tell whether one is still working on the task. check that the multiplexer is \
+             running, then run this again. nothing was torn down."
+        )
+    })?;
+    // The multiplexer is shared with other projects and with people, and a
+    // session of theirs can carry the same `<task> · <step>` name. Only the
+    // lanes in a checkout of ours are stopped and banked.
+    let mine = crate::dispatch::our_checkouts(repo, &tasks);
+    lanes.retain(|lane| crate::dispatch::owns_cwd(&mine, &lane.cwd));
     if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())?
         && !crate::status::stopped_for_unqueue(repo, &tasks, pipelines, &lanes, id)
     {
         bail!(
             "did not unqueue `{id}`: it is on `{stage}` and a dispatcher is running for this \
              repo (pid {pid}), which could be moving it right now. a task is only torn down \
-             under a running dispatcher once it has stopped with no lane or command at work. \
+             under a running dispatcher once it has stopped with no lane or cut at work. \
              run `spoolway queue pause {id}`, wait until it shows paused, then run this \
              again. nothing was torn down."
         );
@@ -14172,6 +14195,63 @@ mod tests {
         queue_unqueue_forced(&repo, &pipelines, "nightly-3").unwrap();
         assert!(!copy.path.exists());
         assert!(draft.exists(), "the copy was carried to pending");
+    }
+
+    /// A started routine copy that a task carried with it depends on is
+    /// carried to pending too, beside that task, not deleted: the dependent
+    /// keeps naming the copy in `depends_on:`, and `queue add` refuses a task
+    /// whose dependency is nowhere. Fails when the copy is deleted.
+    #[test]
+    fn a_forced_unqueue_carries_a_routine_copy_a_dependent_leans_on() {
+        let (repo, _root_guard) = fixture("unqueue-forced-routine-dependent");
+        let pipelines = Pipelines::builtin();
+        let routine = repo.routines_dir().join("nightly").join("nightly.md");
+        std::fs::create_dir_all(routine.parent().unwrap()).unwrap();
+        std::fs::write(
+            &routine,
+            "---\nid: nightly\ngroup: demo\npipeline: default\n---\n## Goal\n\nDo it.\n",
+        )
+        .unwrap();
+        add(&repo, "nightly-3", &[]);
+        add(&repo, "after", &["nightly-3"]);
+        let mut copy = queued(&repo, "nightly-3");
+        copy.front.stage = "paused".to_string();
+        copy.front.routine = Some("nightly".into());
+        copy.save().unwrap();
+
+        queue_unqueue_forced(&repo, &pipelines, "nightly-3").unwrap();
+
+        assert!(!copy.path.exists());
+        let carried = std::fs::read_to_string(repo.pending_dir().join("nightly-3.md")).unwrap();
+        assert!(carried.contains("nightly-3"), "{carried}");
+        let after = std::fs::read_to_string(repo.pending_dir().join("after.md")).unwrap();
+        assert!(after.contains("nightly-3"), "{after}");
+        assert!(routine.exists(), "the routine file stays");
+    }
+
+    /// A newer draft already in pending for a task that would be carried along
+    /// refuses the whole unqueue while the checkout still stands: nothing is
+    /// torn down and no task moves. Fails when the check is left to the move.
+    #[test]
+    fn a_forced_unqueue_refuses_before_teardown_over_a_dependents_newer_draft() {
+        let (repo, _root_guard) = fixture("unqueue-forced-dependent-draft");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        add(&repo, "after", &["solo"]);
+        let worktree = paused_with_worktree(&repo, "solo");
+        let draft = repo.pending_dir().join("after.md");
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(&draft, "a newer draft\n").unwrap();
+
+        let err = queue_unqueue_forced(&repo, &pipelines, "solo").unwrap_err();
+
+        let said = format!("{err:#}");
+        assert!(said.contains("a newer draft of `after`"), "{said}");
+        assert!(said.contains("nothing was torn down"), "{said}");
+        assert!(worktree.exists(), "the worktree still stands");
+        assert!(branch_exists(&repo, "task/solo"));
+        assert!(repo.task("solo").is_ok() && repo.task("after").is_ok());
+        assert_eq!(std::fs::read_to_string(&draft).unwrap(), "a newer draft\n");
     }
 
     #[test]

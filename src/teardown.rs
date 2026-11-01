@@ -418,9 +418,10 @@ impl<'a> Dispatcher<'a> {
             //
             // Said here and not in `tear_down_checkout`'s own problem line,
             // because that has other callers that do not hold the task:
-            // `tear_down_stopped` carries it to pending (or, for a routine
-            // copy, deletes it) and `discard_arm` deletes it, and nothing
-            // would try again for either.
+            // `queue_unqueue_forced`, through `tear_down_stopped`, carries it
+            // to pending (or, for a routine copy, deletes it) and
+            // `discard_arm` deletes it, and nothing would try again for
+            // either.
             report.problems.push(format!(
                 "{}: stays at `done`; cleanup removes its worktree again on the next pass",
                 task.id()
@@ -642,10 +643,11 @@ impl<'a> Dispatcher<'a> {
     /// [`Dispatcher::branch_keep_reason`].
     ///
     /// Called from [`Dispatcher::clean_up`], once a task has actually
-    /// finished, and from `discard_arm` and [`Dispatcher::tear_down_stopped`],
-    /// which tear a checkout down on purpose. Stopping the dispatcher never reaches here
-    /// any more, since [`Dispatcher::sweep_on_stop`] leaves an interrupted
-    /// task's checkout exactly where it stood.
+    /// finished, from `discard_arm`, which tears a checkout down on purpose,
+    /// and, through [`Dispatcher::tear_down_checkout_with`], from
+    /// [`Dispatcher::tear_down_stopped`]. Stopping the dispatcher never
+    /// reaches here any more, since [`Dispatcher::sweep_on_stop`] leaves an
+    /// interrupted task's checkout exactly where it stood.
     ///
     /// `report` is where a branch kept because it is not fully pushed (or,
     /// with no remote, not yet in its base) gets named — see the comment on the delete itself, below. It is also where a
@@ -1304,6 +1306,11 @@ impl<'a> Dispatcher<'a> {
     /// homes are reclaimed. This is what unqueuing a paused, blocked or
     /// hook-failed task runs.
     ///
+    /// `lanes` must be only lanes this project owns, see [`crate::dispatch::owns_cwd`]: the
+    /// multiplexer is shared, and another project's session can carry the same
+    /// `<task> · <step>` name. Stopping it would kill their agent and bank its
+    /// spend into this project's ledger.
+    ///
     /// It leaves out what only a finished task has: no commit first, because
     /// the work is thrown away on purpose; no removal marker, because nothing
     /// half-removed is ever committed; and no archive, handover copy, patch or
@@ -1387,6 +1394,16 @@ impl<'a> Dispatcher<'a> {
             if let Some(record) = self.lanes.remove(&name) {
                 record.reclaim_session_home();
             }
+        }
+        // No pass follows an unqueue to write the records back, so they are
+        // saved here. Left on disk, the task's old records would outlive it,
+        // and `prune_stale_lane_records` keeps them once the same id is queued
+        // again, so the new run would start beside the old run's records.
+        if let Err(e) = save_lane_records(self.repo, &self.lanes) {
+            report.problems.push(format!(
+                "{}: could not save the lane records after the teardown: {e:#}",
+                task.id()
+            ));
         }
         true
     }

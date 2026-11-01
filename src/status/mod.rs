@@ -2755,9 +2755,15 @@ pub(crate) fn depended_on_by_queued<'a>(
 
 /// Whether the task `id` is stopped in the sense unqueuing a started task
 /// needs: parked on `paused`, `blocked` or `hook_failed`, with no agent lane
-/// mid-turn on it (an unblocker's included), no command step running for it
-/// and no worktree cut going. Teardown removes its checkout, so only a task
-/// nothing is moving may be torn down while a dispatcher runs.
+/// mid-turn on it (an unblocker's included) and no worktree cut going.
+/// Teardown removes its checkout, so only a task nothing is moving may be
+/// torn down while a dispatcher runs.
+///
+/// No check is made for a running command step. A parked stage is never a
+/// command step, since a pipeline's `blocked` step may not run a command, so
+/// the only command that can still be going is one an earlier step left in the
+/// background. Nothing is moving the task on its account, and the teardown
+/// stops it before the checkout goes.
 ///
 /// A task that is not in `tasks` is not stopped.
 pub(crate) fn stopped_for_unqueue(
@@ -2778,9 +2784,6 @@ pub(crate) fn stopped_for_unqueue(
     .contains(&tasks[idx].stage());
     parked
         && !live_agent_lane_tasks(repo, tasks, pipelines, lanes).contains(&idx)
-        && !running_command_steps(repo, tasks, pipelines)
-            .iter()
-            .any(|running| running.task == id)
         && crate::cut::running(repo, id).is_none()
 }
 
@@ -6966,6 +6969,64 @@ mod tests {
             &[],
             "ghost"
         ));
+    }
+
+    /// An unblocker's lane working on a `blocked` task keeps it from being
+    /// stopped, so a teardown under a running dispatcher refuses it. The same
+    /// lane in a directory that is not one of ours, such as another project's
+    /// session of the same name, does not.
+    #[test]
+    fn a_blocked_task_with_a_live_unblocker_lane_is_not_stopped_for_unqueue() {
+        let (repo, _root_guard) = fixture("stopped-for-unqueue-lane");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "b", &[], Some("blocked"), Some("b"));
+        let tasks = repo.tasks().unwrap();
+        let ours = lane("b · blocked", &repo.root);
+        let theirs = lane("b · blocked", Path::new("/somewhere/else"));
+
+        assert!(!stopped_for_unqueue(
+            &repo,
+            &tasks,
+            &pipelines,
+            &[ours],
+            "b"
+        ));
+        assert!(stopped_for_unqueue(
+            &repo,
+            &tasks,
+            &pipelines,
+            &[theirs],
+            "b"
+        ));
+        assert!(stopped_for_unqueue(&repo, &tasks, &pipelines, &[], "b"));
+    }
+
+    /// A worktree cut still going keeps a parked task from being stopped: the
+    /// teardown would remove the checkout the cut is writing.
+    #[test]
+    fn a_paused_task_whose_cut_is_going_is_not_stopped_for_unqueue() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("stopped-for-unqueue-cut");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[], Some("paused"));
+        let hook = repo.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nsleep 300\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = repo.worktree_root().join("task-solo");
+        let began = crate::cut::begin(&repo, "solo", &path, "task/solo", "group/demo");
+        assert!(
+            began
+                .unwrap_err()
+                .downcast_ref::<crate::cut::CutPending>()
+                .is_some()
+        );
+        let tasks = repo.tasks().unwrap();
+
+        assert!(!stopped_for_unqueue(&repo, &tasks, &pipelines, &[], "solo"));
+
+        crate::cut::stop_and_reclaim(&repo, "solo", "run it again").unwrap();
+        assert!(stopped_for_unqueue(&repo, &tasks, &pipelines, &[], "solo"));
     }
 
     // ---- Reader: coalescing and shutdown ----
