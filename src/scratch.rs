@@ -350,6 +350,12 @@ fn finished_run_pid(name: &str) -> Option<u32> {
 /// commits the same on a machine whose git has no global identity configured
 /// at all, which is what CI usually is.
 ///
+/// Automatic maintenance is turned off too. After a commit, git can start
+/// `git maintenance run --auto` detached in the background, and it writes
+/// `.git/objects/maintenance.lock` after the commit has returned. A test that
+/// lists the repository before and after a step then sees a file nobody in the
+/// test wrote, as macOS CI did on the v0.18.0 rehearsal.
+///
 /// `args` are appended to `git init -q`, for the `-b <branch>` or `--bare` a
 /// caller wants.
 #[cfg(test)]
@@ -357,7 +363,11 @@ pub(crate) fn git_init(root: &Path, args: &[&str]) {
     let mut init = vec!["init", "-q"];
     init.extend_from_slice(args);
     crate::repo::run(root, "git", &init).unwrap();
-    for (key, value) in [("user.email", "t@example.com"), ("user.name", "spoolway t")] {
+    for (key, value) in [
+        ("user.email", "t@example.com"),
+        ("user.name", "spoolway t"),
+        ("maintenance.auto", "false"),
+    ] {
         crate::repo::run(root, "git", &["config", key, value]).unwrap();
     }
 }

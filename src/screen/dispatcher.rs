@@ -746,12 +746,26 @@ mod tests {
     }
 
     /// A stop `enter` asked for that the board quits over still gets its
-    /// line, naming `enter`, and only one.
+    /// line, naming `enter`, and only one. The stand-in ignores `SIGINT`, as
+    /// a dispatcher still settling its pass does in effect: one that died of
+    /// the signal before the board quit would be reaped with its status
+    /// instead, which is a different line.
     #[cfg(unix)]
     #[test]
     fn a_quit_over_a_stop_enter_asked_for_keeps_that_reason() {
-        let (_root, log) = log_in("dispatcher-log-enter-then-quit");
-        let mut child = Dispatcher::stand_in_logging("exec sleep 30", log.clone());
+        let (root, log) = log_in("dispatcher-log-enter-then-quit");
+        std::fs::create_dir_all(&*root).unwrap();
+        let ready = root.join("ready");
+        let script = format!("trap '' INT; : > '{}'; exec sleep 5", ready.display());
+        let mut child = Dispatcher::stand_in_logging(&script, log.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stand-in never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         child.stop(Asked::Enter);
         drop(child);
         let text = logged(&log);
