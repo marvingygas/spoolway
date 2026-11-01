@@ -1356,7 +1356,12 @@ fn board_frame_rows(
 ) -> Option<Vec<String>> {
     let panel = tab.popup.as_ref().map(Popup::panel);
     let frame = board
-        .hosted_frame(repo, pipelines, tab.dispatching(), tab.drawn(panel.as_deref()))
+        .hosted_frame(
+            repo,
+            pipelines,
+            tab.dispatching(),
+            tab.drawn(panel.as_deref()),
+        )
         .ok()?;
     let mut rows = strip();
     rows.extend(frame.lines().map(str::to_string));

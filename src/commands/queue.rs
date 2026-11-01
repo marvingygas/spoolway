@@ -22494,7 +22494,8 @@ mod tests {
 
     /// Edit schedule over the list opens the schedule popup, titled for
     /// the highlighted routine, with its keys on the line under the frame —
-    /// and writes nothing yet.
+    /// and writes nothing yet. The line under the frame names `enter` only
+    /// once the typed text parses, while the popup names it throughout.
     #[test]
     fn new_job_opens_the_schedule_popup_for_the_highlighted_routine() {
         let (repo, _root_guard) = fixture("routine-new-job-open");
@@ -22503,6 +22504,19 @@ mod tests {
         let last = last_frame(&routines_screen(&repo, "jo\r")).to_string();
 
         assert!(last.contains("─ when does nightly run "), "{last}");
+        assert_eq!(
+            last.matches("[enter] accept   [esc] cancel").count(),
+            1,
+            "in the popup alone, with nothing typed yet: {last}"
+        );
+        assert_eq!(
+            last.matches("[esc] cancel").count(),
+            2,
+            "the line under the frame keeps esc: {last}"
+        );
+        assert!(job_names(&repo).is_empty());
+
+        let last = last_frame(&routines_screen(&repo, "jo\r0 3 * * *")).to_string();
         assert_eq!(
             last.matches("[enter] accept   [esc] cancel").count(),
             2,
