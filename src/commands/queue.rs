@@ -15699,9 +15699,9 @@ mod tests {
     #[test]
     fn a_key_inside_the_gate_picker_draws_without_starting_a_process_or_reading_a_file() {
         let (baseline_proc, baseline_reads) =
-            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\x1b[B\r");
+            process_and_read_counts("queue-reader-thread-gate-baseline", "\to\x1b[B\x1b[B\x1b[B\r");
         let (measured_proc, measured_reads) =
-            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\x1b[B\rj");
+            process_and_read_counts("queue-reader-thread-gate-measured", "\to\x1b[B\x1b[B\x1b[B\rj");
 
         assert_eq!(
             measured_proc, baseline_proc,
@@ -16326,9 +16326,8 @@ mod tests {
     }
 
     /// `o` lists what the focused row can do, titled with its name: over
-    /// the tasks pane a pending task offers open task, edit pipeline, gate
-    /// then delete, over
-    /// the groups pane a group with a pending task offers trial, save as
+    /// the tasks pane a pending chain head offers open task, edit pipeline,
+    /// edit lands in, gate then delete, over the groups pane a group with a pending task offers trial, save as
     /// routine then delete. A group with no tasks has none of them and opens
     /// the menu with nothing in it, and a pane with no row under its cursor
     /// opens no menu at all.
@@ -16353,6 +16352,7 @@ mod tests {
             [
                 RowOption::Open,
                 RowOption::EditPipeline,
+                RowOption::EditLandsIn,
                 RowOption::Gate,
                 RowOption::Delete
             ]
@@ -16411,6 +16411,7 @@ mod tests {
                 [
                     RowOption::Open,
                     RowOption::EditPipeline,
+                    RowOption::EditLandsIn,
                     RowOption::Gate,
                     RowOption::Delete
                 ],
@@ -16440,7 +16441,8 @@ mod tests {
     /// The groups pane's menu on a group whose task has a `plan:` draws
     /// `open plan`, `trial`, `save as routine` and `delete`, in that order,
     /// the cursor on the first, and that task's own menu draws `open task`,
-    /// `edit pipeline`, `gate` and `delete` with no `open plan` among them.
+    /// `edit pipeline`, `edit lands in`, `gate` and `delete` with no `open
+    /// plan` among them.
     #[test]
     fn the_group_menu_draws_open_plan_first_and_the_task_menu_drops_it() {
         let (repo, _root_guard) = fixture("screen-options-draws-plan");
@@ -16480,6 +16482,7 @@ mod tests {
                 format!("{TOP_LEFT}─ cart-totals {}{TOP_RIGHT}", "─".repeat(19)),
                 "│  > open task                    │".to_string(),
                 "│    edit pipeline                │".to_string(),
+                "│    edit lands in                │".to_string(),
                 "│    gate                         │".to_string(),
                 "│    delete                       │".to_string(),
                 "│                                 │".to_string(),
@@ -17077,6 +17080,7 @@ mod tests {
             [
                 RowOption::Open,
                 RowOption::EditPipeline,
+                RowOption::EditLandsIn,
                 RowOption::Gate,
                 RowOption::Delete
             ]
@@ -21394,11 +21398,11 @@ mod tests {
         );
         let groups = listed(&repo);
 
-        // Tab onto tasks, space to select, o, down twice onto gate (past
-        // edit pipeline) and enter to open the gate picker, down onto the
-        // pipeline's second step (`review`), enter to pick it, enter to
-        // submit.
-        screen(&repo, groups, "\t o\x1b[B\x1b[B\r\x1b[B\r\r");
+        // Tab onto tasks, space to select, o, down three times onto gate
+        // (past edit pipeline and edit lands in) and enter to open the gate
+        // picker, down onto the pipeline's second step (`review`), enter to
+        // pick it, enter to submit.
+        screen(&repo, groups, "\t o\x1b[B\x1b[B\x1b[B\r\x1b[B\r\r");
 
         let saved = std::fs::read_to_string(repo.queue_dir().join("wire.md")).unwrap();
         assert!(saved.contains("gate_at: review"), "{saved}");
