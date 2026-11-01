@@ -729,35 +729,61 @@ fn unqueue_saying(
         if crate::status::stopped_for_unqueue(repo, tasks, pipelines, lanes, id) {
             return Ok(());
         }
-        let stage = tasks
-            .iter()
-            .find(|t| t.id() == id)
-            .map_or("", |t| t.stage());
-        bail!(running_refusal(id, stage));
+        bail!(running_refusal(repo, pipelines, tasks, id));
     };
     unqueue_stopped(repo, pipelines, id, &check, say)
 }
 
 /// What a task that is not stopped is told: unqueue takes a stopped task only,
-/// and the pause command stops it where it is. Nothing was changed, and says
-/// so. A task on `done` is not running and has nothing to pause: the board
-/// offers it no `unqueue` either, and the dispatcher archives it on its own.
-fn running_refusal(id: &str, stage: &str) -> String {
+/// and what to do about the one thing still moving it. Nothing was changed, and
+/// says so.
+///
+/// The pause command is the way out for a task running an agent step, or held
+/// by a lane, but not for the other two. A running command step makes `queue
+/// pause` refuse without `--force`, and a worktree cut still going is not
+/// something `queue pause` stops, so each is named for what actually ends it.
+/// A task on `done` is not running and has nothing to pause: the board offers
+/// it no `unqueue` either, and the dispatcher archives it on its own.
+fn running_refusal(repo: &Repo, pipelines: &Pipelines, tasks: &[Task], id: &str) -> String {
+    let stage = tasks
+        .iter()
+        .find(|t| t.id() == id)
+        .map_or("", |t| t.stage());
     if stage == crate::pipeline::DONE {
         return format!(
             "`{id}` is done — unqueue takes a stopped task only, and a done task is archived on \
              its own.\n\nnothing was changed."
         );
     }
-    let doing = match stage {
-        crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED => {
-            format!("has a lane or a cut still working on `{stage}`")
+    if crate::cut::running(repo, id).is_some() {
+        return format!(
+            "`{id}` has a worktree cut still going on `{stage}` — unqueue takes a stopped task \
+             only.\n\n  `spoolway queue pause` does not stop a cut. wait for it to finish, then \
+             unqueue it:\n      spoolway queue unqueue {id}\n\nnothing was changed."
+        );
+    }
+    let command = crate::status::running_command_steps(repo, tasks, pipelines)
+        .into_iter()
+        .find(|running| running.task == id);
+    let doing = match (&command, stage) {
+        (Some(running), _) => format!("is running step {}", running.step),
+        (
+            None,
+            crate::pipeline::PAUSED | crate::pipeline::BLOCKED | crate::pipeline::HOOK_FAILED,
+        ) => {
+            format!("has a lane still working on `{stage}`")
         }
-        step => format!("is running step {step}"),
+        (None, step) => format!("is running step {step}"),
+    };
+    let pause = match &command {
+        Some(_) => format!(
+            "spoolway queue pause --force {id}   (throws away the command's work in progress)"
+        ),
+        None => format!("spoolway queue pause {id}"),
     };
     format!(
         "`{id}` {doing} — unqueue takes a stopped task only.\n\n  to stop it where it is, \
-         then unqueue it:\n      spoolway queue pause {id}\n      spoolway queue unqueue {id}\n\n\
+         then unqueue it:\n      {pause}\n      spoolway queue unqueue {id}\n\n\
          nothing was changed."
     )
 }
@@ -782,6 +808,12 @@ fn unqueue_unstarted(
     ids.extend(crate::status::unqueue_dependents(tasks, id));
     let skipped = crate::status::skipped_last_steps(repo, pipelines, tasks, &ids);
     let drafted = crate::status::drafted_in_batch(repo, &ids)?;
+    // Every draft in the way is found before the head moves. A draft under a
+    // task near the end of the chain would otherwise refuse after the head was
+    // already in pending, leaving a task queued on a dependency that is
+    // nowhere.
+    let carried = crate::status::carried_to_pending(repo, tasks, &ids, &drafted);
+    refuse_draft_in_the_way(repo, id, &carried, "nothing was changed.")?;
     // The head first: one that stayed queued refuses here, before a line
     // claims anything was left behind or any task after it moves.
     let head = unqueued_line(repo, id, crate::status::unqueue_in(repo, id, &drafted)?)?;
@@ -794,6 +826,25 @@ fn unqueue_unstarted(
     for each in &ids[1..] {
         let outcome = crate::status::unqueue_in(repo, each, &drafted)?;
         say(Said::Line(unqueued_line(repo, each, outcome)?));
+    }
+    Ok(())
+}
+
+/// Refuse, with `nothing` saying what was left alone, when a draft already in
+/// pending is where one of `carried` would be written. `id` is the task that
+/// was asked for.
+pub(crate) fn refuse_draft_in_the_way(
+    repo: &Repo,
+    id: &str,
+    carried: &[String],
+    nothing: &str,
+) -> Result<()> {
+    if let Some((carried_id, dest)) = crate::status::draft_in_the_way(repo, carried) {
+        bail!(
+            "did not unqueue `{id}`: a newer draft of `{carried_id}` is already at {} — move \
+             that draft aside, then run this again. {nothing}",
+            dest.display()
+        );
     }
     Ok(())
 }
@@ -828,7 +879,8 @@ pub(crate) fn unqueued_line(
 /// One thing [`unqueue_stopped`] has to tell whoever asked for it, as it
 /// happens: the command prints each, the board keeps the problems.
 pub(crate) enum Said {
-    /// What was done: a worktree removed or kept, a task carried or deleted.
+    /// What was done: the deletion line, the `last:` warning, or a task
+    /// carried or deleted.
     Line(String),
     /// Something the teardown could not do, named for a person to fix.
     Problem(String),
@@ -855,7 +907,7 @@ pub(crate) type UnqueueCheck<'a> = dyn Fn(&[Task], &[crate::mux::Lane]) -> Resul
 /// nothing: a worktree that cannot be removed leaves the task queued and its
 /// file untouched. A copy of a routine that still exists is deleted instead of
 /// carried, unless a task carried with it depends on it — see
-/// [`crate::status::forced_routine_file`].
+/// [`crate::status::stopped_routine_file`].
 ///
 /// The task lock is taken first, and `check` is asked under it with the
 /// queue and this project's own lanes as they stand then: an `Err` from it
@@ -914,7 +966,7 @@ pub(crate) fn unqueue_stopped(
     let dependents = crate::status::unqueue_dependents(&tasks, id);
     let drafted = crate::status::drafted_in_batch(repo, &dependents)?;
     let routine_file =
-        crate::status::forced_routine_file(repo, &tasks, &tasks[idx], &dependents, &drafted);
+        crate::status::stopped_routine_file(repo, &tasks, &tasks[idx], &dependents, &drafted);
     let carried = std::iter::once(id.to_string())
         .filter(|_| routine_file.is_none())
         .chain(
@@ -930,16 +982,12 @@ pub(crate) fn unqueue_stopped(
                 })
                 .cloned(),
         );
-    for carried_id in carried {
-        let dest = repo.pending_dir().join(format!("{carried_id}.md"));
-        if dest.exists() {
-            bail!(
-                "did not unqueue `{id}`: a newer draft of `{carried_id}` is already at {} — \
-                 move that draft aside, then run this again. nothing was torn down.",
-                dest.display()
-            );
-        }
-    }
+    refuse_draft_in_the_way(
+        repo,
+        id,
+        &carried.collect::<Vec<_>>(),
+        "nothing was torn down.",
+    )?;
 
     // Read before the teardown removes what they name. The same rules the
     // board's panel draws its warnings by, so the command and the popup say
@@ -28257,6 +28305,127 @@ body\n";
         assert!(err.ends_with("nothing was changed."), "{err}");
         assert_eq!(said, "");
         assert!(repo.task("login").is_ok());
+    }
+
+    /// A task running a command step is refused, and told the pause that
+    /// works for it: plain `queue pause` refuses a running command, so the
+    /// advice names `--force`. Fails when it sends a script to the pause that
+    /// is itself refused.
+    #[test]
+    fn queue_unqueue_names_pause_force_for_a_running_command_step() {
+        let (repo, _root_guard) = fixture("queue-unqueue-running-command");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.set_stage_unbanked("handover", "test setup");
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("handover", "solo");
+        runs.start(&key, "sleep 20", &repo.checkout, &BTreeMap::new())
+            .unwrap();
+
+        let (result, said) = unqueue_said(&repo, &pipelines, "solo");
+        let err = format!("{:#}", result.unwrap_err());
+        runs.stop(&key);
+
+        assert!(err.starts_with("`solo` is running step handover"), "{err}");
+        assert!(err.contains("spoolway queue pause --force solo"), "{err}");
+        assert!(err.ends_with("nothing was changed."), "{err}");
+        assert_eq!(said, "");
+        assert!(repo.task("solo").is_ok());
+    }
+
+    /// A parked task whose worktree cut is still going is told to wait for the
+    /// cut, not to pause: `queue pause` does not stop a cut, so that advice
+    /// would bring the same refusal back. Fails when the pause route is named.
+    #[test]
+    fn queue_unqueue_tells_a_task_with_a_cut_going_to_wait_for_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("queue-unqueue-cut-going");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = crate::pipeline::PAUSED.to_string();
+        task.save().unwrap();
+        let hook = repo.root.join(".git/hooks/post-checkout");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nsleep 300\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = repo.worktree_root().join("task-solo");
+        let began = crate::cut::begin(&repo, "solo", &path, "task/solo", "HEAD");
+        assert!(
+            began
+                .unwrap_err()
+                .downcast_ref::<crate::cut::CutPending>()
+                .is_some()
+        );
+
+        let (result, said) = unqueue_said(&repo, &Pipelines::builtin(), "solo");
+        let err = format!("{:#}", result.unwrap_err());
+        crate::cut::stop_and_reclaim(&repo, "solo", "run it again").unwrap();
+
+        assert!(
+            err.starts_with("`solo` has a worktree cut still going on `paused`"),
+            "{err}"
+        );
+        assert!(err.contains("wait for it to finish"), "{err}");
+        assert!(!err.contains("spoolway queue pause solo"), "{err}");
+        assert!(err.ends_with("nothing was changed."), "{err}");
+        assert_eq!(said, "");
+        assert!(repo.task("solo").is_ok());
+    }
+
+    /// A parked task is refused for a lane still working on it with the pause
+    /// route, which interrupts the lane. Asked of the wording directly, since
+    /// a lane in a test project's own checkout needs a live multiplexer.
+    /// Fails when the `has a lane still working` wording or the pause route
+    /// is lost.
+    #[test]
+    fn running_refusal_names_the_lane_still_working_on_a_parked_task() {
+        let (repo, _root_guard) = fixture("running-refusal-lane");
+        add(&repo, "solo", &[]);
+        let mut task = queued(&repo, "solo");
+        task.front.stage = crate::pipeline::BLOCKED.to_string();
+        task.save().unwrap();
+        let tasks = repo.tasks().unwrap();
+
+        let said = running_refusal(&repo, &Pipelines::builtin(), &tasks, "solo");
+
+        assert!(
+            said.starts_with("`solo` has a lane still working on `blocked` — unqueue takes"),
+            "{said}"
+        );
+        assert!(said.contains("spoolway queue pause solo\n"), "{said}");
+        assert!(said.ends_with("nothing was changed."), "{said}");
+    }
+
+    /// A draft already in pending under a task after the head refuses the
+    /// whole chain before the head moves. Fails before the change, which moved
+    /// the head to pending, then refused the dependent, leaving it queued on a
+    /// dependency that is in neither the queue nor the archive.
+    #[test]
+    fn queue_unqueue_refuses_a_draft_under_a_later_task_before_moving_the_head() {
+        let (repo, _root_guard) = fixture("queue-unqueue-later-draft");
+        add(&repo, "base", &[]);
+        add(&repo, "dependent", &["base"]);
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        let draft = repo.pending_dir().join("dependent.md");
+        std::fs::write(&draft, "a newer draft\n").unwrap();
+
+        let (result, said) = unqueue_said(&repo, &Pipelines::builtin(), "base");
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert_eq!(
+            err,
+            format!(
+                "did not unqueue `base`: a newer draft of `dependent` is already at {} — move \
+                 that draft aside, then run this again. nothing was changed.",
+                draft.display()
+            )
+        );
+        assert_eq!(said, "");
+        assert!(repo.task("base").is_ok(), "the head stays queued");
+        assert!(repo.task("dependent").is_ok());
+        assert!(!repo.pending_dir().join("base.md").exists());
     }
 
     /// A stopped task with a branch and a worktree says what it deleted, then

@@ -629,6 +629,11 @@ $ spoolway queue unqueue sessions
 nothing was changed.
 ```
 
+The pause command it names is the one that works for that task. A task running a command step is
+told to run `spoolway queue pause --force <task>` instead, which throws away the command's work in
+progress, because the plain pause refuses to do that. A task whose worktree is still being cut is
+told to wait for the cut to finish, because pausing does not stop it.
+
 A copy of a routine is deleted instead, when a routine file under `.spoolway/routines/` has the
 copy's `routine:` as its `id:`. Nothing is written to the pending directory. The command prints
 the routine file's path, and the routine stays there to queue again. A copy that has started loses

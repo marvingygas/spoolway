@@ -1525,7 +1525,7 @@ impl Board {
         };
         if !confirm.started {
             let ids: Vec<String> = confirm.chain.iter().map(|e| e.id.clone()).collect();
-            {
+            let drafted = {
                 let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&head.id))
                     .with_context(|| {
                         format!(
@@ -1548,14 +1548,27 @@ impl Board {
                     )
                 })?;
                 unchanged(&tasks, &lanes)?;
-            }
+                // A draft already in pending under any task of the chain
+                // refuses before the head moves, as `unqueue_stopped` does:
+                // otherwise a draft near the end would leave the head in
+                // pending and a task after it queued on a dependency that is
+                // nowhere.
+                let drafted = drafted_in_batch(repo, &ids)?;
+                let carried = carried_to_pending(repo, &tasks, &ids, &drafted);
+                crate::commands::refuse_draft_in_the_way(
+                    repo,
+                    &head.id,
+                    &carried,
+                    "nothing was unqueued.",
+                )?;
+                drafted
+            };
             // The head's lock is let go above, since `unqueue_in` takes it
             // again, so the dispatcher can launch the head in the gap. Its
             // `unqueue_in` then leaves it queued, and the refusal comes
             // before any task after it is carried away from a head still
             // running. A dependent refused later stops the rest the same
             // way, as `unqueue_stopped` does for a started head.
-            let drafted = drafted_in_batch(repo, &ids)?;
             for id in &ids {
                 let outcome = unqueue_in(repo, id, &drafted)?;
                 crate::commands::unqueued_line(repo, id, outcome)?;
@@ -2907,7 +2920,7 @@ pub(crate) fn unqueue_dependents(tasks: &[crate::task::Task], id: &str) -> Vec<S
 /// [`drafted_in_batch`] reads only tasks that have not started, so it cannot
 /// answer for this one. `spoolway queue unqueue` deletes by it and
 /// the board's `unqueue` panel marks the copy by it, so the two agree.
-pub(crate) fn forced_routine_file(
+pub(crate) fn stopped_routine_file(
     repo: &Repo,
     tasks: &[crate::task::Task],
     task: &crate::task::Task,
@@ -3138,7 +3151,7 @@ fn unqueue_lanes(
 ///
 /// Which routine copies the answer deletes is read through the same rules
 /// it deletes by — [`drafted_in_batch`] and [`deleted_on_unqueue`] for the
-/// tasks that have not started, [`forced_routine_file`] for a started head —
+/// tasks that have not started, [`stopped_routine_file`] for a started head —
 /// so the panel names exactly what it will do.
 fn unqueue_confirm(
     repo: &Repo,
@@ -3162,7 +3175,7 @@ fn unqueue_confirm(
             continue;
         };
         let routine_file = match entry.id == id && started {
-            true => forced_routine_file(repo, tasks, task, &ids[1..], &drafted),
+            true => stopped_routine_file(repo, tasks, task, &ids[1..], &drafted),
             false => deleted_on_unqueue(repo, task, &drafted),
         };
         // Shown relative to the checkout the routines are read from, as
@@ -3201,8 +3214,10 @@ impl UnqueueConfirm {
 }
 
 /// What unqueuing `task` deletes for good: its local branch when one exists,
-/// and the worktree it cut. `None` for a task that borrowed its checkout,
-/// which the teardown spares, and for one with neither.
+/// and the worktree it cut when that directory is still there. `None` for a
+/// task that borrowed its checkout, which the teardown spares, and for one
+/// with neither. A worktree a person already removed by hand is not listed,
+/// since nothing is left for the teardown to delete.
 ///
 /// The panel's [`unqueue_lead`] and the command's `deleted branch` line both
 /// read this, so the two cannot disagree about what is deleted.
@@ -3224,7 +3239,11 @@ fn unqueue_deletes(
             .is_ok()
         })
         .map(str::to_string);
-    let worktree = task.front.worktree_path.clone();
+    let worktree = task
+        .front
+        .worktree_path
+        .clone()
+        .filter(|path| path.exists());
     (!task.front.borrowed && (worktree.is_some() || branch.is_some())).then_some((branch, worktree))
 }
 
@@ -3420,9 +3439,14 @@ pub(crate) fn drafted_in_batch(repo: &Repo, ids: &[String]) -> Result<Vec<String
     Ok(drafted.into_iter().map(str::to_string).collect())
 }
 
-/// [`unqueue_task`] for one task of a batch: `drafted` is
+/// Move one task of a batch that has not started from the queue back to
+/// pending through [`carry_to_pending`], or delete it when it is a routine
+/// copy whose file still exists ([`deleted_on_unqueue`]). `drafted` is
 /// [`drafted_in_batch`]'s answer for the whole batch, and a routine copy in it
 /// is written to pending rather than deleted.
+///
+/// The task is read fresh under its lock and left alone when it has started
+/// since the caller looked, with [`Unqueued::Untouched`].
 pub(crate) fn unqueue_in(repo: &Repo, id: &str, drafted: &[String]) -> Result<Unqueued> {
     // The same per-task lock the dispatcher and `spoolway report` take, so
     // this rename cannot land in the middle of one of their read-modify-
@@ -3481,6 +3505,39 @@ pub(crate) fn deleted_on_unqueue(
         .filter(|_| !drafted.iter().any(|d| d == task.id()))
 }
 
+/// The ids of `ids` that [`unqueue_in`] writes to pending rather than
+/// deleting, for a chain of tasks that have not started: the ones a draft
+/// already in pending would stop. An id the queue no longer has is left out,
+/// since there is nothing of it to carry.
+pub(crate) fn carried_to_pending(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    ids: &[String],
+    drafted: &[String],
+) -> Vec<String> {
+    ids.iter()
+        .filter(|id| {
+            tasks
+                .iter()
+                .find(|t| t.id() == id.as_str())
+                .is_some_and(|t| deleted_on_unqueue(repo, t, drafted).is_none())
+        })
+        .cloned()
+        .collect()
+}
+
+/// The first of `carried` that already has a draft in pending, and the path
+/// of that draft: the one thing that makes [`carry_to_pending`] stop short.
+/// Asked of the whole chain before anything in it moves, so a draft under a
+/// task near the end cannot leave the head in pending and a task after it
+/// queued with a `depends_on:` that names nothing.
+pub(crate) fn draft_in_the_way(repo: &Repo, carried: &[String]) -> Option<(String, PathBuf)> {
+    carried.iter().find_map(|id| {
+        let dest = repo.pending_dir().join(format!("{id}.md"));
+        dest.exists().then(|| (id.clone(), dest))
+    })
+}
+
 /// What [`unqueue_in`] did, for the command that tells a person.
 pub(crate) enum Unqueued {
     /// Written to pending at this path, the queue file removed.
@@ -3498,7 +3555,7 @@ pub(crate) enum Unqueued {
 /// written to pending with every reserved key and the dispatcher's pause
 /// records dropped, then its queue file removed and its hook runs under
 /// `tracking/` stopped and reclaimed. The caller decides whether `task` may
-/// go — [`unqueue_task`] only carries a task that has not started, and
+/// go — [`unqueue_in`] only carries a task that has not started, and
 /// `commands::queue::unqueue_stopped`, which the board's `unqueue` and
 /// `queue unqueue` run on a stopped task, one whose checkout it has
 /// just torn down — and holds the task's lock while it does.
@@ -16941,13 +16998,14 @@ mod tests {
     }
 
     /// `enter` on an unstarted task's panel keeps the panel open with a
-    /// refusal when a task in it stays queued, here because a newer draft
-    /// of it already sits in pending. A head that stays is refused before
-    /// the task after it is carried away from it, and a dependent that
-    /// stays is named. Fails before the change, which threw each outcome
-    /// away, carried the rest and closed the panel as if all had gone.
+    /// refusal when a newer draft of any task in it already sits in pending,
+    /// the head or one after it. The refusal comes before anything moves, so
+    /// a draft under the last task of the chain cannot leave the head in
+    /// pending and a task after it queued on a dependency that is nowhere.
+    /// Fails before the change, which moved the head first, then refused
+    /// the dependent.
     #[test]
-    fn enter_on_an_unstarted_unqueue_panel_refuses_a_task_that_stays_queued() {
+    fn enter_on_an_unstarted_unqueue_panel_refuses_before_moving_anything() {
         use crate::screen::Key;
         for stays in ["solo", "after"] {
             let (repo, _root_guard) = fixture(&format!("unqueue-unstarted-{stays}-stays"));
@@ -16966,7 +17024,10 @@ mod tests {
             let BoardMode::ConfirmUnqueue(confirm) = &board.mode else {
                 panic!("{stays}: the panel closed over a task that stayed queued");
             };
-            let refusal = format!("did not unqueue `{stays}`: a newer draft is already at");
+            let refusal = format!(
+                "did not unqueue `solo`: a newer draft of `{stays}` is already at {}",
+                draft.display()
+            );
             assert!(
                 confirm
                     .error
@@ -16974,12 +17035,76 @@ mod tests {
                     .is_some_and(|e| e.contains(&refusal)),
                 "{stays}: {confirm:?}"
             );
-            assert!(repo.task(stays).is_ok(), "{stays} is still queued");
+            assert!(repo.task("solo").is_ok(), "solo is still queued");
+            assert!(repo.task("after").is_ok(), "after is still queued");
             assert_eq!(std::fs::read_to_string(&draft).unwrap(), "a newer draft\n");
-            if stays == "solo" {
-                assert!(repo.task("after").is_ok(), "after stays with its head");
-                assert!(!repo.pending_dir().join("after.md").exists());
+            for id in ["solo", "after"].into_iter().filter(|id| *id != stays) {
+                assert!(
+                    !repo.pending_dir().join(format!("{id}.md")).exists(),
+                    "{stays}: {id} must not have moved"
+                );
             }
+        }
+    }
+
+    /// The line the command prints after the teardown says what was there to
+    /// delete: a branch with its worktree, a branch alone, a worktree whose
+    /// recorded branch is not a local one, and nothing when the worktree a
+    /// person removed by hand was all there was. Fails when either of the two
+    /// one-sided forms is swapped or dropped, and when a worktree that is no
+    /// longer on disk is claimed deleted.
+    #[test]
+    fn the_deletion_line_names_only_what_there_is_to_delete() {
+        let (repo, _root_guard) = fixture("unqueue-deletion-line");
+        let there = repo.root.join("a-worktree");
+        std::fs::create_dir_all(&there).unwrap();
+        let gone = repo.root.join("removed-by-hand");
+
+        // (id, has a local branch, recorded worktree, the line said)
+        let cases = [
+            (
+                "both",
+                true,
+                Some(&there),
+                Some("deleted branch task/both and its worktree".to_string()),
+            ),
+            (
+                "branch-only",
+                true,
+                None,
+                Some("deleted branch task/branch-only".to_string()),
+            ),
+            (
+                "worktree-only",
+                false,
+                Some(&there),
+                Some(format!("deleted worktree {}", there.display())),
+            ),
+            (
+                "ghost-worktree",
+                true,
+                Some(&gone),
+                Some("deleted branch task/ghost-worktree".to_string()),
+            ),
+            ("ghost-only", false, Some(&gone), None),
+        ];
+        for (id, local, worktree, line) in cases {
+            add_to(&repo, id, &[], Some(crate::pipeline::PAUSED), Some(id));
+            if local {
+                crate::repo::run(&repo.root, "git", &["branch", &format!("task/{id}")]).unwrap();
+            }
+            let mut task = repo.task(id).unwrap();
+            task.front.branch = Some(format!("task/{id}"));
+            task.front.worktree_path = worktree.cloned();
+            task.save().unwrap();
+            let task = repo.task(id).unwrap();
+
+            assert_eq!(unqueue_deletion_line(&repo, &task), line, "{id}");
+            assert_eq!(
+                matches!(unqueue_lead(&repo, &task), UnqueueLead::Deletes),
+                line.is_some(),
+                "{id}: the popup's lead reads the same facts"
+            );
         }
     }
 

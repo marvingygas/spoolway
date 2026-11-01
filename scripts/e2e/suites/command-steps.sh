@@ -88,19 +88,20 @@ add_command_step() {
 # than on their own pipeline.
 #
 # Taken out the way the case at the herdr stub does it: `dispatcher_stop`
-# first, because `unqueue` refuses a task a dispatcher could be
-# mid-turn on, and a running one could write a deleted file back. The task is
-# paused where it can be, because a task that got as far as `blocked` has a
-# worktree of its own, which the unqueue deletes. Deleting the queue file instead left that worktree and any live lane
-# behind it. The next `drive` starts a dispatcher again.
+# first, because a running dispatcher could write a deleted file back. The
+# task is paused where it can be, because a task that got as far as `blocked`
+# has a worktree of its own, which the unqueue deletes. Deleting the queue file
+# instead left that worktree and any live lane behind it. The next `drive`
+# starts a dispatcher again.
 forget() {
   local id
   dispatcher_stop
   for id in "$@"; do
     [ -e "$SPOOLWAY_PROJECT_HOME/queue/$id.md" ] || continue
-    # Paused first: unqueue takes a stopped task only. A task already
-    # stopped on `blocked` or `hook_failed` may refuse the pause, and needs none.
-    "$SPOOLWAY" queue pause "$id" >/dev/null 2>&1 || true
+    # Paused first: unqueue takes a stopped task only. `--force` because a
+    # command step a case left running makes the pause refuse without it,
+    # and its work is being thrown away with the task.
+    must "$id is paused" "$SPOOLWAY" queue pause --force "$id"
     must "$id is taken out of the queue" "$SPOOLWAY" queue unqueue "$id"
   done
 }
@@ -1370,7 +1371,7 @@ fi
 # taken out from under the queue. The next scenario starts its own with
 # `dispatcher_restart`, so nothing is left without one.
 dispatcher_stop
-"$SPOOLWAY" queue pause panedfail >/dev/null 2>&1 || true
+must "the failing-pane task is paused" "$SPOOLWAY" queue pause --force panedfail
 must "the failing-pane task is taken back out before its pipeline goes" \
   "$SPOOLWAY" queue unqueue panedfail
 
