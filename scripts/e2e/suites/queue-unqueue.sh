@@ -218,6 +218,19 @@ else
   bad "and the lane it interrupted is really over"
 fi
 
+# Run again over the same task, as a second person or the board would after the
+# first run finished: the task is no longer in the queue, so the command
+# refuses cleanly and the pending document the first run wrote stays as it was.
+BEFORE_AGAIN=$(cksum <"$SPOOLWAY_PROJECT_HOME/pending/solo.md")
+if "$SPOOLWAY" queue unqueue solo --force >"$LIVE/unqueue-again.out" 2>&1; then
+  bad "a second \`--force\` over the same task refuses"
+else
+  ok "a second \`--force\` over the same task refuses"
+fi
+works "and leaves the pending document untouched" \
+  test "$BEFORE_AGAIN" = "$(cksum <"$SPOOLWAY_PROJECT_HOME/pending/solo.md")"
+works "and its branch stays deleted" test -z "$(git branch --list task/solo)"
+
 # ------------------------------------- a started task whose branch was never made
 # `queue add` stamps `branch: task/<id>` before anything is cut, so a task
 # can name a branch that does not exist. Deleting the real one afterwards
