@@ -825,8 +825,8 @@ impl Board {
             BoardMode::ResumePicker(picker) => {
                 self.on_key_resume_picker(repo, pipelines, picker, key)?
             }
-            BoardMode::ConfirmUnqueue { chain, dir } => {
-                self.on_key_unqueue_confirm(repo, pipelines, chain, dir, key)?
+            BoardMode::ConfirmUnqueue(confirm) => {
+                self.on_key_unqueue_confirm(repo, pipelines, confirm, key)?
             }
             BoardMode::ConfirmRestart(confirm) => {
                 self.on_key_restart_confirm(repo, pipelines, confirm, key)?
@@ -927,7 +927,7 @@ impl Board {
                     }
                 }
                 Some(RowAction::Restart) => self.begin_restart(repo, pipelines, menu.id)?,
-                Some(RowAction::Unqueue) => self.begin_unqueue(repo, menu.id)?,
+                Some(RowAction::Unqueue) => self.begin_unqueue(repo, pipelines, menu.id)?,
                 // An empty menu offers nothing to confirm; it stays open
                 // until `esc`, as its key row says.
                 None => self.mode = BoardMode::Options(menu),
@@ -1413,44 +1413,18 @@ impl Board {
     }
 
     /// The options menu's `unqueue`: open [`BoardMode::ConfirmUnqueue`] for
-    /// task `id` and everything that reaches it through `depends_on` — a
-    /// no-op on a task the queue no longer has, or one that has started
-    /// ([`not_started`] says no). A task some other still-queued task names
-    /// in its own `depends_on` is not refused: the panel lists that
-    /// dependent alongside it instead — see [`unqueue_chain`]. Each routine
-    /// copy the answer would delete is marked with its routine file here.
-    fn begin_unqueue(&mut self, repo: &Repo, id: String) -> Result<()> {
+    /// task `id` and every task after it in its group — see
+    /// [`unqueue_confirm`]. A no-op on a task the queue no longer has, or
+    /// one that is neither unstarted nor stopped; also when the lanes cannot
+    /// be listed, since a live unblocker lane could not then be ruled out.
+    fn begin_unqueue(&mut self, repo: &Repo, pipelines: &Pipelines, id: String) -> Result<()> {
         let tasks = repo.tasks()?;
-        let Some(task) = tasks.iter().find(|t| t.id() == id) else {
+        let Ok(lanes) = crate::mux::backend(repo)?.list_lanes() else {
             return Ok(());
         };
-        if !not_started(task) {
-            return Ok(());
+        if let Some(confirm) = unqueue_confirm(repo, pipelines, &tasks, &lanes, &id)? {
+            self.mode = BoardMode::ConfirmUnqueue(confirm);
         }
-        let mut chain = unqueue_chain(&tasks, &id);
-        // Which copies the confirm deletes, read through the same
-        // `drafted_in_batch` and `deleted_on_unqueue` the `enter` below
-        // unqueues with, so the panel names exactly what it will do.
-        let ids: Vec<String> = chain.iter().map(|e| e.id.clone()).collect();
-        let drafted = drafted_in_batch(repo, &ids)?;
-        for entry in &mut chain {
-            let Some(task) = tasks.iter().find(|t| t.id() == entry.id) else {
-                continue;
-            };
-            // Shown relative to the checkout the routines are read from, as
-            // `.spoolway/routines/...`; a routine directory outside it (a
-            // workspace clone's) keeps its full path for the panel to
-            // shorten.
-            entry.routine_file = deleted_on_unqueue(repo, task, &drafted).map(|path| {
-                path.strip_prefix(&repo.checkout)
-                    .map(Path::to_path_buf)
-                    .unwrap_or(path)
-            });
-        }
-        self.mode = BoardMode::ConfirmUnqueue {
-            chain,
-            dir: repo.pending_dir(),
-        };
         Ok(())
     }
 
@@ -1458,8 +1432,7 @@ impl Board {
         &mut self,
         repo: &Repo,
         pipelines: &Pipelines,
-        chain: Vec<ChainEntry>,
-        dir: PathBuf,
+        confirm: UnqueueConfirm,
         key: crate::screen::Key,
     ) -> Result<()> {
         use crate::screen::Key;
@@ -1479,20 +1452,128 @@ impl Board {
                     .into_iter()
                     .map(|row| row.id)
                     .collect();
-                let next = next_cursor_after_chain(&before, &chain);
-                let ids: Vec<String> = chain.iter().map(|e| e.id.clone()).collect();
-                let drafted = drafted_in_batch(repo, &ids)?;
-                for id in &ids {
-                    unqueue_in(repo, id, &drafted)?;
+                let next = next_cursor_after_chain(&before, &confirm.chain);
+                match self.answer_unqueue(repo, pipelines, &confirm) {
+                    Ok(()) => self.cursor = next,
+                    // The dispatch loop drops an `Err` out of `on_key`
+                    // without a word, so a refused unqueue would close the
+                    // panel and look like it happened. It stays open with
+                    // the refusal in it.
+                    Err(err) => match err.downcast::<Redrawn>() {
+                        Ok(Redrawn(fresh)) => self.mode = BoardMode::ConfirmUnqueue(fresh),
+                        Err(err) => {
+                            self.mode = BoardMode::ConfirmUnqueue(UnqueueConfirm {
+                                error: Some(format!("{err:#}")),
+                                ..confirm
+                            })
+                        }
+                    },
                 }
-                self.cursor = next;
             }
             Key::Esc => {}
-            _ => self.mode = BoardMode::ConfirmUnqueue { chain, dir },
+            _ => self.mode = BoardMode::ConfirmUnqueue(confirm),
         }
         Ok(())
     }
+
+    /// `enter` on the `unqueue` panel: the tasks are read again under the
+    /// head's task lock, and anything the panel drew that differs now —
+    /// the stop, the chain, a routine copy, either warning — refuses with
+    /// [`Redrawn`] before anything is touched. A resume from a shell or an
+    /// unblocker lane the dispatcher started can land while the panel is
+    /// open, and the panel must not act on what it no longer shows.
+    ///
+    /// A task that never started goes through [`unqueue_in`], the road it
+    /// always took. One that started goes through
+    /// [`crate::commands::unqueue_stopped`], the teardown `spoolway queue
+    /// unqueue --force` runs, which takes the lock itself and asks the same
+    /// comparison under it. What its teardown could not do lands in the
+    /// problem log after a success, and in the refusal after a failure.
+    fn answer_unqueue(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        confirm: &UnqueueConfirm,
+    ) -> Result<()> {
+        let Some(head) = confirm.chain.first() else {
+            return Ok(());
+        };
+        let drawn = UnqueueConfirm {
+            error: None,
+            ..confirm.clone()
+        };
+        let unchanged = |tasks: &[crate::task::Task], lanes: &[crate::mux::Lane]| -> Result<()> {
+            match unqueue_confirm(repo, pipelines, tasks, lanes, &head.id)? {
+                Some(fresh) if fresh == drawn => Ok(()),
+                Some(fresh) => Err(Redrawn(UnqueueConfirm {
+                    error: Some(REDRAWN.to_string()),
+                    ..fresh
+                })
+                .into()),
+                None => Err(Redrawn(UnqueueConfirm {
+                    error: Some(format!(
+                        "`{}` is no longer stopped, or has left the queue, so nothing was \
+                         unqueued. press esc; its row says where it is now.",
+                        head.name
+                    )),
+                    ..drawn.clone()
+                })
+                .into()),
+            }
+        };
+        if !confirm.started {
+            let ids: Vec<String> = confirm.chain.iter().map(|e| e.id.clone()).collect();
+            {
+                let _task_lock = crate::lock::TaskLock::acquire(&repo.task_lock_file(&head.id))?;
+                let lanes = crate::mux::backend(repo)?.list_lanes()?;
+                unchanged(&repo.tasks()?, &lanes)?;
+            }
+            let drafted = drafted_in_batch(repo, &ids)?;
+            for id in &ids {
+                unqueue_in(repo, id, &drafted)?;
+            }
+            return Ok(());
+        }
+        let mut problems = Vec::new();
+        let unqueued =
+            crate::commands::unqueue_stopped(repo, pipelines, &head.id, &unchanged, &mut |said| {
+                if let crate::commands::Said::Problem(problem) = said {
+                    problems.push(problem);
+                }
+            });
+        match unqueued {
+            Ok(()) => {
+                for problem in &problems {
+                    crate::problem_log::append(repo, problem);
+                }
+                Ok(())
+            }
+            // Its refusal says "see above", so the problems go above it.
+            Err(err) if !problems.is_empty() && err.downcast_ref::<Redrawn>().is_none() => {
+                Err(anyhow::anyhow!("{}\n{err:#}", problems.join("\n")))
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
+
+/// The line a redrawn `unqueue` panel carries: what it shows changed while
+/// it was open, so the `enter` that redrew it did nothing.
+const REDRAWN: &str = "this changed since it opened, so nothing was unqueued. \
+                       read it again, then press enter.";
+
+/// [`Board::answer_unqueue`]'s refusal when the panel no longer shows what
+/// `enter` would do: the panel to draw in its place.
+#[derive(Debug)]
+struct Redrawn(UnqueueConfirm);
+
+impl std::fmt::Display for Redrawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.error.as_deref().unwrap_or(REDRAWN))
+    }
+}
+
+impl std::error::Error for Redrawn {}
 
 /// The options menu's `open task`: open task `id`'s file in the editor
 /// [`crate::editor::open`] picks — a terminal editor in a pane the
@@ -1643,20 +1724,9 @@ enum BoardMode {
     /// `r` on a held row: every step of its pipeline the task runs, with the
     /// one a bare resume goes to preselected — see [`ResumePicker`].
     ResumePicker(ResumePicker),
-    /// `unqueue` found a task that has not started, named along with every
-    /// unstarted task that reaches it through `depends_on` — see
-    /// [`unqueue_chain`] — and `dir`, this run's own [`Repo::pending_dir`],
-    /// read once when the panel opened, so its panel can show where the
-    /// tasks are about to land without a second lookup at answer time. Each
-    /// entry's `routine_file`, read at the same moment, marks a routine copy
-    /// the answer deletes instead.
-    /// `chain` still needs a fresh [`Repo::task`] per id to answer with, the
-    /// same as every confirm panel here: a task a moment ago and the
-    /// task now are not guaranteed to be the same file.
-    ConfirmUnqueue {
-        chain: Vec<ChainEntry>,
-        dir: PathBuf,
-    },
+    /// `unqueue` on a task that has not started or has stopped: what the
+    /// answer deletes and carries — see [`UnqueueConfirm`].
+    ConfirmUnqueue(UnqueueConfirm),
     /// `restart` on a task `spoolway restart` accepts: the step it would start
     /// over and the session it would abandon, or on a command step the run it
     /// would end. Its one answer, `restart`, carries the restart out, and
@@ -1687,7 +1757,9 @@ impl BoardMode {
                 confirm.cursor,
             )),
             BoardMode::ResumePicker(picker) => Some(resume_picker_panel(picker, pane_height())),
-            BoardMode::ConfirmUnqueue { chain, dir } => Some(unqueue_confirm_panel(chain, dir)),
+            BoardMode::ConfirmUnqueue(confirm) => {
+                Some(unqueue_confirm_panel(confirm, pane_height()))
+            }
             BoardMode::ConfirmRestart(confirm) => Some(restart_confirm_panel(confirm)),
             BoardMode::ConfirmSkipHook(confirm) => Some(skip_hook_confirm_panel(confirm)),
             // Wrapped no wider than the board has room for, so a narrow
@@ -1759,8 +1831,9 @@ fn options_panel(menu: &OptionsMenu) -> Vec<String> {
 /// is running, as [`focus_step`] does; `restart` needs [`restartable_step`]
 /// to accept it on [`restart_graph`]'s graph, the one
 /// [`Board::begin_restart`] opens its panel on; `unqueue` needs it in the
-/// queue and [`not_started`]. Resume is never listed: it stays on the board's
-/// `r`.
+/// queue and either [`not_started`] or [`stopped_for_unqueue`], as
+/// [`unqueue_confirm`] does, so a started task is not offered it while the
+/// lanes cannot be listed. Resume is never listed: it stays on the board's `r`.
 ///
 /// `mux` is the backend `focus` would go through, asked here so a backend
 /// that cannot focus a pane — headless — never lists it.
@@ -1781,7 +1854,12 @@ fn row_actions(
         RowAction::Restart => task.as_ref().is_some_and(|task| {
             restartable_step(task, &restart_graph(repo, pipelines, id).0).is_ok()
         }),
-        RowAction::Unqueue => queued.is_some_and(not_started),
+        RowAction::Unqueue => queued.is_some_and(|task| {
+            not_started(task)
+                || mux
+                    .list_lanes()
+                    .is_ok_and(|lanes| stopped_for_unqueue(repo, &tasks, pipelines, &lanes, id))
+        }),
     };
     Ok([
         RowAction::Open,
@@ -1910,24 +1988,39 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
         ),
         (
             "unqueue",
-            unqueue_confirm_panel(&[entry("login", &[])], pending),
+            unqueue_confirm_panel(
+                &UnqueueConfirm::unstarted(&[entry("login", &[])], pending),
+                None,
+            ),
         ),
         (
             "unqueue, with a dependent",
-            unqueue_confirm_panel(&[entry("login", &[]), entry("logout", &["login"])], pending),
+            unqueue_confirm_panel(
+                &UnqueueConfirm::unstarted(
+                    &[entry("login", &[]), entry("logout", &["login"])],
+                    pending,
+                ),
+                None,
+            ),
         ),
         (
             "unqueue, a routine copy",
-            unqueue_confirm_panel(&[copy("nightly-3", "nightly", &[])], pending),
+            unqueue_confirm_panel(
+                &UnqueueConfirm::unstarted(&[copy("nightly-3", "nightly", &[])], pending),
+                None,
+            ),
         ),
         (
             "unqueue, a chain with a routine copy",
             unqueue_confirm_panel(
-                &[
-                    entry("login", &[]),
-                    copy("nightly-3", "nightly", &["login"]),
-                ],
-                pending,
+                &UnqueueConfirm::unstarted(
+                    &[
+                        entry("login", &[]),
+                        copy("nightly-3", "nightly", &["login"]),
+                    ],
+                    pending,
+                ),
+                None,
             ),
         ),
         ("resume picker", resume_picker_panel(&picker, None)),
@@ -2799,11 +2892,303 @@ pub(crate) fn unqueue_dependents(tasks: &[crate::task::Task], id: &str) -> Vec<S
         .collect()
 }
 
+/// The routine file a started routine copy `task` was made from, when
+/// unqueuing it deletes the copy rather than carrying it to pending: the
+/// routine still exists, and no task in `drafted` (see [`drafted_in_batch`]
+/// over `dependents`) depends on the copy. A drafted dependent keeps its
+/// `depends_on:` naming the copy, so the copy is carried with it, or that
+/// draft would name a task that is nowhere.
+///
+/// The started task's own counterpart of [`deleted_on_unqueue`]:
+/// [`drafted_in_batch`] reads only tasks that have not started, so it cannot
+/// answer for this one. `spoolway queue unqueue --force` deletes by it and
+/// the board's `unqueue` panel marks the copy by it, so the two agree.
+pub(crate) fn forced_routine_file(
+    repo: &Repo,
+    tasks: &[crate::task::Task],
+    task: &crate::task::Task,
+    dependents: &[String],
+    drafted: &[String],
+) -> Option<PathBuf> {
+    task.routine()
+        .and_then(|routine| crate::commands::routine_file(repo, routine))
+        .filter(|_| {
+            !dependents.iter().any(|dependent| {
+                drafted.contains(dependent)
+                    && tasks.iter().any(|t| {
+                        t.id() == dependent && t.front.depends_on.iter().any(|d| d == task.id())
+                    })
+            })
+        })
+}
+
+/// A task left at the end of its group by an unqueue that has already gone
+/// past `last:` steps it never ran: what the `unqueue` panel warns about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkippedLast {
+    /// The task's [`crate::task::Task::display_name`].
+    pub(crate) task: String,
+    /// Its `last:` steps it is past, in pipeline order.
+    pub(crate) steps: Vec<String>,
+}
+
+/// Every task that unqueuing `ids` leaves at the end of its group after it
+/// walked past its `last:` steps, with those steps.
+///
+/// A task walks past a `last:` step while a task after it in its group still
+/// runs one — see [`crate::dispatch::walk_past`]. Nothing records that it
+/// did, so it is worked out from the queue: a task some task in `ids`
+/// depends on, outside `ids` and in the queue or the archive, counts when the
+/// open tasks held its `last:` steps back before the unqueue and none will
+/// once `ids` are gone. Of its pipeline's `last:` steps its `skip:` does not
+/// name, those it is past are named — see [`past_on_route`]. A done or
+/// archived task is past them all.
+///
+/// Nothing reruns a step named here. The panel only says no task is left to
+/// run it.
+pub(crate) fn skipped_last_steps(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+    ids: &[String],
+) -> Vec<SkippedLast> {
+    let gone = |id: &str| ids.iter().any(|g| g == id);
+    let remaining: Vec<crate::task::Task> =
+        tasks.iter().filter(|t| !gone(t.id())).cloned().collect();
+    let before = crate::graph::Graph::build(tasks, &repo.archive_dir());
+    let after = crate::graph::Graph::build(&remaining, &repo.archive_dir());
+    let mut looked_at: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for dep in tasks
+        .iter()
+        .filter(|t| gone(t.id()))
+        .flat_map(|t| &t.front.depends_on)
+    {
+        if gone(dep) || looked_at.contains(&dep.as_str()) {
+            continue;
+        }
+        looked_at.push(dep);
+        let Ok(left) = repo.task(dep) else {
+            continue;
+        };
+        let held = |tasks: &[crate::task::Task], graph: &crate::graph::Graph| {
+            crate::dispatch::same_group_dependents(repo, pipelines, tasks, graph, &left) > 0
+        };
+        if !held(tasks, &before) || held(&remaining, &after) {
+            continue;
+        }
+        let Ok(pipeline) = pipelines.for_task(&left) else {
+            continue;
+        };
+        let in_queue = tasks.iter().any(|t| t.id() == left.id());
+        let steps: Vec<String> = pipeline
+            .steps
+            .iter()
+            .filter(|step| step.last && !left.front.skip.contains(&step.id))
+            .filter(|step| !in_queue || past_on_route(pipeline, &left, &step.id))
+            .map(|step| step.id.clone())
+            .collect();
+        if !steps.is_empty() {
+            out.push(SkippedLast {
+                task: left.display_name().to_string(),
+                steps,
+            });
+        }
+    }
+    out
+}
+
+/// Whether `task` is past `step` on `pipeline`'s route: `step` is on the
+/// `on_pass` road from the pipeline's entry, and not on the one from where
+/// the task stands now, so a pass from here never reaches it. A task on
+/// `done`, or held by its `done` hook, is past every step.
+///
+/// Where a task stands is its stage when that is a step. A task parked on
+/// `paused` stands on the step `parked_from` names, and one parked anywhere
+/// else on the step [`crate::commands::resume_target`] sends it back to;
+/// a task that never started stands at the entry. Following `on_pass` alone,
+/// a review that sends a task back to an earlier step does not make that step
+/// count as ahead: the road a pass takes is what decides whether the task
+/// will still reach a `last:` step.
+fn past_on_route(
+    pipeline: &crate::pipeline::Pipeline,
+    task: &crate::task::Task,
+    step: &str,
+) -> bool {
+    let stage = task.stage();
+    let done_hook = stage == crate::pipeline::HOOK_FAILED
+        && task.front.hook_paused.as_deref() == Some(crate::pipeline::DONE);
+    if stage == crate::pipeline::DONE || done_hook {
+        return true;
+    }
+    let at = if pipeline.step(stage).is_some() {
+        stage.to_string()
+    } else {
+        task.front
+            .parked_from
+            .clone()
+            .filter(|from| stage == crate::pipeline::PAUSED && pipeline.step(from).is_some())
+            .unwrap_or_else(|| crate::commands::resume_target(task, pipeline))
+    };
+    // A position that is no step — `queued`, for a task that never started —
+    // is the entry: everything is still ahead of it.
+    let at = match pipeline.step(&at) {
+        Some(_) => at,
+        None => pipeline.entry().to_string(),
+    };
+    let road = |from: &str| {
+        let mut road = vec![from.to_string()];
+        // Bounded by the step count, so `on_pass` wiring that cycles cannot
+        // loop here.
+        for _ in 0..pipeline.steps.len() {
+            match pipeline.next_running_step(road.last().map_or("", String::as_str)) {
+                Some(next) if !road.iter().any(|s| s == next) => road.push(next.to_string()),
+                _ => break,
+            }
+        }
+        road
+    };
+    road(pipeline.entry()).iter().any(|s| s == step) && !road(&at).iter().any(|s| s == step)
+}
+
+/// [`BoardMode::ConfirmUnqueue`]'s state: everything its panel says, read
+/// once when it opened by [`unqueue_confirm`]. `enter` builds it again and
+/// acts only when the two are equal, `error` aside — see
+/// [`Board::answer_unqueue`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnqueueConfirm {
+    /// The task under the cursor first, then every task after it in its
+    /// group — see [`unqueue_chain`]. Each entry's `routine_file` marks a
+    /// routine copy the answer deletes instead of carrying.
+    chain: Vec<ChainEntry>,
+    /// This run's own [`Repo::pending_dir`], where the tasks land.
+    dir: PathBuf,
+    /// The head has left `queued`, so the answer tears its checkout down
+    /// through [`crate::commands::unqueue_stopped`].
+    started: bool,
+    /// What the panel says about the head's own run — see [`UnqueueLead`].
+    lead: UnqueueLead,
+    /// The tasks left at the end of their group past `last:` steps they never
+    /// ran — see [`skipped_last_steps`].
+    skipped_last: Vec<SkippedLast>,
+    /// Why `enter` did nothing, when it did nothing.
+    error: Option<String>,
+}
+
+/// The first thing the `unqueue` panel says, about the task under the
+/// cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnqueueLead {
+    /// Nothing has run for it: it never left `queued`, or was paused off it
+    /// before anything was cut.
+    NothingRan,
+    /// It has a branch or a worktree of its own, which the answer deletes for
+    /// good.
+    Deletes,
+    /// It ran in a checkout it borrowed, which stays, and has no branch of
+    /// its own. Neither line is true of it, so the panel says neither.
+    Neither,
+}
+
+/// The `unqueue` panel for task `id`, from the queue `tasks` and the
+/// multiplexer's `lanes`: `None` when `id` is not in the queue, or has
+/// started and is not [`stopped_for_unqueue`].
+///
+/// Which routine copies the answer deletes is read through the same rules
+/// it deletes by — [`drafted_in_batch`] and [`deleted_on_unqueue`] for the
+/// tasks that have not started, [`forced_routine_file`] for a started head —
+/// so the panel names exactly what it will do.
+fn unqueue_confirm(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    tasks: &[crate::task::Task],
+    lanes: &[crate::mux::Lane],
+    id: &str,
+) -> Result<Option<UnqueueConfirm>> {
+    let Some(head) = tasks.iter().find(|t| t.id() == id) else {
+        return Ok(None);
+    };
+    let started = !not_started(head);
+    if started && !stopped_for_unqueue(repo, tasks, pipelines, lanes, id) {
+        return Ok(None);
+    }
+    let mut chain = unqueue_chain(tasks, id);
+    let ids: Vec<String> = chain.iter().map(|e| e.id.clone()).collect();
+    let drafted = drafted_in_batch(repo, &ids)?;
+    for entry in &mut chain {
+        let Some(task) = tasks.iter().find(|t| t.id() == entry.id) else {
+            continue;
+        };
+        let routine_file = match entry.id == id && started {
+            true => forced_routine_file(repo, tasks, task, &ids[1..], &drafted),
+            false => deleted_on_unqueue(repo, task, &drafted),
+        };
+        // Shown relative to the checkout the routines are read from, as
+        // `.spoolway/routines/...`; a routine directory outside it (a
+        // workspace clone's) keeps its full path for the panel to shorten.
+        entry.routine_file = routine_file.map(|path| {
+            path.strip_prefix(&repo.checkout)
+                .map(Path::to_path_buf)
+                .unwrap_or(path)
+        });
+    }
+    Ok(Some(UnqueueConfirm {
+        chain,
+        dir: repo.pending_dir(),
+        started,
+        lead: unqueue_lead(repo, head),
+        skipped_last: skipped_last_steps(repo, pipelines, tasks, &ids),
+        error: None,
+    }))
+}
+
+#[cfg(test)]
+impl UnqueueConfirm {
+    /// The panel for `chain` with nothing started: what the panel drew
+    /// before a started task could be unqueued.
+    fn unstarted(chain: &[ChainEntry], dir: &Path) -> UnqueueConfirm {
+        UnqueueConfirm {
+            chain: chain.to_vec(),
+            dir: dir.to_path_buf(),
+            started: false,
+            lead: UnqueueLead::NothingRan,
+            skipped_last: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+/// What the `unqueue` panel says first about `task`. It deletes the task's
+/// worktree when it cut one, and its branch when that is a local branch:
+/// the same two the teardown takes, neither of them for a borrowed checkout
+/// — see [`crate::dispatch::Dispatcher::tear_down_stopped`]. A task paused
+/// off `queued` has started by stage but has neither, and nothing has run
+/// for it.
+fn unqueue_lead(repo: &Repo, task: &crate::task::Task) -> UnqueueLead {
+    let branch = task.front.branch.as_deref().is_some_and(|branch| {
+        repo.git(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .is_ok()
+    });
+    if !task.front.borrowed && (task.front.worktree_path.is_some() || branch) {
+        UnqueueLead::Deletes
+    } else if task.front.worktree_path.is_none() && task.front.last_report.is_none() {
+        UnqueueLead::NothingRan
+    } else {
+        UnqueueLead::Neither
+    }
+}
+
 /// One task in a `unqueue`-panel's chain: its id, and — for everything but the
 /// chain's own head — the ids elsewhere in the chain its own `depends_on`
 /// names, for [`view::unqueue_confirm_panel`]'s "(depends on ...)"
 /// annotation. Empty for the head, which by construction depends on nothing
 /// else in its own chain — the chain is exactly what depends on *it*.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ChainEntry {
     id: String,
     /// [`crate::task::Task::display_name`]: the routine's name for a copy,
@@ -2813,7 +3198,7 @@ struct ChainEntry {
     /// The routine file this copy was made from, when the unqueue deletes it
     /// rather than writing it to pending — see [`deleted_on_unqueue`].
     /// Relative to the checkout when the file is inside it. `None` from
-    /// [`unqueue_chain`], which reads no routine files; [`Board::begin_unqueue`]
+    /// [`unqueue_chain`], which reads no routine files; [`unqueue_confirm`]
     /// fills it in.
     routine_file: Option<PathBuf>,
 }
@@ -12264,8 +12649,8 @@ mod tests {
 
     /// `o` lists, in a fixed order, only what each row can do: a running
     /// row can be opened, paused and restarted; a paused, resumable row
-    /// opened and restarted, with resume left to `r`; a queued row opened,
-    /// paused and unqueued. The done row's own list is pinned by
+    /// opened, restarted and unqueued, with resume left to `r`; a queued row
+    /// opened, paused and unqueued. The done row's own list is pinned by
     /// [`the_cursor_reaches_a_done_row_and_its_menu_opens_its_task`].
     #[test]
     fn the_options_menu_lists_only_what_each_row_can_do() {
@@ -12291,7 +12676,10 @@ mod tests {
                 "running",
                 &[RowAction::Open, RowAction::Pause, RowAction::Restart][..],
             ),
-            ("held", &[RowAction::Open, RowAction::Restart][..]),
+            (
+                "held",
+                &[RowAction::Open, RowAction::Restart, RowAction::Unqueue][..],
+            ),
             (
                 "waiting",
                 &[RowAction::Open, RowAction::Pause, RowAction::Unqueue][..],
@@ -16185,9 +16573,9 @@ mod tests {
         assert!(!repo.pending_dir().join("solo.md").exists());
     }
 
-    /// The menu offers no `unqueue` on a row that has already started,
-    /// however idle it looks between passes — unqueuing it would mean
-    /// tearing down a checkout, which is outside what unqueuing reaches.
+    /// The menu offers no `unqueue` on a row standing on a step, however idle
+    /// it looks between passes: its checkout is torn down only once the task
+    /// has stopped on `paused`, `blocked` or `hook_failed`.
     #[test]
     fn the_menu_offers_no_unqueue_on_a_started_task() {
         let (repo, _root_guard) = fixture("unqueue-started");
@@ -16213,6 +16601,242 @@ mod tests {
         let items = menu_items(&mut board, &repo, &pipelines);
         assert!(!items.contains(&RowAction::Unqueue), "{items:?}");
         assert_eq!(repo.task("under-way").unwrap().stage(), "implement");
+    }
+
+    /// Task `id` parked on `paused` in a worktree of its own on `task/<id>`,
+    /// as a lane that ran and was paused leaves it. Returns the worktree.
+    fn paused_in_worktree(repo: &Repo, id: &str) -> PathBuf {
+        let worktree = repo.worktree_root().join(format!("task-{id}"));
+        let branch = format!("task/{id}");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &branch,
+                &worktree.display().to_string(),
+            ],
+        )
+        .unwrap();
+        let mut task = repo.task(id).unwrap();
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.front.parked_from = Some("implement".into());
+        task.front.branch = Some(branch);
+        task.front.worktree_path = Some(worktree.clone());
+        task.save().unwrap();
+        worktree
+    }
+
+    /// Whether `branch` is a local branch of `repo`.
+    fn has_branch(repo: &Repo, branch: &str) -> bool {
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .is_ok()
+    }
+
+    /// The menu lists `unqueue` on every stopped row — queued, paused,
+    /// blocked and hook_failed — and on none that is running: a row on a
+    /// step, a blocked row whose unblocker lane is at work, or a done row.
+    /// Fails before the change, which listed it on the queued row alone.
+    #[test]
+    fn the_menu_offers_unqueue_on_every_stopped_row_and_no_running_one() {
+        let (repo, _root_guard) = fixture("unqueue-stopped-rows");
+        crate::mux::force_headless_for_test();
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "waiting", &[], None, Some("a"));
+        add_to(
+            &repo,
+            "paused",
+            &[],
+            Some(crate::pipeline::PAUSED),
+            Some("b"),
+        );
+        add_to(
+            &repo,
+            "blocked",
+            &[],
+            Some(crate::pipeline::BLOCKED),
+            Some("c"),
+        );
+        add_to(
+            &repo,
+            "hooked",
+            &[],
+            Some(crate::pipeline::HOOK_FAILED),
+            Some("d"),
+        );
+        add_to(&repo, "running", &[], Some("implement"), Some("e"));
+        add_to(
+            &repo,
+            "staffed",
+            &[],
+            Some(crate::pipeline::BLOCKED),
+            Some("f"),
+        );
+        add_to(
+            &repo,
+            "finished",
+            &[],
+            Some(crate::pipeline::DONE),
+            Some("g"),
+        );
+        let (mux, _name) = live_headless_lane_at(&repo, "staffed", "blocked", "unblocker");
+
+        for (id, listed) in [
+            ("waiting", true),
+            ("paused", true),
+            ("blocked", true),
+            ("hooked", true),
+            ("running", false),
+            ("staffed", false),
+            ("finished", false),
+        ] {
+            let items = row_actions(&repo, &pipelines, id, &*mux).unwrap();
+            assert_eq!(
+                items.contains(&RowAction::Unqueue),
+                listed,
+                "{id}: {items:?}"
+            );
+        }
+    }
+
+    /// `unqueue` on a paused task with a worktree opens the panel that says
+    /// its branch and worktree are deleted for good, in place of the line
+    /// saying nothing has run, and lists every task after it in its group.
+    /// `enter` removes the worktree, deletes the branch and carries all
+    /// three to pending, with a dispatcher holding the run lock or with none.
+    /// Fails before the change, whose menu offered no `unqueue` on the row.
+    #[test]
+    fn picking_unqueue_on_a_paused_task_tears_it_down_and_carries_its_chain() {
+        for dispatching in [false, true] {
+            let (repo, _root_guard) = fixture(&format!("unqueue-paused-{dispatching}"));
+            crate::mux::force_headless_for_test();
+            let pipelines = Pipelines::builtin();
+            add(&repo, "sessions", &[], None);
+            add(&repo, "profile", &["sessions"], None);
+            add(&repo, "settings", &["profile"], None);
+            let worktree = paused_in_worktree(&repo, "sessions");
+            let _held = dispatching
+                .then(|| crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap());
+
+            let mut board = Board::for_test();
+            board.cursor = Some("sessions".into());
+            pick(&mut board, &repo, &pipelines, RowAction::Unqueue);
+            let BoardMode::ConfirmUnqueue(confirm) = &board.mode else {
+                panic!("the unqueue panel did not open");
+            };
+            let text = unqueue_confirm_panel(confirm, None).join("\n");
+            assert!(
+                text.contains("sessions has a branch and a worktree."),
+                "{text}"
+            );
+            assert!(
+                text.contains("both are deleted and cannot be recovered."),
+                "{text}"
+            );
+            assert!(text.contains("3 tasks go back to:"), "{text}");
+            assert!(!text.contains("nothing has run"), "{text}");
+            assert!(!text.contains("queue tab"), "{text}");
+
+            board
+                .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+                .unwrap();
+
+            assert!(matches!(board.mode, BoardMode::Browsing), "{dispatching}");
+            assert!(!worktree.exists(), "the worktree is removed");
+            assert!(!has_branch(&repo, "task/sessions"), "the branch is deleted");
+            for id in ["sessions", "profile", "settings"] {
+                assert!(repo.task(id).is_err(), "{id} left the queue");
+                assert!(repo.pending_dir().join(format!("{id}.md")).exists(), "{id}");
+            }
+        }
+    }
+
+    /// `enter` on an `unqueue` panel whose tasks changed since it opened does
+    /// nothing and draws the panel again as it stands now, saying so: a new
+    /// dependent joins the chain, and a resumed task, no longer stopped, is
+    /// named as such. Only an `enter` on a panel that still holds unqueues.
+    /// Fails before the change, which unqueued whatever its chain had named.
+    #[test]
+    fn enter_on_a_changed_unqueue_panel_redraws_it_instead_of_acting() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("unqueue-panel-changed");
+        crate::mux::force_headless_for_test();
+        let pipelines = Pipelines::builtin();
+        add(&repo, "sessions", &[], None);
+        let worktree = paused_in_worktree(&repo, "sessions");
+
+        let mut board = Board::for_test();
+        board.cursor = Some("sessions".into());
+        pick(&mut board, &repo, &pipelines, RowAction::Unqueue);
+        add(&repo, "profile", &["sessions"], None);
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+        let BoardMode::ConfirmUnqueue(confirm) = &board.mode else {
+            panic!("the panel closed over a chain that changed");
+        };
+        assert_eq!(confirm.chain.len(), 2, "{confirm:?}");
+        assert_eq!(confirm.error.as_deref(), Some(REDRAWN));
+        assert!(worktree.exists() && repo.task("sessions").is_ok());
+
+        let mut task = repo.task("sessions").unwrap();
+        task.set_stage("implement", None);
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+        let BoardMode::ConfirmUnqueue(confirm) = &board.mode else {
+            panic!("the panel closed over a task that is running again");
+        };
+        assert!(
+            confirm
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("no longer stopped")),
+            "{confirm:?}"
+        );
+        assert!(worktree.exists() && repo.task("sessions").is_ok());
+
+        let mut task = repo.task("sessions").unwrap();
+        task.set_stage(crate::pipeline::PAUSED, None);
+        task.save().unwrap();
+        board.on_key(&repo, &pipelines, Key::Esc).unwrap();
+        pick(&mut board, &repo, &pipelines, RowAction::Unqueue);
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing));
+        assert!(!worktree.exists());
+        assert!(repo.pending_dir().join("profile.md").exists());
+    }
+
+    /// The same redraw guards a task that never started: a dependent queued
+    /// while its panel is open is drawn into it, not carried unseen.
+    #[test]
+    fn enter_on_a_changed_unqueue_panel_of_an_unstarted_task_redraws_it() {
+        use crate::screen::Key;
+        let (repo, _root_guard) = fixture("unqueue-panel-changed-queued");
+        let pipelines = Pipelines::builtin();
+        add(&repo, "solo", &[], None);
+
+        let mut board = Board::for_test();
+        board.cursor = Some("solo".into());
+        pick(&mut board, &repo, &pipelines, RowAction::Unqueue);
+        add(&repo, "after", &["solo"], None);
+        board.on_key(&repo, &pipelines, Key::Enter).unwrap();
+
+        let BoardMode::ConfirmUnqueue(confirm) = &board.mode else {
+            panic!("the panel closed over a chain that changed");
+        };
+        assert_eq!(confirm.chain.len(), 2, "{confirm:?}");
+        assert!(repo.task("solo").is_ok() && repo.task("after").is_ok());
     }
 
     /// `unqueue` on a task a still-queued task depends on opens a panel naming
@@ -16647,7 +17271,8 @@ mod tests {
             board.cursor = Some(id.into());
             pick(&mut board, repo, &pipelines, RowAction::Unqueue);
             match board.mode {
-                BoardMode::ConfirmUnqueue { chain, .. } => chain
+                BoardMode::ConfirmUnqueue(confirm) => confirm
+                    .chain
                     .into_iter()
                     .map(|e| (e.id, e.name, e.routine_file))
                     .collect::<Vec<_>>(),
@@ -16768,7 +17393,7 @@ mod tests {
                 .on_key(&repo, &pipelines, crate::screen::Key::Char(key))
                 .unwrap();
             assert!(
-                matches!(board.mode, BoardMode::ConfirmUnqueue { .. }),
+                matches!(board.mode, BoardMode::ConfirmUnqueue(_)),
                 "unqueue, {key}"
             );
         }
@@ -17473,6 +18098,81 @@ mod tests {
         }
         task.save().unwrap();
         (repo, root_guard, pipelines)
+    }
+
+    /// The `unqueue` panel names a `last:` step only for the task an unqueue
+    /// leaves at the end of its group, and only once that task is past it:
+    /// before `suite` it names nothing; past it, parked past it, on `done`
+    /// or archived it names `suite`. Unqueuing the group's first task names
+    /// nothing, and neither does leaving a task at the end that never
+    /// started.
+    /// Fails before the change, which had no such check.
+    #[test]
+    fn the_unqueue_panel_names_a_last_step_only_once_the_task_left_is_past_it() {
+        // `t` is queued on `test`, where `after` can still be queued behind
+        // it, and moved on from there.
+        let queue = |name: &str, stage: &str, park: Option<&str>| {
+            let (repo, root_guard, pipelines) = hidden_suite(name, Rule::Last, "test");
+            let mut task = repo.task("t").unwrap();
+            task.set_stage(stage, None);
+            task.front.parked_from = park.map(str::to_string);
+            task.save().unwrap();
+            (repo, root_guard, pipelines)
+        };
+        let named = |stage: &str, park: Option<&str>| {
+            let (repo, _root_guard, pipelines) =
+                queue(&format!("skipped-last-{stage}-{park:?}"), stage, park);
+            let tasks = repo.tasks().unwrap();
+            skipped_last_steps(&repo, &pipelines, &tasks, &["after".to_string()])
+        };
+        let suite = vec![SkippedLast {
+            task: "t".into(),
+            steps: vec!["suite".into()],
+        }];
+        assert_eq!(named("test", None), [], "before suite");
+        assert_eq!(named("document", None), suite, "past suite");
+        assert_eq!(
+            named(crate::pipeline::PAUSED, Some("handover")),
+            suite,
+            "parked past it"
+        );
+        assert_eq!(
+            named(crate::pipeline::PAUSED, Some("test")),
+            [],
+            "parked before it"
+        );
+        assert_eq!(named(crate::pipeline::DONE, None), suite, "on done");
+
+        let (repo, _root_guard, pipelines) = queue("skipped-last-archived", "test", None);
+        archive_on(&repo, "t", crate::pipeline::DONE);
+        let tasks = repo.tasks().unwrap();
+        let ids = ["after".to_string()];
+        assert_eq!(
+            skipped_last_steps(&repo, &pipelines, &tasks, &ids),
+            suite,
+            "archived"
+        );
+
+        let (repo, _root_guard, pipelines) = queue("skipped-last-first", "document", None);
+        let tasks = repo.tasks().unwrap();
+        let ids = ["t".to_string(), "after".to_string()];
+        assert_eq!(
+            skipped_last_steps(&repo, &pipelines, &tasks, &ids),
+            [],
+            "the first task"
+        );
+
+        // `t` past `suite`, then `after`, then `later`: unqueuing `later`
+        // leaves `after` at the end, and `after` has run nothing yet.
+        let (repo, _root_guard, pipelines) = queue("skipped-last-middle", "document", None);
+        add(&repo, "later", &["after"], None);
+        let tasks = repo.tasks().unwrap();
+        let ids = ["later".to_string()];
+        assert_eq!(
+            skipped_last_steps(&repo, &pipelines, &tasks, &ids),
+            [],
+            "the task left has not started"
+        );
     }
 
     /// NEXT on a row working `test` names `document`, the first step past it

@@ -785,7 +785,7 @@ pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> 
     )
 }
 
-/// [`BoardMode::ConfirmUnqueue`]'s panel. When `chain` names only the
+/// [`BoardMode::ConfirmUnqueue`]'s panel. When the chain names only the
 /// cursor's own task it is a single sentence about that task: where in `dir`
 /// it goes back to, or, for a routine copy the unqueue deletes, where its
 /// routine stays. A longer chain lists its tasks in two groups, the ones going
@@ -793,12 +793,29 @@ pub(super) fn skip_hook_confirm_panel(confirm: &SkipHookConfirm) -> Vec<String> 
 /// annotated with what in the chain it depends on. A group with no members is
 /// left out, its closing line with it.
 ///
+/// Above that, the panel says what the unqueue costs. A task with a branch or
+/// a worktree is told it loses both for good, in place of the line saying
+/// nothing has run; one that ran in a borrowed checkout gets neither line.
+/// Each task the unqueue leaves at the end of its group past `last:` steps
+/// it never ran is named with those steps, since no task is left to run
+/// them. A refusal `enter` met closes the body.
+///
 /// The title names the head the way the board names its row, so a routine
 /// copy reads as its routine whether it is deleted or not. In the body a
 /// deleted copy is named by its routine too, and a task going to `dir` by its
 /// id even when it is a copy whose routine is gone, since that id is the file
 /// it lands under.
-pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path) -> Vec<String> {
+///
+/// `height` is [`pane_height`]'s. A panel taller than the pane leaves room
+/// for, the three spare rows [`resume_picker_panel`] keeps included, folds:
+/// first the lists of tasks, from the last entry up, under a `… and n more`
+/// line, then whole lists, then the blank lines between its paragraphs. The
+/// counts, the warnings and the key line stay. `None` folds nothing.
+pub(super) fn unqueue_confirm_panel(
+    confirm: &super::UnqueueConfirm,
+    height: Option<usize>,
+) -> Vec<String> {
+    let chain = &confirm.chain;
     let Some(head) = chain.first() else {
         return Vec::new();
     };
@@ -806,86 +823,164 @@ pub(super) fn unqueue_confirm_panel(chain: &[ChainEntry], dir: &std::path::Path)
         Some(_) => entry.name.clone(),
         None => entry.id.clone(),
     };
-    if chain.len() == 1 {
-        let body = match &head.routine_file {
-            Some(routine_file) => vec![
-                String::new(),
-                "nothing has run for it yet.".to_string(),
-                String::new(),
-                "this copy is deleted. the".to_string(),
-                "routine stays in:".to_string(),
-                shorten_home(routine_file),
-                String::new(),
-                "the routines tab queues it again.".to_string(),
-            ],
-            None => vec![
-                String::new(),
-                "nothing has run for it yet.".to_string(),
-                String::new(),
-                "the task goes back to:".to_string(),
-                shorten_home(&dir.join(format!("{}.md", head.id))),
-                String::new(),
-                "the queue tab is what sends it again.".to_string(),
-            ],
-        };
-        return crate::screen::ask(
-            &format!("unqueue {}", head.name),
-            &body,
-            &["unqueue it".to_string()],
-            0,
-        );
-    }
 
-    // A dependency is named the way its own line in the panel names it, so
-    // the annotation can be matched to a line by eye.
-    let line = |entry: &ChainEntry| {
-        let name = shown(entry);
-        if entry.depends_on.is_empty() {
-            return format!("  {name}");
-        }
-        let depends_on: Vec<String> = entry
-            .depends_on
+    // Each paragraph of the body, and whether it is a list that may fold.
+    let mut paragraphs: Vec<(Vec<String>, bool)> = Vec::new();
+    match confirm.lead {
+        super::UnqueueLead::Deletes => paragraphs.push((
+            vec![
+                format!("{} has a branch and a worktree.", head.name),
+                "both are deleted and cannot be recovered.".to_string(),
+            ],
+            false,
+        )),
+        super::UnqueueLead::NothingRan => paragraphs.push((
+            vec![match chain.len() {
+                1 => "nothing has run for it yet.".to_string(),
+                _ => "nothing has run for these yet.".to_string(),
+            }],
+            false,
+        )),
+        super::UnqueueLead::Neither => {}
+    }
+    if !confirm.skipped_last.is_empty() {
+        let mut lines: Vec<String> = confirm
+            .skipped_last
             .iter()
-            .map(|id| {
-                chain
-                    .iter()
-                    .find(|e| &e.id == id)
-                    .map_or_else(|| id.clone(), shown)
+            .map(|skipped| match skipped.steps.as_slice() {
+                [step] => format!("{} is past its last: step {step}.", skipped.task),
+                steps => format!(
+                    "{} is past its last: steps {}.",
+                    skipped.task,
+                    steps.join(", ")
+                ),
             })
             .collect();
-        format!("  {name}{GUTTER}(depends on {})", depends_on.join(", "))
-    };
-    let (deleted, drafted): (Vec<&ChainEntry>, Vec<&ChainEntry>) =
-        chain.iter().partition(|entry| entry.routine_file.is_some());
+        lines.push("unqueueing leaves no other task to run them.".to_string());
+        paragraphs.push((lines, false));
+    }
 
-    let mut body = vec![String::new(), "nothing has run for these yet.".to_string()];
-    if !drafted.is_empty() {
-        body.push(String::new());
-        body.push(match drafted.len() {
-            1 => "1 task goes back to:".to_string(),
-            n => format!("{n} tasks go back to:"),
-        });
-        body.push(format!("{}/", shorten_home(dir)));
-        body.push(String::new());
-        body.extend(drafted.iter().map(|entry| line(entry)));
-        body.push(String::new());
-        body.push("the queue tab is what sends them again.".to_string());
+    if chain.len() == 1 {
+        match &head.routine_file {
+            Some(routine_file) => {
+                paragraphs.push((
+                    vec![
+                        "this copy is deleted. the".to_string(),
+                        "routine stays in:".to_string(),
+                        shorten_home(routine_file),
+                    ],
+                    false,
+                ));
+                paragraphs.push((vec!["the routines tab queues it again.".to_string()], false));
+            }
+            None => paragraphs.push((
+                vec![
+                    "the task goes back to:".to_string(),
+                    shorten_home(&confirm.dir.join(format!("{}.md", head.id))),
+                ],
+                false,
+            )),
+        }
+    } else {
+        // A dependency is named the way its own line in the panel names it,
+        // so the annotation can be matched to a line by eye.
+        let line = |entry: &ChainEntry| {
+            let name = shown(entry);
+            if entry.depends_on.is_empty() {
+                return format!("  {name}");
+            }
+            let depends_on: Vec<String> = entry
+                .depends_on
+                .iter()
+                .map(|id| {
+                    chain
+                        .iter()
+                        .find(|e| &e.id == id)
+                        .map_or_else(|| id.clone(), shown)
+                })
+                .collect();
+            format!("  {name}{GUTTER}(depends on {})", depends_on.join(", "))
+        };
+        let (deleted, drafted): (Vec<&ChainEntry>, Vec<&ChainEntry>) =
+            chain.iter().partition(|entry| entry.routine_file.is_some());
+        if !drafted.is_empty() {
+            paragraphs.push((
+                vec![
+                    match drafted.len() {
+                        1 => "1 task goes back to:".to_string(),
+                        n => format!("{n} tasks go back to:"),
+                    },
+                    format!("{}/", shorten_home(&confirm.dir)),
+                ],
+                false,
+            ));
+            paragraphs.push((drafted.iter().map(|entry| line(entry)).collect(), true));
+        }
+        if !deleted.is_empty() {
+            paragraphs.push((
+                vec![match deleted.len() {
+                    1 => "1 routine copy is deleted:".to_string(),
+                    n => format!("{n} routine copies are deleted:"),
+                }],
+                false,
+            ));
+            paragraphs.push((deleted.iter().map(|entry| line(entry)).collect(), true));
+            paragraphs.push((
+                vec!["the routines tab queues them again.".to_string()],
+                false,
+            ));
+        }
     }
-    if !deleted.is_empty() {
-        body.push(String::new());
-        body.push(match deleted.len() {
-            1 => "1 routine copy is deleted:".to_string(),
-            n => format!("{n} routine copies are deleted:"),
-        });
-        body.push(String::new());
-        body.extend(deleted.iter().map(|entry| line(entry)));
-        body.push(String::new());
-        body.push("the routines tab queues them again.".to_string());
+    if let Some(err) = &confirm.error {
+        paragraphs.push((
+            err.lines()
+                .flat_map(|l| crate::screen::wrap(l, crate::screen::NOTICE_WRAP))
+                .collect(),
+            false,
+        ));
     }
+
+    let body = |paragraphs: &[(Vec<String>, bool)], gaps: bool| {
+        let mut body = Vec::new();
+        for (i, (lines, _)) in paragraphs.iter().enumerate() {
+            if i == 0 || gaps {
+                body.push(String::new());
+            }
+            body.extend(lines.iter().cloned());
+        }
+        body
+    };
+    // The body rows a pane of `height` leaves: the three spare rows
+    // `resume_picker_panel` keeps, the two borders, and the blank and key
+    // row `ask` closes the panel with.
+    let room = height.map_or(usize::MAX, |height| height.saturating_sub(3 + 2 + 2));
+    let mut over = body(&paragraphs, true).len().saturating_sub(room);
+    for (lines, _) in paragraphs.iter_mut().rev().filter(|(_, list)| *list) {
+        if over == 0 {
+            break;
+        }
+        // Folding `k` entries under one `… and k more` line saves `k - 1`
+        // rows, and is worth it only while one entry is left to show.
+        let fold = over + 1;
+        if fold < lines.len() {
+            let kept = lines.len() - fold;
+            lines.truncate(kept);
+            lines.push(format!("  … and {fold} more"));
+            over = 0;
+        } else {
+            over = over.saturating_sub(lines.len() + 1);
+            lines.clear();
+        }
+    }
+    paragraphs.retain(|(lines, _)| !lines.is_empty());
+    let gaps = height.is_none_or(|_| body(&paragraphs, true).len() <= room);
     crate::screen::ask(
         &format!("unqueue {}", head.name),
-        &body,
-        &["unqueue them".to_string()],
+        &body(&paragraphs, gaps),
+        &[match chain.len() {
+            1 => "unqueue it".to_string(),
+            _ => "unqueue them".to_string(),
+        }],
         0,
     )
 }
@@ -5552,13 +5647,135 @@ mod tests {
         }
     }
 
+    /// The panel over a paused `sessions`, `profile` and `settings` after
+    /// it, with `login` past its `last:` step `suite`.
+    fn started_chain_panel() -> super::UnqueueConfirm {
+        let home = crate::platform::home_dir().unwrap_or_default();
+        super::UnqueueConfirm {
+            started: true,
+            lead: super::UnqueueLead::Deletes,
+            skipped_last: vec![super::SkippedLast {
+                task: "login".into(),
+                steps: vec!["suite".into()],
+            }],
+            ..super::UnqueueConfirm::unstarted(
+                &[
+                    drafted_entry("sessions", "sessions", &[]),
+                    drafted_entry("profile", "profile", &["sessions"]),
+                    drafted_entry("settings", "settings", &["profile"]),
+                ],
+                &home.join(".spoolway/shop/pending"),
+            )
+        }
+    }
+
+    /// A started task's panel says its branch and worktree are deleted for
+    /// good, names the `last:` step the task left at the end of the group
+    /// walked past, and lists the chain, with no line about the queue tab.
+    /// Fails before the change, which drew neither warning.
+    #[test]
+    fn the_unqueue_panel_for_a_started_task_says_what_is_deleted_for_good() {
+        let panel = unqueue_confirm_panel(&started_chain_panel(), None);
+        let profile = format!("profile{GUTTER}(depends on sessions)");
+        let settings = format!("settings{GUTTER}(depends on profile)");
+        assert_eq!(
+            panel_text(&panel)[..15],
+            [
+                "unqueue sessions",
+                "",
+                "sessions has a branch and a worktree.",
+                "both are deleted and cannot be recovered.",
+                "",
+                "login is past its last: step suite.",
+                "unqueueing leaves no other task to run them.",
+                "",
+                "3 tasks go back to:",
+                "~/.spoolway/shop/pending/",
+                "",
+                "sessions",
+                profile.as_str(),
+                settings.as_str(),
+                "",
+            ]
+            .map(String::from),
+            "{panel:#?}"
+        );
+
+        let one = super::UnqueueConfirm {
+            chain: vec![drafted_entry("sessions", "sessions", &[])],
+            skipped_last: vec![super::SkippedLast {
+                task: "login".into(),
+                steps: vec!["suite".into(), "handover".into()],
+            }],
+            ..started_chain_panel()
+        };
+        let text = panel_text(&unqueue_confirm_panel(&one, None));
+        assert!(
+            text.contains(&"login is past its last: steps suite, handover.".to_string()),
+            "{text:#?}"
+        );
+        assert!(
+            !text.iter().any(|l| l.contains("nothing has run")),
+            "{text:#?}"
+        );
+
+        let borrowed = super::UnqueueConfirm {
+            lead: super::UnqueueLead::Neither,
+            skipped_last: Vec::new(),
+            ..one
+        };
+        let text = panel_text(&unqueue_confirm_panel(&borrowed, None));
+        assert!(
+            !text
+                .iter()
+                .any(|l| l.contains("worktree") || l.contains("nothing has run")),
+            "{text:#?}"
+        );
+    }
+
+    /// In a 15-row pane, the shortest the board's popups are drawn in, the
+    /// started panel folds its list of tasks and the blanks between its
+    /// paragraphs and keeps both warnings, the count and the key line inside
+    /// the twelve rows the resume picker keeps to. It stays within the 100
+    /// columns the board's popups are drawn at.
+    #[test]
+    fn the_started_unqueue_panel_fits_a_fifteen_row_pane() {
+        let panel = unqueue_confirm_panel(&started_chain_panel(), Some(15));
+        let text = panel.join("\n");
+        assert!(panel.len() <= 12, "{text}");
+        for line in [
+            "sessions has a branch and a worktree.",
+            "both are deleted and cannot be recovered.",
+            "login is past its last: step suite.",
+            "unqueueing leaves no other task to run them.",
+            "3 tasks go back to:",
+            "[enter] confirm   [esc] close",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        assert!(
+            panel.iter().all(|line| line.chars().count() <= 100),
+            "{text}"
+        );
+
+        // A taller pane keeps every paragraph apart, folding only the list.
+        let panel = unqueue_confirm_panel(&started_chain_panel(), Some(19));
+        let text = panel_text(&panel);
+        assert!(panel.len() <= 16, "{text:#?}");
+        assert!(text.contains(&"sessions".to_string()), "{text:#?}");
+        assert!(text.contains(&"… and 2 more".to_string()), "{text:#?}");
+    }
+
     /// A routine copy the unqueue deletes says so, and names the routine file
     /// that stays, in place of the pending path an ordinary task is given.
     #[test]
     fn the_unqueue_panel_for_a_routine_copy_names_where_its_routine_stays() {
         let panel = unqueue_confirm_panel(
-            &[routine_copy("nightly-3", "nightly")],
-            std::path::Path::new("/pending"),
+            &super::UnqueueConfirm::unstarted(
+                &[routine_copy("nightly-3", "nightly")],
+                std::path::Path::new("/pending"),
+            ),
+            None,
         );
         let text = panel_text(&panel);
         assert_eq!(
@@ -5595,7 +5812,10 @@ mod tests {
         ] {
             let id = entry.id.clone();
             let name = entry.name.clone();
-            let panel = unqueue_confirm_panel(&[entry], std::path::Path::new("/pending"));
+            let panel = unqueue_confirm_panel(
+                &super::UnqueueConfirm::unstarted(&[entry], std::path::Path::new("/pending")),
+                None,
+            );
             let text = panel_text(&panel);
             assert_eq!(
                 text[..text.len() - 2],
@@ -5606,8 +5826,6 @@ mod tests {
                     "",
                     "the task goes back to:",
                     format!("/pending/{id}.md").as_str(),
-                    "",
-                    "the queue tab is what sends it again.",
                     "",
                 ]
                 .map(String::from),
@@ -5630,7 +5848,10 @@ mod tests {
             },
             drafted_entry("logout", "logout", &["nightly-3"]),
         ];
-        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        let panel = unqueue_confirm_panel(
+            &super::UnqueueConfirm::unstarted(&chain, std::path::Path::new("/pending")),
+            None,
+        );
         let text = panel_text(&panel);
         let logout = format!("logout{GUTTER}(depends on nightly)");
         let nightly = format!("nightly{GUTTER}(depends on login)");
@@ -5646,8 +5867,6 @@ mod tests {
                 "",
                 "login",
                 logout.as_str(),
-                "",
-                "the queue tab is what sends them again.",
                 "",
                 "1 routine copy is deleted:",
                 "",
@@ -5672,7 +5891,10 @@ mod tests {
                 ..routine_copy("weekly-1", "weekly")
             },
         ];
-        let panel = unqueue_confirm_panel(&chain, std::path::Path::new("/pending"));
+        let panel = unqueue_confirm_panel(
+            &super::UnqueueConfirm::unstarted(&chain, std::path::Path::new("/pending")),
+            None,
+        );
         let text = panel_text(&panel);
         assert_eq!(text[0], "unqueue nightly");
         assert!(text.contains(&"2 routine copies are deleted:".to_string()));
@@ -5714,7 +5936,7 @@ mod tests {
             .collect();
         let home = crate::platform::home_dir().unwrap_or_default();
         let dir = home.join(".spoolway/a-long-project-name-1axtn7/pending");
-        let panel = unqueue_confirm_panel(&chain, &dir);
+        let panel = unqueue_confirm_panel(&super::UnqueueConfirm::unstarted(&chain, &dir), None);
         for line in &panel {
             assert!(line.chars().count() <= 80, "{line}");
         }

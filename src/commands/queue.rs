@@ -810,36 +810,82 @@ fn unqueue_or_bail(repo: &Repo, id: &str) -> Result<()> {
 /// Print what [`crate::status::Unqueued`] says happened to `id`, or refuse
 /// when it stayed queued.
 fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> Result<()> {
-    use crate::status::Unqueued;
-    match outcome {
-        Unqueued::Deleted { routine_file } => {
-            println!(
-                "deleted `{id}`, a copy of the routine in {} — it is still there to queue again",
-                routine_file.display()
-            );
-        }
-        Unqueued::Drafted(dest) => {
-            println!("unqueued `{id}` → {}", dest.display());
-        }
-        Unqueued::NewerDraft => {
-            bail!(
-                "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
-                 then run this again.",
-                repo.pending_dir().join(format!("{id}.md")).display()
-            );
-        }
-        Unqueued::Untouched => {
-            bail!(
-                "did not unqueue `{id}`: it is no longer a queued task that has not started — \
-                 `spoolway queue list` shows where it is now. nothing was changed."
-            );
-        }
-    }
+    println!("{}", unqueued_line(repo, id, outcome)?);
     Ok(())
 }
 
-/// `--force` on a task that has started: tear it down the way done-cleanup
-/// does, then carry it, and every task after it in its group, to pending.
+/// The line [`report_unqueued`] prints for `outcome`, or the refusal it
+/// gives when `id` stayed queued.
+fn unqueued_line(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> Result<String> {
+    use crate::status::Unqueued;
+    match outcome {
+        Unqueued::Deleted { routine_file } => Ok(format!(
+            "deleted `{id}`, a copy of the routine in {} — it is still there to queue again",
+            routine_file.display()
+        )),
+        Unqueued::Drafted(dest) => Ok(format!("unqueued `{id}` → {}", dest.display())),
+        Unqueued::NewerDraft => bail!(
+            "did not unqueue `{id}`: a newer draft is already at {} — move that draft aside, \
+             then run this again.",
+            repo.pending_dir().join(format!("{id}.md")).display()
+        ),
+        Unqueued::Untouched => bail!(
+            "did not unqueue `{id}`: it is no longer a queued task that has not started — \
+             `spoolway queue list` shows where it is now. nothing was changed."
+        ),
+    }
+}
+
+/// `--force` on a task that has started: [`unqueue_stopped`], refusing a task
+/// that is still moving while a dispatcher runs, with every line it has to
+/// say printed as it goes.
+///
+/// A dispatcher holding the run lock is no obstacle for a stopped task — see
+/// [`crate::status::stopped_for_unqueue`] — because nothing is moving it. A
+/// task that is still running is refused while a dispatcher runs, and torn
+/// down, its live lane stopped with it, when none does.
+fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
+    let check = |tasks: &[Task], lanes: &[crate::mux::Lane]| -> Result<()> {
+        if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())?
+            && !crate::status::stopped_for_unqueue(repo, tasks, pipelines, lanes, id)
+        {
+            let stage = tasks
+                .iter()
+                .find(|t| t.id() == id)
+                .map_or("", |t| t.stage());
+            bail!(
+                "did not unqueue `{id}`: it is on `{stage}` and a dispatcher is running for \
+                 this repo (pid {pid}), which could be moving it right now. a task is only torn \
+                 down under a running dispatcher once it has stopped with no lane or cut at \
+                 work. run `spoolway queue pause {id}`, wait until it shows paused, then run \
+                 this again. nothing was torn down."
+            );
+        }
+        Ok(())
+    };
+    unqueue_stopped(repo, pipelines, id, &check, &mut |said| match said {
+        Said::Line(line) => println!("{line}"),
+        Said::Problem(problem) => eprintln!("{problem}"),
+    })
+}
+
+/// One thing [`unqueue_stopped`] has to tell whoever asked for it, as it
+/// happens: the command prints each, the board keeps the problems.
+pub(crate) enum Said {
+    /// What was done: a worktree removed or kept, a task carried or deleted.
+    Line(String),
+    /// Something the teardown could not do, named for a person to fix.
+    Problem(String),
+}
+
+/// What [`unqueue_stopped`] asks under the task lock before it touches
+/// anything: given the queue and this project's own lanes as they stand then,
+/// an `Err` refuses the whole unqueue.
+pub(crate) type UnqueueCheck<'a> = dyn Fn(&[Task], &[crate::mux::Lane]) -> Result<()> + 'a;
+
+/// Tear a task that has started down the way done-cleanup does, then carry
+/// it, and every task after it in its group, to pending. `spoolway queue
+/// unqueue --force` and the board's `unqueue` both come through here.
 ///
 /// The teardown is [`crate::dispatch::Dispatcher::tear_down_stopped`]. It
 /// stops the task's lanes and runs, banks what they spent, removes the
@@ -852,20 +898,25 @@ fn report_unqueued(repo: &Repo, id: &str, outcome: crate::status::Unqueued) -> R
 /// The move to pending comes only after the teardown succeeded, all or
 /// nothing: a worktree that cannot be removed leaves the task queued and its
 /// file untouched. A copy of a routine that still exists is deleted instead of
-/// carried, unless a task carried with it depends on it.
+/// carried, unless a task carried with it depends on it — see
+/// [`crate::status::forced_routine_file`].
 ///
-/// A dispatcher holding the run lock is no obstacle for a stopped task — see
-/// [`crate::status::stopped_for_unqueue`] — because nothing is moving it. The
-/// task lock is taken first, and the stop is checked again under it, since the
-/// dispatcher may have moved the task since the caller looked. A task that is
-/// still running is refused while a dispatcher runs, and torn down, its live
-/// lane stopped with it, when none does.
-fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<()> {
+/// The task lock is taken first, and `check` is asked under it with the
+/// queue and this project's own lanes as they stand then: an `Err` from it
+/// refuses before anything is touched. The caller may have looked at the task
+/// a moment ago, and a dispatcher or a shell may have moved it since.
+pub(crate) fn unqueue_stopped(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    id: &str,
+    check: &UnqueueCheck,
+    say: &mut dyn FnMut(Said),
+) -> Result<()> {
     // The same per-task lock `unqueue_task` itself takes, held across the
     // whole teardown rather than just the final move: nothing else may
     // read or write this task's file while its checkout is coming down.
-    // Going on without it would make the stopped recheck below meaningless
-    // under a running dispatcher, so a holder that outlasts the wait refuses.
+    // Going on without it would make the check below meaningless under a
+    // running dispatcher, so a holder that outlasts the wait refuses.
     let _task_lock =
         crate::lock::TaskLock::acquire(&repo.task_lock_file(id)).with_context(|| {
             format!(
@@ -880,7 +931,6 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
         .iter()
         .position(|t| t.id() == id)
         .with_context(|| format!("no queued task `{id}` — it left the queue while this ran"))?;
-    let stage = tasks[idx].stage().to_string();
 
     let mux = crate::mux::backend(repo)?;
     // A failed listing is not "no lanes": the lanes gate the teardown below,
@@ -898,17 +948,7 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
     // lanes in a checkout of ours are stopped and banked.
     let mine = crate::dispatch::our_checkouts(repo, &tasks);
     lanes.retain(|lane| crate::dispatch::owns_cwd(&mine, &lane.cwd));
-    if let Some(pid) = crate::lock::Lock::holder(&repo.lock_file())?
-        && !crate::status::stopped_for_unqueue(repo, &tasks, pipelines, &lanes, id)
-    {
-        bail!(
-            "did not unqueue `{id}`: it is on `{stage}` and a dispatcher is running for this \
-             repo (pid {pid}), which could be moving it right now. a task is only torn down \
-             under a running dispatcher once it has stopped with no lane or cut at work. \
-             run `spoolway queue pause {id}`, wait until it shows paused, then run this \
-             again. nothing was torn down."
-        );
-    }
+    check(&tasks, &lanes)?;
 
     // The tasks that come along, and which of them are written to pending
     // rather than deleted, decided before anything comes down so a draft
@@ -917,19 +957,8 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
     // lands in the gap is the one race this cannot close.
     let dependents = crate::status::unqueue_dependents(&tasks, id);
     let drafted = crate::status::drafted_in_batch(repo, &dependents)?;
-    let routine_file = tasks[idx]
-        .routine()
-        .and_then(|routine| routine_file(repo, routine))
-        // A routine copy a drafted dependent depends on is carried too, or
-        // that draft would name a task that is nowhere.
-        .filter(|_| {
-            !dependents.iter().any(|dependent| {
-                drafted.contains(dependent)
-                    && tasks
-                        .iter()
-                        .any(|t| t.id() == dependent && t.front.depends_on.iter().any(|d| d == id))
-            })
-        });
+    let routine_file =
+        crate::status::forced_routine_file(repo, &tasks, &tasks[idx], &dependents, &drafted);
     let carried = std::iter::once(id.to_string())
         .filter(|_| routine_file.is_none())
         .chain(
@@ -963,8 +992,8 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
     let mut dispatcher = crate::dispatch::Dispatcher::new(repo, pipelines, mux_ref);
     let mut report = crate::dispatch::Report::default();
     let torn_down = dispatcher.tear_down_stopped(&mut task, &lanes, &mut report);
-    for problem in &report.problems {
-        eprintln!("{problem}");
+    for problem in report.problems {
+        say(Said::Problem(problem));
     }
     if !torn_down {
         bail!(
@@ -981,9 +1010,12 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
             } else {
                 "it could not be removed"
             };
-            println!("kept worktree {} — {why}", path.display());
+            say(Said::Line(format!(
+                "kept worktree {} — {why}",
+                path.display()
+            )));
         } else {
-            println!("removed worktree {}", path.display());
+            say(Said::Line(format!("removed worktree {}", path.display())));
         }
     }
 
@@ -1002,10 +1034,11 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
         std::fs::remove_file(&task.path)
             .with_context(|| format!("removing {}", task.path.display()))?;
         crate::tracking::stop_and_reclaim(repo, id);
-        report_unqueued(repo, id, crate::status::Unqueued::Deleted { routine_file })?;
+        let line = unqueued_line(repo, id, crate::status::Unqueued::Deleted { routine_file })?;
+        say(Said::Line(line));
     } else {
         match crate::status::carry_to_pending(repo, &task)? {
-            Some(dest) => println!("unqueued `{id}` → {}", dest.display()),
+            Some(dest) => say(Said::Line(format!("unqueued `{id}` → {}", dest.display()))),
             None => bail!(
                 "the checkout is torn down, but did not unqueue `{id}`: a newer draft is \
                  already at {} — move that draft aside, then run this again.",
@@ -1017,11 +1050,8 @@ fn queue_unqueue_forced(repo: &Repo, pipelines: &Pipelines, id: &str) -> Result<
     // The tasks after it in its group cannot run without it. Each keeps
     // `group:` and `depends_on:`, so queueing them again rejoins the group.
     for dependent in &dependents {
-        report_unqueued(
-            repo,
-            dependent,
-            crate::status::unqueue_in(repo, dependent, &drafted)?,
-        )?;
+        let outcome = crate::status::unqueue_in(repo, dependent, &drafted)?;
+        say(Said::Line(unqueued_line(repo, dependent, outcome)?));
     }
     Ok(())
 }
