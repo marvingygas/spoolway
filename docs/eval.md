@@ -50,7 +50,7 @@ work while it shows.
 | `[a]` | Open the sort popup, ascending |
 | `[d]` | Open the sort popup, descending |
 | `[t]` | Switch the lanes table between totals and per task, and the directory table between totals and per session |
-| `[tab]` | Move to the next section |
+| `[←→]` | Move to the next section with `→` and the previous one with `←`, wrapping at either end |
 | `[f]` | Open the filter panel |
 | `[e]` | Export the table on screen, in the view drawn, to a CSV file |
 | `[r]` | Re-read the ledger |

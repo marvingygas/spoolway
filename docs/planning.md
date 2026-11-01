@@ -176,7 +176,7 @@ after the path reads again.
 
 | Key | What it does |
 |---|---|
-| `tab` | Switch focus between the groups and tasks panes. |
+| `←` `→` | Switch focus between the groups and tasks panes. |
 | `esc` | With the tasks pane focused, return focus to the groups pane. |
 | `space` | Select a group. |
 | `enter` | Check the selection and queue it. |
@@ -416,7 +416,7 @@ without a key.
 | `space` | Over the list, tick a routine. Over a single task on the right, queue that one task alone. |
 | `enter` | Queue every task under every ticked routine as one batch. |
 | `o` | Open the options menu of the row the focused pane highlights. |
-| `tab` | Switch focus between the routine list and the details pane. |
+| `←` `→` | Switch focus between the routine list and the details pane. On a job row they do nothing. |
 | `esc` | Over the details pane, return focus to the list. Over the list, do nothing. |
 
 The options menu follows focus the same way it does on the queue screen, and is titled with the

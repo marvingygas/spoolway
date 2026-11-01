@@ -924,8 +924,9 @@ checked-in file to override. Its strip numbers `DISPATCH`, `QUEUE`, `ROUTINES` a
 to `4`, and `4` opens eval.
 
 The tab has four sections, named in its list box's title. The open one is bracketed. The tab
-always opens on config, and `tab` moves the brackets one section right, wrapping from active
-back to config.
+always opens on config. `→` moves the brackets one section right, wrapping from active back to
+config, and `←` moves them one section left, wrapping from config to active. They move the
+section only while its list has the keys: inside a search row or a popup they do nothing there.
 
 ```
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
@@ -974,7 +975,7 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 │   watch                                                                      │
 │     dirs                        empty                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+ [enter] set value   [f] search   [o] options   [w] open workspace   [q] quit
 ```
 
 | Key | What it does |
@@ -984,7 +985,7 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 | `f` | Open the `search:` row at the top of the list. |
 | `o` | Open the options menu of the key under the cursor. |
 | `w` | Open the overrides folder. |
-| `tab` | Move to the next section. |
+| `←` `→` | Move to the previous or the next section. |
 
 The options menu is titled with the key. It offers `delete override` when the layer sets the key, and a key the layer does not set shows an empty menu. `delete override` opens a confirm popup that names the key and the file, as in [The active section](#the-active-section). `enter` removes the key from `overrides/config.toml`, and the file leaves the layer when no key is left in it. `esc` closes the popup with nothing deleted.
 
@@ -1064,7 +1065,7 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 │     serial                                                                   │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] select   [f] search   [o] options   [w] open workspace   [tab] section   [q] quit
+ [enter] select   [f] search   [o] options   [w] open workspace   [q] quit
 ```
 
 `↑` and `↓` move the cursor, and `f` opens a `search:` row that narrows the list by field name.
@@ -1187,7 +1188,7 @@ layer already holds a copy of reads `overridden`.
 │   reproducer                                                                 │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [enter] override   [f] search   [w] open workspace   [tab] section   [q] quit
+ [enter] override   [f] search   [w] open workspace   [q] quit
 ```
 
 `↑` and `↓` move the cursor. `f` opens a `search:` row that narrows the list to the prompts whose
@@ -1246,7 +1247,7 @@ copy replaces the whole file, so its row reads `whole file`.
 │   [ ] prompts/code-reviewer          whole file                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- [space] select   [a] select all   [o] options   [w] open workspace   [tab] section   [q] quit
+ [space] select   [a] select all   [o] options   [w] open workspace   [q] quit
 ```
 
 A key the merge leaves out reads `ignored —` and the reason `spoolway override list` prints. The
@@ -1278,7 +1279,7 @@ branch has merged: a promote keeps its entries in the layer until you delete the
 | `a` | Select every file and key. A second `a` clears the selection. |
 | `o` | Open the menu: `edit`, `promote selected` and `delete selected`. |
 | `w` | Open the overrides folder. |
-| `tab` | Move to the next section. |
+| `←` `→` | Move to the previous or the next section. |
 
 `enter` on the list does nothing: every row is edited through `o`, then `edit`. The menu opens
 on `edit`, which always acts on the row under the cursor. The menu's title says how many keys are

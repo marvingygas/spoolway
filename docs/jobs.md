@@ -212,7 +212,7 @@ folder inside a routine, or outside `.spoolway/routines/`. A name too long for t
 
 The row's details show the job's schedule, pipeline, scope, next firing, last firing and name,
 then why it never fires. The row takes no tick, so `space` and `enter` do nothing on it, and
-`tab` does nothing either. Its key line is `[o] options   [q] quit`.
+`←` and `→` do nothing either. Its key line is `[o] options   [q] quit`.
 
 Its options menu offers one item:
 
