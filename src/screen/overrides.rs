@@ -1520,7 +1520,7 @@ mod tests {
     fn the_tab_opens_on_config_under_the_strip() {
         let (repo, _guard) = project("hosted");
         let _hosting = shell::Hosting::open(shell::Tab::Overrides);
-        let mut input = std::io::Cursor::new(b"\x1b[C".to_vec());
+        let mut input = std::io::Cursor::new(b"\x1b[C5".to_vec());
         let mut out = Vec::new();
         let leave = tab(
             &repo,
@@ -1529,9 +1529,9 @@ mod tests {
             &mut out,
         )
         .unwrap();
-        assert_eq!(leave, Leave::Switch(shell::Toward::Right));
+        assert_eq!(leave, Leave::Open(shell::Tab::Eval));
         let drawn = shell::plain(&String::from_utf8(out).unwrap());
-        assert!(drawn.contains("[OVERRIDES]"), "{drawn}");
+        assert!(drawn.contains("[4] OVERRIDES"), "{drawn}");
         assert!(drawn.contains("╭─ [config]   pipeline   prompts   active (0) ─"));
         assert!(drawn.contains(
             "[enter] set value   [f] search   [o] options   [w] open workspace   [tab] section   \

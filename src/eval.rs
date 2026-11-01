@@ -9100,31 +9100,32 @@ mod screen_tests {
 
     /// Hosted, a ledger eval cannot read is held on the tab under the strip
     /// — the shell still has four other tabs to reach — rather than printed
-    /// on the way out, and `←` leaves it.
+    /// on the way out, and a tab's digit leaves it.
     #[test]
     fn hosted_an_unreadable_window_is_held_on_the_tab_until_a_shell_key() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-hosted-load-error");
         let _hosting = Hosting::open(Tab::Eval);
         let args = EvalArgs {
             since: Some("not-a-date".into()),
             ..no_args()
         };
-        let mut input = keys("x\x1b[D");
+        let mut input = keys("x\x1b[D1");
         let mut out = Vec::new();
         let leave = run_now(&repo, &args, &mut input, &mut out);
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let drawn = String::from_utf8(out).unwrap();
         assert!(drawn.contains("spoolway eval: "), "{drawn}");
         assert!(drawn.contains("DISPATCH"), "under the strip: {drawn}");
     }
 
-    /// Hosted as bare `spoolway`'s eval tab, `←` and `→` while browsing hand
-    /// the screen back to the shell, and the frame is eval's own under the
-    /// strip. Inside the filter panel they keep cycling a row's value.
+    /// Hosted as bare `spoolway`'s eval tab, a tab's digit while browsing
+    /// hands the screen back to the shell, and the frame is eval's own under
+    /// the strip. The arrows no longer leave, and inside the filter panel
+    /// they keep cycling a row's value.
     #[test]
-    fn hosted_browsing_leaves_on_the_arrows_but_the_filters_keep_them() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+    fn hosted_browsing_leaves_on_a_digit_and_the_filters_keep_the_arrows() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-hosted-leave");
         let _hosting = Hosting::open(Tab::Eval);
         let run = |input: &str| {
@@ -9134,12 +9135,12 @@ mod screen_tests {
             (leave, String::from_utf8(out).unwrap())
         };
 
-        let (leave, drawn) = run("\x1b[D");
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        let (leave, drawn) = run("1");
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
-        assert!(first.contains("DISPATCH"), "{first}");
+        assert!(first.contains("[1] DISPATCH"), "{first}");
         assert!(has_top(first, TableKind::Lanes, "by pipeline"), "{first}");
-        assert_eq!(run("\x1b[C").0, Leave::Switch(Toward::Right));
+        assert_eq!(run("\x1b[D\x1b[C4").0, Leave::Open(Tab::Overrides));
 
         // `f` opens the filters; `→` there cycles a row, and the input then
         // runs out inside the panel.
@@ -9270,15 +9271,15 @@ mod screen_tests {
 
     /// Hosted, switching to eval draws the strip, the eval frame and the
     /// keyless loading popup before the load lands. While it shows, `f` and
-    /// `tab` are not read and `→` still leaves, and leaving drops the
+    /// `tab` are not read and a tab's digit still leaves, and leaving drops the
     /// receiver, so the thread's late result goes nowhere.
     #[test]
     fn the_first_frame_is_drawn_under_the_loading_popup_before_the_load_lands() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-loading-first");
         let _hosting = Hosting::open(Tab::Eval);
         let senders = Senders::default();
-        let mut input = keys("f\t\x1b[C");
+        let mut input = keys("f\t3");
         let mut out = Vec::new();
         let leave = run_screen_with(
             &repo,
@@ -9290,7 +9291,7 @@ mod screen_tests {
             &mut out,
         )
         .unwrap();
-        assert_eq!(leave, Leave::Switch(Toward::Right));
+        assert_eq!(leave, Leave::Open(Tab::Routines));
 
         let drawn = String::from_utf8(out).unwrap();
         let all = frames(&drawn);
@@ -9416,20 +9417,20 @@ mod screen_tests {
         );
     }
 
-    /// 200 keys and then `←`: the tab switches after the one frame drawn
+    /// 200 keys and then `1`: the tab switches after the one frame drawn
     /// for the table. The keys alternate `↓` and `↑` so that every one of
     /// them would change the frame, and the frame writer, which skips a
     /// repeat of the last frame, could not hide a frame drawn per key.
     #[test]
     fn a_burst_of_keys_then_left_switches_after_one_frame() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_to_sort("screen-burst-left");
         let _hosting = Hosting::open(Tab::Eval);
-        let script = format!("{}\x1b[D", format!("{DOWN}k").repeat(100));
+        let script = format!("{}1", format!("{DOWN}k").repeat(100));
         let mut input = keys(&script);
         let mut out = Vec::new();
         let leave = run_now(&repo, &no_args(), &mut input, &mut out);
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let drawn = String::from_utf8(out).unwrap();
         assert_eq!(frames(&drawn).len(), 1, "one frame for the whole burst");
     }

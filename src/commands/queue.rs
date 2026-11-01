@@ -16937,49 +16937,51 @@ mod tests {
         assert!(last.contains("[o] options   [tab] routines"), "{last}");
     }
 
-    /// Hosted, the arrows leave for the neighbouring tab from the tasks pane
-    /// too — `tab` moving focus there does not hand them to the screen.
+    /// Hosted, a tab's digit leaves for that tab from the tasks pane too —
+    /// `tab` moving focus there does not hand the digits to the screen.
     #[test]
-    fn hosted_the_arrows_leave_the_tab_from_the_tasks_pane_too() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+    fn hosted_a_digit_leaves_the_tab_from_the_tasks_pane_too() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-leave-tasks");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
-        let (exit, _) = screen_exit(&repo, listed(&repo), "\t\x1b[D");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
-        let (exit, _) = screen_exit(&repo, listed(&repo), "\t\x1b[C");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\t1");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Dispatch)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\t3");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Routines)));
     }
 
-    /// Hosted as bare `spoolway`'s queue tab, `←`, `→` and `q` while
+    /// Hosted as bare `spoolway`'s queue tab, a tab's digit and `q` while
     /// browsing hand the screen back to the shell, and the frame opens under
-    /// the strip.
+    /// the strip. The arrows no longer leave: the input runs out on the tab.
     #[test]
-    fn hosted_the_arrows_and_q_leave_the_tab_while_browsing() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+    fn hosted_a_digit_and_q_leave_the_tab_while_browsing() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-leave");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
-        let (exit, drawn) = screen_exit(&repo, listed(&repo), "\x1b[D");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
-        assert!(last_frame(&drawn).contains("DISPATCH"), "{drawn}");
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "1");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Dispatch)));
+        assert!(last_frame(&drawn).contains("[1] DISPATCH"), "{drawn}");
         assert!(last_frame(&drawn).contains("[q] quit"), "{drawn}");
 
-        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[C");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "5");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Eval)));
+        let (exit, _) = screen_exit(&repo, listed(&repo), "\x1b[D\x1b[C");
+        assert_eq!(exit, ScreenExit::Quit, "the input ran out on the tab");
         let (exit, _) = screen_exit(&repo, listed(&repo), "q");
         assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
     }
 
-    /// Hosted as bare `spoolway`'s routines tab, `←`, `→` and `q` over the
-    /// routine list hand the screen back to the shell, from either pane —
+    /// Hosted as bare `spoolway`'s routines tab, a tab's digit and `q` over
+    /// the routine list hand the screen back to the shell, from either pane —
     /// and the list's key line names `q` and no `esc`, as the routines tab's
     /// mockup draws it.
     #[test]
-    fn hosted_the_arrows_and_q_leave_the_routines_tab_and_its_line_names_q() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+    fn hosted_a_digit_and_q_leave_the_routines_tab_and_its_line_names_q() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-routines-leave");
         write_routine(
             &repo,
@@ -16997,20 +16999,20 @@ mod tests {
             ),
             "{drawn}"
         );
-        assert!(last_frame(&drawn).contains("[ROUTINES]"), "{drawn}");
-        let (exit, _) = routines_exit(&repo, "\x1b[D");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Left)));
-        let (exit, _) = routines_exit(&repo, "\x1b[C");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
-        let (exit, _) = routines_exit(&repo, "\t\x1b[C");
-        assert_eq!(exit, ScreenExit::Leave(Leave::Switch(Toward::Right)));
+        assert!(last_frame(&drawn).contains("[3] ROUTINES"), "{drawn}");
+        let (exit, _) = routines_exit(&repo, "2");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Queue)));
+        let (exit, _) = routines_exit(&repo, "4");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Overrides)));
+        let (exit, _) = routines_exit(&repo, "\t4");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Overrides)));
     }
 
-    /// A popup over the routines tab keeps `←`, `→` and `q` for itself, the
+    /// A popup over the routines tab keeps the digits and `q` for itself, the
     /// rule the queue tab keeps: here the headless refusal that picking open
     /// task off the tasks pane's menu opens, which reads nothing but `enter`.
     #[test]
-    fn hosted_a_popup_over_the_routines_tab_keeps_the_arrows_and_q() {
+    fn hosted_a_popup_over_the_routines_tab_keeps_the_digits_and_q() {
         use crate::screen::shell::{Hosting, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-routines-popup");
         let _editor = crate::editor::pin_editor("/bin/sh");
@@ -17023,7 +17025,7 @@ mod tests {
         );
         let _hosting = Hosting::open(Tab::Routines);
 
-        let (exit, drawn) = routines_exit(&repo, "\to\r\x1b[C\x1b[Dq");
+        let (exit, drawn) = routines_exit(&repo, "\to\r24q");
         assert_eq!(exit, ScreenExit::Quit, "the input ran out under the popup");
         assert!(
             last_frame(&drawn).contains(&format!("{TOP_LEFT}─ open task ")),
@@ -17031,31 +17033,32 @@ mod tests {
         );
     }
 
-    /// Inside a sub-mode the arrows and `q` stay with it even when hosted:
-    /// the filter reads `q` into its query and holds the arrows — it does
-    /// not leave the tab.
+    /// Inside a sub-mode the digits and `q` stay with it even when hosted:
+    /// the search reads `q` and a tab's digit into its query as text — it
+    /// does not leave the tab.
     #[test]
-    fn hosted_a_sub_mode_keeps_the_arrows_and_q_for_itself() {
+    fn hosted_a_sub_mode_keeps_the_digits_and_q_for_itself() {
         use crate::screen::shell::{Hosting, Tab};
         let (repo, _root_guard) = fixture("screen-hosted-sub-mode");
         write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
         let _hosting = Hosting::open(Tab::Queue);
 
-        let (exit, _) = screen_exit(&repo, listed(&repo), "fq\x1b[D");
+        let (exit, drawn) = screen_exit(&repo, listed(&repo), "fq1");
         assert_eq!(
             exit,
             ScreenExit::Quit,
             "the input ran out inside the filter"
         );
+        assert!(last_frame(&drawn).contains("q1"), "typed as text: {drawn}");
     }
 
     /// Where the old standalone screen printed its opening message and
     /// ended, the queue tab holds it on screen under the strip, as a popup
     /// over the tab — every key but `enter` is the popup's to ignore, `enter`
-    /// closes it onto the ordinary screen, and `←` then leaves.
+    /// closes it onto the ordinary screen, and `1` then leaves.
     #[test]
     fn the_queue_tab_holds_its_opening_message_instead_of_ending() {
-        use crate::screen::shell::{Hosting, Leave, Tab, Toward};
+        use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture("queue-tab-opening-message");
         std::fs::write(
             repo.pending_dir().join("no-group.md"),
@@ -17064,7 +17067,7 @@ mod tests {
         .unwrap();
         let _hosting = Hosting::open(Tab::Queue);
 
-        let mut input = keys("x\x1b[D\r\x1b[D");
+        let mut input = keys("x1\r1");
         let mut out = Vec::new();
         let leave = queue_tab(
             &repo,
@@ -17075,7 +17078,7 @@ mod tests {
             &mut out,
         )
         .unwrap();
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let drawn = String::from_utf8(out).unwrap();
         let first = drawn.split("\x1b[?2026h\x1b[H").nth(1).unwrap();
         assert!(

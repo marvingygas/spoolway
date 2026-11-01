@@ -21,9 +21,10 @@
 //! for the answer, says a good one for a second and closes itself, and holds
 //! a refusal until `enter`.
 //!
-//! A tab's screen keeps its own loop. When it reads `←`, `→` or `q` with no
-//! popup or sub-mode of its own open — [`leave_on`] — it hands a [`Leave`]
-//! back here and returns, and this loop opens the neighbouring tab. That is
+//! A tab's screen keeps its own loop. When it reads a tab's digit or `q`
+//! with no popup or sub-mode of its own open — [`leave_on`] — it hands a
+//! [`Leave`] back here and returns, and this loop opens the tab with that
+//! number. That is
 //! what lets every key the tab's screen already reads, inside its filters or
 //! its popups, keep its own meaning without this module knowing what any of
 //! them are.
@@ -66,8 +67,8 @@ pub(crate) enum Tab {
     Eval,
 }
 
-/// Every tab, left to right — the order the strip draws them and `←`/`→`
-/// walk them in. Routines sit beside queue, the tab `s` saves them from.
+/// Every tab, left to right — the order the strip draws and numbers them,
+/// from `1`. Routines sit beside queue, the tab `s` saves them from.
 const TABS: [Tab; 5] = [
     Tab::Dispatch,
     Tab::Queue,
@@ -77,7 +78,7 @@ const TABS: [Tab; 5] = [
 ];
 
 /// [`TABS`] for a home-mode project, which has no overrides tab — see the
-/// module doc.
+/// module doc. Eval is numbered `4` here, the place the strip draws it.
 const HOME_TABS: [Tab; 4] = [Tab::Dispatch, Tab::Queue, Tab::Routines, Tab::Eval];
 
 /// The tabs `repo`'s strip draws: every one in repo mode, and all but
@@ -101,24 +102,6 @@ impl Tab {
             Tab::Eval => "EVAL",
         }
     }
-
-    /// The tab beside this one on a strip of `tabs`, or this one again at
-    /// either end: `←` on dispatch and `→` on eval have no neighbour to
-    /// reach, and wrapping round would put the two furthest tabs one key
-    /// apart.
-    fn toward(self, way: Toward, tabs: &[Tab]) -> Tab {
-        let at = tabs.iter().position(|tab| *tab == self).unwrap_or(0);
-        match way {
-            Toward::Left => tabs[at.saturating_sub(1)],
-            Toward::Right => tabs[(at + 1).min(tabs.len() - 1)],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Toward {
-    Left,
-    Right,
 }
 
 /// Why a tab's screen handed control back to the shell.
@@ -126,8 +109,8 @@ pub(crate) enum Toward {
 pub(crate) enum Leave {
     /// `q`, `ctrl-c`, or the input running out: the whole screen ends.
     Quit,
-    /// `←` or `→`: open the neighbouring tab.
-    Switch(Toward),
+    /// A tab's digit: open that tab.
+    Open(Tab),
 }
 
 thread_local! {
@@ -188,12 +171,19 @@ pub(crate) fn strip_rows() -> usize {
 /// its meaning there. `None` with no shell around the screen at all — a
 /// standalone `run_screen` driven directly by a test has no neighbouring tab
 /// to go to, and `q` there keeps whatever meaning it already had.
+///
+/// A digit opens the tab the strip numbers with it, counting from `1`. A
+/// digit past the strip's last tab, and `0`, are `None`: `5` on a home-mode
+/// strip has no tab to open, and reading it as the last one would open a
+/// tab the person did not ask for.
 pub(crate) fn leave_on(key: Key) -> Option<Leave> {
-    hosted()?;
+    let (_, tabs) = HOSTED.with(Cell::get)?;
     match key {
-        Key::Left => Some(Leave::Switch(Toward::Left)),
-        Key::Right => Some(Leave::Switch(Toward::Right)),
         Key::Char('q') => Some(Leave::Quit),
+        Key::Char(digit) => {
+            let at = digit.to_digit(10)?.checked_sub(1)?;
+            tabs.get(at as usize).copied().map(Leave::Open)
+        }
         _ => None,
     }
 }
@@ -211,11 +201,8 @@ pub(crate) fn quit_hint() -> &'static [(&'static str, &'static str)] {
 /// area of the 100-column terminal every mockup of this screen is drawn to.
 const FALLBACK_WIDTH: usize = 100 - 2 * super::MARGIN;
 
-/// The gap between two neighbouring tab slots on the strip. A slot is a
-/// label with one column either side for the open tab's brackets, so with
-/// these six spaces every label lands in the column it held when the strip
-/// marked the open tab by colour and spaced its labels eight apart.
-const SLOT_GAP: &str = "      ";
+/// The gap between two neighbouring labels on the strip.
+const LABEL_GAP: &str = "        ";
 
 /// The strip with one blank row above it and one under it, for a screen to
 /// put above its own frame — or nothing at all with no shell hosting one. The
@@ -243,45 +230,47 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: `tabs` centred, each in a
-/// slot one column wider than its label on either side, and `←` and `→`
-/// one space outside the first and last slot. The open tab fills its slot's
-/// spare columns with `[` and `]`, the same mark the key line gives a key;
-/// every other slot leaves them blank. The whole line is bold, the weight the
-/// wordmark is drawn in, and reset on the same line so the bold never runs
-/// into the row under it. Nothing is coloured or dim, and the open tab is not
-/// bolder than the rest — the brackets alone say which tab is open.
+/// The strip itself, `width` columns wide: `tabs` centred, each label
+/// after its digit in brackets — `[1] DISPATCH` — the mark the key line gives
+/// a key, since the digit is the key that opens it. The open tab is drawn at
+/// normal brightness and every other label is dimmed. The whole line is
+/// bold, the weight the wordmark is drawn in, and reset on the same line so
+/// the bold never runs into the row under it. Nothing is coloured.
+///
+/// A dimmed label ends on [`NORMAL_INTENSITY`] and the bold again, not on a
+/// reset: most terminals clear bold and dim with one code, so a reset or a
+/// bare `22` after a dimmed label would draw every label after it thin.
 ///
 /// `width` is the drawing area's, not the terminal's: the frame writer's
 /// one-column indent moves the line in by the margin, which keeps it centred
-/// on the terminal as the margin keeps every tab's frame.
-///
-/// At least two columns of the area stay before `←` however narrow the
-/// terminal, and nothing is written past the `→`: a row that reaches the
-/// terminal's last column is followed by a newline the terminal has already
-/// wrapped for, and the frame under it comes out one row lower than it was
-/// measured for. The bold and reset codes take no column, so they are left
-/// out of every width measured here.
+/// on the terminal as the margin keeps every tab's frame. A terminal too
+/// narrow for the labels starts them in the area's first column. The codes
+/// take no column, so they are left out of every width measured here.
 fn strip_line(open: Tab, tabs: &[Tab], width: usize) -> String {
-    use crate::status::{BOLD, RESET};
+    use crate::status::{BOLD, DIM, RESET};
 
-    let slots: Vec<String> = tabs
+    let labels: Vec<String> = tabs
         .iter()
-        .map(|tab| match *tab == open {
-            true => format!("[{}]", tab.label()),
-            false => format!(" {} ", tab.label()),
+        .enumerate()
+        .map(|(at, tab)| format!("[{}] {}", at + 1, tab.label()))
+        .collect();
+    let span = labels.iter().map(|l| l.chars().count()).sum::<usize>()
+        + LABEL_GAP.len() * (labels.len() - 1);
+    let start = width.saturating_sub(span) / 2;
+    let drawn: Vec<String> = tabs
+        .iter()
+        .zip(&labels)
+        .map(|(tab, label)| match *tab == open {
+            true => label.clone(),
+            false => format!("{DIM}{label}{NORMAL_INTENSITY}{BOLD}"),
         })
         .collect();
-    let span =
-        slots.iter().map(|s| s.chars().count()).sum::<usize>() + SLOT_GAP.len() * (slots.len() - 1);
-    // Two columns of margin, the arrow, and one space before the first slot.
-    let start = (width.saturating_sub(span) / 2).max(4);
-    format!(
-        "{BOLD}{}← {} →{RESET}",
-        " ".repeat(start - 2),
-        slots.join(SLOT_GAP)
-    )
+    format!("{BOLD}{}{}{RESET}", " ".repeat(start), drawn.join(LABEL_GAP))
 }
+
+/// SGR 22, which ends dim. It ends bold too, so the strip writes its bold
+/// again straight after it — see [`strip_line`].
+const NORMAL_INTENSITY: &str = "\x1b[22m";
 
 /// Open the screen: bare `spoolway` in a terminal.
 ///
@@ -385,7 +374,7 @@ fn host(
         }
         match leave {
             Leave::Quit => return Ok(()),
-            Leave::Switch(way) => tab = tab.toward(way, tabs),
+            Leave::Open(next) => tab = next,
         }
     }
 }
@@ -447,7 +436,7 @@ pub(crate) fn tui_screens() -> Vec<(String, Vec<String>)> {
 /// start a child from `current_exe`, which under `cargo test` is the test
 /// binary itself.
 #[cfg(test)]
-const TO_QUEUE: &str = "\x1b[C";
+const TO_QUEUE: &str = "2";
 
 /// The frames `host` draws over `input` typed at it, with the opening
 /// dispatch frame dropped and [`TO_QUEUE`] typed first, so the first frame
@@ -460,7 +449,7 @@ pub(crate) fn drive_frames(repo: &Repo, input: &str) -> Vec<String> {
     let mut frames = drive_from_start(repo, &format!("{TO_QUEUE}{input}"));
     let opening = frames.remove(0);
     assert!(
-        opening.contains("[DISPATCH]"),
+        opening.contains("dispatcher stopped"),
         "the frame dropped ahead of the queue tab is the dispatch tab's: {opening}"
     );
     frames
@@ -565,7 +554,7 @@ impl Popup {
     }
 
     /// Whether this popup reads keys. `Starting`, `Updating` and `Loaded` do
-    /// not: the board's keys, `←`, `→` and `q` all work under them, and each
+    /// not: the board's keys, the tabs' digits and `q` all work under them, and each
     /// closes on its own.
     fn reads_keys(&self) -> bool {
         !matches!(
@@ -1340,7 +1329,7 @@ fn draw_board_from_memory(
 
 /// A tab that has nothing to draw but a message — a ledger eval could not
 /// read — held on screen under the strip until a key moves on. Every key but
-/// `←`, `→` and `q` is ignored: there is nothing else here to act on.
+/// a tab's digit and `q` is ignored: there is nothing else here to act on.
 pub(crate) fn message_tab(
     message: &str,
     input: &mut impl PollableRead,
@@ -1422,89 +1411,100 @@ mod tests {
         assert!(!crate::commands::already_running(&repo, false).unwrap());
     }
 
-    // The strip for each open tab, drawn to 80 columns: every label in the
-    // column it holds before the brackets, overrides between routines and
-    // eval. The bold takes no column, so it is taken out before the columns
-    // are read.
+    // The strip drawn to 106 columns, the drawing area of a 108-column
+    // terminal: every tab after its digit, eight columns apart and centred,
+    // with no arrow at either end. The codes take no column, so they are
+    // taken out before the columns are read.
     #[test]
-    fn the_strip_lands_every_label_where_the_mockup_draws_it() {
-        let lines = TABS.map(|tab| plain(&strip_line(tab, &TABS, 80)));
-        assert_eq!(
-            lines,
-            [
-                "    ← [DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL  →",
-                "    ←  DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL  →",
-                "    ←  DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL  →",
-                "    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →",
-                "    ←  DISPATCH        QUEUE        ROUTINES        OVERRIDES       [EVAL] →",
-            ]
-        );
-    }
-
-    // A home-mode project's strip has no overrides tab, and its four labels
-    // land where they did before there was one.
-    #[test]
-    fn the_home_mode_strip_draws_four_tabs_where_they_always_were() {
-        let lines = HOME_TABS.map(|tab| plain(&strip_line(tab, &HOME_TABS, 80)));
-        assert_eq!(
-            lines,
-            [
-                "            ← [DISPATCH]       QUEUE        ROUTINES        EVAL  →",
-                "            ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →",
-                "            ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →",
-                "            ←  DISPATCH        QUEUE        ROUTINES       [EVAL] →",
-            ]
-        );
-    }
-
-    // The whole line is bold and reset on the same line, and nothing else:
-    // no colour, no dim, and no second bold marking the open tab — brackets
-    // are still the only mark of which one is open.
-    #[test]
-    fn the_strip_is_bold_from_its_first_column_to_its_last_and_nothing_else() {
+    fn the_strip_numbers_every_tab_where_the_mockup_draws_it() {
         for tab in TABS {
-            let line = strip_line(tab, &TABS, 100);
-            let inner = line
-                .strip_prefix("\x1b[1m")
-                .and_then(|l| l.strip_suffix("\x1b[0m"))
-                .unwrap_or_else(|| panic!("not wrapped in bold and reset: {line:?}"));
-            assert!(!inner.contains('\x1b'), "{line:?}");
+            assert_eq!(
+                plain(&strip_line(tab, &TABS, 106)),
+                "          [1] DISPATCH        [2] QUEUE        [3] ROUTINES        \
+                 [4] OVERRIDES        [5] EVAL"
+            );
         }
     }
 
-    // Five tabs are wider than a narrow terminal, and the strip still keeps
-    // its margin and both arrows rather than wrapping or losing one.
+    // A home-mode project's strip has no overrides tab, so eval is `4`.
     #[test]
-    fn a_narrow_terminal_still_keeps_a_space_between_each_arrow_and_the_labels() {
+    fn the_home_mode_strip_numbers_eval_four() {
+        for tab in HOME_TABS {
+            assert_eq!(
+                plain(&strip_line(tab, &HOME_TABS, 106)),
+                "                    [1] DISPATCH        [2] QUEUE        \
+                 [3] ROUTINES        [4] EVAL"
+            );
+        }
+    }
+
+    // The open tab is the one label at normal brightness. Each dimmed label
+    // ends on `22` and the bold again, never on a reset or a bare `22`,
+    // which clear the bold of every label after it on most terminals.
+    #[test]
+    fn the_open_tab_is_lit_and_every_other_label_is_dim_and_still_bold() {
+        let dim = |label: &str| format!("\x1b[2m{label}\x1b[22m\x1b[1m");
+        let gap = LABEL_GAP;
+        let line = strip_line(Tab::Queue, &TABS, 106);
+        assert_eq!(
+            line,
+            format!(
+                "\x1b[1m{}{}{gap}[2] QUEUE{gap}{}{gap}{}{gap}{}\x1b[0m",
+                " ".repeat(10),
+                dim("[1] DISPATCH"),
+                dim("[3] ROUTINES"),
+                dim("[4] OVERRIDES"),
+                dim("[5] EVAL"),
+            )
+        );
+        let line = strip_line(Tab::Eval, &HOME_TABS, 106);
+        assert_eq!(
+            line,
+            format!(
+                "\x1b[1m{}{}{gap}{}{gap}{}{gap}[4] EVAL\x1b[0m",
+                " ".repeat(20),
+                dim("[1] DISPATCH"),
+                dim("[2] QUEUE"),
+                dim("[3] ROUTINES"),
+            )
+        );
+    }
+
+    // A terminal too narrow for the labels starts them in the drawing
+    // area's first column rather than underflowing the centring.
+    #[test]
+    fn a_narrow_terminal_starts_the_strip_in_the_first_column() {
         for tabs in [&TABS[..], &HOME_TABS[..]] {
             let line = plain(&strip_line(Tab::Queue, tabs, 20));
-            assert!(line.starts_with("  ←  DISPATCH"), "{line:?}");
-            assert!(line.ends_with("EVAL  →"), "{line:?}");
+            assert!(line.starts_with("[1] DISPATCH"), "{line:?}");
+            assert!(line.ends_with("EVAL"), "{line:?}");
         }
     }
 
+    // Each digit opens the tab the strip numbers with it, and a digit with
+    // no tab — `0`, `6`, and `5` on a home-mode strip — opens nothing.
     #[test]
-    fn left_and_right_walk_the_tabs_in_strip_order_and_stop_at_either_end() {
-        let walk = |tab: Tab, way| tab.toward(way, &TABS);
-        assert_eq!(walk(Tab::Queue, Toward::Left), Tab::Dispatch);
-        assert_eq!(walk(Tab::Queue, Toward::Right), Tab::Routines);
-        assert_eq!(walk(Tab::Routines, Toward::Left), Tab::Queue);
-        assert_eq!(walk(Tab::Routines, Toward::Right), Tab::Overrides);
-        assert_eq!(walk(Tab::Overrides, Toward::Left), Tab::Routines);
-        assert_eq!(walk(Tab::Overrides, Toward::Right), Tab::Eval);
-        assert_eq!(walk(Tab::Eval, Toward::Left), Tab::Overrides);
-        assert_eq!(walk(Tab::Dispatch, Toward::Left), Tab::Dispatch);
-        assert_eq!(walk(Tab::Eval, Toward::Right), Tab::Eval);
+    fn each_digit_opens_the_tab_the_strip_numbers_with_it() {
+        let _hosting = Hosting::open(Tab::Queue);
+        let opens = |digit| leave_on(Key::Char(digit));
+        assert_eq!(opens('1'), Some(Leave::Open(Tab::Dispatch)));
+        assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
+        assert_eq!(opens('3'), Some(Leave::Open(Tab::Routines)));
+        assert_eq!(opens('4'), Some(Leave::Open(Tab::Overrides)));
+        assert_eq!(opens('5'), Some(Leave::Open(Tab::Eval)));
+        assert_eq!(opens('0'), None);
+        assert_eq!(opens('6'), None);
     }
 
-    // On a home-mode strip `→` from routines lands on eval, and `←` from
-    // eval on routines: no key reaches a tab the strip does not draw.
     #[test]
-    fn the_home_mode_strip_walks_from_routines_straight_to_eval() {
-        let walk = |tab: Tab, way| tab.toward(way, &HOME_TABS);
-        assert_eq!(walk(Tab::Routines, Toward::Right), Tab::Eval);
-        assert_eq!(walk(Tab::Eval, Toward::Left), Tab::Routines);
-        assert_eq!(walk(Tab::Eval, Toward::Right), Tab::Eval);
+    fn on_a_home_mode_strip_four_opens_eval_and_five_nothing() {
+        let _hosting = Hosting::open_in(Tab::Queue, &HOME_TABS);
+        let opens = |digit| leave_on(Key::Char(digit));
+        assert_eq!(opens('1'), Some(Leave::Open(Tab::Dispatch)));
+        assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
+        assert_eq!(opens('3'), Some(Leave::Open(Tab::Routines)));
+        assert_eq!(opens('4'), Some(Leave::Open(Tab::Eval)));
+        assert_eq!(opens('5'), None);
     }
 
     // A project is in home mode when its home sits in a workspace's
@@ -1517,19 +1517,20 @@ mod tests {
         assert_eq!(tabs_for(&repo), &HOME_TABS[..]);
     }
 
-    // The whole walk on a home-mode project: the strip draws four tabs, and
-    // `→` twice from queue reaches eval with no overrides tab between.
+    // The whole walk on a home-mode project: the strip draws four tabs, `4`
+    // opens eval, and `5` after it opens nothing.
     #[test]
     fn host_on_a_home_mode_project_draws_no_overrides_tab() {
         let (mut repo, _root_guard) = crate::status::testutil::fixture("shell-host-home-mode");
         repo.home = repo.root.join("workspace/dispatchers/shop");
-        let frames = drive_host(&repo, "\x1b[C\x1b[C");
+        let frames = drive_host(&repo, "45");
         for frame in &frames {
             assert!(!frame.contains("OVERRIDES"), "{frame}");
         }
         let last = frames.last().unwrap();
+        assert!(last.contains("[3] ROUTINES        [4] EVAL"), "{last}");
         assert!(
-            last.contains("DISPATCH        QUEUE        ROUTINES       [EVAL]"),
+            last.contains(&format!("{TOP_LEFT}─ [eval]   directories   trials ")),
             "{last}"
         );
     }
@@ -1546,18 +1547,22 @@ mod tests {
 
     // The e2e suite's own gesture, at unit level: the screen opens on the
     // dispatch tab under the strip, with no dispatcher behind it, offering
-    // `enter` to start one. `→` reaches the queue tab and `←` from the
-    // opening tab stays where it is. The queue is empty, so `enter` and `q`
-    // are the only keys on the line.
+    // `enter` to start one. `2` reaches the queue tab, and neither arrow
+    // leaves the opening tab. The queue is empty, so `enter` and `q` are the
+    // only keys on the line.
     #[test]
-    fn host_opens_on_the_dispatch_tab_and_right_reaches_the_queue() {
+    fn host_opens_on_the_dispatch_tab_and_two_reaches_the_queue() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-open");
         let frames = drive_from_start(&repo, "");
         let first = &frames[0];
         assert!(
-            first.contains("[DISPATCH]       QUEUE        ROUTINES        OVERRIDES        EVAL"),
+            first.contains(
+                "[1] DISPATCH        [2] QUEUE        [3] ROUTINES        \
+                 [4] OVERRIDES        [5] EVAL"
+            ),
             "{first}"
         );
+        assert!(!first.contains('←') && !first.contains('→'), "{first}");
         assert!(first.contains("dispatcher stopped"), "{first}");
         assert!(
             !first.contains("─ dispatch"),
@@ -1573,15 +1578,13 @@ mod tests {
             first.contains("\n  [enter] start dispatching   [q] quit\n"),
             "{first}"
         );
-        let left = drive_from_start(&repo, "\x1b[D");
-        let last = left.last().unwrap();
-        assert!(last.contains("[DISPATCH]"), "{last}");
-        let right = drive_from_start(&repo, "\x1b[C");
-        let last = right.last().unwrap();
-        assert!(
-            last.contains("DISPATCH       [QUEUE]       ROUTINES        OVERRIDES        EVAL"),
-            "{last}"
-        );
+        for arrows in ["\x1b[D", "\x1b[C", "\x1b[C\x1b[C"] {
+            let frames = drive_from_start(&repo, arrows);
+            let last = frames.last().unwrap();
+            assert!(last.contains("dispatcher stopped"), "{arrows:?}: {last}");
+        }
+        let frames = drive_from_start(&repo, "2");
+        let last = frames.last().unwrap();
         assert!(last.contains("─ [groups]"), "{last}");
     }
 
@@ -1594,7 +1597,7 @@ mod tests {
         let frames = drive_from_start(&repo, "");
         let first = &frames[0];
         assert!(
-            first.contains("[DISPATCH]       QUEUE        ROUTINES        EVAL"),
+            first.contains("[1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] EVAL"),
             "{first}"
         );
         assert!(first.contains("dispatcher stopped"), "{first}");
@@ -1627,7 +1630,7 @@ mod tests {
             .map(|body| format!("\x1b[?2026h\x1b[H{body}"))
             .collect::<Vec<_>>();
         assert!(
-            frames[0].contains("[DISPATCH]"),
+            frames[0].contains("dispatcher stopped"),
             "the frame dropped ahead of the queue tab is the dispatch tab's"
         );
         frames.split_off(1)
@@ -1652,14 +1655,11 @@ mod tests {
         // Queue (where the driver starts) → Dispatch → Queue → Routines → Overrides → Eval →
         // Overrides → Routines → Queue → Dispatch → Queue: forward through
         // all five, then back through all five, both with a real switch
-        // behind every arrow.
-        let frames = drive_host_raw_frames(
-            &repo,
-            "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C\x1b[D\x1b[D\x1b[D\x1b[D\x1b[C",
-        );
+        // behind every digit.
+        let frames = drive_host_raw_frames(&repo, "1234543212");
         const DISPATCH: &str = "dispatcher stopped";
         const QUEUE: &str = "─ [groups]";
-        const ROUTINES: &str = "[ROUTINES]";
+        const ROUTINES: &str = "─ [routines] ─";
         // Its key line rather than its title: with no terminal to measure
         // the whole config list is drawn, and its top runs off the screen.
         // Not `[tab] section` alone, which the eval tab's key line reads too.
@@ -1706,7 +1706,7 @@ mod tests {
         let (width, height) = (100, 24);
         let _terminal = crate::screen::test_terminal((width, height));
         // Queue (where the driver starts) → Dispatch → Queue → Routines → Overrides → Eval.
-        let frames = drive_host_raw_frames(&repo, "\x1b[D\x1b[C\x1b[C\x1b[C\x1b[C");
+        let frames = drive_host_raw_frames(&repo, "12345");
         let names = [
             "queue",
             "dispatch",
@@ -1750,7 +1750,7 @@ mod tests {
                 "{name}: the key line ends on the row above them:\n{shown}"
             );
             assert!(
-                shown.lines().nth(1).is_some_and(|line| line.contains('←')),
+                shown.lines().nth(1).is_some_and(|line| line.contains("[1] DISPATCH")),
                 "{name}: the strip is still on its own row:\n{shown}"
             );
         }
@@ -1929,12 +1929,12 @@ mod tests {
         );
     }
 
-    // `→` from the queue tab opens routines, reading the routine folders on
+    // `3` from the queue tab opens routines, reading the routine folders on
     // that visit: a routine saved with save as routine a moment earlier on
-    // the queue tab is already listed. `→` again moves on to overrides, the
-    // tab beside it, which opens on its config section.
+    // the queue tab is already listed. `4` then opens overrides, which opens
+    // on its config section.
     #[test]
-    fn right_from_queue_opens_routines_with_a_routine_just_saved_then_overrides() {
+    fn three_from_queue_opens_routines_with_a_routine_just_saved_then_four_overrides() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-routines");
         std::fs::write(
             repo.pending_dir().join("audit-deps.md"),
@@ -1944,13 +1944,9 @@ mod tests {
 
         // `o` opens the group's options menu, `↓` `enter` picks save as
         // routine, whose panel is named after the group; `enter` saves it,
-        // `enter` closes the notice, `→` opens routines.
-        let frames = drive_host(&repo, "o\x1b[B\r\r\r\x1b[C");
+        // `enter` closes the notice, `3` opens routines.
+        let frames = drive_host(&repo, "o\x1b[B\r\r\r3");
         let last = frames.last().unwrap();
-        assert!(
-            last.contains("DISPATCH        QUEUE       [ROUTINES]       OVERRIDES        EVAL"),
-            "{last}"
-        );
         assert!(last.contains("─ [routines] ─"), "{last}");
         assert!(last.contains("> [ ] nightly"), "{last}");
         assert!(
@@ -1960,12 +1956,8 @@ mod tests {
             "{last}"
         );
 
-        let frames = drive_host(&repo, "\x1b[C\x1b[C");
+        let frames = drive_host(&repo, "34");
         let last = frames.last().unwrap();
-        assert!(
-            last.contains("DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL"),
-            "{last}"
-        );
         assert!(
             last.contains("─ [config]   pipeline   prompts   active (0) ─"),
             "{last}"
@@ -2001,11 +1993,11 @@ mod tests {
     }
 
     // `enter` asks the overrides gate first, as a popup over the board, and
-    // the popup reads every key: `→` does not leave the tab while it is up.
+    // the popup reads every key: `2` does not leave the tab while it is up.
     #[test]
-    fn enter_opens_the_overrides_popup_and_it_keeps_the_arrows() {
+    fn enter_opens_the_overrides_popup_and_it_keeps_the_digits() {
         let (repo, _root_guard) = fixture_with_layer("shell-host-overrides");
-        let frames = drive_host(&repo, "\x1b[D\r\x1b[C");
+        let frames = drive_host(&repo, "1\r2");
         let last = frames.last().unwrap();
         assert!(
             last.contains(&format!(
@@ -2033,7 +2025,7 @@ mod tests {
     #[test]
     fn esc_off_the_overrides_popup_starts_nothing() {
         let (repo, _root_guard) = fixture_with_layer("shell-host-overrides-esc");
-        let frames = drive_host(&repo, "\x1b[D\r\x1b");
+        let frames = drive_host(&repo, "1\r\x1b");
         let last = frames.last().unwrap();
         assert!(!last.contains("overrides are active"), "{last}");
         assert!(last.contains("[enter] start dispatching"), "{last}");
@@ -3156,14 +3148,14 @@ mod tests {
         runs.stop(&key);
     }
 
-    // While a board menu or confirm panel is open it reads every key: `→`
+    // While a board menu or confirm panel is open it reads every key: `2`
     // there is the menu's to ignore, not the shell's, so the screen stays on
     // the board rather than opening the queue tab.
     #[test]
-    fn an_open_board_panel_keeps_the_arrows_from_the_shell() {
+    fn an_open_board_panel_keeps_the_digits_from_the_shell() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let frames = drive_host(&repo, "\x1b[Do\x1b[C");
+        let frames = drive_host(&repo, "1o2");
         let last = frames.last().unwrap();
         assert!(last.contains("> open"), "the menu is still up: {last}");
         // Either title the queue tab draws, whichever of its panes has focus.
@@ -3175,33 +3167,33 @@ mod tests {
 
     // Once the panel is answered — `unqueue` picked from the menu, then
     // `enter`, which carries the unqueue out — the board is at rest again
-    // and `→` is the shell's: it reaches the queue tab.
+    // and `2` is the shell's: it reaches the queue tab.
     #[test]
-    fn an_answered_board_panel_gives_the_arrows_back() {
+    fn an_answered_board_panel_gives_the_digits_back() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-panel-answered");
         crate::status::testutil::add(&repo, "wire", &[], None);
-        let frames = drive_host(&repo, "\x1b[Do\x1b[B\x1b[B\r\r\x1b[C");
+        let frames = drive_host(&repo, "1o\x1b[B\x1b[B\r\r2");
         let last = frames.last().unwrap();
         assert!(last.contains("─ [groups]"), "{last}");
     }
 
     // A tab with only a message to show keeps it under the strip, ignores
-    // every key but the shell's own, and leaves on `←`.
+    // every key but the shell's own, and leaves on a tab's digit.
     #[test]
     fn message_tab_holds_its_message_until_a_shell_key() {
         let _hosting = Hosting::open(Tab::Eval);
-        let mut input = std::io::Cursor::new(b"xj\x1b[D".to_vec());
+        let mut input = std::io::Cursor::new(b"xj\x1b[D\x1b[C1".to_vec());
         let mut out = Vec::new();
         let leave = message_tab("spoolway eval: no ledger", &mut input, &mut out);
-        assert_eq!(leave, Leave::Switch(Toward::Left));
+        assert_eq!(leave, Leave::Open(Tab::Dispatch));
         let drawn = plain(&String::from_utf8(out).unwrap());
-        assert!(drawn.contains("DISPATCH        QUEUE"), "{drawn}");
+        assert!(drawn.contains("[1] DISPATCH        [2] QUEUE"), "{drawn}");
         assert!(drawn.contains("spoolway eval: no ledger"), "{drawn}");
     }
 
     #[test]
     fn with_no_shell_hosting_nothing_leaves_and_nothing_is_drawn() {
-        assert_eq!(leave_on(Key::Left), None);
+        assert_eq!(leave_on(Key::Char('1')), None);
         assert_eq!(leave_on(Key::Char('q')), None);
         assert!(strip().is_empty());
         assert_eq!(strip_rows(), 0);
@@ -3209,18 +3201,19 @@ mod tests {
     }
 
     #[test]
-    fn hosting_a_tab_makes_the_arrows_and_q_leave_until_it_is_dropped() {
+    fn hosting_a_tab_makes_the_digits_and_q_leave_until_it_is_dropped() {
         {
             let _hosting = Hosting::open(Tab::Routines);
-            assert_eq!(leave_on(Key::Left), Some(Leave::Switch(Toward::Left)));
-            assert_eq!(leave_on(Key::Right), Some(Leave::Switch(Toward::Right)));
+            assert_eq!(leave_on(Key::Char('1')), Some(Leave::Open(Tab::Dispatch)));
             assert_eq!(leave_on(Key::Char('q')), Some(Leave::Quit));
+            assert_eq!(leave_on(Key::Left), None);
+            assert_eq!(leave_on(Key::Right), None);
             assert_eq!(leave_on(Key::Tab), None);
             assert_eq!(strip_rows(), 3);
             let strip = strip();
             assert_eq!(strip.len(), 3);
             assert_eq!(strip[0], "");
-            assert!(plain(&strip[1]).contains("[ROUTINES]"), "{:?}", strip[1]);
+            assert!(plain(&strip[1]).contains("[3] ROUTINES"), "{:?}", strip[1]);
             assert_eq!(strip[2], "");
         }
         assert_eq!(hosted(), None);

@@ -1651,12 +1651,12 @@ mod tests {
     fn tui_text_is_lowercase() {
         let _t = test_terminal((100, 30));
         let mut screens: Vec<(String, Vec<String>)> = Vec::new();
-        let (left, right, down) = ("\x1b[D", "\x1b[C", "\x1b[B");
+        let (dispatch, routines, overrides, down) = ("1", "3", "4", "\x1b[B");
         let walks: Vec<String> = vec![
             // The tabs, each as the screen opens or is reached.
             String::new(),
-            left.into(),
-            right.into(),
+            dispatch.into(),
+            routines.into(),
             // Queue tab: panes, filters, the options menu and what each
             // item asks, then what answering it says.
             "\t".into(),
@@ -1682,55 +1682,55 @@ mod tests {
             // Routines tab: the list, its details pane, the job and the
             // routine without a job or without a routine, and the options
             // each has.
-            format!("{right}\t"),
-            format!("{right}\r"),
-            format!("{right}{down}"),
-            format!("{right}{down}{down}"),
-            format!("{right}{down}{down}\t"),
-            format!("{right}o"),
-            format!("{right}o\r"),
-            format!("{right}o\r\r"),
-            format!("{right}o\r\r\r"),
-            format!("{right}o\r\r\r\r"),
-            format!("{right}o\r1\r"),
-            format!("{right}o{down}\r"),
-            format!("{right}o{down}\r\r"),
-            format!("{right}o{down}{down}\r"),
-            format!("{right}o{down}{down}\r\r"),
-            format!("{right}{down}o"),
-            format!("{right}{down}o\r"),
-            format!("{right}{down}o\r\r"),
-            format!("{right}{down}o\r\r\r"),
-            format!("{right}{down}{down}o"),
-            format!("{right}{down}{down}o\r"),
-            format!("{right} \r"),
-            format!("{right} \r\r"),
+            format!("{routines}\t"),
+            format!("{routines}\r"),
+            format!("{routines}{down}"),
+            format!("{routines}{down}{down}"),
+            format!("{routines}{down}{down}\t"),
+            format!("{routines}o"),
+            format!("{routines}o\r"),
+            format!("{routines}o\r\r"),
+            format!("{routines}o\r\r\r"),
+            format!("{routines}o\r\r\r\r"),
+            format!("{routines}o\r1\r"),
+            format!("{routines}o{down}\r"),
+            format!("{routines}o{down}\r\r"),
+            format!("{routines}o{down}{down}\r"),
+            format!("{routines}o{down}{down}\r\r"),
+            format!("{routines}{down}o"),
+            format!("{routines}{down}o\r"),
+            format!("{routines}{down}o\r\r"),
+            format!("{routines}{down}o\r\r\r"),
+            format!("{routines}{down}{down}o"),
+            format!("{routines}{down}{down}o\r"),
+            format!("{routines} \r"),
+            format!("{routines} \r\r"),
             // Overrides tab: each section, the search row, both config
             // popups with something typed into them, and the pipeline
             // section's step selection, searched, and its value field. The
             // prompts section's own walks are below.
-            format!("{right}{right}"),
-            format!("{right}{right}\t"),
-            format!("{right}{right}\t\t\t"),
-            format!("{right}{right}fdispatch"),
-            format!("{right}{right}fzzz"),
-            format!("{right}{right}\rdispatch.x\t5"),
-            format!("{right}{right}{down}\r"),
-            format!("{right}{right}\t\r"),
-            format!("{right}{right}\t\rfnot set"),
-            format!("{right}{right}\t\ra\rx"),
+            format!("{overrides}"),
+            format!("{overrides}\t"),
+            format!("{overrides}\t\t\t"),
+            format!("{overrides}fdispatch"),
+            format!("{overrides}fzzz"),
+            format!("{overrides}\rdispatch.x\t5"),
+            format!("{overrides}{down}\r"),
+            format!("{overrides}\t\r"),
+            format!("{overrides}\t\rfnot set"),
+            format!("{overrides}\t\ra\rx"),
             // Dispatch tab: the board's rows, their options and the
             // resume and skip-a-hook questions. Never `enter` outside a
             // popup, and never an option that opens a file.
-            format!("{left}u"),
-            format!("{left}o"),
-            format!("{left}{down}"),
-            format!("{left}{down}{down}{down}"),
-            format!("{left}{down}o"),
-            format!("{left}{down}{down}{down}o"),
-            format!("{left}{down}{down}{down}{down}o"),
-            format!("{left}{down}{down}{down}r"),
-            format!("{left}{down}{down}{down}k"),
+            format!("{dispatch}u"),
+            format!("{dispatch}o"),
+            format!("{dispatch}{down}"),
+            format!("{dispatch}{down}{down}{down}"),
+            format!("{dispatch}{down}o"),
+            format!("{dispatch}{down}{down}{down}o"),
+            format!("{dispatch}{down}{down}{down}{down}o"),
+            format!("{dispatch}{down}{down}{down}r"),
+            format!("{dispatch}{down}{down}{down}k"),
         ];
         for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
@@ -1741,11 +1741,11 @@ mod tests {
         // search, both popups `enter` opens, and the `open workspace` popup
         // `w` opens when the folder cannot be opened.
         let prompt_walks = [
-            format!("{right}{right}\t\t"),
-            format!("{right}{right}\t\tfimpl"),
-            format!("{right}{right}\t\t\r"),
-            format!("{right}{right}\t\t\r\r\r"),
-            format!("{right}{right}w"),
+            format!("{overrides}\t\t"),
+            format!("{overrides}\t\tfimpl"),
+            format!("{overrides}\t\t\r"),
+            format!("{overrides}\t\t\r\r\r"),
+            format!("{overrides}w"),
         ];
         crate::browser::refuse_opens("could not open the overrides folder: no display is set");
         for (i, keys) in prompt_walks.iter().enumerate() {
@@ -1761,10 +1761,10 @@ mod tests {
         let empty_walks = [
             String::new(),
             "o".into(),
-            left.into(),
-            format!("{left}o"),
-            right.into(),
-            format!("{right}o"),
+            dispatch.into(),
+            format!("{dispatch}o"),
+            routines.into(),
+            format!("{routines}o"),
         ];
         for (i, keys) in empty_walks.iter().enumerate() {
             let (repo, _guard) = crate::status::testutil::fixture(&format!("capitals-empty-{i}"));
