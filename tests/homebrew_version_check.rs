@@ -13,7 +13,20 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Held while an executable is being written and while a process is being
+/// started. A process forked in one test thread while another is writing an
+/// executable inherits that file's open descriptor until it execs, and the
+/// writer's own exec of the file then fails with "Text file busy".
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn fake(path: &Path, body: &str) {
+    let _guard = spawn_guard();
     std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -51,7 +64,10 @@ impl Install {
             ),
         );
         let cellar_exe = cellar_bin.join("spoolway");
-        std::fs::copy(env!("CARGO_BIN_EXE_spoolway"), &cellar_exe).unwrap();
+        {
+            let _guard = spawn_guard();
+            std::fs::copy(env!("CARGO_BIN_EXE_spoolway"), &cellar_exe).unwrap();
+        }
         Install { root, cellar_exe }
     }
 
@@ -64,7 +80,8 @@ impl Install {
             self.root.join("bin").display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let output = Command::new(exe)
+        let mut command = Command::new(exe);
+        command
             .arg("__version-check")
             .current_dir(&self.root)
             .env("PATH", path)
@@ -73,8 +90,14 @@ impl Install {
             .env_remove("HOMEBREW_NO_AUTO_UPDATE")
             .env("HOME", &self.root)
             .env("XDG_STATE_HOME", self.root.join("state"))
-            .output()
-            .unwrap();
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = {
+            let _guard = spawn_guard();
+            command.spawn().unwrap()
+        };
+        let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
             "stderr: {}",
