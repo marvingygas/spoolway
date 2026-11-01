@@ -8310,8 +8310,8 @@ fn stacked_on(groups: &[Group], state: &ScreenState) -> Option<(String, String, 
 /// chain that would not land in `branch`: its id, the pending task of this
 /// group it depends on, and where it lands now — its own `base:`, else the
 /// board's branch. `None` when no such task depends on a task this pick
-/// rewrites. A queued or done task of this group keeps its `base:`, so a
-/// task stacked on one of those is left out.
+/// rewrites, or whose branch is not known. A queued or done task of this
+/// group keeps its `base:`, so a task stacked on one of those is left out.
 fn stacked_onto(
     groups: &[Group],
     state: &ScreenState,
