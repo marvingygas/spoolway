@@ -1688,8 +1688,10 @@ fn running_step_pane(
 /// task is done, so a stopped task can have several. Every one counts: its
 /// agent lanes, kept or not, and the panes its command runs recorded. They
 /// are ordered by start time the way [`crate::dispatch`] orders them when it
-/// closes a task's oldest panes, a lane by its record's `started_at` and a
-/// command pane by [`crate::command_step::Runs::pane_started`]. A lane counts
+/// closes a task's oldest panes, a lane by its record's start time and a
+/// command pane by [`crate::command_step::Runs::pane_started`]. Both are
+/// compared in milliseconds, so two lanes that started in the same second
+/// still have a newest. A lane counts
 /// only when [`crate::mux::lane_of_task`] names this task and
 /// [`crate::dispatch::owns_cwd`] finds it in one of this project's
 /// checkouts, so another task's lane, or another project's under the same
@@ -1719,13 +1721,13 @@ fn stopped_pane(
         .filter(|l| crate::mux::lane_of_task(&l.name, task))
         .filter(|l| crate::dispatch::owns_cwd(&mine, &l.cwd))
         .map(|l| {
-            let started = records.get(&l.name).map_or(0, |r| r.started_at());
+            let started = records.get(&l.name).map_or(0, |r| r.started_ms());
             (started, l.pane_id.clone())
         });
     let runs = crate::command_step::Runs::new(&repo.commands_dir());
     let commands = runs.keys_for_task(task.id()).into_iter().filter_map(|key| {
         let pane = runs.pane(&key)?;
-        Some((runs.pane_started(&key).unwrap_or_default(), pane))
+        Some((runs.pane_started(&key).unwrap_or_default() * 1000, pane))
     });
     agents
         .chain(commands)
