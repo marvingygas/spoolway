@@ -5349,11 +5349,11 @@ enum Mode {
     /// A [`load`] running on its own thread, under a keyless `eval` popup
     /// reading `loading…` — over an empty frame on a visit's first load, and
     /// over the table already shown on `r` or the filter panel's `enter`.
-    /// Only `←`, `→` and `q` are read: every other key would act on a table
-    /// that is about to be replaced. `filters` are the ones loaded through,
-    /// the screen's own once the result lands; `reset_cursor` is set by the
-    /// filter panel, whose new filters can leave the old row far past the
-    /// end.
+    /// Only a tab's digit and `q` are read: every other key would act on a
+    /// table that is about to be replaced. `filters` are the ones loaded
+    /// through, the screen's own once the result lands; `reset_cursor` is set
+    /// by the filter panel, whose new filters can leave the old row far past
+    /// the end.
     ///
     /// The screen owns the only receiver, so a load replaced by a newer one,
     /// or one still running when the person leaves the tab, sends into a
@@ -5648,8 +5648,8 @@ fn run_screen(
 
 /// The screen's own loop. Ends in [`Leave::Quit`] on `q` or when the input
 /// runs out, and in whatever [`crate::screen::shell::leave_on`] reads off
-/// `←` or `→` while browsing or loading when bare `spoolway` hosts this as
-/// its eval tab.
+/// a tab's digit while browsing or loading when bare `spoolway` hosts this
+/// as its eval tab.
 ///
 /// Every load goes through `start` and lands through [`Mode::Loading`], the
 /// first one included, so the frame is drawn on the keypress that opened
@@ -5741,7 +5741,7 @@ fn run_screen_with(
             let was_table = state.table;
             'handle: {
                 // Browsing and loading are the modes with no filter panel, calendar
-                // or notice open: the only ones where `←` and `→` are a hosting
+                // or notice open: the only ones where the digits are a hosting
                 // shell's.
                 if matches!(state.mode, Mode::Browsing | Mode::Loading { .. })
                     && let Some(leave) = crate::screen::shell::leave_on(key)

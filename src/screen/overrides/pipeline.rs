@@ -525,7 +525,7 @@ impl PipelineSection {
     }
 
     /// Whether the field list has the keys, with nothing open over it: the
-    /// only time `tab`, `q` and `←`/`→` reach past the section.
+    /// only time `tab`, `q` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::Fields)
     }

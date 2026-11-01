@@ -5437,7 +5437,7 @@ fn dispatcher_line(repo: &Repo) -> Option<&'static str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenExit {
     Quit,
-    /// `←`, `→` or `q` on a tab's home screen with no popup open, inside
+    /// A tab's digit or `q` on a tab's home screen with no popup open, inside
     /// bare `spoolway`'s queue or routines tab — see
     /// [`crate::screen::shell::leave_on`]. Never reached outside those tabs,
     /// where nothing is hosting the screen to hand a key back to.
@@ -5956,9 +5956,10 @@ pub(crate) fn queue_tab(
 ///
 /// The routine folders are read here, once per visit — and again only
 /// after delete removes one, see [`after_routine_delete`] — so a routine
-/// saved with save as routine on the queue tab is listed the moment `→` reaches this one. Each
-/// visit also starts on a fresh [`RoutineNav`], with nothing ticked and both
-/// cursors at the top, the same as the queue tab starts each visit fresh.
+/// saved with save as routine on the queue tab is listed the moment its
+/// digit opens this one. Each visit also starts on a fresh [`RoutineNav`],
+/// with nothing ticked and both cursors at the top, the same as the queue
+/// tab starts each visit fresh.
 ///
 /// The pending groups are not read: nothing on this tab draws or queues
 /// them, and the screen's own poll fills them in anyway — see
@@ -6109,7 +6110,7 @@ fn run_screen_from(
             break;
         };
 
-        // Inside bare `spoolway`, `←`, `→` and `q` belong to the shell on
+        // Inside bare `spoolway`, a tab's digit and `q` belong to the shell on
         // each tab's own home screen — browsing on the queue tab, the
         // routines pane on the routines tab — the two modes with no popup
         // or sub-mode open. Every other mode keeps them: a popup over
@@ -7381,9 +7382,7 @@ fn activate_refusal(repo: &Repo, job: &crate::jobs::Job) -> Option<String> {
 /// run what the menu's gate, trial and save as routine now do.
 ///
 /// `tab` is the one key that moves focus between the two panes. `←` and `→`
-/// used to as well, but inside bare `spoolway` they move between tabs, and
-/// one screen reading them two ways depending on where it was opened would
-/// be one more thing to remember — so they do nothing here. `esc` is the
+/// used to as well, and do nothing here now. `esc` is the
 /// other way back from the tasks pane to the groups pane, the same "back" it
 /// means on the routines pane's key line; over the groups pane there is
 /// nowhere further back to go, so it does nothing there.
@@ -7482,9 +7481,8 @@ fn highlighted_routine_task<'a>(
 /// `space` and `tab` do nothing on it.
 ///
 /// `tab` is the only key that moves between the two panes. `←` and `→`
-/// read nothing here: they belong to the tab strip the routines tab sits
-/// under. `esc` is not read here either: it means "back to the list" over
-/// the details pane, which `run_screen` reads itself.
+/// read nothing here. `esc` is not read here either: it means "back to the
+/// list" over the details pane, which `run_screen` reads itself.
 fn handle_routine_key(routines: &[RoutineFolder], orphans: usize, nav: &mut RoutineNav, key: Key) {
     let last = (routines.len() + orphans).saturating_sub(1);
     match key {
@@ -9117,9 +9115,8 @@ fn two_pane_frame(
 /// focused pane highlights. The order is the same in both panes, `tab`
 /// straight after `o options` and then `f search`, so a key stays in the same
 /// spot when focus moves; only the label on `tab` changes. `tab` is named
-/// as the pane it leads to — the one way into the tasks pane inside bare
-/// `spoolway`, where `←`/`→` switch tabs instead — and the one way to a
-/// group's actions from the tasks pane.
+/// as the pane it leads to — the one way into the tasks pane — and the one
+/// way to a group's actions from the tasks pane.
 ///
 /// While a picker is open over the screen — [`Mode::Gate`], [`Mode::Trial`],
 /// [`Mode::SaveRoutine`], [`Mode::DeleteRoutine`], [`Mode::DeletePending`],
@@ -15684,9 +15681,8 @@ mod tests {
         drawn.rsplit("\x1b[?2026h\x1b[H").next().unwrap_or(drawn)
     }
 
-    /// `←` and `→` no longer move focus between the two panes — `tab` is the
-    /// one key for that now, so the same arrows can move between tabs inside
-    /// bare `spoolway` without meaning two things on one screen.
+    /// `←` and `→` do not move focus between the two panes — `tab` is the
+    /// one key for that.
     #[test]
     fn only_tab_moves_focus_between_the_two_panes() {
         let (repo, _root_guard) = fixture("screen-focus-tab-only");

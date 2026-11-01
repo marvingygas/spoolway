@@ -249,7 +249,7 @@ impl State {
     }
 
     /// Whether the open section's list has the keys, with nothing open over
-    /// it: the only time `tab`, `q` and `←`/`→` reach past the section.
+    /// it: the only time `tab`, `q` and the digits reach past the section.
     fn at_rest(&self) -> bool {
         matches!(self.mode, Mode::Browsing)
             && match self.section {
@@ -441,7 +441,7 @@ pub(crate) fn tab(
             return Ok(Leave::Quit);
         };
         // Only at rest: the search rows, the fields, the picking list, the
-        // menus and the notices read `q` and the arrows as their own.
+        // menus and the notices read `q` and the digits as their own.
         if state.at_rest()
             && let Some(leave) = shell::leave_on(key)
         {

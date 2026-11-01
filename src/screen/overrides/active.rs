@@ -385,7 +385,7 @@ impl ActiveSection {
     }
 
     /// Whether the list has the keys, with nothing open over it: the only
-    /// time `tab`, `q`, `w` and `←`/`→` reach past the section.
+    /// time `tab`, `q`, `w` and the digits reach past the section.
     pub(super) fn at_rest(&self) -> bool {
         matches!(self.view, View::List)
     }

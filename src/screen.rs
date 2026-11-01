@@ -1178,20 +1178,20 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 }
 
 /// What a test that reads a screen's text calls the screen `lines` draw: the
-/// tab the strip marks open, or `fallback` when there is no strip, and the
+/// tab the strip draws lit, or `fallback` when there is no strip, and the
 /// title of a popup drawn over it, if there is one. A popup's top border
 /// sits inside the tab's own `│` border, which a pane's title never does.
+///
+/// `lines` keep their codes: the lit tab differs from the rest only by the
+/// dim in front of every other label, which plain text has lost.
 #[cfg(test)]
 pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
-    let tab = ["DISPATCH", "QUEUE", "ROUTINES", "OVERRIDES", "EVAL"]
-        .into_iter()
-        .find(|tab| {
-            lines
-                .iter()
-                .take(3)
-                .any(|line| line.contains(&format!("[{tab}]")))
-        })
+    let tab = lines
+        .iter()
+        .take(3)
+        .find_map(|line| shell::lit_tab(line))
         .map_or(fallback.to_string(), str::to_lowercase);
+    let lines: Vec<String> = lines.iter().map(|line| shell::plain(line)).collect();
     let popup = lines.iter().find_map(|line| {
         let (_, after) = line.split_once('│')?;
         let (_, title) = after.split_once(corner::TOP_LEFT)?;
@@ -1205,16 +1205,18 @@ pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
 }
 
 /// The frames one scripted walk drew, as the screens a test reads, each
-/// named by what it shows — see [`shown_screen`]. Named by content because a
-/// walk's earlier frames are not the screen its keys were written to reach,
-/// and a name written beside the keys would be wrong for them.
+/// named by what it shows — see [`shown_screen`] — with its codes taken
+/// out. Named by content because a walk's earlier frames are not the screen
+/// its keys were written to reach, and a name written beside the keys would
+/// be wrong for them.
 #[cfg(test)]
 pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Vec<String>)> {
     frames
         .iter()
         .map(|frame| {
             let lines: Vec<String> = frame.lines().map(str::to_string).collect();
-            (shown_screen(&lines, fallback), lines)
+            let name = shown_screen(&lines, fallback);
+            (name, lines.iter().map(|line| shell::plain(line)).collect())
         })
         .collect()
 }
@@ -1580,18 +1582,34 @@ mod tests {
         assert!(!report.contains("popup"), "{report}");
     }
 
-    /// A screen is named by the tab the strip marks and the title of the
+    /// A screen is named by the tab the strip draws lit and the title of the
     /// popup over it, and by the fallback tab when there is no strip.
     #[test]
     fn a_screen_is_named_by_its_tab_and_the_popup_over_it() {
         let lines = |text: &str| text.lines().map(str::to_string).collect::<Vec<_>>();
-        let plain = lines(
-            "\n  ←  DISPATCH       [QUEUE]       ROUTINES        EVAL  →\n\n ╭─ [groups] ┬─ tasks ──╮\n │ > a       │          │\n",
-        );
-        assert_eq!(shown_screen(&plain, "eval"), "queue tab");
-        let popup = lines(
-            "\n  ←  DISPATCH        QUEUE       [ROUTINES]       EVAL  →\n\n ╭─ [routines] ┬─ details ╮\n │   ╭─ weekly ───╮  │\n",
-        );
+        // The strip as `shell` draws it: bold, with every label but the
+        // open tab's dimmed.
+        let dim = |label: &str| format!("\x1b[2m{label}\x1b[22m\x1b[1m");
+        let strip = |labels: [String; 4]| format!("\x1b[1m  {}\x1b[0m", labels.join("        "));
+        let queue_open = strip([
+            dim("[1] DISPATCH"),
+            "[2] QUEUE".to_string(),
+            dim("[3] ROUTINES"),
+            dim("[4] EVAL"),
+        ]);
+        let queue = lines(&format!(
+            "\n{queue_open}\n\n ╭─ [groups] ┬─ tasks ──╮\n │ > a       │          │\n"
+        ));
+        assert_eq!(shown_screen(&queue, "eval"), "queue tab");
+        let routines_open = strip([
+            dim("[1] DISPATCH"),
+            dim("[2] QUEUE"),
+            "[3] ROUTINES".to_string(),
+            dim("[4] EVAL"),
+        ]);
+        let popup = lines(&format!(
+            "\n{routines_open}\n\n ╭─ [routines] ┬─ details ╮\n │   ╭─ weekly ───╮  │\n"
+        ));
         assert_eq!(
             shown_screen(&popup, "eval"),
             "routines tab, popup \"weekly\""
@@ -1734,7 +1752,7 @@ mod tests {
         ];
         for (i, keys) in walks.iter().enumerate() {
             let (repo, _guard) = full_project(&format!("capitals-{i}"));
-            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            let frames = crate::screen::shell::drive_coloured_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
         // The overrides tab's prompts section with a prompt to list: its
@@ -1753,7 +1771,7 @@ mod tests {
             let path = crate::prompt::directory_form(&repo, "implementer");
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "implementer\n").unwrap();
-            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            let frames = crate::screen::shell::drive_coloured_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
         // A project with nothing in it, where each tab says so and the
@@ -1768,7 +1786,7 @@ mod tests {
         ];
         for (i, keys) in empty_walks.iter().enumerate() {
             let (repo, _guard) = crate::status::testutil::fixture(&format!("capitals-empty-{i}"));
-            let frames = crate::screen::shell::drive_frames(&repo, keys);
+            let frames = crate::screen::shell::drive_coloured_frames(&repo, keys);
             screens.extend(walk_screens("queue", &frames));
         }
         for (name, panel) in [

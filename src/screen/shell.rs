@@ -169,8 +169,8 @@ pub(crate) fn strip_rows() -> usize {
 /// of its own is open — a popup, a filter, a picker — or for a key the open
 /// sub-mode reads nothing of its own on, so every key a sub-mode reads keeps
 /// its meaning there. `None` with no shell around the screen at all — a
-/// standalone `run_screen` driven directly by a test has no neighbouring tab
-/// to go to, and `q` there keeps whatever meaning it already had.
+/// standalone `run_screen` driven directly by a test has no other tab to
+/// go to, and `q` there keeps whatever meaning it already had.
 ///
 /// A digit opens the tab the strip numbers with it, counting from `1`. A
 /// digit past the strip's last tab, and `0`, are `None`: `5` on a home-mode
@@ -265,7 +265,11 @@ fn strip_line(open: Tab, tabs: &[Tab], width: usize) -> String {
             false => format!("{DIM}{label}{NORMAL_INTENSITY}{BOLD}"),
         })
         .collect();
-    format!("{BOLD}{}{}{RESET}", " ".repeat(start), drawn.join(LABEL_GAP))
+    format!(
+        "{BOLD}{}{}{RESET}",
+        " ".repeat(start),
+        drawn.join(LABEL_GAP)
+    )
 }
 
 /// SGR 22, which ends dim. It ends bold too, so the strip writes its bold
@@ -446,8 +450,18 @@ const TO_QUEUE: &str = "2";
 /// scripted-terminal drive the shell's own tests use.
 #[cfg(test)]
 pub(crate) fn drive_frames(repo: &Repo, input: &str) -> Vec<String> {
-    let mut frames = drive_from_start(repo, &format!("{TO_QUEUE}{input}"));
-    let opening = frames.remove(0);
+    drive_coloured_frames(repo, input)
+        .iter()
+        .map(|frame| plain(frame))
+        .collect()
+}
+
+/// [`drive_frames`] with every frame's codes kept, for a test that has to
+/// tell which tab the strip draws lit — see [`lit_tab`].
+#[cfg(test)]
+pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
+    let mut frames = drive_coloured_from_start(repo, &format!("{TO_QUEUE}{input}"));
+    let opening = plain(&frames.remove(0));
     assert!(
         opening.contains("dispatcher stopped"),
         "the frame dropped ahead of the queue tab is the dispatch tab's: {opening}"
@@ -455,10 +469,34 @@ pub(crate) fn drive_frames(repo: &Repo, input: &str) -> Vec<String> {
     frames
 }
 
+/// The label of the tab `line` draws lit, when `line` is the strip: the one
+/// label with no dim code in front of it — see [`strip_line`]. `None` for
+/// any other line, so a test can hand it every row of a frame.
+#[cfg(test)]
+pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
+    if !plain(line).contains("[1] DISPATCH") {
+        return None;
+    }
+    TABS.into_iter().map(Tab::label).find(|label| {
+        line.find(&format!("] {label}"))
+            .and_then(|at| line[..at].rfind('['))
+            .is_some_and(|open| !line[..open].ends_with(crate::status::DIM))
+    })
+}
+
 /// The frames `host` draws over `input` typed at it from the tab it opens
 /// on, each with its colour codes taken out.
 #[cfg(test)]
 fn drive_from_start(repo: &Repo, input: &str) -> Vec<String> {
+    drive_coloured_from_start(repo, input)
+        .iter()
+        .map(|frame| plain(frame))
+        .collect()
+}
+
+/// [`drive_from_start`] with every frame's codes kept.
+#[cfg(test)]
+fn drive_coloured_from_start(repo: &Repo, input: &str) -> Vec<String> {
     let mut input = std::io::Cursor::new(input.as_bytes().to_vec());
     let mut out = Vec::new();
     host(
@@ -473,7 +511,7 @@ fn drive_from_start(repo: &Repo, input: &str) -> Vec<String> {
     drawn
         .split("\x1b[?2026h\x1b[H")
         .skip(1)
-        .map(plain)
+        .map(str::to_string)
         .collect()
 }
 
@@ -1750,7 +1788,10 @@ mod tests {
                 "{name}: the key line ends on the row above them:\n{shown}"
             );
             assert!(
-                shown.lines().nth(1).is_some_and(|line| line.contains("[1] DISPATCH")),
+                shown
+                    .lines()
+                    .nth(1)
+                    .is_some_and(|line| line.contains("[1] DISPATCH")),
                 "{name}: the strip is still on its own row:\n{shown}"
             );
         }
