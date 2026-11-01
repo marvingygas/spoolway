@@ -185,6 +185,7 @@ that still has a task to queue or has every task archived. A group with every ta
 queued never appears. Below the groups that can be queued, the pane also lists one row per plan
 page that no task names yet. See [Queueing a plan](planning.md#queueing-a-plan). The left pane
 is titled `groups`. The right pane is titled `tasks` and lists the highlighted group's tasks.
+The focused pane's title is drawn in square brackets, such as `[groups]`.
 Beside a plan row it says `use /spoolway-tasks`. Each task shows its `pipeline:`, `depends on:`,
 `starts from:` and `lands in:`. `starts from:` is the task's own `starts_from:`, else its first
 dependency's id, else the same branch as `lands in:`. `lands in:` is the task's `base:`, else the
@@ -195,7 +196,7 @@ board's branch.
 | Key | What it does |
 |---|---|
 | `↑` `↓` / `j` `k` | Move the cursor |
-| `tab` | Switch focus between the groups and tasks panes |
+| `tab` | Switch focus between the groups and tasks panes, and move the brackets with it |
 | `esc` | With the tasks pane focused, return focus to the groups pane |
 | `space` | Select a group |
 | `enter` | Check the selection, queue what can be queued, and show what queued and what did not |
