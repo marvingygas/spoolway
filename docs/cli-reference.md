@@ -82,7 +82,7 @@ below it.
 
 | Key | What it does |
 |---|---|
-| `1`–`5` | Open that tab, when no popup or sub-mode of the tab's own is open. A home-mode project has no overrides tab, so its eval is `4` |
+| `1`–`5` | Open that tab, when no popup or sub-mode of the tab's own is open. The open tab's own digit does nothing. A home-mode project has no overrides tab, so its eval is `4` |
 | `←` `→` | Move to the next section or pane, wrapping at either end, when no popup or sub-mode of the tab's own is open |
 | `q` | Quit the whole screen, when no popup or sub-mode of the tab's own is open |
 

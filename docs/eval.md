@@ -41,7 +41,7 @@ transcript's size or modification time changed since the last read. The same rea
 model once from the price table. The screen keeps those prices until the next read, so a price
 table refreshed meanwhile shows after `[r]`. On first opening the tab,
 the popup sits over an empty frame. On `[r]` or the filter panel, it sits over the table
-already on screen. It closes by itself when the read finishes, and only `[←]`, `[→]` and `[q]`
+already on screen. It closes by itself when the read finishes, and only a tab's digit and `[q]`
 work while it shows.
 
 | Key | What it does |
@@ -61,9 +61,9 @@ filter or `[t]` leaves fewer rows than the cursor's position, the cursor moves t
 row.
 
 While you browse, keys that arrive faster than the screen draws are all applied in the order
-typed, and the screen draws one frame for them. Holding `[↓]` and then pressing `[←]` switches
-tab at once. Opening a popup, the filter panel, the calendar or a notice ends the burst, and
-that frame is drawn before the next key is read.
+typed, and the screen draws one frame for them. Holding `[↓]` and then pressing a tab's digit
+opens that tab at once. Opening a popup, the filter panel, the calendar or a notice ends the burst,
+and that frame is drawn before the next key is read.
 
 ### Totals and per task
 

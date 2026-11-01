@@ -140,7 +140,7 @@ runs `spoolway task contract --from` over the directory to check the set.
 
 <img src="screenshots/readme/queue.png" alt="the queue screen">
 
-Bare `spoolway` opens the screen on the dispatch tab, and `→` reaches the queue tab. The left
+Bare `spoolway` opens the screen on the dispatch tab, and `2` opens the queue tab. The left
 pane, titled `groups`, lists one row per group in the pending directory, and one per plan page no
 task names yet. The right pane, titled `tasks`, lists the highlighted group's tasks and what each
 waits on. The focused pane's title is drawn in square brackets, such as `[groups]`, so you can see

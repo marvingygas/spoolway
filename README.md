@@ -136,7 +136,7 @@ routines, overrides and eval from `1` to `5`, and each tab's digit opens it.
 
 To start dispatching, spoolway must run in herdr.
 
-`spoolway` opens on the dispatch tab, and `←` from the queue tab returns to it. Press `enter` there
+`spoolway` opens on the dispatch tab, and `1` from any tab returns to it. Press `enter` there
 to start dispatching.
 
 <img src="docs/screenshots/readme/dispatch.png" alt="the dispatch tab" width="100%">

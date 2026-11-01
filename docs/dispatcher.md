@@ -916,16 +916,16 @@ the line, and `[u] update config` is off the key line.
 
 ## The overrides tab
 
-Bare `spoolway`'s tab strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES`, `EVAL`. The
-overrides tab sets keys in the private [overrides layer](configuration.md#the-overrides-layer)
-from the screen, so a change needs no `override` command per key. A home-mode project has no
-overrides tab: its whole setup already lives privately in its workspace, so there is no
-checked-in file to override. Its strip reads `DISPATCH`, `QUEUE`, `ROUTINES`, `EVAL`, and `→`
-from routines reaches eval.
+Bare `spoolway`'s tab strip numbers `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES` and `EVAL` from `1`
+to `5`, and `4` opens the overrides tab. The overrides tab sets keys in the private
+[overrides layer](configuration.md#the-overrides-layer) from the screen, so a change needs no
+`override` command per key. A home-mode project has no overrides tab: its whole setup already lives privately in its workspace, so there is no
+checked-in file to override. Its strip numbers `DISPATCH`, `QUEUE`, `ROUTINES` and `EVAL` from `1`
+to `4`, and `4` opens eval.
 
-The tab has four sections, named in its list box's title. The open one is bracketed, the way the
-strip brackets the open tab. The tab always opens on config, and `tab` moves the brackets one
-section right, wrapping from active back to config. `←` and `→` still change tabs.
+The tab has four sections, named in its list box's title. The open one is bracketed. The tab
+always opens on config, and `tab` moves the brackets one section right, wrapping from active
+back to config.
 
 ```
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
@@ -959,7 +959,7 @@ has no entry for yet, is written by hand: `w` opens the overrides folder, or
 `spoolway config override --set models.qwen3-coder.input=0.4` writes one key from the command line.
 
 ```
-    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+    [1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] OVERRIDES        [5] EVAL
 
 ╭─ [config]   pipeline   prompts   active (2) ─────────────────────────────────╮
 │                                                                              │
@@ -1229,7 +1229,7 @@ ones the dispatcher reads. A worktree's own copy of them never changes what a ro
 copy replaces the whole file, so its row reads `whole file`.
 
 ```
-    ←  DISPATCH        QUEUE        ROUTINES       [OVERRIDES]       EVAL  →
+    [1] DISPATCH        [2] QUEUE        [3] ROUTINES        [4] OVERRIDES        [5] EVAL
 
 ╭─ config   pipeline   prompts   [active (7)] ─────────────────────────────────╮
 │                                                                              │
