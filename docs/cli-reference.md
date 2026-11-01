@@ -242,6 +242,28 @@ Three cases write nothing and open a `lands in not changed` popup that says what
 
 If a file cannot be written, the popup names the files already changed and the files left unchanged. Pick the branch again once the cause is fixed.
 
+`edit depends on` opens a picker titled `depends on for <task>`. It opens on a `checking pull requests…` row while GitHub is asked, through `gh`, which done groups still have an open pull request. Then it lists these rows, each task with its group's name beside it:
+
+| Row | When it is listed |
+|---|---|
+| `none` | Only while the head depends on a task of another group. |
+| The last task of a group | Every other pending group, every other queued group, and each done group whose last task has an open pull request. |
+
+The current pick is left out, and so is every group that stacks on this one, directly or through other groups. A group with more than one last task is left out. `esc` goes back to the options menu while the pull requests are checked.
+
+If the check fails, the list holds no done group, and a notice over it reads `pull request check failed: <reason>. done groups are left out.` and `run gh auth login, then reopen.` The reason is the first line `gh` printed.
+
+The key row reads `[enter] confirm   [f] search   [esc] back`. `enter` on a task writes `depends_on: [<id>]` into the head's pending file. It also writes the branch that task's group lands in as `base:` into every pending task file of the head's group, and closes to the queue screen, where the tasks pane shows the new `depends on` and `lands in:` rows. When that branch is not known, only the head's file is written. `enter` on `none` removes `depends_on:` from the head's file and leaves every `base:` as it is. Tasks of the group that are queued or done are not changed.
+
+Two cases write nothing and open a `depends on not changed` popup that says what to do instead:
+
+| Case | What the popup says |
+|---|---|
+| A pending task of another group depends on a pending task of this group, and the pick lands in another branch. | Change what that other task depends on first. |
+| The task was queued, deleted or moved while the picker was open. | Open the options menu again. |
+
+If a file cannot be written, the popup names the files already changed and the files left unchanged. Pick the task again once the cause is fixed.
+
 `gate` opens a picker of the agent steps the pending task will run. `enter` gates the task at the step
 under the cursor, and `enter` on the step already gated clears the gate. `esc` closes the picker
 with nothing changed. A step the task walks past is not listed. These are a `first:` step when the task is not its chain's root, a `last:` step while a task above this one in its group runs a `last:` step of its own, and a step its own `skip:` names. Dependents are counted across the pending tasks and the open queue together. A pending task's own `skip:` is cleared when it is queued, so it hides no step in the picker.
