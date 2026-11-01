@@ -542,6 +542,12 @@ impl LaneRecord {
         self.kept
     }
 
+    /// When this lane started, in seconds: what the board's `focus` on a
+    /// stopped row orders a task's open panes by, as [`lanes_to_close`] does.
+    pub(crate) fn started_at(&self) -> i64 {
+        self.started_at
+    }
+
     /// A record for a lane this dispatcher did not start — an interrupted pass
     /// picking up where it left off. There is nothing to attribute its usage to,
     /// so the ledger fields stay blank and only `started_at` and
