@@ -16610,6 +16610,53 @@ mod tests {
         }
     }
 
+    /// A pending list that will not read again after the pick still shows
+    /// the new pipeline on the task's row, patched in memory, and says the
+    /// list would not read in a notice. Before, the failure was dropped
+    /// without a word and the screen closed to browsing.
+    #[test]
+    fn a_list_that_will_not_read_after_a_pipeline_pick_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-reread");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let pipelines = Pipelines::builtin();
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        // Write and search but no read: the listing fails, while the file
+        // itself still reads and the rename into the directory still works.
+        let dir = repo.pending_dir();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o300);
+        std::fs::set_permissions(&dir, perms.clone()).unwrap();
+
+        let mode = set_pipeline(&repo, &pipelines, &mut groups, &mut state, &menu, "bugfix");
+
+        // Restore before asserting, so a failed assertion does not leave a
+        // directory this test's own cleanup cannot remove.
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .any(|l| l == "pipeline: bugfix")
+        );
+        assert_eq!(groups[0].tasks[0].pipeline.as_deref(), Some("bugfix"));
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "pipeline changed");
+        assert!(
+            notice.text.contains(&path.display().to_string())
+                && notice
+                    .text
+                    .contains("the pending task list would not read again: "),
+            "{}",
+            notice.text
+        );
+    }
+
     /// A pick lands on nothing once its task has moved: with another task
     /// slid under the cursor, or the pending file gone, a notice names the
     /// file and nothing is written.
