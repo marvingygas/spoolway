@@ -123,9 +123,10 @@ works "and every other task in the routine with it" \
 has "— chained onto the nested task's minted id" "prune-2" \
   "$SPOOLWAY_PROJECT_HOME/queue/sweep-1.md"
 
-# `sweep-1` goes again before the unqueue below, which takes `prune-2` alone:
-# the rest of this suite never queues `maintenance`, and a copy left behind
-# would only refuse the next run of it.
+# `sweep-1` is unqueued first: it depends on `prune-2` and has not started,
+# so the unqueue of `prune-2` below is refused while it is still queued.
+# `sweep.md` goes too, so later steps find `maintenance` holding `prune` alone,
+# as it did before this check.
 must "the sweep copy unqueues" "$SPOOLWAY" queue unqueue sweep-1
 must "and its routine file goes, leaving maintenance as it was" \
   rm .spoolway/routines/maintenance/sweep.md

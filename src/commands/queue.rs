@@ -7451,7 +7451,7 @@ fn highlighted_routine_task<'a>(
 }
 
 /// One key over the routines pane — everything but `esc` over the tasks
-/// pane, `enter` on a selected folder and `o`, which all need the repo or
+/// pane, `enter` with a routine ticked and `o`, which all need the repo or
 /// the pipelines or change this mode outright, so `run_screen` reads those
 /// first and only falls through to this for the rest, the same split it
 /// makes for `handle_browse_key`. `q` is part of that rest, and does nothing
@@ -21005,7 +21005,7 @@ mod tests {
 
     /// An arm forked from a task already in the archive gets its own
     /// `depends_on` emptied before it is ever validated — the same emptying
-    /// [`mint_routine_solo`] makes for a job naming one routine file — so a
+    /// [`mint_routine_solo`] makes for a routine target naming one file — so a
     /// predecessor `retain` has since swept out of `archive/` cannot refuse
     /// a trial that never needed to resolve it in the first place.
     #[test]
