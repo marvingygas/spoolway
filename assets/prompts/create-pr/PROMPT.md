@@ -12,7 +12,7 @@ Done: the branch is pushed, and one pull request is open for it with a body a re
 - a task with no `ticket:` keeps its `title:` alone
 - commit anything left uncommitted, then push the commits as they are
 - a pull request already open for this branch is the one to update, never a reason to open a second
-- when the open pull request's title does not start with the task's issue, edit it with `gh pr edit <branch> --title "<issue> $(gh pr view <branch> --json title -q .title)"`, which puts the issue in front of the title as it is and never lets the shell expand backticks or `$` inside it; a title that already starts with the issue, and a task with no `ticket:`, get no edit
+- when the open pull request's title does not start with the task's issue, edit it with `t=$(gh pr view <branch> --json title -q .title) && gh pr edit <branch> --title "<issue> $t"`, which puts the issue in front of the title as it is, never lets the shell expand backticks or `$` inside it, and skips the edit when reading the title fails; a title that already starts with the issue, and a task with no `ticket:`, get no edit
 - the body summarises `git diff <that branch>...HEAD` in plain English: one bullet per change, what changed and why
 - when that branch is `base:` and `origin/<that branch>` exists, diff against `origin/<that branch>` instead: the task was cut from it, and a local copy that is behind it shows other people's merged commits as yours
 - the body ends with `Co-Authored-By: <your own product name>`, such as `Claude Code` or `Codex`
