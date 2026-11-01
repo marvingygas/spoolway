@@ -17402,7 +17402,7 @@ mod tests {
     /// the head's group would move and leave the stacked group depending on
     /// a task that no longer lands in its base, which submission refuses.
     #[test]
-    fn a_head_stacked_onto_lands_nowhere_its_stack_does_not() {
+    fn a_head_another_chain_stacks_onto_keeps_its_branch() {
         let (repo, _root_guard) = fixture("screen-edit-lands-in-stacked-onto");
         let mut paths = Vec::new();
         for (id, extra) in [
