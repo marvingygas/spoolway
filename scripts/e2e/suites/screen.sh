@@ -623,6 +623,20 @@ works "its body is followed by a blank row and the key row" bash -c \
      grep -qF "and only git can bring it back."' _ "$LAST"
 works "enter deletes the routine" test ! -e .spoolway/routines/nightly
 
+# Before anything is written the overrides layer is empty, so the active
+# section (`←` from config wraps onto it) has nothing for `space`, `a` or
+# `o` to act on, and its key line names only `w` and `q`. Read off the last
+# frame, since the config section's own key line ends the same way.
+EMPTY_LAYER="$LIVE/overrides-empty-layer.txt"
+on_screen '4\x1b[D' "$EMPTY_LAYER"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$EMPTY_LAYER" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "← from config wraps onto the empty active section" \
+  "╭─ config   pipeline   prompts   [active (0)] ─" "$LAST"
+has "an empty layer's key line names only w and q" " [w] open workspace   [q] quit" "$LAST"
+lacks "and no select" "[space] select" "$LAST"
+lacks "nor options" "[o] options" "$LAST"
+
 # The overrides tab (`4` from the queue tab) opens on its config
 # section. Two listed keys are set through their fields: `f` searches the
 # list down to `lane_quiet`, which leaves the cursor on it, `enter` leaves
@@ -660,8 +674,8 @@ has "active counts both keys" "active (2)" "$LAST"
 # that leave it out would leave nothing to pick, so the picker lists them
 # all and offers no `h`. `→` moves onto the section, seven `↓` past the
 # six fields every step takes and model onto effort, and `enter` lists both
-# pipelines with their steps under them, where `a` selects every step.
-# `enter` opens the value field, `low` is typed and saved, and `enter`
+# pipelines with their steps under them, with no `enter` named until `a`
+# selects every step. `enter` opens the value field, `low` is typed and saved, and `enter`
 # closes the popup the save opened.
 sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
 lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
@@ -678,7 +692,9 @@ has "the field list's key line names enter as select" \
 lacks "and no key line names tab" "[tab]" "$PIPELINE_TAB.plain"
 lacks "the step selection keeps the section names over its box" "select steps for" \
   "$PIPELINE_TAB.plain"
-has "the step picker's key line names a as select all, and no h where no step sets the field" \
+has "the step picker names no enter before a step is selected, and no h where no step sets the field" \
+  "[space] select   [a] select all   [esc] back" "$PIPELINE_TAB.plain"
+has "and names enter as set value once a selects every step" \
   "[space] select   [a] select all   [enter] set value   [esc] back" "$PIPELINE_TAB.plain"
 has "every pipeline lists its not-set steps before any is selected" \
   "[ ] reproduce            not set" "$PIPELINE_TAB.plain"
@@ -694,13 +710,15 @@ has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
 # On a field some step sets, the picker opens with the steps that leave it
 # out hidden. `→` moves onto the section, two `↓` onto on_fail, and
 # `enter` lists the steps that route a failure. bugfix's reproduce leaves
-# on_fail out, so it is not listed until `h` shows it.
+# on_fail out, so it is not listed until `h` shows it. No step is selected
+# yet, so the key line names no `enter`.
 ON_FAIL_TAB="$LIVE/overrides-on-fail.txt"
 on_screen '4\x1b[C\x1b[B\x1b[B\r' "$ON_FAIL_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$ON_FAIL_TAB" >"$ON_FAIL_TAB.plain"
 has "the step picker's key line names h on a field some step sets" \
-  "[space] select   [a] select all   [enter] set value   [h] show not set   [esc] back" \
+  "[space] select   [a] select all   [h] show not set   [esc] back" \
   "$ON_FAIL_TAB.plain"
+lacks "and no enter with no step selected" "[enter] set value" "$ON_FAIL_TAB.plain"
 lacks "a step that leaves on_fail out starts hidden" "[ ] reproduce " "$ON_FAIL_TAB.plain"
 
 # The overrides tab's prompts section copies one prompt into the layer.
