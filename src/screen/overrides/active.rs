@@ -819,9 +819,15 @@ impl ActiveSection {
     }
 
     /// The key line under the frame: whatever the section shows names its
-    /// own keys.
+    /// own keys. An empty layer has no row for `space` or `a` to select and
+    /// no item for `o`'s menu, so only `w` and `q` are named on it.
     pub(super) fn footer(&self) -> Vec<(&'static str, &'static str)> {
         match &self.view {
+            View::List if self.files.is_empty() => [
+                [super::OPEN_WORKSPACE].as_slice(),
+                crate::screen::shell::quit_hint(),
+            ]
+            .concat(),
             View::List => [
                 [
                     ("space", "select"),
@@ -1296,6 +1302,17 @@ mod tests {
             key_line(&state),
             " [space] select   [a] select all   [o] options   [w] open workspace"
         );
+    }
+
+    // An empty layer has nothing for `space`, `a` or `o` to act on, so its
+    // key line names only `w`, and `q` under bare `spoolway`'s strip.
+    #[test]
+    fn an_empty_layer_names_only_open_workspace_and_quit() {
+        let (repo, _guard) = project("active-empty");
+        let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+        let state = on_active(&repo);
+        assert!(state.layer.files.is_empty());
+        assert_eq!(key_line(&state), " [w] open workspace   [q] quit");
     }
 
     // A key the merge ignores reads `ignored —` with the reason `override

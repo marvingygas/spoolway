@@ -935,7 +935,9 @@ const OPEN_WORKSPACE: (&str, &str) = ("w", "open workspace");
 const OPTIONS: (&str, &str) = ("o", "options");
 
 /// The key line under the frame: whatever is open names its own keys, and
-/// the list names what `enter` does on the row under the cursor.
+/// the list names what `enter` does on the row under the cursor. A config
+/// search that leaves no key leaves `enter` and `o` nothing to act on, so
+/// both pairs go until a key matches again.
 fn footer(state: &State) -> String {
     let pairs: Vec<(&str, &str)> = match &state.mode {
         Mode::Search => SEARCH_KEYS.to_vec(),
@@ -947,6 +949,11 @@ fn footer(state: &State) -> String {
         Mode::Browsing if state.section == Section::Pipeline => state.pipeline.footer(),
         Mode::Browsing if state.section == Section::Prompts => state.prompts.footer(),
         Mode::Browsing if state.section == Section::Active => state.layer.footer(),
+        Mode::Browsing if state.under_cursor().is_none() => [
+            [("f", "search"), OPEN_WORKSPACE].as_slice(),
+            shell::quit_hint(),
+        ]
+        .concat(),
         Mode::Browsing => [
             [
                 ("enter", "set value"),
@@ -1502,7 +1509,8 @@ mod tests {
     }
 
     // A search that leaves no key leaves nothing under the cursor: `enter`
-    // and `o` open no popup, and the key line still names `set value`.
+    // and `o` open no popup, and the key line names neither until `esc`
+    // on the search row brings the keys back.
     #[test]
     fn a_search_that_leaves_no_key_opens_nothing() {
         let (repo, _guard) = project("search-empty");
@@ -1521,7 +1529,12 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("no keys match this search"))
         );
-        assert!(key_line(&state).starts_with(" [enter] set value "));
+        assert_eq!(key_line(&state), " [f] search   [w] open workspace");
+        type_keys(&repo, &mut state, "f\x1b");
+        assert_eq!(
+            key_line(&state),
+            " [enter] set value   [f] search   [o] options   [w] open workspace"
+        );
     }
 
     // A value is written as the TOML it reads as: a number, a boolean and an
