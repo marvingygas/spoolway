@@ -86,7 +86,8 @@ enum Fetch<T> {
     /// this reason, so the list is still the one from before the fetch.
     Unread(String),
     /// A load read its list but left something out, and says what in this
-    /// sentence, worded by the list itself.
+    /// text, worded by the list itself. Each of its lines starts a row of
+    /// its own, so what to do about it can sit apart from what went wrong.
     Noted(String),
 }
 
@@ -181,8 +182,9 @@ impl<T: Clone + Send + 'static> Picker<T> {
 
     /// The picker, showing `waiting` in place of its list while `load`
     /// reads the list on a thread of its own, then listing what it read.
-    /// `load` also answers what it left out, as a sentence the popup draws
-    /// over the list, or `None` when it left nothing out.
+    /// `load` also answers what it left out, as text the popup draws over
+    /// the list, each line wrapped on rows of its own, or `None` when it
+    /// left nothing out.
     pub(crate) fn loading(
         mut self,
         waiting: &'static str,
@@ -339,7 +341,10 @@ impl<T: Clone + Send + 'static> Picker<T> {
                 ),
                 width,
             ),
-            Fetch::Noted(notice) => crate::screen::wrap(&format!("  {notice}"), width),
+            Fetch::Noted(notice) => notice
+                .lines()
+                .flat_map(|line| crate::screen::wrap(&format!("  {line}"), width))
+                .collect(),
             Fetch::Off | Fetch::Running { .. } => Vec::new(),
         };
         if !failure.is_empty() {
@@ -743,6 +748,57 @@ mod tests {
              before the fetch. esc and reopen to try again."
         );
         assert_eq!(rows[blank + 1], "  > main");
+    }
+
+    // A load waits on the row it names, not the fetch's, and then lists
+    // what it read under the text it answered, wrapped and indented as a
+    // fetch's failure is, each of its lines starting a row of its own.
+    #[test]
+    fn a_load_waits_on_its_own_row_then_lists_under_its_notice() {
+        let (send, gate) = std::sync::mpsc::channel::<()>();
+        let picker = Picker::new("depends on for wire", Vec::new(), LOOK).loading(
+            "checking pull requests…",
+            move || {
+                gate.recv().unwrap();
+                (
+                    entries(&["none", "ship-cart"]),
+                    Some(
+                        "pull request check failed: gh is not logged in. done groups are \
+                         left out.\nrun gh auth login, then reopen."
+                            .to_string(),
+                    ),
+                )
+            },
+        );
+        assert_eq!(inside(&picker)[2], "    checking pull requests…");
+        send.send(()).unwrap();
+        assert_eq!(
+            inside(&settled(picker)),
+            [
+                "  search: ▏",
+                "",
+                "    pull request check failed: gh is not",
+                "    logged in. done groups are left out.",
+                "    run gh auth login, then reopen.",
+                "",
+                "  > none",
+                "    ship-cart",
+                "",
+                "  [enter] confirm   [f] search   [esc] back",
+            ]
+        );
+    }
+
+    // A load that leaves nothing out draws no notice above its list.
+    #[test]
+    fn a_load_with_no_notice_lists_straight_under_the_search_row() {
+        let picker = settled(
+            Picker::new("depends on for wire", Vec::new(), LOOK)
+                .loading("checking pull requests…", || {
+                    (entries(&["ship-cart"]), None)
+                }),
+        );
+        assert_eq!(inside(&picker)[2], "  > ship-cart");
     }
 
     // `esc` closes the picker while the fetch still runs, and the fetch's

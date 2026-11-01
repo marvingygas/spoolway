@@ -4986,15 +4986,18 @@ impl std::fmt::Debug for DependsOnPick {
 impl DependsOnPick {
     /// The picker over what `head`, the chain head of `group`, can stack
     /// onto — see [`stack_targets`]. It opens on a `checking pull
-    /// requests…` row while a thread of its own asks GitHub which done
-    /// groups still have their pull request open, so the key loop never
-    /// waits on `gh` and `esc` still goes back while it asks.
+    /// requests…` row while a thread of its own asks `gh`, the program run
+    /// as GitHub's command line, which done groups still have their pull
+    /// request open, so the key loop never waits on it and `esc` still goes
+    /// back while it asks. With no done group there is nothing to ask, so it
+    /// lists at once, as a fetch with no `origin` does.
     fn new(
         repo: &Repo,
         groups: &[Group],
         state: &ScreenState,
         group: &Group,
         head: &PendingTask,
+        gh: String,
         menu: OptionsMenu,
     ) -> DependsOnPick {
         let look = crate::screen::picker::Look {
@@ -5007,17 +5010,22 @@ impl DependsOnPick {
         let title = format!("depends on for {}", head.id);
         let (ready, done) = stack_targets(groups, state, group, head);
         let stacked = stack_dependency(group, head).is_some();
+        if done.is_empty() {
+            let list =
+                crate::screen::picker::Picker::new(title, depends_on_entries(stacked, ready), look);
+            return DependsOnPick { menu, list };
+        }
         let repo = repo.clone();
         let list = crate::screen::picker::Picker::new(title, Vec::new(), look).loading(
             "checking pull requests…",
             move || {
-                let (open, failure) = open_done_targets(&crate::repo::gh_program(), &repo, done);
+                let (open, failure) = open_done_targets(&gh, &repo, done);
                 (
                     depends_on_entries(stacked, ready.into_iter().chain(open).collect()),
                     failure.map(|reason| {
                         format!(
-                            "pull request check failed: {}. done groups are left out. run gh \
-                             auth login, then reopen.",
+                            "pull request check failed: {}. done groups are left out.\nrun \
+                             gh auth login, then reopen.",
                             reason.trim_end_matches('.')
                         )
                     }),
@@ -7812,6 +7820,7 @@ impl Picked<'_> {
                         state,
                         group,
                         task,
+                        crate::repo::gh_program(),
                         menu.clone(),
                     )))
                 }),
@@ -18013,6 +18022,384 @@ mod tests {
             );
         }
         assert_eq!(yaml_scalar("task/gh-9-wire"), "task/gh-9-wire");
+    }
+
+    /// `state`'s edit depends on picker, opened through the menu's own item
+    /// with `gh` as GitHub's command line.
+    fn edit_depends_on_on(
+        repo: &Repo,
+        groups: &[Group],
+        state: &ScreenState,
+        gh: &std::path::Path,
+    ) -> Box<DependsOnPick> {
+        let menu = pending_options(groups, state).unwrap();
+        assert!(menu.items.contains(&RowOption::EditDependsOn));
+        let (group, head) = shown(groups, state)
+            .get(state.group_cursor)
+            .copied()
+            .zip(highlighted_task(groups, state))
+            .unwrap();
+        Box::new(DependsOnPick::new(
+            repo,
+            groups,
+            state,
+            group,
+            head,
+            gh.display().to_string(),
+            menu,
+        ))
+    }
+
+    /// `picker`'s popup once its load has answered.
+    fn settled_picker(
+        picker: &mut crate::screen::picker::Picker<Option<StackTarget>>,
+    ) -> Vec<String> {
+        let start = std::time::Instant::now();
+        while picker.fetching() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(20));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            picker.settle();
+        }
+        picker
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect()
+    }
+
+    /// The groups `wire`'s chain could stack onto: the last task of every
+    /// other group, pending, queued or done, where it lands as the tasks pane
+    /// shows it, and a pending one naming no `base:` landing on the board's
+    /// branch. Left out are the task `wire` stacks on now, a group with two
+    /// last tasks, and the groups stacked on `wire`'s own, one stacked
+    /// directly and one through it, two hops away.
+    #[test]
+    fn stack_targets_leave_out_the_current_stack_and_every_group_above() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-targets");
+        for (id, front) in [
+            ("login-flow", "group: auth\nbase: main\n"),
+            ("wire", "group: pay\nbase: main\ndepends_on: [login-flow]\n"),
+            ("tests", "group: pay\nbase: main\ndepends_on: [wire]\n"),
+            ("ship-cart-1", "group: cart\nbase: task/gh-1425-x\n"),
+            (
+                "ship-cart",
+                "group: cart\nbase: task/gh-1425-x\ndepends_on: [ship-cart-1]\n",
+            ),
+            ("refresh-guide", "group: docs-refresh\nbase: plan/docs\n"),
+            ("export-csv", "group: billing-export\n"),
+            ("on-pay", "group: above\ndepends_on: [tests]\n"),
+            ("on-above", "group: higher\ndepends_on: [on-pay]\n"),
+            ("fan-a", "group: fan\n"),
+            ("fan-b", "group: fan\n"),
+        ] {
+            write_pending(&repo, id, &task_text(id, front, BODY));
+        }
+        let mut groups = listed(&repo);
+        // Set by hand, as `a_lands_in_pick_writes_only_the_groups_pending_files`
+        // does: what the listing gives a queued and a done group.
+        for group in &mut groups {
+            let (task_state, group_state) = match group.name.as_str() {
+                "cart" => (TaskState::Queued, GroupState::Queued),
+                "docs-refresh" => (TaskState::Done, GroupState::Done),
+                _ => continue,
+            };
+            group.state = group_state;
+            for task in &mut group.tasks {
+                task.state = task_state;
+            }
+        }
+        let mut state = on_pending_task(&groups, "wire");
+        state.board_branch = Some("plan/demo".to_string());
+        let group = shown(&groups, &state)[state.group_cursor];
+        let head = highlighted_task(&groups, &state).unwrap();
+
+        let (mut ready, done) = stack_targets(&groups, &state, group, head);
+        ready.sort_by(|a, b| a.id.cmp(&b.id));
+        let target = |id: &str, group: &str, lands: &str| StackTarget {
+            id: id.to_string(),
+            group: group.to_string(),
+            lands: Some(lands.to_string()),
+        };
+        assert_eq!(
+            ready,
+            [
+                target("export-csv", "billing-export", "plan/demo"),
+                target("ship-cart", "cart", "task/gh-1425-x"),
+            ]
+        );
+        assert_eq!(done, [target("refresh-guide", "docs-refresh", "plan/docs")]);
+    }
+
+    /// The picker opens on `checking pull requests…` while `gh` is asked
+    /// about the done groups' last tasks, and no other, then lists `none`,
+    /// since `wire` stacks on something, and every target beside its group,
+    /// in the order of the groups' names: the done group whose pull request
+    /// is open among them, the one whose pull request merged left out.
+    #[test]
+    fn the_depends_on_picker_lists_none_then_each_task_beside_its_group() {
+        use crate::archive_index::testutil::archive;
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-list");
+        let gh_dir = crate::scratch::root("commands-screen-edit-depends-on-list-gh");
+        let gh =
+            super::super::stack::stand_in_gh(&gh_dir, &["task/refresh-guide"], &["task/old-guide"]);
+        archive(
+            &repo,
+            "refresh-guide",
+            "group: docs-refresh\nbranch: task/refresh-guide\nbase: main\n",
+        );
+        archive(
+            &repo,
+            "old-guide",
+            "group: old-docs\nbranch: task/old-guide\nbase: main\n",
+        );
+        for (id, front) in [
+            ("login-flow", "group: auth\n"),
+            ("wire", "group: pay\ndepends_on: [login-flow]\n"),
+            ("ship-cart", "group: cart\n"),
+            ("export-csv", "group: billing-export\n"),
+        ] {
+            write_pending(&repo, id, &task_text(id, front, BODY));
+        }
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+
+        let mut list = edit_depends_on_on(&repo, &groups, &state, &gh).list;
+        assert_eq!(
+            drawn_picker_of(&list)[3],
+            "│    checking pull requests…                     │"
+        );
+        assert_eq!(
+            settled_picker(&mut list),
+            [
+                "╭─ depends on for wire ──────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│  > none                                        │",
+                "│    export-csv       billing-export             │",
+                "│    ship-cart        cart                       │",
+                "│    refresh-guide    docs-refresh               │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let mut asked: Vec<String> = std::fs::read_to_string(gh_dir.join("asked"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        asked.sort();
+        assert_eq!(asked, ["task/old-guide", "task/refresh-guide"]);
+    }
+
+    /// A `gh` that cannot answer leaves every done group out, stops asking
+    /// after the first, and says why over the list with `gh`'s own reason
+    /// and what to do, as the mockup draws it.
+    #[test]
+    fn a_failed_pull_request_check_leaves_done_groups_out_and_says_why() {
+        use crate::archive_index::testutil::archive;
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-failed");
+        let gh_dir = crate::scratch::root("commands-screen-edit-depends-on-failed-gh");
+        let gh = super::super::stack::stand_in_gh(
+            &gh_dir,
+            &["task/refresh-guide", "task/guide-two"],
+            &[],
+        );
+        std::fs::write(gh_dir.join("logged-out"), "").unwrap();
+        archive(
+            &repo,
+            "refresh-guide",
+            "group: docs-refresh\nbranch: task/refresh-guide\n",
+        );
+        archive(
+            &repo,
+            "guide-two",
+            "group: docs-two\nbranch: task/guide-two\n",
+        );
+        for (id, front) in [
+            ("login-flow", "group: auth\n"),
+            ("wire", "group: pay\ndepends_on: [login-flow]\n"),
+            ("ship-cart", "group: cart\n"),
+        ] {
+            write_pending(&repo, id, &task_text(id, front, BODY));
+        }
+        let groups = listed(&repo);
+        let state = on_pending_task(&groups, "wire");
+
+        let mut list = edit_depends_on_on(&repo, &groups, &state, &gh).list;
+        assert_eq!(
+            settled_picker(&mut list),
+            [
+                "╭─ depends on for wire ──────────────────────────╮",
+                "│  search: ▏                                     │",
+                "│                                                │",
+                "│    pull request check failed: To get started   │",
+                "│    with GitHub CLI, please run: gh auth        │",
+                "│    login. done groups are left out.            │",
+                "│    run gh auth login, then reopen.             │",
+                "│                                                │",
+                "│  > none                                        │",
+                "│    ship-cart        cart                       │",
+                "│                                                │",
+                "│  [enter] confirm   [f] search   [esc] back     │",
+                "╰────────────────────────────────────────────────╯",
+            ]
+        );
+        let asked = std::fs::read_to_string(gh_dir.join("asked")).unwrap();
+        assert_eq!(asked.lines().count(), 1, "{asked}");
+    }
+
+    /// `picker`'s popup as drawn now, its colours taken off.
+    fn drawn_picker_of(picker: &crate::screen::picker::Picker<Option<StackTarget>>) -> Vec<String> {
+        picker
+            .popup(None)
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect()
+    }
+
+    /// `enter` on a task writes it as the head's `depends_on:`, and the
+    /// lands-in branch of its group as `base:` into every pending file of
+    /// the head's group. The group stacked onto names no `base:`, so the
+    /// branch copied is the board's, which its `lands in:` row shows. The
+    /// screen closes to the tasks pane, which shows both.
+    #[test]
+    fn enter_on_the_depends_on_picker_stacks_the_chain_onto_the_pick() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-enter");
+        let cart = task_text("ship-cart", "group: cart\n", BODY);
+        let cart_path = write_pending(&repo, "ship-cart", &cart);
+        let wire = write_pending(
+            &repo,
+            "wire",
+            &task_text("wire", "group: billing\nbase: main\n", BODY),
+        );
+        let tests = write_pending(
+            &repo,
+            "tests",
+            &task_text(
+                "tests",
+                "group: billing\nbase: main\ndepends_on: [wire]\n",
+                BODY,
+            ),
+        );
+
+        // Tab onto the tasks pane, o, down three times onto edit depends on,
+        // enter to open it, enter on `ship-cart`, its only entry: `wire`
+        // stacks on nothing, so there is no `none` row.
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\x1b[B\r\r");
+        let after = std::fs::read_to_string(&wire).unwrap();
+        assert!(
+            after.lines().any(|l| l == "depends_on: [ship-cart]"),
+            "{after}"
+        );
+        assert!(after.lines().any(|l| l == "base: plan/demo"), "{after}");
+        let after = std::fs::read_to_string(&tests).unwrap();
+        assert!(after.lines().any(|l| l == "base: plan/demo"), "{after}");
+        assert!(after.lines().any(|l| l == "depends_on: [wire]"), "{after}");
+        assert_eq!(std::fs::read_to_string(&cart_path).unwrap(), cart);
+        let last = crate::screen::shell::plain(last_frame(&drawn));
+        assert!(last.contains("depends on:  ship-cart"), "{last}");
+        assert!(last.contains("lands in:    plan/demo"), "{last}");
+        assert!(!last.contains("depends on for wire"), "{last}");
+    }
+
+    /// `none` drops the head's `depends_on:`, a block list's items with it,
+    /// and leaves every `base:` as it was.
+    #[test]
+    fn none_on_the_depends_on_picker_drops_the_stack_and_keeps_the_base() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-none");
+        write_pending(
+            &repo,
+            "login-flow",
+            &task_text("login-flow", "group: auth\nbase: main\n", BODY),
+        );
+        let wire = write_pending(
+            &repo,
+            "wire",
+            &task_text(
+                "wire",
+                "group: pay\ndepends_on:\n- login-flow\nbase: main\n",
+                BODY,
+            ),
+        );
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, None);
+
+        assert!(matches!(mode, Mode::Browsing), "{mode:?}");
+        let after = std::fs::read_to_string(&wire).unwrap();
+        assert!(!after.contains("depends_on"), "{after}");
+        assert!(!after.contains("- login-flow"), "{after}");
+        assert!(after.lines().any(|l| l == "base: main"), "{after}");
+        assert!(
+            highlighted_task(&groups, &state)
+                .unwrap()
+                .depends_on
+                .is_empty()
+        );
+    }
+
+    /// `esc` on the picker goes back to the options menu, on edit depends on.
+    #[test]
+    fn esc_on_the_depends_on_picker_reopens_the_options_menu() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-esc");
+        write_pending(
+            &repo,
+            "ship-cart",
+            &task_text("ship-cart", "group: cart\n", BODY),
+        );
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: billing\n", BODY));
+        let before = std::fs::read_to_string(&path).unwrap();
+        let drawn = screen(&repo, listed(&repo), "\to\x1b[B\x1b[B\x1b[B\r\x1b");
+        let last = last_frame(&drawn).to_string();
+        assert!(last.contains("> edit depends on"), "{last}");
+        assert!(!last.contains("depends on for wire"), "{last}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_eq!(RowOption::EditDependsOn.label(), "edit depends on");
+    }
+
+    /// A stack onto a group landing elsewhere changes no file while a pending
+    /// task of another group stacks onto this chain and lands where it does
+    /// now: moving the chain alone would leave that task behind.
+    #[test]
+    fn a_stack_that_would_strand_a_group_stacked_onto_the_chain_changes_nothing() {
+        let (repo, _root_guard) = fixture("screen-edit-depends-on-stranded");
+        let mut paths = Vec::new();
+        for (id, front) in [
+            ("ship-cart", "group: cart\nbase: plan/other\n"),
+            ("wire", "group: pay\nbase: main\n"),
+            ("on-wire", "group: above\nbase: main\ndepends_on: [wire]\n"),
+        ] {
+            let text = task_text(id, front, BODY);
+            paths.push((write_pending(&repo, id, &text), text));
+        }
+        let mut groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        let menu = pending_options(&groups, &state).unwrap();
+        let target = StackTarget {
+            id: "ship-cart".to_string(),
+            group: "cart".to_string(),
+            lands: Some("plan/other".to_string()),
+        };
+
+        let mode = set_depends_on(&repo, &mut groups, &mut state, &menu, Some(&target));
+
+        let Mode::Outcome { notice, .. } = &mode else {
+            panic!("{mode:?}");
+        };
+        assert_eq!(notice.title, "depends on not changed");
+        assert!(
+            notice
+                .text
+                .contains("`on-wire` of another group stacks on `wire` and lands in `main`"),
+            "{}",
+            notice.text
+        );
+        for (path, before) in &paths {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), before);
+        }
     }
 
     /// Two groups where deleting `cart-totals` reaches into the other one:
