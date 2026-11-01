@@ -145,14 +145,25 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the arrows leave the dispatch tab open" "dispatcher stopped" "$LAST"
 lacks "and reach no queue tab" "─ [groups] ─" "$LAST"
 
-# `tab` moves focus, and the brackets with it, onto the tasks pane.
+# `→` moves focus, and the brackets with it, onto the tasks pane, and `←`
+# from there wraps round to the groups pane. `tab` moves nothing.
 FOCUS="$LIVE/focus.txt"
-works "tab on the queue tab ends when its keys run out" \
-  script -qec "printf '2\\t' | '$SPOOLWAY'" "$FOCUS"
+works "→ on the queue tab ends when its keys run out" \
+  script -qec "printf '2\\033[C' | '$SPOOLWAY'" "$FOCUS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FOCUS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "tab brackets the tasks pane's title" "─ [tasks] ─" "$LAST"
+has "→ brackets the tasks pane's title" "─ [tasks] ─" "$LAST"
 has "and leaves the groups pane's plain" "─ groups ─" "$LAST"
+has "the key line is the same over the tasks pane" \
+  "[space] select   [enter] queue   [o] options   [f] search" "$LAST"
+lacks "and names no tab" "[tab]" "$LAST"
+works "→ then ← on the queue tab ends when its keys run out" \
+  script -qec "printf '2\\033[C\\033[D\\t' | '$SPOOLWAY'" "$FOCUS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$FOCUS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "← brings the brackets back to the groups pane, and tab leaves them" \
+  "─ [groups] ─" "$LAST"
+has "and leaves the tasks pane's plain" "─ tasks ─" "$LAST"
 
 # `enter` on the dispatch tab starts a `spoolway dispatch` child and `enter`
 # again, with no step running, stops it at once and draws no stop popup.
@@ -477,7 +488,7 @@ has "3 reaches the routines tab" "$(lit '[3] ROUTINES')" "$LAST.raw"
 has "titled routines, bracketed while the list has focus" "─ [routines] ─" "$LAST"
 has "listing the routine" "> [ ] nightly" "$LAST"
 has "under its own key line" \
-  "[space] select   [enter] queue   [o] options   [tab] details   [q] quit" "$LAST"
+  "[space] select   [enter] queue   [o] options   [q] quit" "$LAST"
 
 # A full board in a short pane scrolls its task table rather than cutting the
 # frame off at the bottom. Thirty queued tasks in six groups are more than a
@@ -632,7 +643,7 @@ has "active counts both keys" "active (2)" "$LAST"
 # pipelines. bugfix's steps leave `effort` out, with its lines deleted here,
 # and default's carry it blank. With no step setting it, hiding the steps
 # that leave it out would leave nothing to pick, so the picker lists them
-# all and offers no `h`. `tab` moves onto the section, seven `↓` past the
+# all and offers no `h`. `→` moves onto the section, seven `↓` past the
 # six fields every step takes and model onto effort, and `enter` lists both
 # pipelines with their steps under them, where `a` selects every step.
 # `enter` opens the value field, `low` is typed and saved, and `enter`
@@ -640,15 +651,16 @@ has "active counts both keys" "active (2)" "$LAST"
 sed -i '/^[[:space:]]*effort: ""[[:space:]]*$/d' .spoolway/pipelines/bugfix.yml
 lacks "bugfix's steps leave effort out" "effort:" .spoolway/pipelines/bugfix.yml
 PIPELINE_TAB="$LIVE/overrides-pipeline.txt"
-on_screen '4\t\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\ra\rlow\r\r' \
+on_screen '4\x1b[C\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B\ra\rlow\r\r' \
   "$PIPELINE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PIPELINE_TAB" >"$PIPELINE_TAB.plain"
-has "tab moves onto the pipeline section" \
+has "→ moves onto the pipeline section" \
   "╭─ config   [pipeline]   prompts   active (2) ─" "$PIPELINE_TAB.plain"
 has "it lists the fields every step takes first" "all steps" "$PIPELINE_TAB.plain"
 has "it lists effort under the agent steps" "agent steps" "$PIPELINE_TAB.plain"
 has "the field list's key line names enter as select" \
-  "[enter] select   [f] search   [o] options" "$PIPELINE_TAB.plain"
+  "[enter] select   [f] search   [o] options   [w] open workspace" "$PIPELINE_TAB.plain"
+lacks "and no key line names tab" "[tab]" "$PIPELINE_TAB.plain"
 lacks "the step selection keeps the section names over its box" "select steps for" \
   "$PIPELINE_TAB.plain"
 has "the step picker's key line names a as select all, and no h where no step sets the field" \
@@ -665,11 +677,11 @@ has "bugfix's patch sets the effort its steps left out" "effort: low" "$PATCHES/
 has "and default's sets it too" "effort: low" "$PATCHES/default.yml"
 
 # On a field some step sets, the picker opens with the steps that leave it
-# out hidden. `tab` moves onto the section, two `↓` onto on_fail, and
+# out hidden. `→` moves onto the section, two `↓` onto on_fail, and
 # `enter` lists the steps that route a failure. bugfix's reproduce leaves
 # on_fail out, so it is not listed until `h` shows it.
 ON_FAIL_TAB="$LIVE/overrides-on-fail.txt"
-on_screen '4\t\x1b[B\x1b[B\r' "$ON_FAIL_TAB"
+on_screen '4\x1b[C\x1b[B\x1b[B\r' "$ON_FAIL_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$ON_FAIL_TAB" >"$ON_FAIL_TAB.plain"
 has "the step picker's key line names h on a field some step sets" \
   "[space] select   [a] select all   [enter] set value   [h] show not set   [esc] back" \
@@ -677,40 +689,43 @@ has "the step picker's key line names h on a field some step sets" \
 lacks "a step that leaves on_fail out starts hidden" "[ ] reproduce " "$ON_FAIL_TAB.plain"
 
 # The overrides tab's prompts section copies one prompt into the layer.
-# `tab` twice moves onto the section, `f` searches it down to implementer,
+# `→` twice moves onto the section, `f` searches it down to implementer,
 # `enter` leaves the search, and `enter` on the prompt writes the copy and
 # opens the popup naming it, which `enter` closes. `w` is left to the unit
 # tests, since it starts a file manager outside this run.
 PROMPTS_TAB="$LIVE/overrides-prompts.txt"
-on_screen '4\t\tfimplementer\r\r\r' "$PROMPTS_TAB"
+on_screen '4\x1b[C\x1b[Cfimplementer\r\r\r' "$PROMPTS_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PROMPTS_TAB" >"$PROMPTS_TAB.plain"
-has "tab twice moves onto the prompts section" \
+has "→ twice moves onto the prompts section" \
   "╭─ config   pipeline   [prompts]   active (" "$PROMPTS_TAB.plain"
 has "its key line names enter and w" \
-  "[enter] override   [f] search   [w] open workspace   [tab] section" "$PROMPTS_TAB.plain"
+  "[enter] override   [f] search   [w] open workspace" "$PROMPTS_TAB.plain"
+lacks "and no key line names tab" "[tab]" "$PROMPTS_TAB.plain"
 has "enter says where the copy is" "wrote overrides/prompts/implementer/PROMPT.md" \
   "$PROMPTS_TAB.plain"
 PROMPT_COPY="$SPOOLWAY_PROJECT_HOME/overrides/prompts/implementer/PROMPT.md"
 works "the copy is in the layer" test -f "$PROMPT_COPY"
 works "and holds the tracked prompt" cmp -s .spoolway/prompts/implementer/PROMPT.md "$PROMPT_COPY"
 
-# The overrides tab's active section deletes one key from the layer. `tab`
-# three times moves onto the section, which lists config.toml first with its
-# keys sorted under it, so `↓` lands on dispatch.lane_quiet. `o` opens its
-# menu on `edit`, `↓` moves onto `delete selected`, `enter` there opens the
-# confirm popup naming the file and the key, and `enter` deletes it.
+# The overrides tab's active section deletes one key from the layer. `←`
+# from config wraps round onto the section, which lists config.toml first
+# with its keys sorted under it, so `↓` lands on dispatch.lane_quiet. `o`
+# opens its menu on `edit`, `↓` moves onto `delete selected`, `enter` there
+# opens the confirm popup naming the file and the key, and `enter` deletes
+# it.
 ACTIVE_TAB="$LIVE/overrides-active.txt"
-on_screen '4\t\t\t\x1b[Bo\x1b[B\r\r' "$ACTIVE_TAB"
+on_screen '4\x1b[D\x1b[Bo\x1b[B\r\r' "$ACTIVE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$ACTIVE_TAB" >"$ACTIVE_TAB.plain"
-has "tab three times moves onto the active section" \
+has "← from config wraps onto the active section" \
   "╭─ config   pipeline   prompts   [active (" "$ACTIVE_TAB.plain"
 has "it lists the layer's config.toml" "[ ] config.toml" "$ACTIVE_TAB.plain"
 has "with the key set earlier under it" "[ ] dispatch.lane_quiet" "$ACTIVE_TAB.plain"
 has "a prompt reads whole file" "[ ] prompts/implementer            whole file" \
   "$ACTIVE_TAB.plain"
-has "its key line names space, a, o, w and tab" \
-  "[space] select   [a] select all   [o] options   [w] open workspace   [tab] section" \
+has "its key line names space, a, o and w" \
+  "[space] select   [a] select all   [o] options   [w] open workspace" \
   "$ACTIVE_TAB.plain"
+lacks "and no key line names tab" "[tab]" "$ACTIVE_TAB.plain"
 has "o opens the key's menu" "╭─ dispatch.lane_quiet ─" "$ACTIVE_TAB.plain"
 has "the menu opens on edit" "│  > edit " "$ACTIVE_TAB.plain"
 has "delete selected opens one confirm popup" "╭─ delete this override ─" \
@@ -729,7 +744,7 @@ has "and keeps the other key" "visible_lanes = 4" "$CONFIG_LAYER"
 # worktree and writes the file.
 must "a local branch with no checkout" git branch feature/promote
 PROMOTE_TAB="$LIVE/overrides-promote.txt"
-on_screen '4\t\t\t\x1b[B\x1b[Bo\x1b[B\rffeature/promote\r\r\r' "$PROMOTE_TAB"
+on_screen '4\x1b[D\x1b[B\x1b[Bo\x1b[B\rffeature/promote\r\r\r' "$PROMOTE_TAB"
 sed 's/\x1b\[[0-9;]*m//g' "$PROMOTE_TAB" >"$PROMOTE_TAB.plain"
 has "o on a whole file offers promote selected" "│  > promote selected" \
   "$PROMOTE_TAB.plain"

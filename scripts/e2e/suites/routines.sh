@@ -93,7 +93,7 @@ works "a nested task queues with its top-level routine" \
 has "still carrying that routine's group" "group: maintenance" \
   "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md"
 
-# A second, solo pick: `3` reaches the routines tab, and `tab` moves the
+# A second, solo pick: `3` reaches the routines tab, and `→` moves the
 # cursor onto `maintenance`'s tasks in the details pane, already on `prune`,
 # its one task, nested or not; `space` queues it alone. `prune-1` is taken by
 # the batch above, so this one mints the next number.
@@ -108,9 +108,9 @@ mkdir -p "$SPOOLWAY_PROJECT_HOME/archive"
 must "prune-1 lands, as a finished run would" \
   mv "$SPOOLWAY_PROJECT_HOME/queue/prune-1.md" "$SPOOLWAY_PROJECT_HOME/archive/prune-1.md"
 
-on_screen '3\t n' /dev/null
+on_screen '3\x1b[C n' /dev/null
 
-works "tab reaches a nested task under its routine, and a solo pick queues it" \
+works "→ reaches a nested task under its routine, and a solo pick queues it" \
   test -f "$SPOOLWAY_PROJECT_HOME/queue/prune-2.md"
 
 # Unqueuing that copy deletes it. The routine is still in the checkout for the
@@ -338,7 +338,9 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "the routines tab's right pane is titled details" "─ details ─" "$LAST"
 has "beside the focused list's bracketed title" "─ [routines] ─" "$LAST"
 has "a routine with no job says its schedule is none" "schedule:    none" "$LAST"
-has "and the list's key line names tab details" "[tab] details" "$LAST"
+has "and the list's key line names no tab" \
+  "[space] select   [enter] queue   [o] options   [q] quit" "$LAST"
+lacks "nor any tab pair" "[tab]" "$LAST"
 lacks "a routine row carries no task count" "1 task" "$LAST"
 on_screen '3jj' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
@@ -346,12 +348,19 @@ awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' 
 has "a routine with a job draws the job's schedule" "schedule:    0 3 * * 1-5" "$LAST"
 has "and names the job" "job:         release" "$LAST"
 
-# `tab` moves focus, and the brackets with it, onto the details pane.
-on_screen '3\t' "$DETAILS"
+# `→` moves focus, and the brackets with it, onto the details pane, and `←`
+# from the list wraps round to it too. The key line stays the list's.
+on_screen '3\x1b[C' "$DETAILS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "tab brackets the details pane's title" "─ [details] ─" "$LAST"
+has "→ brackets the details pane's title" "─ [details] ─" "$LAST"
 has "and leaves the list's plain" "─ routines ─" "$LAST"
+has "under the same key line, naming no tab" \
+  "[space] select   [enter] queue   [o] options   [q] quit" "$LAST"
+on_screen '3\x1b[D' "$DETAILS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$DETAILS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "← wraps round to the details pane too" "─ [details] ─" "$LAST"
 
 # Deactivate job (`o`, down, `enter`) writes the job back disabled, to the
 # user store it lives in and nowhere else, and the details pane says it is
