@@ -108,7 +108,7 @@ impl Tab {
 pub(crate) enum Leave {
     /// `q`, `ctrl-c`, or the input running out: the whole screen ends.
     Quit,
-    /// A tab's digit: open that tab.
+    /// Another tab's digit: open that tab.
     Open(Tab),
 }
 
