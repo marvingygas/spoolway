@@ -2,8 +2,8 @@
 
 description: >-
   Review open Dependabot pull requests with an AI agent, merge the safe ones
-  behind the required checks, and queue a bugfix task for the ones that need
-  code changes.
+  behind the required checks, and put a bugfix task on the queue screen for
+  the ones that need code changes.
 
 steps:
   # A command step, so a run with nothing new to review ends here without
@@ -17,7 +17,7 @@ steps:
     on_fail: done
 
   - id: review
-    description: Give every open Dependabot pull request a verdict — merge, hold or fix — and queue a bugfix task for each fix.
+    description: Give every open Dependabot pull request a verdict — merge, hold or fix — and write a bugfix task for each fix.
     agent: claude
     prompt: dependency-reviewer
     model: claude-opus-5-5
@@ -26,8 +26,10 @@ steps:
 
   # A command step, so Claude Code's auto mode never sees the merge, and so
   # every approval is checked again by rules no review can talk its way past.
+  # It also hands each fix's task to the pending directory: spoolway refuses
+  # `queue add` in every lane, so a person sends it from the queue screen.
   - id: merge
-    description: Re-check every approval, post each verdict as a comment, and turn on auto-merge for the approved pull requests.
+    description: Re-check every approval, post each verdict as a comment, turn on auto-merge for the approved pull requests, and put each fix's bugfix task on the queue screen.
     run: scripts/dependabot-merge.sh
     timeout: 15m
     hide: true
