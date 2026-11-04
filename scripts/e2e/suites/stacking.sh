@@ -540,6 +540,27 @@ else
   cat "$FORGE"/prs/[0-9]* | sed 's/^/        /'
 fi
 
+# ------------------------------------------- a dependent cut without its parent
+# `wq` names `wp` in `depends_on` but pins `starts_from: main`, so it is cut
+# from the base while `wp`, a task that walked past `handover`, ends at `done`
+# with commits and no pull request. That is the shape of a task queued before
+# a parent's branch was handed on: the commits reach `main` only through `wq`,
+# so it stops at `blocked` before its next step rather than run on and drop
+# them, and the reason names the branch to merge.
+task_doc "$LIVE/wp.md" wp "$BODY" "group: lost" "base: main" "pipeline: walk"
+task_doc "$LIVE/wq.md" wq "$BODY" "group: lost" "base: main" \
+  "pipeline: walk" "depends_on: [wp]" "starts_from: main"
+must "the parent that will walk past handover" "$SPOOLWAY" queue add --from "$LIVE/wp.md"
+must "and its dependent, pinned to the base" "$SPOOLWAY" queue add --from "$LIVE/wq.md"
+if drive_and_hold wq blocked 400; then
+  ok "a dependent cut from the base without its parent's commits stops at blocked"
+else
+  bad "a dependent cut from the base without its parent's commits stops at blocked (at \`$(stage_of wq)\`)"
+fi
+has "and the Status Log says which branch to merge" \
+  "→ \`blocked\`: \`wq\` was cut without the work of its dependency \`wp\`: \`task/wp\` has commits that \`task/wq\` does not, and \`wp\` opened no pull request, so they reach \`main\` only through \`wq\`. merge \`task/wp\` into \`task/wq\`, then resume \`wq\` on the board" \
+  "$SPOOLWAY_PROJECT_HOME/queue/wq.md"
+
 # --------------------------------------------------------- two siblings, one slot
 # `base` and `top` are a chain — every earlier assertion in this suite is
 # about that shape. A GitHub stack can only ever be a chain: `dep` here has

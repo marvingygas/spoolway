@@ -30,7 +30,7 @@ use crate::mux::{
 };
 use crate::pipeline::{Pipeline, Pipelines, Step, StepKind};
 use crate::platform::PathExt;
-use crate::repo::Repo;
+use crate::repo::{ParentWork, Repo};
 use crate::task::Task;
 
 pub(crate) const LANES_FILE: &str = "lanes.json";
@@ -2010,6 +2010,47 @@ impl<'a> Dispatcher<'a> {
                     *lane_step == step.id && lane_task == tasks[index].id()
                 })
                 .map(|(_, _, lane)| *lane);
+
+            // A task cut without the commits of a parent that opened no pull
+            // request is stopped before this step starts. Not for a step
+            // already working: the check ran when it began.
+            if lane.is_none() {
+                match self.repo.parent_work(&tasks[index]) {
+                    ParentWork::Fine => {}
+                    // `gh` could not say, so running on could drop the work
+                    // and blocking could stall a healthy task. The task is
+                    // held and asked again next pass, as a start branch
+                    // `origin` cannot be asked about is.
+                    ParentWork::Unknown => continue,
+                    ParentWork::Missing {
+                        dependency,
+                        branch,
+                        task_branch,
+                    } => {
+                        let task = &mut tasks[index];
+                        let lands_on = task
+                            .front
+                            .starts_from
+                            .clone()
+                            .or_else(|| task.front.base.clone())
+                            .unwrap_or_default();
+                        let reason = missing_parent_work_reason(
+                            task.id(),
+                            &dependency,
+                            &branch,
+                            &task_branch,
+                            &lands_on,
+                        );
+                        self.escalate(task, &pipeline, &step, &reason, false)?;
+                        report.actions.push(format!(
+                            "{}: blocked at `{}` — {reason}",
+                            task.id(),
+                            step.id
+                        ));
+                        continue;
+                    }
+                }
+            }
 
             match step.kind() {
                 StepKind::Command => {
@@ -7330,6 +7371,27 @@ pub(crate) fn vanished_worktree_reason(step: &str, vanished: &Path) -> String {
          committed is gone and its result would route work that no longer exists. \
          resume the task to run the step again in a fresh worktree",
         vanished.display()
+    )
+}
+
+/// Why a task is blocked when it was cut without the commits of its
+/// dependency `dependency`, which opened no pull request.
+///
+/// Those commits reach `lands_on` only through this task's own pull request,
+/// so running on would drop them. The dispatcher never merges the branch
+/// itself: the reason names it, and a person or the unblocker does.
+pub(crate) fn missing_parent_work_reason(
+    task: &str,
+    dependency: &str,
+    branch: &str,
+    task_branch: &str,
+    lands_on: &str,
+) -> String {
+    format!(
+        "`{task}` was cut without the work of its dependency `{dependency}`: `{branch}` has \
+         commits that `{task_branch}` does not, and `{dependency}` opened no pull request, so \
+         they reach `{lands_on}` only through `{task}`. merge `{branch}` into `{task_branch}`, \
+         then resume `{task}` on the board"
     )
 }
 
@@ -26791,6 +26853,70 @@ mod tests {
                     .to_string()
             ]
         );
+    }
+
+    /// A task cut without the commits of its first dependency, which opened
+    /// no pull request, stops at `blocked` before its step runs, with the
+    /// reason that names the branch to merge. Once the branch is merged in
+    /// and the task resumed, the next pass runs it on.
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_task_missing_a_parents_commits_blocks_until_the_branch_is_merged() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = fixture("block-cut-missing-parent");
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+        git(&["branch", "task/second"]);
+        git(&["switch", "-q", "-c", "task/first"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first's work"]);
+        git(&["switch", "-q", "work"]);
+        let archived = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.run = Some("run-first".into());
+            f.patch = Some(crate::task::Patch {
+                files: 2,
+                insertions: 1,
+                deletions: 0,
+            });
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
+        let path = add_task_with(&repo, "second", "implement", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+            f.base = Some("work".into());
+        });
+        let gh = repo.root.join("gh-none");
+        std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(task.front.worktree_path.is_none(), "no step ran");
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains(
+                "→ `blocked`: `second` was cut without the work of its dependency `first`: \
+                 `task/first` has commits that `task/second` does not, and `first` opened no \
+                 pull request, so they reach `work` only through `second`. merge `task/first` \
+                 into `task/second`, then resume `second` on the board"
+            ),
+            "{log}"
+        );
+
+        // A person merges the branch and resumes the task on its step.
+        git(&["switch", "-q", "task/second"]);
+        git(&["merge", "-q", "--no-edit", "task/first"]);
+        git(&["switch", "-q", "work"]);
+        let mut resumed = reload(&path);
+        resumed.set_stage("implement", None);
+        resumed.save().unwrap();
+        run_pass(&repo, &mux);
+        assert_ne!(reload(&path).stage(), crate::pipeline::BLOCKED);
     }
 
     /// The late merge itself: the dependency is `done`, but its branch is gone.

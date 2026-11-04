@@ -72,6 +72,22 @@ fn queued_ids_under(queue: &Path) -> std::collections::BTreeSet<String> {
 /// matches [`crate::mux`]'s bound on the fetch of the same remote.
 const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// What [`Repo::parent_work`] found out about a cut task's first dependency.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParentWork {
+    /// Nothing is missing, or nothing can be: run on.
+    Fine,
+    /// The dependency's commits, on `branch`, are not in `task_branch`, and
+    /// the dependency opened no pull request to carry them to the base.
+    Missing {
+        dependency: String,
+        branch: String,
+        task_branch: String,
+    },
+    /// `gh` could not say whether the dependency has a pull request.
+    Unknown,
+}
+
 /// Where a tracked write lands, as [`Repo::tracked_write_root`] decides it.
 #[derive(Debug)]
 pub struct TrackedWrite<'a> {
@@ -1331,6 +1347,80 @@ impl Repo {
         let start = self.dependency_start(dep).ok()?;
         (start != from && self.dependency_own_branch(dep).ok().as_deref() == Some(from))
             .then_some(start)
+    }
+
+    /// Whether a task already cut is missing the commits of its first
+    /// dependency, which opened no pull request and so has no other road to
+    /// the base than this task's own.
+    ///
+    /// A dependent queued before a parent's commits were handed on is cut
+    /// from the base, and the fix to the cut cannot add them afterwards.
+    /// [`ParentWork::Missing`] only when every one of these holds: the
+    /// dependency is archived at `done` with commits to hand over, its
+    /// branch exists, that branch's tip is not inside the task's branch, and
+    /// GitHub knows no pull request for it. A parent whose pull request is
+    /// open is stacked, and a stacked dependent legitimately lags behind it.
+    ///
+    /// The cheap local facts are read first and `gh` last, so a healthy
+    /// chain never asks it. [`ParentWork::Unknown`] when `gh` could not
+    /// answer: running on could drop the work and blocking could stall a
+    /// healthy task, so the caller holds the task and asks again next pass.
+    /// A project with no `origin` has no forge to ask and no pull request to
+    /// miss, so it is never checked.
+    pub fn parent_work(&self, task: &Task) -> ParentWork {
+        self.parent_work_asking(task, &gh_program())
+    }
+
+    /// [`Repo::parent_work`] asking `gh` for its pull requests, so a test can
+    /// stand a script in for it.
+    fn parent_work_asking(&self, task: &Task, gh: &str) -> ParentWork {
+        let Some(dep_id) = task.front.depends_on.first() else {
+            return ParentWork::Fine;
+        };
+        let Some(dep) = self.archived_done(dep_id) else {
+            return ParentWork::Fine;
+        };
+        let Ok(own) = self.dependency_own_branch(dep_id) else {
+            return ParentWork::Fine;
+        };
+        let task_branch = task
+            .front
+            .branch
+            .clone()
+            .unwrap_or_else(|| task::default_branch(task.id()));
+        let exists = |branch: &str| {
+            self.git(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .is_ok()
+        };
+        // An uncut task has no branch yet, and its cut starts from the
+        // parent's branch; only a branch that exists can lack commits.
+        if nothing_to_hand_over(&dep) || !exists(&own) || !exists(&task_branch) {
+            return ParentWork::Fine;
+        }
+        // Both refs exist, so a failure here is the answer "not an ancestor".
+        if self
+            .git(&["merge-base", "--is-ancestor", &own, &task_branch])
+            .is_ok()
+        {
+            return ParentWork::Fine;
+        }
+        if self.git(&["remote", "get-url", "origin"]).is_err() {
+            return ParentWork::Fine;
+        }
+        match self.has_pull_request(gh, &own) {
+            Some(false) => ParentWork::Missing {
+                dependency: dep_id.clone(),
+                branch: own,
+                task_branch,
+            },
+            Some(true) => ParentWork::Fine,
+            None => ParentWork::Unknown,
+        }
     }
 
     /// Whether GitHub knows a pull request, in any state, with `branch` for
@@ -5983,6 +6073,88 @@ mod tests {
                 "{id}'s dependent still opens against the chain's base"
             );
         }
+    }
+
+    /// A task cut without the commits of its first dependency is missing
+    /// them only when that dependency opened no pull request. A healthy
+    /// chain, a parent whose pull request is open, a parent with an empty
+    /// patch and an uncut task are fine, `gh` failing is not an answer, and
+    /// the check passes once the dependency's branch is merged in.
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_task_missing_the_commits_of_a_parent_with_no_pull_request_is_found() {
+        let (_origin, work, _base_guard) = fixture("parent-work-missing");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        for id in ["a", "empty"] {
+            git(&work, &["branch", &format!("task/{id}")]);
+        }
+        git(&work, &["switch", "-q", "task/a"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "a's work"]);
+        git(&work, &["switch", "-q", "plan/x"]);
+        git(&work, &["branch", "task/b"]);
+        git(&work, &["branch", "task/healthy", "task/a"]);
+        archive_done(&repo, "a", 2, "");
+        archive_done(&repo, "empty", 0, "");
+        let child = |id: &str, dep: &str| {
+            Task::parse(
+                PathBuf::from(format!("{id}.md")),
+                &format!(
+                    "---\nid: {id}\nstage: implement\nbranch: task/{id}\nbase: main\n\
+                     depends_on: [{dep}]\n---\n## Goal\nok\n"
+                ),
+            )
+            .unwrap()
+        };
+        let none = stub_gh(&work, "none", "echo '[]'");
+        let some = stub_gh(&work, "some", "echo '[{\"number\": 7}]'");
+        let broken = stub_gh(&work, "broken", "exit 1");
+
+        // Local facts alone settle these, so `broken` is never consulted.
+        assert_eq!(
+            repo.parent_work_asking(&child("healthy", "a"), &broken),
+            ParentWork::Fine,
+            "the parent's tip is inside the task's branch"
+        );
+        let b = child("b", "empty");
+        assert_eq!(
+            repo.parent_work_asking(&b, &none),
+            ParentWork::Fine,
+            "an empty patch has nothing to hand over"
+        );
+        assert_eq!(
+            repo.parent_work_asking(&child("uncut", "a"), &none),
+            ParentWork::Fine,
+            "an uncut task has no branch to lack anything"
+        );
+        let b = child("b", "a");
+        assert_eq!(
+            repo.parent_work_asking(&b, &some),
+            ParentWork::Fine,
+            "a parent with a pull request is stacked"
+        );
+        assert_eq!(
+            repo.parent_work_asking(&b, &broken),
+            ParentWork::Unknown,
+            "gh could not say, so the task is held"
+        );
+        assert_eq!(
+            repo.parent_work_asking(&b, &none),
+            ParentWork::Missing {
+                dependency: "a".into(),
+                branch: "task/a".into(),
+                task_branch: "task/b".into(),
+            }
+        );
+
+        // A person merges the branch and resumes: nothing is missing, and
+        // `gh` is not asked again.
+        git(&work, &["switch", "-q", "task/b"]);
+        git(&work, &["merge", "-q", "--no-edit", "task/a"]);
+        assert_eq!(
+            repo.parent_work_asking(&b, &broken),
+            ParentWork::Fine,
+            "merged in"
+        );
     }
 
     /// A project with no `origin` has no forge to ask, so a dependency with
