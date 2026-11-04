@@ -26880,7 +26880,7 @@ mod tests {
         git(&["switch", "-q", "-c", "task/first"]);
         git(&["commit", "-q", "--allow-empty", "-m", "first's work"]);
         git(&["switch", "-q", "work"]);
-        let archived = add_task_with(&repo, "first", "done", |f| {
+        let archived = add_task_with(repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
             f.run = Some("run-first".into());
             f.patch = Some(crate::task::Patch {
@@ -26891,7 +26891,7 @@ mod tests {
         });
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
-        let path = add_task_with(&repo, "second", "implement", |f| {
+        let path = add_task_with(repo, "second", "implement", |f| {
             f.branch = Some("task/second".into());
             f.depends_on = vec!["first".into()];
             f.base = Some("work".into());
