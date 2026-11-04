@@ -1063,8 +1063,8 @@ fn register_stack(
         // opened no pull request: its commits reach the base through this
         // one, cut from its branch. Only a lookup that says so counts —
         // `pr_view` reads every `gh` refusal as no pull request, and a
-        // `gh` that could not answer must not open one against a branch
-        // nobody checked. The start is the dependency's own branch unless
+        // `gh` that could not answer must not pass the handover on a
+        // lookup nobody made. The start is the dependency's own branch unless
         // it hands something else on, so equal means nothing was found.
         if repo.has_pull_request(&gh, &dep_branch) == Some(false)
             && let Ok(start) = repo.dependency_start(dep_id)
@@ -1350,6 +1350,45 @@ mod tests {
         assert_eq!(
             said,
             "none — dependency `b` opened no pull request, so `c` stands on `release/sprint-5`"
+        );
+    }
+
+    /// A `gh` that cannot say whether the dependency has a pull request —
+    /// logged out, offline — is no answer that there is none, so the handover
+    /// keeps its refusal rather than claiming the dependent stands on the
+    /// dependency's start for a branch nobody checked.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_keeps_the_refusal_when_gh_cannot_say_whether_its_parent_opened_a_pull_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-parent-gh-silent");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/project.git",
+            ],
+        )
+        .unwrap();
+        let doc = "---\nid: b\nstage: done\nbranch: task/b\nbase: main\nrun: run-b\n\
+                   starts_from: release/sprint-5\n\
+                   patch:\n  files: 2\n  insertions: 3\n  deletions: 1\n---\n## Goal\nok\n";
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(repo.archive_dir().join("b.md"), doc).unwrap();
+        let gh = repo.root.join("gh-logged-out");
+        std::fs::write(&gh, "#!/bin/sh\necho 'gh: not logged in' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let err = register_stack(&repo, &repo.root, "c", &["b".to_string()], 7).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("dependency `b` has no pull request on `task/b` to stack onto"),
+            "{err}"
         );
     }
 
