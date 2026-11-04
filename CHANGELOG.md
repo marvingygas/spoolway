@@ -21,6 +21,30 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.18.1
+
+### Highlights
+- A chain whose tasks walk past their `last:` step keeps every task's work in its one pull request. A dependent is cut from its parent's branch whenever the parent has commits and opened no pull request, where it was cut from the chain's base and the chain's pull request dropped the parent's work. Only a parent that ended `done` with an empty patch, or never set up a checkout, hands on where it stood instead. (#1473)
+- `spoolway stack` opens a dependent's pull request on its own against the parent's starting branch when the parent did its work and opened no pull request, and prints ``none — dependency `<dep>` opened no pull request, so `<task>` stands on `<base>` ``. It failed the handover there before. When `gh` cannot say whether the parent has a pull request, it still refuses. (#1474)
+- A task that was already cut without the commits of a parent that opened no pull request stops on `blocked` before its next step, with a reason that names the branch to merge into its own. Merge that branch in the task's worktree and resume it on the board. The dispatcher never merges it itself, and pull requests merged before this release are not repaired. (#1475)
+
+### Fixes
+- The block lands once, in attended and unattended runs alike, and the task file records the parent's tip as `parent_work_tip:` once the dispatcher finds it inside the task, so a branch squashed at handover is not blocked again. The check skips a step a lane or a foreground command is working, and an unattended task whose unblocker passes without merging parks on `paused`. (#1475)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- spoolway builds against `sysinfo` 0.40. (#1468, #1472)
+- Release verification retries the real `npm install` until the installed wrapper runs, where a platform package npm could not fetch yet passed unnoticed. (#1466)
+- The upgrade suite runs a project the released 0.18.0 binary wrote through the new binary. (#1467)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.18.1`, run it without installing via `npx spoolway@0.18.1`, install it with `brew install marvingygas/tap/spoolway`, or download it with `curl -fsSL https://github.com/marvingygas/spoolway/releases/download/v0.18.1/install.sh | sh`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl, darwin-arm64 and darwin-x64; the GitHub release carries four bare executables, `install.sh` and `SHA256SUMS`.
+- No project changes are needed from 0.18.0. Restart the dispatcher to take the fixes, and merge the named branch into any task it blocks.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.18.1
+
 ## 0.18.0
 
 ### Highlights
