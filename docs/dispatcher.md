@@ -161,8 +161,10 @@ same as a session you started by hand. Typing into one on a local model may make
 weights. The footer counts lanes by the same rule.
 
 A task with a `depends_on` is cut from its first dependency's branch. When that dependency was
-[closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), the task is
-cut from the branch that dependency started from. A task without a `depends_on` is cut from
+[closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), meaning it
+changed nothing, the task is cut from the branch that dependency stood on. A dependency with
+commits is always cut from, even when it opened no pull request, so a group's one pull request
+carries every task's commits. A task without a `depends_on` is cut from
 `origin/<base>` when `origin` has the base, and from the local `<base>` branch when it does
 not. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as

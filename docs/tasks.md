@@ -63,7 +63,7 @@ as JSON.
 | `stage` | the pipeline | The step the task is on. |
 | `routine` | the routines tab, or a job | The `id:` of the routine file this task is a queued copy of. The board and the `queued` popup show it in place of the numbered id. See [Routines](planning.md#routines). |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. A group whose every task in the batch sets `tracking: off` keeps `task/<id>`. |
-| `starts_from` | the dispatcher, or you | The branch the worktree is cut from: the first dependency's branch, else `base`. A task cut from `base` starts at `origin/<base>` when `origin` has it, so your unpushed commits stay out of its pull request, and at the local branch otherwise. A dependency [closed without a pull request](#a-dependency-closed-without-a-pull-request) hands on the branch it started from instead. Set it yourself before the task starts to cut from another branch. The pull request opens against it. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
+| `starts_from` | the dispatcher, or you | The branch the worktree is cut from and the pull request opens against: the first dependency's branch, else `base`. A dependency with commits and no pull request is the exception: the worktree is cut from its branch, and `starts_from` records that dependency's own `starts_from`. A task cut from `base` starts at `origin/<base>` when `origin` has it, so your unpushed commits stay out of its pull request, and at the local branch otherwise. A dependency [closed without a pull request](#a-dependency-closed-without-a-pull-request) hands on the branch it stood on instead. Set it yourself before the task starts to cut from another branch. The pull request opens against it. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
 | `base_commit` | the dispatcher | The commit `starts_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
@@ -471,8 +471,8 @@ line, with `-m` as its Note:
 A lane still working on the task is stopped first. The task is then torn down and archived like
 any task that reaches `done`, and the tasks that depend on it go on.
 
-A task closed this way with no pull request has no branch worth building on. Its dependents start
-from, and open their pull requests against, the branch that task itself started from. See
+A task closed this way with no changes has no branch worth building on. Its dependents are cut
+from the branch that task itself stood on. See
 [A dependency closed without a pull request](#a-dependency-closed-without-a-pull-request).
 
 Only a person closes a task. `spoolway report --pass --stage done` from an unblocker lane exits 1
@@ -482,20 +482,23 @@ moment.
 
 ### A dependency closed without a pull request
 
-A dependency counts as closed without a pull request when it is in the archive at `done` and one
-of these holds:
+A dependency counts as closed without a pull request only when it is in the archive at `done`
+and its recorded patch has no files, in any group and however it was closed. Its dependents are
+then cut from the branch it stood on: its first dependency's branch, else its own `starts_from:`,
+else its `base:`.
 
-- its recorded patch has no files
-- GitHub lists no pull request, in any state, with its branch as the head
-
-Its dependents are then cut from, and open their pull requests against, the branch that
-dependency started from. That is its own `starts_from:`, else its first dependency's branch,
-else its `base:`. A dependency whose pull request exists, or whose pull request GitHub cannot be
-asked about, keeps its own branch as the start.
+A dependency with commits is never closed in this sense, whether or not it opened a pull request.
+That includes a task that walked past its pipeline's `last:` step because a dependent in its
+group runs it. Its dependent is cut from its branch, so the group's one pull request carries its
+commits. The dependent records the dependency's own `starts_from:` as its `starts_from:`, so that
+pull request opens against the group's base and not against a branch that is never pushed. Only
+when GitHub lists a pull request for the dependency's branch, in any state, or cannot be asked,
+does the dependent record the dependency's branch, so a stacked pull request opens against its
+dependency's.
 
 A dependent whose own `starts_from:` you set is left alone. A dependent already cut from the
-closed branch has its `starts_from:` moved to the new branch before its next step. Its worktree
-stays as it is.
+dependency's branch has its `starts_from:` moved to the recorded start before its next step. Its
+worktree stays as it is.
 
 `spoolway queue list` names the branch in the NEXT column of such a queued dependent:
 

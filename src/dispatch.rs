@@ -7243,6 +7243,9 @@ pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 /// closed with nothing to hand over counts as where it stood here, not its
 /// branch — see [`Repo::closed_dependency_base`].
 ///
+/// This is where the worktree is cut, not what is recorded as `starts_from`:
+/// see [`recorded_start`].
+///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
 /// [`Dispatcher::missing_start_branch`] and for queueing's own check in
 /// `commands::queue::missing_start_branch`, so none of them checks a
@@ -7252,6 +7255,20 @@ pub(crate) fn start_branch(repo: &Repo, task: &Task, base: &str) -> Result<Strin
     match (&task.front.starts_from, task.front.depends_on.first()) {
         (Some(own), _) => Ok(own.clone()),
         (None, Some(dep)) => repo.dependency_branch(dep),
+        (None, None) => Ok(base.to_string()),
+    }
+}
+
+/// The `starts_from` an uncut `task` records once it is cut from
+/// [`start_branch`]. The same answer, except for a dependency whose pull
+/// request opens elsewhere: a parent with commits and no pull request is cut
+/// from, yet its dependent opens against the parent's own start, so the
+/// chain's one pull request lands in the chain's base — see
+/// [`Repo::dependency_start`].
+pub(crate) fn recorded_start(repo: &Repo, task: &Task, base: &str) -> Result<String> {
+    match (&task.front.starts_from, task.front.depends_on.first()) {
+        (Some(own), _) => Ok(own.clone()),
+        (None, Some(dep)) => repo.dependency_start(dep),
         (None, None) => Ok(base.to_string()),
     }
 }
@@ -7413,13 +7430,15 @@ fn ensure_checkout(
         || task.front.run.is_some()
         || task.front.base_commit.is_some();
 
-    // A dependent cut before its dependency was closed with nothing to hand
-    // over still records that dependency's branch as `starts_from`, which was
-    // never pushed. The pull request opens against `starts_from` (the shipped
-    // `create-pr` prompt says so), so it is pointed at where the dependency
-    // stood instead. Only the recorded name moves: the worktree, its branch
-    // and `base_commit` are left alone. A `starts_from` a person pointed
-    // elsewhere is not the dependency's branch and is kept.
+    // A dependent cut while its dependency's pull request still seemed to be
+    // coming records that dependency's branch as `starts_from`. When the
+    // dependency then closes with nothing to hand over, or ends with commits
+    // and no pull request, that branch is never pushed, and the pull request
+    // opens against `starts_from` (the shipped `create-pr` prompt says so), so
+    // it is pointed at where the dependency stood instead. Only the recorded
+    // name moves: the worktree, its branch and `base_commit` are left alone.
+    // A `starts_from` a person pointed elsewhere is not the dependency's
+    // branch and is kept.
     if cut_before
         && let Some(from) = task.front.starts_from.clone()
         && let Some(base) = repo.retarget_cut_start(task, &from)
@@ -7760,6 +7779,10 @@ fn ensure_checkout(
                 // re-cut after a worktree deleted by hand reads back too —
                 // the branch it was first cut from.
                 let starts_from = start_branch(repo, task, &base)?;
+                // What the task records is not always where it is cut: a
+                // parent with commits and no pull request is cut from, but
+                // its dependent's pull request opens against the chain's base.
+                let recorded = recorded_start(repo, task, &base)?;
                 // A task's first cut never adopts a branch it did not make.
                 // `cut_worktree` reuses any existing branch, which is right
                 // for re-cutting this task's own deleted worktree and wrong
@@ -7903,7 +7926,7 @@ fn ensure_checkout(
                 task.front.borrowed = false;
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
-                task.front.starts_from = Some(starts_from);
+                task.front.starts_from = Some(recorded);
                 persist_task(repo, task, file_seen)?;
             }
         }

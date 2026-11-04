@@ -68,6 +68,12 @@ configure_project plan/live
 # This suite is about what `spoolway stack` does, so its pipelines end the way a
 # project's that kept the old `handover` step do.
 stack_handover
+# A pipeline whose `handover` carries `last:`, copied before the steps below
+# are appended to `default`: a chain on it hands over once, from its tip, and
+# the tasks beneath walk past `handover` to `done` with commits and no pull
+# request. See "a chain that walks past" at the end of the chain sections.
+cp .spoolway/pipelines/default.yml .spoolway/pipelines/walk.yml
+sed -i '/^  - id: handover$/,$s/^    hide: true$/    hide: true\n    last: true/' .spoolway/pipelines/walk.yml
 publish plan/live
 
 # ------------------------------------------------------- a step the stack runs once
@@ -458,6 +464,59 @@ if grep -lx "head=plan/live" "$FORGE"/prs/[0-9]* >/dev/null 2>&1; then
   cat "$FORGE"/prs/[0-9]* | sed 's/^/        /'
 else
   ok "and no plan pull request was ever opened"
+fi
+
+# ----------------------------------------------------- a chain that walks past
+# a -> b -> c in one group, on a pipeline whose `handover` carries `last:`. Only
+# c runs it, so a and b end at `done` with commits and no pull request, and c's
+# one pull request has to carry all three tasks' work. Each task is cut from
+# its parent's branch (so the work is in c's worktree), while c records the
+# chain's base as its `starts_from`, so the pull request opens against `main`
+# and not against `task/b`, a branch that is never pushed.
+for id in wa wb wc; do
+  case $id in
+    wa) deps=() ;;
+    wb) deps=("depends_on: [wa]") ;;
+    wc) deps=("depends_on: [wb]") ;;
+  esac
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: walk" "base: main" \
+    "pipeline: walk" "${deps[@]}"
+  must "the walking chain's $id" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
+done
+
+if drive wc blocked 400; then ok "the tip of a chain whose parents walked past hands over"
+else bad "the tip of a chain whose parents walked past hands over (at \`$(stage_of wc)\`)"; fi
+
+has "the root walked past the handover" \
+  "walked past \`handover\` (not last in its chain)" \
+  "$SPOOLWAY_PROJECT_HOME/archive/wa.md"
+if ! handed_over wa && ! handed_over wb; then
+  ok "so neither parent opened a pull request"
+else
+  bad "so neither parent opened a pull request"
+  ls "$FORGE/prs" | sed 's/^/        /'
+fi
+says "and it records the chain's base as its \`starts_from\`, not \`task/wb\`" \
+  "starts_from: main" "$SPOOLWAY" queue show wc
+if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-wc/work-wa.txt" ] \
+   && [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-wc/work-wb.txt" ]; then
+  ok "the tip's worktree carries the work of both parents"
+else
+  bad "the tip's worktree carries the work of both parents"
+  ls "$SPOOLWAY_PROJECT_HOME/worktrees/task-wc" 2>/dev/null | sed 's/^/        /'
+fi
+if git -C "$ORIGIN" show "task/wc:work-wa.txt" >/dev/null 2>&1 \
+   && git -C "$ORIGIN" show "task/wc:work-wb.txt" >/dev/null 2>&1 \
+   && git -C "$ORIGIN" show "task/wc:work-wc.txt" >/dev/null 2>&1; then
+  ok "and the tip's pushed branch holds all three tasks' work"
+else
+  bad "and the tip's pushed branch holds all three tasks' work"
+  git -C "$ORIGIN" ls-tree --name-only task/wc 2>/dev/null | sed 's/^/        /'
+fi
+if stacked_on wc main; then ok "and its pull request targets the chain's base"
+else
+  bad "and its pull request targets the chain's base"
+  cat "$FORGE"/prs/[0-9]* | sed 's/^/        /'
 fi
 
 # --------------------------------------------------------- two siblings, one slot

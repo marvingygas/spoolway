@@ -89,11 +89,10 @@ says "the task file records the remote-only branch as starts_from" \
 works "no local branch was made for the remote-only base by the cut" no_local_copy
 
 # A pull request recorded in the sandbox forge for a dependency's branch. A
-# finished dependency that GitHub knows no pull request for was closed with
-# nothing to hand over, and its dependents start from its own base instead
-# (`Repo::closed_dependency_base`). These two dependencies did open one, so
-# the forge has to say so, or the dependent never looks for the deleted
-# branch at all. Numbered well past anything `pr create` assigns here.
+# finished dependency that GitHub knows no pull request for records its own
+# start as its dependents' `starts_from` instead of its branch
+# (`Repo::dependency_start`). These two dependencies did open one, so the
+# forge has to say so, or the dependent records the wrong start. Numbered well past anything `pr create` assigns here.
 record_pr() {
   local n=$1 head=$2 state=$3
   printf 'number=%s\nbase=plan/live\nhead=%s\ntitle=%s\nstate=%s\n' \
