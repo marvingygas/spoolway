@@ -14354,13 +14354,13 @@ mod tests {
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("auth-login.md"),
-            "---\nid: auth-login\ntitle: auth-login\ngroup: auth-api\nstage: done\n---\nbody\n",
+            "---\nid: auth-login\ntitle: auth-login\ngroup: auth-api\nrun: r-login\nstage: done\n---\nbody\n",
         )
         .unwrap();
         std::fs::write(
             repo.archive_dir().join("auth-sessions.md"),
             "---\nid: auth-sessions\ntitle: auth-sessions\ngroup: auth-api\n\
-             depends_on: [auth-login]\nstage: done\n---\nbody\n",
+             depends_on: [auth-login]\nrun: r-sessions\nstage: done\n---\nbody\n",
         )
         .unwrap();
         // Its branch is still there, so `auth-form` has somewhere to start.

@@ -1227,8 +1227,11 @@ impl Repo {
     /// commits.
     ///
     /// "Closed with nothing to hand over" means the task is in the archive at
-    /// `done` and its recorded patch is empty, so there was nothing to open a
-    /// pull request with. A task still in the queue is not handed over *yet*,
+    /// `done` and either its recorded patch is empty or it never set up a
+    /// checkout (no `run:`), so there was nothing to open a pull request with.
+    /// The second covers a task closed by hand before it was ever cut: it
+    /// leaves no patch, and its `task/<id>` branch was stamped at queueing but
+    /// never made. A task still in the queue is not handed over *yet*,
     /// so it never counts. A task with commits never counts, however it was
     /// closed and whether or not it opened a pull request: a task that walked
     /// past its pipeline's `last:` step because a same-group dependent runs
@@ -1261,7 +1264,7 @@ impl Repo {
             return None;
         }
         let dep = self.archived_done(dep_id)?;
-        if !dep.front.patch.is_some_and(|patch| patch.files == 0) {
+        if !nothing_to_hand_over(&dep) {
             return None;
         }
         if let Some(first) = dep.front.depends_on.first() {
@@ -1278,8 +1281,9 @@ impl Repo {
     /// [`Repo::dependency_branch`].
     ///
     /// Normally `dep_id`'s own branch, since a stacked pull request opens
-    /// against its dependency's pull request. Two cases open against where the
-    /// dependency stood instead, because no pull request will ever exist for
+    /// against its dependency's pull request. Two cases open against the
+    /// dependency's own `starts_from` instead (else its first dependency's
+    /// start, else its `base`), because no pull request will ever exist for
     /// its branch: a dependency closed with nothing to hand over, and a
     /// dependency with commits whose branch GitHub knows no pull request for.
     /// The second is a task that walked past `last:`; its work reaches the
@@ -1302,8 +1306,7 @@ impl Repo {
         let Some(dep) = self.archived_done(dep_id) else {
             return Ok(own);
         };
-        let empty = dep.front.patch.is_some_and(|patch| patch.files == 0);
-        if !empty && self.has_pull_request(gh, &own) != Some(false) {
+        if !nothing_to_hand_over(&dep) && self.has_pull_request(gh, &own) != Some(false) {
             return Ok(own);
         }
         if let Some(from) = dep.front.starts_from.clone() {
@@ -4403,6 +4406,18 @@ pub(crate) fn gh_program() -> String {
     std::env::var("SPOOLWAY_GH").unwrap_or_else(|_| "gh".to_string())
 }
 
+/// Whether an archived `done` task left nothing a pull request could carry:
+/// its recorded patch has no files, or it never set up a checkout, which
+/// leaves no patch at all (`teardown` measures only a task with a
+/// `base_commit` and a worktree).
+fn nothing_to_hand_over(task: &Task) -> bool {
+    task.front
+        .patch
+        .as_ref()
+        .is_some_and(|patch| patch.files == 0)
+        || task.front.run.is_none()
+}
+
 /// What `gh pr list --head <branch> --state all` printed, as JSON bytes with
 /// `number`, `state` and `baseRefName` for each pull request, whatever
 /// state it is in. Asked by name rather than by ref, since a deleted branch
@@ -5827,7 +5842,15 @@ mod tests {
         let empty = "patch:\n  files: 0\n  insertions: 0\n  deletions: 0\n";
         write(&repo.archive_dir(), "noop", "done", empty);
         write(&repo.queue_dir(), "waiting", "implement", empty);
+        // Closed by hand before it was ever cut: no run, no patch, and a
+        // `task/never-cut` branch that was stamped but never made.
+        write(&repo.archive_dir(), "never-cut", "done", "");
 
+        assert_eq!(
+            repo.closed_dependency_base("never-cut").as_deref(),
+            Some("main")
+        );
+        assert_eq!(repo.dependency_branch("never-cut").unwrap(), "main");
         assert_eq!(repo.closed_dependency_base("noop").as_deref(), Some("main"));
         assert_eq!(repo.dependency_branch("noop").unwrap(), "main");
         assert_eq!(repo.dependency_own_branch("noop").unwrap(), "task/noop");
@@ -5840,7 +5863,7 @@ mod tests {
     #[cfg(unix)]
     fn archive_done(repo: &Repo, id: &str, files: u32, extra: &str) {
         let doc = format!(
-            "---\nid: {id}\nstage: done\nbranch: task/{id}\nbase: main\n{extra}\
+            "---\nid: {id}\nstage: done\nbranch: task/{id}\nbase: main\nrun: run-{id}\n{extra}\
              patch:\n  files: {files}\n  insertions: 0\n  deletions: 0\n---\n## Goal\nok\n"
         );
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
@@ -5873,10 +5896,13 @@ mod tests {
         let some = stub_gh(&work, "some", "echo '[{\"number\": 7}]'");
         let broken = stub_gh(&work, "broken", "exit 1");
 
+        // Whatever `gh` says, as the old rule asked it for these.
+        crate::platform::set_test_env("SPOOLWAY_GH", &none);
         for id in ["unfiled", "filed", "unsure"] {
             assert_eq!(repo.closed_dependency_base(id), None, "{id} has commits");
             assert_eq!(repo.dependency_branch(id).unwrap(), format!("task/{id}"));
         }
+        crate::platform::remove_test_env("SPOOLWAY_GH");
         let start = |id: &str, gh: &str| repo.dependency_start_asking(id, gh, 0).unwrap();
         assert_eq!(start("unfiled", &none), "release");
         assert_eq!(start("filed", &some), "task/filed", "a pull request");
@@ -5940,16 +5966,15 @@ mod tests {
         archive_done(&repo, "b", 2, "depends_on: [a]\nstarts_from: main\n");
         let none = stub_gh(&work, "no-pull-requests", "echo '[]'");
 
-        assert_eq!(
-            repo.dependency_branch("a").unwrap(),
-            "task/a",
-            "b is cut from a's branch"
-        );
-        assert_eq!(
-            repo.dependency_branch("b").unwrap(),
-            "task/b",
-            "c is cut from b's branch"
-        );
+        // The stub is what makes this fail on the old rule, which asked `gh`
+        // and, hearing of no pull request, handed the base on instead.
+        crate::platform::set_test_env("SPOOLWAY_GH", &none);
+        let from_a = repo.dependency_branch("a");
+        let from_b = repo.dependency_branch("b");
+        crate::platform::remove_test_env("SPOOLWAY_GH");
+
+        assert_eq!(from_a.unwrap(), "task/a", "b is cut from a's branch");
+        assert_eq!(from_b.unwrap(), "task/b", "c is cut from b's branch");
         for id in ["a", "b"] {
             assert_eq!(
                 repo.dependency_start_asking(id, &none, 0).unwrap(),

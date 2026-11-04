@@ -484,6 +484,10 @@ for id in wa wb wc; do
   must "the walking chain's $id" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 done
 
+# `blocked` is where the tip is expected to stop: `spoolway stack` opens its
+# pull request first, then looks for a pull request on its parent's branch to
+# stack onto, finds none because that parent walked past `handover`, and
+# fails. The pull request is already open by then, which is what is checked.
 if drive wc blocked 400; then ok "the tip of a chain whose parents walked past hands over"
 else bad "the tip of a chain whose parents walked past hands over (at \`$(stage_of wc)\`)"; fi
 

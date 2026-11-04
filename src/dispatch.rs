@@ -7435,7 +7435,8 @@ fn ensure_checkout(
     // dependency then closes with nothing to hand over, or ends with commits
     // and no pull request, that branch is never pushed, and the pull request
     // opens against `starts_from` (the shipped `create-pr` prompt says so), so
-    // it is pointed at where the dependency stood instead. Only the recorded
+    // it is pointed at the dependency's own `starts_from` (else its own start,
+    // else its base) instead. Only the recorded
     // name moves: the worktree, its branch and `base_commit` are left alone.
     // A `starts_from` a person pointed elsewhere is not the dependency's
     // branch and is kept.
@@ -7776,8 +7777,10 @@ fn ensure_checkout(
                 // than at the cut — see [`Repo::dependency_branch`].
                 //
                 // A person's own `starts_from:` outranks both, and is what a
-                // re-cut after a worktree deleted by hand reads back too —
-                // the branch it was first cut from.
+                // re-cut after a worktree deleted by hand reads back too: the
+                // recorded value, which for a dependent of a parent with
+                // commits and no pull request is the chain's base, not the
+                // branch it was cut from.
                 let starts_from = start_branch(repo, task, &base)?;
                 // What the task records is not always where it is cut: a
                 // parent with commits and no pull request is cut from, but
@@ -26800,6 +26803,8 @@ mod tests {
         // out cleanup, so only an archived one can have lost its branch.
         let archived = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
+            // A task that never set up a checkout hands its base on instead.
+            f.run = Some("run-first".into());
         });
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
