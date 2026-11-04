@@ -2406,6 +2406,8 @@ Deprecated. Commits what is left in the task's worktree, squashes the branch to 
 
 When the task's first dependency was [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), `stack` opens the pull request against the `starts_from` that dependency recorded and stacks it on nothing.
 
+When the first dependency did its work and opened no pull request, because its chain went on past the handover step, `stack` opens the pull request against that dependency's `starts_from`, prints `none — dependency `<dep>` opened no pull request, so `<task>` stands on `<base>``, and stacks it on nothing. It does this only when GitHub reports no pull request for the dependency's branch. If `gh` cannot answer, `stack` exits 1 saying the dependency has no pull request to stack onto.
+
 From any other directory, `stack` exits 1 before it commits, squashes or pushes. The main checkout, your own worktree and another task's worktree are all refused. A worktree on a detached HEAD is refused with a message that says to check out the task's branch.
 
 ```

@@ -1052,16 +1052,34 @@ fn register_stack(
         ));
     }
     let gh = gh_program();
-    let (owner, repo_name) = owner_repo(worktree)?;
 
     // The dependency's real branch, read from its task file rather than
     // rebuilt as `task/<dep_id>` — the name its pull request was opened on,
     // and the one `gh pr view` is asked for below. An unresolvable
     // dependency fails by name here.
     let dep_branch = repo.dependency_branch(dep_id)?;
-    let dep = pr_view(&gh, worktree, &dep_branch)?.ok_or_else(|| {
-        anyhow::anyhow!("dependency `{dep_id}` has no pull request on `{dep_branch}` to stack onto")
-    })?;
+    let Some(dep) = pr_view(&gh, worktree, &dep_branch)? else {
+        // A dependency that did its work and walked past the handover step
+        // opened no pull request: its commits reach the base through this
+        // one, cut from its branch. Only a lookup that says so counts —
+        // `pr_view` reads every `gh` refusal as no pull request, and a
+        // `gh` that could not answer must not open one against a branch
+        // nobody checked. The start is the dependency's own branch unless
+        // it hands something else on, so equal means nothing was found.
+        if repo.has_pull_request(&gh, &dep_branch) == Some(false)
+            && let Ok(start) = repo.dependency_start(dep_id)
+            && start != dep_branch
+        {
+            return Ok(format!(
+                "none — dependency `{dep_id}` opened no pull request, so `{id}` stands on \
+                 `{start}`"
+            ));
+        }
+        bail!("dependency `{dep_id}` has no pull request on `{dep_branch}` to stack onto")
+    };
+    // Asked after the no-pull-request path above, which needs no github.com
+    // remote: it registers nothing.
+    let (owner, repo_name) = owner_repo(worktree)?;
     // A stack joins two pull requests that are both still open. Once the
     // dependency lands, its change is in the base branch and this one stands
     // on its own — asking GitHub to stack onto it is refused, and rightly so.

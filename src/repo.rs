@@ -1342,7 +1342,7 @@ impl Repo {
     /// one by hand, and a dispatcher can run for weeks, so a `false` and a
     /// failed ask are both kept for a minute: the board asks on every redraw,
     /// and this bounds that to one ask a minute per branch.
-    fn has_pull_request(&self, gh: &str, branch: &str) -> Option<bool> {
+    pub(crate) fn has_pull_request(&self, gh: &str, branch: &str) -> Option<bool> {
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock};
         use std::time::{Duration, Instant};

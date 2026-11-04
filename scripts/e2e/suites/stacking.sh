@@ -74,6 +74,19 @@ stack_handover
 # request. See "a chain that walks past" at the end of the chain sections.
 cp .spoolway/pipelines/default.yml .spoolway/pipelines/walk.yml
 sed -i '/^  - id: handover$/,$s/^    hide: true$/    hide: true\n    last: true/' .spoolway/pipelines/walk.yml
+# One step after `handover` that waits for a file, so the tip can be held
+# there with `handover`'s own log still on disk: the log is deleted when the
+# task reaches `done`. It carries `last:` too, so the parents walk past it.
+SEAL_GATE="$PWD/.seal-gate"
+sed -i '/^  - id: handover$/,$s/^    on_pass: done$/    on_pass: seal/' .spoolway/pipelines/walk.yml
+cat >> .spoolway/pipelines/walk.yml <<TAIL
+  - id: seal
+    description: Ends the walking chain after its handover.
+    run: while [ ! -e $SEAL_GATE ]; do sleep 0.2; done
+    hide: true
+    last: true
+    on_pass: done
+TAIL
 publish plan/live
 
 # ------------------------------------------------------- a step the stack runs once
@@ -484,12 +497,23 @@ for id in wa wb wc; do
   must "the walking chain's $id" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
 done
 
-# `blocked` is where the tip is expected to stop: `spoolway stack` opens its
-# pull request first, then looks for a pull request on its parent's branch to
-# stack onto, finds none because that parent walked past `handover`, and
-# fails. The pull request is already open by then, which is what is checked.
-if drive wc blocked 400; then ok "the tip of a chain whose parents walked past hands over"
-else bad "the tip of a chain whose parents walked past hands over (at \`$(stage_of wc)\`)"; fi
+# The tip's parent walked past `handover` and opened no pull request, so
+# `spoolway stack` opens the tip's own against the chain's base and registers
+# no stack: the handover passes and the task reaches `done`.
+if drive wc seal 400; then
+  ok "the tip of a chain whose parents walked past hands over"
+else
+  bad "the tip of a chain whose parents walked past hands over (at \`$(stage_of wc)\`)"
+fi
+has "and its stack line says the parent opened no pull request" \
+  "none — dependency \`wb\` opened no pull request, so \`wc\` stands on \`main\`" \
+  "$SPOOLWAY_PROJECT_HOME/commands/wc · handover.log"
+touch "$SEAL_GATE"
+if drive wc gone 150 && grep -q '^stage: done' "$SPOOLWAY_PROJECT_HOME/archive/wc.md"; then
+  ok "and the tip then finishes"
+else
+  bad "and the tip then finishes"
+fi
 
 has "the root walked past the handover" \
   "walked past \`handover\` (not last in its chain)" \
@@ -502,13 +526,6 @@ else
 fi
 says "and it records the chain's base as its \`starts_from\`, not \`task/wb\`" \
   "starts_from: main" "$SPOOLWAY" queue show wc
-if [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-wc/work-wa.txt" ] \
-   && [ -e "$SPOOLWAY_PROJECT_HOME/worktrees/task-wc/work-wb.txt" ]; then
-  ok "the tip's worktree carries the work of both parents"
-else
-  bad "the tip's worktree carries the work of both parents"
-  ls "$SPOOLWAY_PROJECT_HOME/worktrees/task-wc" 2>/dev/null | sed 's/^/        /'
-fi
 if git -C "$ORIGIN" show "task/wc:work-wa.txt" >/dev/null 2>&1 \
    && git -C "$ORIGIN" show "task/wc:work-wb.txt" >/dev/null 2>&1 \
    && git -C "$ORIGIN" show "task/wc:work-wc.txt" >/dev/null 2>&1; then
