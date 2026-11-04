@@ -3744,6 +3744,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         map.remove("hook_paused");
         map.remove("hook_error");
         map.remove("missing_start_branch");
+        map.remove("parent_work_tip");
         map.remove("hook_skipped");
     }
     let yaml =
@@ -5325,8 +5326,8 @@ fn spool_turns(holder: Option<u32>, finishing: Option<usize>) -> bool {
 }
 
 /// The NEXT-column line for a queued task whose first dependency was closed
-/// with nothing to hand over: it is cut from, and opens against, that
-/// dependency's own base, and the row says so. `None` for any other task,
+/// with nothing to hand over: it is cut from where that dependency stood,
+/// and the row says so. `None` for any other task,
 /// including one whose `starts_from:` a person set, since that is the branch
 /// it uses whatever its dependency did.
 fn closed_dependency_note(repo: &Repo, task: &crate::task::Task) -> Option<String> {

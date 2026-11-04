@@ -30,7 +30,7 @@ use crate::mux::{
 };
 use crate::pipeline::{Pipeline, Pipelines, Step, StepKind};
 use crate::platform::PathExt;
-use crate::repo::Repo;
+use crate::repo::{ParentWork, Repo};
 use crate::task::Task;
 
 pub(crate) const LANES_FILE: &str = "lanes.json";
@@ -2010,6 +2010,93 @@ impl<'a> Dispatcher<'a> {
                     *lane_step == step.id && lane_task == tasks[index].id()
                 })
                 .map(|(_, _, lane)| *lane);
+
+            // A task cut without the commits of a parent that opened no pull
+            // request is stopped before this step starts. Not for a step
+            // already working, a lane or a foreground command's run: the
+            // check ran when it began, and a branch that changes under it,
+            // as handover's squash does, is not work gone missing.
+            //
+            // Not on `blocked` itself: a staffed `blocked` step is the
+            // unblocker, whose job is to merge that branch, and it must not
+            // be stopped for the very fault it was called to clear.
+            let live_command = !step.background
+                && step.kind() == StepKind::Command
+                && command_keys.get(tasks[index].id()).is_some_and(|keys| {
+                    keys.contains(&crate::command_step::Runs::key(&step.id, tasks[index].id()))
+                });
+            if lane.is_none() && !live_command && step.id != crate::pipeline::BLOCKED {
+                match self.repo.parent_work(&tasks[index]) {
+                    ParentWork::Fine => {}
+                    ParentWork::Inside { tip } => {
+                        tasks[index].front.parent_work_tip = Some(tip);
+                        self.persist(&mut tasks[index])?;
+                    }
+                    // `gh` could not say, so running on could drop the work
+                    // and blocking could stall a healthy task. The task is
+                    // held and asked again next pass, as a start branch
+                    // `origin` cannot be asked about is.
+                    ParentWork::Unknown => continue,
+                    ParentWork::Missing {
+                        dependency,
+                        branch,
+                        task_branch,
+                    } => {
+                        let task = &mut tasks[index];
+                        let lands_on = task
+                            .front
+                            .starts_from
+                            .clone()
+                            .or_else(|| task.front.base.clone())
+                            .unwrap_or_default();
+                        let reason = missing_parent_work_reason(
+                            task.id(),
+                            &dependency,
+                            &branch,
+                            &task_branch,
+                            &lands_on,
+                        );
+                        // The same fault found again after an unblocker
+                        // passed without merging the branch. The dispatcher
+                        // would find it on every pass and the unblocker
+                        // would be sent for free each time, so the task
+                        // parks on `paused` for a person, as a spent
+                        // unblocker lap limit does.
+                        let repeated = task.body.contains(&format!("- {reason}\n"));
+                        let unblocker = pipeline
+                            .step(crate::pipeline::BLOCKED)
+                            .filter(|_| pipeline.blocked_is_staffed(self.unattended))
+                            .cloned();
+                        crate::commands::set_blocked_from(task, &step.id);
+                        if let (true, true, Some(unblocker)) =
+                            (repeated, self.unattended, unblocker)
+                        {
+                            self.escalate(task, &pipeline, &unblocker, &reason, false)?;
+                            report.actions.push(format!(
+                                "{}: parked at `{}` — {reason}",
+                                task.id(),
+                                step.id
+                            ));
+                            continue;
+                        }
+                        // Straight to `blocked` in every mode, not through
+                        // `escalate`: an unattended run whose pipeline staffs
+                        // no `blocked` step would resume the task onto this
+                        // same step, and the next pass would block it again,
+                        // for ever. The task rests on `blocked` until a
+                        // person, or a staffed unblocker, merges the branch.
+                        task.append_to_section("## Blocker", &format!("- {reason}\n"));
+                        task.set_stage(crate::pipeline::BLOCKED, Some(&reason));
+                        self.persist(task)?;
+                        report.actions.push(format!(
+                            "{}: blocked at `{}` — {reason}",
+                            task.id(),
+                            step.id
+                        ));
+                        continue;
+                    }
+                }
+            }
 
             match step.kind() {
                 StepKind::Command => {
@@ -7243,6 +7330,9 @@ pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 /// closed with nothing to hand over counts as where it stood here, not its
 /// branch — see [`Repo::closed_dependency_base`].
 ///
+/// This is where the worktree is cut, not what is recorded as `starts_from`:
+/// see [`recorded_start`].
+///
 /// One answer for the cut in [`ensure_workspace`], for the pause in
 /// [`Dispatcher::missing_start_branch`] and for queueing's own check in
 /// `commands::queue::missing_start_branch`, so none of them checks a
@@ -7252,6 +7342,20 @@ pub(crate) fn start_branch(repo: &Repo, task: &Task, base: &str) -> Result<Strin
     match (&task.front.starts_from, task.front.depends_on.first()) {
         (Some(own), _) => Ok(own.clone()),
         (None, Some(dep)) => repo.dependency_branch(dep),
+        (None, None) => Ok(base.to_string()),
+    }
+}
+
+/// The `starts_from` an uncut `task` records once it is cut from
+/// [`start_branch`]. The same answer, except for a dependency whose pull
+/// request opens elsewhere: a parent with commits and no pull request is cut
+/// from, yet its dependent opens against the parent's own start, so the
+/// chain's one pull request lands in the chain's base — see
+/// [`Repo::dependency_start`].
+pub(crate) fn recorded_start(repo: &Repo, task: &Task, base: &str) -> Result<String> {
+    match (&task.front.starts_from, task.front.depends_on.first()) {
+        (Some(own), _) => Ok(own.clone()),
+        (None, Some(dep)) => repo.dependency_start(dep),
         (None, None) => Ok(base.to_string()),
     }
 }
@@ -7313,6 +7417,27 @@ pub(crate) fn vanished_worktree_reason(step: &str, vanished: &Path) -> String {
          committed is gone and its result would route work that no longer exists. \
          resume the task to run the step again in a fresh worktree",
         vanished.display()
+    )
+}
+
+/// Why a task is blocked when it was cut without the commits of its
+/// dependency `dependency`, which opened no pull request.
+///
+/// Those commits reach `lands_on` only through this task's own pull request,
+/// so running on would drop them. The dispatcher never merges the branch
+/// itself: the reason names it, and a person or the unblocker does.
+pub(crate) fn missing_parent_work_reason(
+    task: &str,
+    dependency: &str,
+    branch: &str,
+    task_branch: &str,
+    lands_on: &str,
+) -> String {
+    format!(
+        "`{task}` was cut without the work of its dependency `{dependency}`: `{branch}` has \
+         commits that `{task_branch}` does not, and `{dependency}` opened no pull request, so \
+         they reach `{lands_on}` only through `{task}`. merge `{branch}` into `{task_branch}`, \
+         then resume `{task}` on the board"
     )
 }
 
@@ -7413,13 +7538,16 @@ fn ensure_checkout(
         || task.front.run.is_some()
         || task.front.base_commit.is_some();
 
-    // A dependent cut before its dependency was closed with nothing to hand
-    // over still records that dependency's branch as `starts_from`, which was
-    // never pushed. The pull request opens against `starts_from` (the shipped
-    // `create-pr` prompt says so), so it is pointed at where the dependency
-    // stood instead. Only the recorded name moves: the worktree, its branch
-    // and `base_commit` are left alone. A `starts_from` a person pointed
-    // elsewhere is not the dependency's branch and is kept.
+    // A dependent cut while its dependency's pull request still seemed to be
+    // coming records that dependency's branch as `starts_from`. When the
+    // dependency then closes with nothing to hand over, or ends with commits
+    // and no pull request, that branch is never pushed, and the pull request
+    // opens against `starts_from` (the shipped `create-pr` prompt says so), so
+    // it is pointed at the dependency's own `starts_from` (else its first
+    // dependency's start, else its base) instead. Only the recorded
+    // name moves: the worktree, its branch and `base_commit` are left alone.
+    // A `starts_from` a person pointed elsewhere is not the dependency's
+    // branch and is kept.
     if cut_before
         && let Some(from) = task.front.starts_from.clone()
         && let Some(base) = repo.retarget_cut_start(task, &from)
@@ -7757,9 +7885,15 @@ fn ensure_checkout(
                 // than at the cut — see [`Repo::dependency_branch`].
                 //
                 // A person's own `starts_from:` outranks both, and is what a
-                // re-cut after a worktree deleted by hand reads back too —
-                // the branch it was first cut from.
+                // re-cut after a worktree deleted by hand reads back too: the
+                // recorded value, which for a dependent of a parent with
+                // commits and no pull request is the chain's base, not the
+                // branch it was cut from.
                 let starts_from = start_branch(repo, task, &base)?;
+                // What the task records is not always where it is cut: a
+                // parent with commits and no pull request is cut from, but
+                // its dependent's pull request opens against the chain's base.
+                let recorded = recorded_start(repo, task, &base)?;
                 // A task's first cut never adopts a branch it did not make.
                 // `cut_worktree` reuses any existing branch, which is right
                 // for re-cutting this task's own deleted worktree and wrong
@@ -7903,7 +8037,7 @@ fn ensure_checkout(
                 task.front.borrowed = false;
                 task.front.branch = Some(branch);
                 task.front.base = Some(base);
-                task.front.starts_from = Some(starts_from);
+                task.front.starts_from = Some(recorded);
                 persist_task(repo, task, file_seen)?;
             }
         }
@@ -11311,6 +11445,7 @@ mod tests {
             hook_error: None,
             hook_skipped: None,
             missing_start_branch: None,
+            parent_work_tip: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
@@ -26767,6 +26902,179 @@ mod tests {
         );
     }
 
+    /// Stands the project up so `second` was cut without the commits of its
+    /// archived dependency `first`, which opened no pull request, and returns
+    /// `second`'s file with the `gh` that says so.
+    #[cfg(unix)]
+    fn second_lacks_firsts_commits(repo: &Repo) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
+        git(&["branch", "task/second"]);
+        git(&["switch", "-q", "-c", "task/first"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first's work"]);
+        git(&["switch", "-q", "work"]);
+        let archived = add_task_with(repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.run = Some("run-first".into());
+            f.patch = Some(crate::task::Patch {
+                files: 2,
+                insertions: 1,
+                deletions: 0,
+            });
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
+        let path = add_task_with(repo, "second", "implement", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+            f.base = Some("work".into());
+        });
+        let gh = repo.root.join("gh-none");
+        std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (path, gh)
+    }
+
+    /// A task cut without the commits of its first dependency, which opened
+    /// no pull request, stops at `blocked` before its step runs, with the
+    /// reason that names the branch to merge. Once the branch is merged in
+    /// and the task resumed, the next pass runs it on.
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_task_missing_a_parents_commits_blocks_until_the_branch_is_merged() {
+        let (repo, _root_guard) = fixture("block-cut-missing-parent");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        assert!(task.front.worktree_path.is_none(), "no step ran");
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            log.contains(
+                "→ `blocked`: `second` was cut without the work of its dependency `first`: \
+                 `task/first` has commits that `task/second` does not, and `first` opened no \
+                 pull request, so they reach `work` only through `second`. merge `task/first` \
+                 into `task/second`, then resume `second` on the board"
+            ),
+            "{log}"
+        );
+
+        // A person merges the branch and resumes the task on its step.
+        git(&["switch", "-q", "task/second"]);
+        git(&["merge", "-q", "--no-edit", "task/first"]);
+        git(&["switch", "-q", "work"]);
+        let mut resumed = reload(&path);
+        resumed.set_stage("implement", None);
+        resumed.save().unwrap();
+        run_pass(&repo, &mux);
+        assert_ne!(reload(&path).stage(), crate::pipeline::BLOCKED);
+        let tip = git(&["rev-parse", "task/first"]);
+        assert_eq!(
+            reload(&path).front.parent_work_tip.as_deref(),
+            Some(tip.trim()),
+            "the tip found inside is recorded, for handover's squash to come"
+        );
+    }
+
+    /// An unattended run on a pipeline with no `blocked` step lands the same
+    /// task on `blocked` once, and a later pass neither resumes it onto its
+    /// step nor writes the reason again.
+    #[cfg(unix)]
+    #[test]
+    fn an_unattended_run_blocks_a_cut_task_missing_a_parents_commits_once() {
+        let (repo, _root_guard) = unattended_fixture("block-cut-missing-parent-unattended");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..3 {
+            run_pass_with(&repo, &mux, &unstaffed_builtin());
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        // Once under `## Blocker` and once in the Status Log, however many
+        // passes ran.
+        assert_eq!(
+            task.body.matches("was cut without the work").count(),
+            2,
+            "{}",
+            task.body
+        );
+    }
+
+    /// A foreground command already running when the check would fire is left
+    /// to finish: handover's own squash moves the branch under it, and
+    /// blocking then would stop a task mid-push. Once the run is gone the
+    /// next pass checks as usual.
+    #[cfg(unix)]
+    #[test]
+    fn a_running_command_step_is_not_blocked_for_missing_a_parents_commits() {
+        let (repo, _root_guard) = fixture("block-cut-missing-parent-live-command");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let yaml = "steps:\n  \
+             - id: work\n    run: sleep 30\n    on_pass: done\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let mut task = reload(&path);
+        task.set_stage("work", None);
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("work", "second");
+        runs.start(&key, "sleep 30", &repo.root, &Default::default())
+            .unwrap();
+
+        run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+        let live = reload(&path);
+        runs.stop(&key);
+
+        assert_eq!(live.stage(), "work", "{}", live.body);
+        assert!(!live.body.contains("was cut without the work"));
+    }
+
+    /// With a staffed `blocked` step, the pass after the block does not block
+    /// the task again from `blocked` itself, so the unblocker is the one that
+    /// gets it. An unblocker that passes without merging the branch sends the
+    /// task back to its step, and the same fault found there parks it on
+    /// `paused` instead of sending the unblocker again.
+    #[cfg(unix)]
+    #[test]
+    fn a_staffed_unblocker_is_not_blocked_by_the_fault_and_a_repeat_parks() {
+        let (repo, _root_guard) = unattended_fixture("block-cut-missing-parent-staffed");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let mux = FakeMux::new(vec![]);
+        let home = crate::scratch::root("block-cut-missing-parent-staffed-home");
+
+        with_home(&home, || run_pass(&repo, &mux));
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+        with_home(&home, || run_pass(&repo, &mux));
+        let task = reload(&path);
+        assert_eq!(
+            task.body.matches("was cut without the work").count(),
+            2,
+            "the check must not run again on `blocked`: {}",
+            task.body
+        );
+
+        // The unblocker passed without merging: the task is back on its step.
+        let mut back = reload(&path);
+        back.set_stage("implement", None);
+        back.save().unwrap();
+        with_home(&home, || run_pass(&repo, &mux));
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
+    }
+
     /// The late merge itself: the dependency is `done`, but its branch is gone.
     /// The dependent pauses naming that branch, and a second pass leaves it
     /// paused rather than pausing it again.
@@ -26777,6 +27085,8 @@ mod tests {
         // out cleanup, so only an archived one can have lost its branch.
         let archived = add_task_with(&repo, "first", "done", |f| {
             f.branch = Some("task/first".into());
+            // A task that never set up a checkout hands its base on instead.
+            f.run = Some("run-first".into());
         });
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
@@ -29199,9 +29509,10 @@ mod tests {
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
 
-        crate::platform::set_test_env("SPOOLWAY_GH", "gh-forge-stub");
-        drive(&repo, &pipelines, &mux, &path, "review");
-        crate::platform::remove_test_env("SPOOLWAY_GH");
+        {
+            let _gh = crate::platform::GhOverride::new("gh-forge-stub");
+            drive(&repo, &pipelines, &mux, &path, "review");
+        }
 
         let env_call = mux
             .did("run_in_pane env")

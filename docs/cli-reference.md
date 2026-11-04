@@ -612,7 +612,7 @@ not. It takes exactly the tasks the board's `unqueue` takes: a task on `queued`,
 `paused`, `blocked` or `hook_failed` with no live agent lane, no unblocker lane at work and no
 worktree cut going. Every task after it in its group goes with it, directly or through another
 task. Each keeps its `group:` and `depends_on:`, with every reserved key, `hook_paused:`,
-`hook_error:` and `missing_start_branch:` stripped. The tasks' running hooks are stopped and their
+`hook_error:`, `missing_start_branch:` and `parent_work_tip:` stripped. The tasks' running hooks are stopped and their
 files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
 
 ```
@@ -2404,7 +2404,9 @@ Deprecated. Commits what is left in the task's worktree, squashes the branch to 
 
 `stack` runs only in the task's own worktree. That is a linked worktree on the task's `branch:`, or on `task/<task>` when the task has no `branch:`. A step's worktree comes from `$SPOOLWAY_WORKTREE`. Run by hand, `stack` uses the current directory.
 
-When the task's first dependency was [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), `stack` opens the pull request against the branch that dependency started from and stacks it on nothing.
+When the task's first dependency was [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), `stack` opens the pull request against the `starts_from` that dependency recorded and stacks it on nothing.
+
+When the first dependency did its work and opened no pull request, because its chain went on past the handover step, `stack` opens the pull request against that dependency's `starts_from`, prints ``none — dependency `<dep>` opened no pull request, so `<task>` stands on `<base>` ``, and stacks it on nothing. It does this only when GitHub reports no pull request for the dependency's branch. If `gh` cannot answer, `stack` exits 1 saying the dependency has no pull request to stack onto.
 
 From any other directory, `stack` exits 1 before it commits, squashes or pushes. The main checkout, your own worktree and another task's worktree are all refused. A worktree on a detached HEAD is refused with a message that says to check out the task's branch.
 

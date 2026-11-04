@@ -1052,16 +1052,34 @@ fn register_stack(
         ));
     }
     let gh = gh_program();
-    let (owner, repo_name) = owner_repo(worktree)?;
 
     // The dependency's real branch, read from its task file rather than
     // rebuilt as `task/<dep_id>` — the name its pull request was opened on,
     // and the one `gh pr view` is asked for below. An unresolvable
     // dependency fails by name here.
     let dep_branch = repo.dependency_branch(dep_id)?;
-    let dep = pr_view(&gh, worktree, &dep_branch)?.ok_or_else(|| {
-        anyhow::anyhow!("dependency `{dep_id}` has no pull request on `{dep_branch}` to stack onto")
-    })?;
+    let Some(dep) = pr_view(&gh, worktree, &dep_branch)? else {
+        // A dependency that did its work and walked past the handover step
+        // opened no pull request: its commits reach the base through this
+        // one, cut from its branch. Only a lookup that says so counts —
+        // `pr_view` reads every `gh` refusal as no pull request, and a
+        // `gh` that could not answer must not pass the handover on a
+        // lookup nobody made. The start is the dependency's own branch unless
+        // it hands something else on, so equal means nothing was found.
+        if repo.has_pull_request(&gh, &dep_branch) == Some(false)
+            && let Ok(start) = repo.dependency_start(dep_id)
+            && start != dep_branch
+        {
+            return Ok(format!(
+                "none — dependency `{dep_id}` opened no pull request, so `{id}` stands on \
+                 `{start}`"
+            ));
+        }
+        bail!("dependency `{dep_id}` has no pull request on `{dep_branch}` to stack onto")
+    };
+    // Asked after the no-pull-request path above, which needs no github.com
+    // remote: it registers nothing.
+    let (owner, repo_name) = owner_repo(worktree)?;
     // A stack joins two pull requests that are both still open. Once the
     // dependency lands, its change is in the base branch and this one stands
     // on its own — asking GitHub to stack onto it is refused, and rightly so.
@@ -1282,6 +1300,95 @@ mod tests {
         assert!(
             said.contains("closed without a pull request") && said.contains("`main`"),
             "{said}"
+        );
+    }
+
+    /// A dependency that did its work and opened no pull request, because its
+    /// chain went on past the handover step, has nothing to stack onto. Its
+    /// dependent's pull request stands alone against the dependency's own
+    /// start, and `register_stack` says so rather than failing the handover
+    /// for want of a pull request on the dependency's branch. It registers no
+    /// stack, so `gh api` is never called.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_of_a_parent_with_commits_and_no_pull_request_stands_on_the_parent_s_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-parent-no-pr");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/project.git",
+            ],
+        )
+        .unwrap();
+        let doc = "---\nid: b\nstage: done\nbranch: task/b\nbase: main\nrun: run-b\n\
+                   starts_from: release/sprint-5\n\
+                   patch:\n  files: 2\n  insertions: 3\n  deletions: 1\n---\n## Goal\nok\n";
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(repo.archive_dir().join("b.md"), doc).unwrap();
+        // GitHub knows no pull request for any branch, and refuses a stack.
+        let gh = repo.root.join("gh-no-pull-requests");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               pr) if [ \"$2\" = list ]; then echo '[]'; exit 0; fi\n\
+                   echo 'no pull requests found for branch' >&2; exit 1;;\n\
+             esac\n\
+             echo \"unexpected gh $*\" >&2; exit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let said = register_stack(&repo, &repo.root, "c", &["b".to_string()], 7).unwrap();
+
+        assert_eq!(
+            said,
+            "none — dependency `b` opened no pull request, so `c` stands on `release/sprint-5`"
+        );
+    }
+
+    /// A `gh` that cannot say whether the dependency has a pull request —
+    /// logged out, offline — is no answer that there is none, so the handover
+    /// keeps its refusal rather than claiming the dependent stands on the
+    /// dependency's start for a branch nobody checked.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_keeps_the_refusal_when_gh_cannot_say_whether_its_parent_opened_a_pull_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-parent-gh-silent");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/project.git",
+            ],
+        )
+        .unwrap();
+        let doc = "---\nid: b\nstage: done\nbranch: task/b\nbase: main\nrun: run-b\n\
+                   starts_from: release/sprint-5\n\
+                   patch:\n  files: 2\n  insertions: 3\n  deletions: 1\n---\n## Goal\nok\n";
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(repo.archive_dir().join("b.md"), doc).unwrap();
+        let gh = repo.root.join("gh-logged-out");
+        std::fs::write(&gh, "#!/bin/sh\necho 'gh: not logged in' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let err = register_stack(&repo, &repo.root, "c", &["b".to_string()], 7).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("dependency `b` has no pull request on `task/b` to stack onto"),
+            "{err}"
         );
     }
 

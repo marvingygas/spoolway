@@ -68,6 +68,25 @@ configure_project plan/live
 # This suite is about what `spoolway stack` does, so its pipelines end the way a
 # project's that kept the old `handover` step do.
 stack_handover
+# A pipeline whose `handover` carries `last:`, copied before the steps below
+# are appended to `default`: a chain on it hands over once, from its tip, and
+# the tasks beneath walk past `handover` to `done` with commits and no pull
+# request. See "a chain that walks past" at the end of the chain sections.
+cp .spoolway/pipelines/default.yml .spoolway/pipelines/walk.yml
+sed -i '/^  - id: handover$/,$s/^    hide: true$/    hide: true\n    last: true/' .spoolway/pipelines/walk.yml
+# One step after `handover` that waits for a file, so the tip can be held
+# there with `handover`'s own log still on disk: the log is deleted when the
+# task reaches `done`. It carries `last:` too, so the parents walk past it.
+SEAL_GATE="$PWD/.seal-gate"
+sed -i '/^  - id: handover$/,$s/^    on_pass: done$/    on_pass: seal/' .spoolway/pipelines/walk.yml
+cat >> .spoolway/pipelines/walk.yml <<TAIL
+  - id: seal
+    description: Ends the walking chain after its handover.
+    run: while [ ! -e $SEAL_GATE ]; do sleep 0.2; done
+    hide: true
+    last: true
+    on_pass: done
+TAIL
 publish plan/live
 
 # ------------------------------------------------------- a step the stack runs once
@@ -459,6 +478,88 @@ if grep -lx "head=plan/live" "$FORGE"/prs/[0-9]* >/dev/null 2>&1; then
 else
   ok "and no plan pull request was ever opened"
 fi
+
+# ----------------------------------------------------- a chain that walks past
+# a -> b -> c in one group, on a pipeline whose `handover` carries `last:`. Only
+# c runs it, so a and b end at `done` with commits and no pull request, and c's
+# one pull request has to carry all three tasks' work. Each task is cut from
+# its parent's branch (so the work is in c's worktree), while c records the
+# chain's base as its `starts_from`, so the pull request opens against `main`
+# and not against `task/b`, a branch that is never pushed.
+for id in wa wb wc; do
+  case $id in
+    wa) deps=() ;;
+    wb) deps=("depends_on: [wa]") ;;
+    wc) deps=("depends_on: [wb]") ;;
+  esac
+  task_doc "$LIVE/$id.md" "$id" "$BODY" "group: walk" "base: main" \
+    "pipeline: walk" "${deps[@]}"
+  must "the walking chain's $id" "$SPOOLWAY" queue add --from "$LIVE/$id.md"
+done
+
+# The tip's parent walked past `handover` and opened no pull request, so
+# `spoolway stack` opens the tip's own against the chain's base and registers
+# no stack: the handover passes and the task reaches `done`.
+if drive wc seal 400; then
+  ok "the tip of a chain whose parents walked past hands over"
+else
+  bad "the tip of a chain whose parents walked past hands over (at \`$(stage_of wc)\`)"
+fi
+has "and its stack line says the parent opened no pull request" \
+  "none — dependency \`wb\` opened no pull request, so \`wc\` stands on \`main\`" \
+  "$SPOOLWAY_PROJECT_HOME/commands/wc · handover.log"
+touch "$SEAL_GATE"
+if drive wc gone 150 && grep -q '^stage: done' "$SPOOLWAY_PROJECT_HOME/archive/wc.md"; then
+  ok "and the tip then finishes"
+else
+  bad "and the tip then finishes"
+fi
+
+has "the root walked past the handover" \
+  "walked past \`handover\` (not last in its chain)" \
+  "$SPOOLWAY_PROJECT_HOME/archive/wa.md"
+if ! handed_over wa && ! handed_over wb; then
+  ok "so neither parent opened a pull request"
+else
+  bad "so neither parent opened a pull request"
+  ls "$FORGE/prs" | sed 's/^/        /'
+fi
+says "and it records the chain's base as its \`starts_from\`, not \`task/wb\`" \
+  "starts_from: main" "$SPOOLWAY" queue show wc
+if git -C "$ORIGIN" show "task/wc:work-wa.txt" >/dev/null 2>&1 \
+   && git -C "$ORIGIN" show "task/wc:work-wb.txt" >/dev/null 2>&1 \
+   && git -C "$ORIGIN" show "task/wc:work-wc.txt" >/dev/null 2>&1; then
+  ok "and the tip's pushed branch holds all three tasks' work"
+else
+  bad "and the tip's pushed branch holds all three tasks' work"
+  git -C "$ORIGIN" ls-tree --name-only task/wc 2>/dev/null | sed 's/^/        /'
+fi
+if stacked_on wc main; then ok "and its pull request targets the chain's base"
+else
+  bad "and its pull request targets the chain's base"
+  cat "$FORGE"/prs/[0-9]* | sed 's/^/        /'
+fi
+
+# ------------------------------------------- a dependent cut without its parent
+# `wq` names `wp` in `depends_on` but pins `starts_from: main`, so it is cut
+# from the base while `wp`, a task that walked past `handover`, ends at `done`
+# with commits and no pull request. That is the shape of a task queued before
+# a parent's branch was handed on: the commits reach `main` only through `wq`,
+# so it stops at `blocked` before its next step rather than run on and drop
+# them, and the reason names the branch to merge.
+task_doc "$LIVE/wp.md" wp "$BODY" "group: lost" "base: main" "pipeline: walk"
+task_doc "$LIVE/wq.md" wq "$BODY" "group: lost" "base: main" \
+  "pipeline: walk" "depends_on: [wp]" "starts_from: main"
+must "the parent that will walk past handover" "$SPOOLWAY" queue add --from "$LIVE/wp.md"
+must "and its dependent, pinned to the base" "$SPOOLWAY" queue add --from "$LIVE/wq.md"
+if drive_and_hold wq blocked 400; then
+  ok "a dependent cut from the base without its parent's commits stops at blocked"
+else
+  bad "a dependent cut from the base without its parent's commits stops at blocked (at \`$(stage_of wq)\`)"
+fi
+has "and the Status Log says which branch to merge" \
+  "→ \`blocked\`: \`wq\` was cut without the work of its dependency \`wp\`: \`task/wp\` has commits that \`task/wq\` does not, and \`wp\` opened no pull request, so they reach \`main\` only through \`wq\`. merge \`task/wp\` into \`task/wq\`, then resume \`wq\` on the board" \
+  "$SPOOLWAY_PROJECT_HOME/queue/wq.md"
 
 # --------------------------------------------------------- two siblings, one slot
 # `base` and `top` are a chain — every earlier assertion in this suite is

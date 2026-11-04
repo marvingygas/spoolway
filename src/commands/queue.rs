@@ -1424,6 +1424,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // would word the first start in RECENT as a skip.
     front.hook_skipped = None;
     front.missing_start_branch = None;
+    front.parent_work_tip = None;
     front.resume = None;
     front.restart = None;
     front.branch = Some(format!("task/{}", front.id));
@@ -14354,13 +14355,13 @@ mod tests {
         std::fs::create_dir_all(repo.archive_dir()).unwrap();
         std::fs::write(
             repo.archive_dir().join("auth-login.md"),
-            "---\nid: auth-login\ntitle: auth-login\ngroup: auth-api\nstage: done\n---\nbody\n",
+            "---\nid: auth-login\ntitle: auth-login\ngroup: auth-api\nrun: r-login\nstage: done\n---\nbody\n",
         )
         .unwrap();
         std::fs::write(
             repo.archive_dir().join("auth-sessions.md"),
             "---\nid: auth-sessions\ntitle: auth-sessions\ngroup: auth-api\n\
-             depends_on: [auth-login]\nstage: done\n---\nbody\n",
+             depends_on: [auth-login]\nrun: r-sessions\nstage: done\n---\nbody\n",
         )
         .unwrap();
         // Its branch is still there, so `auth-form` has somewhere to start.
@@ -30755,12 +30756,13 @@ body\n";
     fn parse_submission_drops_the_pause_records() {
         let doc = task_text(
             "solo",
-            "group: g\nhook_paused: done\nmissing_start_branch: gone\n",
+            "group: g\nhook_paused: done\nmissing_start_branch: gone\nparent_work_tip: abc123\n",
             BODY,
         );
         let task = parse_submission("solo.md", &doc, Some("master")).unwrap();
         assert_eq!(task.front.hook_paused, None);
         assert_eq!(task.front.missing_start_branch, None);
+        assert_eq!(task.front.parent_work_tip, None);
     }
 
     /// A task on `queued` carries every task after it in its group to pending

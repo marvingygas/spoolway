@@ -161,8 +161,10 @@ same as a session you started by hand. Typing into one on a local model may make
 weights. The footer counts lanes by the same rule.
 
 A task with a `depends_on` is cut from its first dependency's branch. When that dependency was
-[closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), the task is
-cut from the branch that dependency started from. A task without a `depends_on` is cut from
+[closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), meaning it
+changed nothing, the task is cut from the branch that dependency stood on. A task is always cut
+from the branch of a dependency with commits, even when that dependency opened no pull request,
+so a group's one pull request carries every task's commits. A task without a `depends_on` is cut from
 `origin/<base>` when `origin` has the base, and from the local `<base>` branch when it does
 not. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
@@ -451,7 +453,7 @@ stateDiagram-v2
 | `paused` | The task's own stage is `paused`: a gate, or a `pause` from the options menu or the dispatch tab's stop. |
 | `hook_failed` | The task's own stage is `hook_failed`: an issue-tracking hook failed on `queued`, `started` or `done`. Drawn `● hook failed`. NEXT reads `[r] rerun hook  [k] skip hook`. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
-| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. Cleanup also parks a task here when its worktree is off its branch. See [A worktree that is off its branch](#a-worktree-that-is-off-its-branch). |
+| `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. Cleanup also parks a task here when its worktree is off its branch. See [A worktree that is off its branch](#a-worktree-that-is-off-its-branch). A task cut without the commits of a dependency that opened no pull request stops here before its next step. See [A task cut without its parent's commits](#a-task-cut-without-its-parents-commits). |
 | `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
 | `held` | The task's pipeline name belongs to both a tracked and a private pipeline. The dispatcher starts nothing for the task. Drawn `○ held`. NEXT reads ``private `<name>` clashes with the tracked one: spoolway pipeline rename <name> <new-name>``. Other tasks run as usual. See [`pipeline rename`](cli-reference.md#spoolway-pipeline-rename-old-new). |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
@@ -2190,6 +2192,38 @@ the command that resumes the task:
 
 Put the work on `task/<id>`, or finish or abort the operation, then resume the task. Cleanup
 runs again when the task reaches `done`. A borrowed checkout is not checked, because it is yours.
+
+### A task cut without its parent's commits
+
+A task queued before a parent's branch was handed on may already be cut from the base while its
+first dependency ended at `done` with commits and no pull request. Those commits reach the base
+only through this task, so running on would drop them. Before each step, the dispatcher holds
+the task on `blocked` when all of these hold:
+
+- the first dependency is archived at `done` and its patch has files
+- GitHub knows no pull request for the dependency's branch, in any state
+- the dependency's branch exists, its tip is in neither the task's branch nor the commit the
+  task was cut from, and no earlier pass recorded the tip as inside
+
+The Status Log and `## Blocker` read:
+
+```
+- 2026-11-04 14:07 → `blocked`: `b` was cut without the work of its dependency `a`: `task/a` has commits that `task/b` does not, and `a` opened no pull request, so they reach `release/sprint-5` only through `b`. merge `task/a` into `task/b`, then resume `b` on the board
+```
+
+The dispatcher never merges the branch itself. Merge the dependency's branch into the task's
+branch in the task's worktree, then resume the task. The first pass that finds the branch inside
+the task records its tip as `parent_work_tip:` in the task file. The record is what keeps the
+check quiet once handover squashes the task's branch, which takes the tip out of its history.
+The check does not run while a lane or a foreground command is working the step, or on
+`blocked` itself, so an unblocker is never stopped by the fault it was sent to clear. When an
+unattended run's unblocker passes without merging the branch and the same reason comes up
+again, the task parks on `paused` for a person instead.
+
+A dependency whose pull request is open is stacked and may lag behind it, and a dependency with
+an empty patch has nothing to hand over, so neither is checked. When `gh` cannot say whether the
+dependency has a pull request, the task waits for the next pass and neither runs nor blocks. A
+project with no `origin` is not checked.
 
 ### Tearing down a stopped task
 

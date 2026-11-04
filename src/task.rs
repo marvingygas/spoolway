@@ -439,8 +439,12 @@ pub struct Frontmatter {
     /// The branch this task's worktree starts from: its own value when a
     /// person set one before the cut, else the first dependency's own branch
     /// when `depends_on` names one — read from that task's `branch:` field,
-    /// see [`crate::repo::Repo::dependency_branch`], or the branch that task
-    /// started from when it was closed with nothing to hand over — and `base` otherwise.
+    /// see [`crate::repo::Repo::dependency_branch`] — and `base` otherwise.
+    /// A dependent of a dependency closed with nothing to hand over, or of one
+    /// with commits and no pull request, records that dependency's own
+    /// `starts_from` here rather than the branch it was cut from, so the
+    /// chain's one pull request opens against the chain's base — see
+    /// [`crate::repo::Repo::dependency_start`].
     /// Recorded separately from `base`, which keeps its own meaning — the
     /// branch the plan lands in — whether or not the two agree.
     ///
@@ -659,6 +663,18 @@ pub struct Frontmatter {
     /// pass to look again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_start_branch: Option<String>,
+
+    /// The tip of the first dependency's branch that the dispatcher found
+    /// inside this task's work, so the check in `Repo::parent_work` is
+    /// settled for that tip for good.
+    ///
+    /// Ancestry cannot be asked again later: `spoolway stack` squashes the
+    /// branch onto its base at handover, which leaves the dependency's tip
+    /// out of the branch's history while its work stays in the tree. A
+    /// dependency's tip does not move once it is archived at `done`, so a
+    /// matching record means nothing is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_work_tip: Option<String>,
 
     /// When the last of those lanes was launched, in epoch seconds.
     ///
