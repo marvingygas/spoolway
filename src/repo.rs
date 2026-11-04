@@ -1403,10 +1403,16 @@ impl Repo {
             return ParentWork::Fine;
         }
         // Both refs exist, so a failure here is the answer "not an ancestor".
-        if self
-            .git(&["merge-base", "--is-ancestor", &own, &task_branch])
-            .is_ok()
-        {
+        // The commit the task was cut from counts as well as its branch:
+        // `spoolway stack` squashes the branch onto its base at handover,
+        // which carries the parent's work in the tree but leaves the
+        // parent's tip out of the branch's history, and the steps after
+        // handover must not read that as work gone missing.
+        let inside = |tip: &str| {
+            self.git(&["merge-base", "--is-ancestor", &own, tip])
+                .is_ok()
+        };
+        if inside(&task_branch) || task.front.base_commit.as_deref().is_some_and(inside) {
             return ParentWork::Fine;
         }
         if self.git(&["remote", "get-url", "origin"]).is_err() {
@@ -6144,6 +6150,27 @@ mod tests {
                 branch: "task/a".into(),
                 task_branch: "task/b".into(),
             }
+        );
+
+        // The branch squashed onto the base at handover no longer holds the
+        // parent's tip, but the commit the task was cut from does.
+        let cut_from = git(&work, &["rev-parse", "task/a"]).trim().to_string();
+        let mut squashed = child("squashed", "a");
+        git(&work, &["branch", "task/squashed", "plan/x"]);
+        assert_eq!(
+            repo.parent_work_asking(&squashed, &none),
+            ParentWork::Missing {
+                dependency: "a".into(),
+                branch: "task/a".into(),
+                task_branch: "task/squashed".into(),
+            },
+            "cut from the base, it has no record of the parent's tip"
+        );
+        squashed.front.base_commit = Some(cut_from);
+        assert_eq!(
+            repo.parent_work_asking(&squashed, &none),
+            ParentWork::Fine,
+            "cut from the parent, whatever handover did to the branch"
         );
 
         // A person merges the branch and resumes: nothing is missing, and

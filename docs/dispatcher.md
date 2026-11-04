@@ -2202,7 +2202,8 @@ the task on `blocked` when all of these hold:
 
 - the first dependency is archived at `done` and its patch has files
 - GitHub knows no pull request for the dependency's branch, in any state
-- the dependency's branch exists, and its tip is not in the task's branch
+- the dependency's branch exists, and its tip is in neither the task's branch nor the commit the
+  task was cut from. The second keeps the check quiet after handover squashes the task's branch
 
 The Status Log and `## Blocker` read:
 
