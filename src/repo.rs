@@ -5919,6 +5919,41 @@ mod tests {
         assert_eq!(repo.retarget_cut_start(&c, "task/b"), None);
     }
 
+    /// In a chain `a -> b -> c` where `a` and `b` walked past the `last:` step,
+    /// each with commits and no pull request, a dependent is cut from its
+    /// parent's own branch, so the chain's one pull request carries every
+    /// task's commits. A parent that has commits is never handed on as its own
+    /// base, whatever GitHub knows about its branch.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_is_cut_from_its_parents_branch_when_the_parent_opened_no_pull_request() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_origin, work, _base_guard) = fixture("dependent-cut-from-parent");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        let archive = |id: &str, extra: &str| {
+            let doc = format!(
+                "---\nid: {id}\nstage: done\nbranch: task/{id}\nbase: main\n\
+                 starts_from: main\n{extra}\
+                 patch:\n  files: 2\n  insertions: 9\n  deletions: 1\n---\n## Goal\nok\n"
+            );
+            std::fs::create_dir_all(repo.archive_dir()).unwrap();
+            std::fs::write(repo.archive_dir().join(format!("{id}.md")), doc).unwrap();
+        };
+        archive("a", "");
+        archive("b", "depends_on: [a]\n");
+        let gh = work.join("gh-no-pull-requests");
+        std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        crate::platform::set_test_env("SPOOLWAY_GH", &gh);
+        let from_a = repo.dependency_branch("a");
+        let from_b = repo.dependency_branch("b");
+        crate::platform::remove_test_env("SPOOLWAY_GH");
+
+        assert_eq!(from_a.unwrap(), "task/a", "b is cut from a's branch");
+        assert_eq!(from_b.unwrap(), "task/b", "c is cut from b's branch");
+    }
+
     /// A project with no `origin` has no forge to ask, so a dependency with
     /// commits is not taken for closed without a pull request, whatever a
     /// `gh` that prints an empty list says.
