@@ -3196,7 +3196,11 @@ fn process_cwd_under(dir: &Path) -> bool {
 fn process_cwd_under(dir: &Path) -> bool {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-    let mut system = System::new();
+    // 0.40 made `System::new` fallible. A host where it cannot initialise
+    // answers like one where no process matches, rather than panicking.
+    let Ok(mut system) = System::new() else {
+        return false;
+    };
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
