@@ -904,6 +904,42 @@ pub fn remove_test_env(key: &str) {
     unsafe { std::env::remove_var(key) }
 }
 
+/// Test-only: `SPOOLWAY_GH` pointed at `value` for as long as the guard lives.
+///
+/// Every test that writes `SPOOLWAY_GH` holds one, so two of them never see
+/// each other's value, and the previous value (or its absence) comes back on
+/// drop, a failing assertion included, rather than leaking a stub into the
+/// rest of the run.
+#[cfg(test)]
+pub struct GhOverride {
+    previous: Option<std::ffi::OsString>,
+    _serialised: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl GhOverride {
+    pub fn new(value: impl AsRef<std::ffi::OsStr>) -> Self {
+        static GH_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let serialised = GH_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("SPOOLWAY_GH");
+        set_test_env("SPOOLWAY_GH", value);
+        GhOverride {
+            previous,
+            _serialised: serialised,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GhOverride {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(previous) => set_test_env("SPOOLWAY_GH", previous),
+            None => remove_test_env("SPOOLWAY_GH"),
+        }
+    }
+}
+
 /// `std::env::var`, unless a test has overridden `key` on this thread — see
 /// [`test_env`]. A non-test build is exactly `std::env::var`.
 ///

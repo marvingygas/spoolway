@@ -7435,8 +7435,8 @@ fn ensure_checkout(
     // dependency then closes with nothing to hand over, or ends with commits
     // and no pull request, that branch is never pushed, and the pull request
     // opens against `starts_from` (the shipped `create-pr` prompt says so), so
-    // it is pointed at the dependency's own `starts_from` (else its own start,
-    // else its base) instead. Only the recorded
+    // it is pointed at the dependency's own `starts_from` (else its first
+    // dependency's start, else its base) instead. Only the recorded
     // name moves: the worktree, its branch and `base_commit` are left alone.
     // A `starts_from` a person pointed elsewhere is not the dependency's
     // branch and is kept.
@@ -29227,9 +29227,10 @@ mod tests {
         let mux = FakeMux::new(vec![]).offering_panes();
         let pipelines = pipelines_running("echo paned", false);
 
-        crate::platform::set_test_env("SPOOLWAY_GH", "gh-forge-stub");
-        drive(&repo, &pipelines, &mux, &path, "review");
-        crate::platform::remove_test_env("SPOOLWAY_GH");
+        {
+            let _gh = crate::platform::GhOverride::new("gh-forge-stub");
+            drive(&repo, &pipelines, &mux, &path, "review");
+        }
 
         let env_call = mux
             .did("run_in_pane env")

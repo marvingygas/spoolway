@@ -5824,12 +5824,12 @@ mod tests {
         );
     }
 
-    /// A task closed with an empty patch has nothing to open a pull request
-    /// with, so a dependent is given the base that task was queued against
-    /// without asking GitHub. A task still queued is not handed over yet, and
-    /// a missing one has no base to hand on.
+    /// A task closed with an empty patch, or one never cut, has nothing to
+    /// open a pull request with, so a dependent is given the base that task
+    /// was queued against without asking GitHub. A task still queued is not
+    /// handed over yet, and a missing one has no base to hand on.
     #[test]
-    fn only_a_dependency_closed_with_an_empty_patch_hands_its_base_on() {
+    fn only_a_dependency_that_left_nothing_to_hand_over_hands_its_base_on() {
         let (_origin, work, _base_guard) = fixture("closed-dependency-base");
         let (repo, _home) = discover_registered(&work).unwrap();
         let write = |dir: &Path, id: &str, stage: &str, patch: &str| {
@@ -5897,12 +5897,13 @@ mod tests {
         let broken = stub_gh(&work, "broken", "exit 1");
 
         // Whatever `gh` says, as the old rule asked it for these.
-        crate::platform::set_test_env("SPOOLWAY_GH", &none);
-        for id in ["unfiled", "filed", "unsure"] {
-            assert_eq!(repo.closed_dependency_base(id), None, "{id} has commits");
-            assert_eq!(repo.dependency_branch(id).unwrap(), format!("task/{id}"));
+        {
+            let _gh = crate::platform::GhOverride::new(&none);
+            for id in ["unfiled", "filed", "unsure"] {
+                assert_eq!(repo.closed_dependency_base(id), None, "{id} has commits");
+                assert_eq!(repo.dependency_branch(id).unwrap(), format!("task/{id}"));
+            }
         }
-        crate::platform::remove_test_env("SPOOLWAY_GH");
         let start = |id: &str, gh: &str| repo.dependency_start_asking(id, gh, 0).unwrap();
         assert_eq!(start("unfiled", &none), "release");
         assert_eq!(start("filed", &some), "task/filed", "a pull request");
@@ -5968,10 +5969,10 @@ mod tests {
 
         // The stub is what makes this fail on the old rule, which asked `gh`
         // and, hearing of no pull request, handed the base on instead.
-        crate::platform::set_test_env("SPOOLWAY_GH", &none);
-        let from_a = repo.dependency_branch("a");
-        let from_b = repo.dependency_branch("b");
-        crate::platform::remove_test_env("SPOOLWAY_GH");
+        let (from_a, from_b) = {
+            let _gh = crate::platform::GhOverride::new(&none);
+            (repo.dependency_branch("a"), repo.dependency_branch("b"))
+        };
 
         assert_eq!(from_a.unwrap(), "task/a", "b is cut from a's branch");
         assert_eq!(from_b.unwrap(), "task/b", "c is cut from b's branch");

@@ -440,10 +440,10 @@ pub struct Frontmatter {
     /// person set one before the cut, else the first dependency's own branch
     /// when `depends_on` names one — read from that task's `branch:` field,
     /// see [`crate::repo::Repo::dependency_branch`] — and `base` otherwise.
-    /// A dependency closed with nothing to hand over, and one with commits and
-    /// no pull request, are cut from but not recorded: the dependent records
-    /// that dependency's own `starts_from` here, so the chain's one pull
-    /// request opens against the chain's base — see
+    /// A dependent of a dependency closed with nothing to hand over, or of one
+    /// with commits and no pull request, records that dependency's own
+    /// `starts_from` here rather than the branch it was cut from, so the
+    /// chain's one pull request opens against the chain's base — see
     /// [`crate::repo::Repo::dependency_start`].
     /// Recorded separately from `base`, which keeps its own meaning — the
     /// branch the plan lands in — whether or not the two agree.
