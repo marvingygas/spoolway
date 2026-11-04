@@ -2014,7 +2014,11 @@ impl<'a> Dispatcher<'a> {
             // A task cut without the commits of a parent that opened no pull
             // request is stopped before this step starts. Not for a step
             // already working: the check ran when it began.
-            if lane.is_none() {
+            //
+            // Not on `blocked` itself: a staffed `blocked` step is the
+            // unblocker, whose job is to merge that branch, and it must not
+            // be stopped for the very fault it was called to clear.
+            if lane.is_none() && step.id != crate::pipeline::BLOCKED {
                 match self.repo.parent_work(&tasks[index]) {
                     ParentWork::Fine => {}
                     // `gh` could not say, so running on could drop the work
@@ -2041,7 +2045,16 @@ impl<'a> Dispatcher<'a> {
                             &task_branch,
                             &lands_on,
                         );
-                        self.escalate(task, &pipeline, &step, &reason, false)?;
+                        // Straight to `blocked` in every mode, not through
+                        // `escalate`: an unattended run whose pipeline staffs
+                        // no `blocked` step would resume the task onto this
+                        // same step, and the next pass would block it again,
+                        // for ever. The task rests on `blocked` until a
+                        // person, or a staffed unblocker, merges the branch.
+                        task.append_to_section("## Blocker", &format!("- {reason}\n"));
+                        crate::commands::set_blocked_from(task, &step.id);
+                        task.set_stage(crate::pipeline::BLOCKED, Some(&reason));
+                        self.persist(task)?;
                         report.actions.push(format!(
                             "{}: blocked at `{}` — {reason}",
                             task.id(),
@@ -26855,15 +26868,12 @@ mod tests {
         );
     }
 
-    /// A task cut without the commits of its first dependency, which opened
-    /// no pull request, stops at `blocked` before its step runs, with the
-    /// reason that names the branch to merge. Once the branch is merged in
-    /// and the task resumed, the next pass runs it on.
+    /// Stands the project up so `second` was cut without the commits of its
+    /// archived dependency `first`, which opened no pull request, and returns
+    /// `second`'s file with the `gh` that says so.
     #[cfg(unix)]
-    #[test]
-    fn a_cut_task_missing_a_parents_commits_blocks_until_the_branch_is_merged() {
+    fn second_lacks_firsts_commits(repo: &Repo) -> (PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
-        let (repo, _root_guard) = fixture("block-cut-missing-parent");
         let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         git(&["remote", "add", "origin", "https://example.invalid/x.git"]);
         git(&["branch", "task/second"]);
@@ -26889,7 +26899,20 @@ mod tests {
         let gh = repo.root.join("gh-none");
         std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (path, gh)
+    }
+
+    /// A task cut without the commits of its first dependency, which opened
+    /// no pull request, stops at `blocked` before its step runs, with the
+    /// reason that names the branch to merge. Once the branch is merged in
+    /// and the task resumed, the next pass runs it on.
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_task_missing_a_parents_commits_blocks_until_the_branch_is_merged() {
+        let (repo, _root_guard) = fixture("block-cut-missing-parent");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
         let _gh = crate::platform::GhOverride::new(&gh);
+        let git = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
         let mux = FakeMux::new(vec![]);
 
         run_pass(&repo, &mux);
@@ -26917,6 +26940,33 @@ mod tests {
         resumed.save().unwrap();
         run_pass(&repo, &mux);
         assert_ne!(reload(&path).stage(), crate::pipeline::BLOCKED);
+    }
+
+    /// An unattended run on a pipeline with no `blocked` step lands the same
+    /// task on `blocked` once, and a later pass neither resumes it onto its
+    /// step nor writes the reason again.
+    #[cfg(unix)]
+    #[test]
+    fn an_unattended_run_blocks_a_cut_task_missing_a_parents_commits_once() {
+        let (repo, _root_guard) = unattended_fixture("block-cut-missing-parent-unattended");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let mux = FakeMux::new(vec![]);
+
+        for _ in 0..3 {
+            run_pass_with(&repo, &mux, &unstaffed_builtin());
+        }
+
+        let task = reload(&path);
+        assert_eq!(task.stage(), crate::pipeline::BLOCKED);
+        // Once under `## Blocker` and once in the Status Log, however many
+        // passes ran.
+        assert_eq!(
+            task.body.matches("was cut without the work").count(),
+            2,
+            "{}",
+            task.body
+        );
     }
 
     /// The late merge itself: the dependency is `done`, but its branch is gone.
