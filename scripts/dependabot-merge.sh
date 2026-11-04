@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Carry out the `review` step's verdicts on open Dependabot pull requests:
-# post each verdict as a comment, and turn on auto-merge for the approved
-# ones. Run by the `merge` step of the dependabot pipeline, from the review
-# worktree. A person can run it by hand from any checkout holding a verdicts
-# file.
+# post each verdict as a comment, turn on auto-merge for the approved ones,
+# and hand each `fix` verdict's bugfix task to the queue screen. Run by the
+# `merge` step of the dependabot pipeline, from the review worktree. A person
+# can run it by hand from any checkout holding a verdicts file.
 #
 # A command step, not an agent, for the same reason as release-ship.sh:
 # Claude Code's auto mode refuses a merge a lane makes.
@@ -18,6 +18,14 @@
 #   - every action it pins to a SHA is the commit its `# <ref>` comment names
 #   - no check on it has failed
 #
+# Nothing here queues either. spoolway refuses `queue add` in every lane,
+# this step included, so a `fix` verdict's task is copied into the pending
+# directory instead. The queue screen lists it there, and a person sends it.
+# A task is only handed over when it is a `bugfix` task on `main` for that
+# pull request's own `dependabot-<pr>` group, and `spoolway task contract`
+# finds no problem with it. None is handed over for a group already pending
+# or queued.
+#
 # Every verdict carried out, and every approval refused, leaves a comment
 # carrying `<!-- dependency-reviewer <head-sha> <verdict> -->`.
 # scripts/dependabot-pending.sh reads that marker, so the pull request is not
@@ -28,6 +36,8 @@
 # Input, relative to the current directory:
 #   tmp/dependabot/verdicts.tsv   `<pr>\t<head-sha>\t<merge|hold|fix>` per line
 #   tmp/dependabot/<pr>.md        the comment posted on that pull request
+#   tmp/dependabot/<pr>-task.md   a `fix` verdict's bugfix task, unless one
+#                                 was already handed over for that group
 #
 # Exit 0: every verdict was carried out, refused with a comment, or deferred
 # by the cap. Exit 1: main's ci is red, or something could not be carried
@@ -118,6 +128,60 @@ comment() { # <pr> <head-sha> <verdict> [extra paragraph]
     | gh pr comment "$1" --body-file - >/dev/null
 }
 
+front() { # <key> <task file> — that key's value in the frontmatter, unquoted
+  awk -v key="$1" '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    index($0, key ":") == 1 {
+      v = substr($0, length(key) + 2)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      gsub(/^["\047]|["\047]$/, "", v)
+      print v
+      exit
+    }' "$2"
+}
+
+# Copy a `fix` verdict's bugfix task into the pending directory, for a person
+# to send from the queue screen. Says why on stderr and returns 1 when it
+# cannot be handed over.
+hand_off() { # <pr>
+  local pr="$1" task="$dir/$1-task.md" group="dependabot-$1" pending id out
+  pending="$(spoolway task contract --json | jq -r '.output.dir // empty')" || true
+  [ -n "$pending" ] && [ -d "$pending" ] || { say "#$pr: spoolway names no pending directory"; return 1; }
+
+  # Queueing may prefix the group with a tracker's ticket: `gh-1469-dependabot-1468`.
+  if grep -qsxE "group:[[:space:]]*[\"']?$group[\"']?[[:space:]]*" "$pending"/*.md \
+    || spoolway queue list --json \
+      | jq -e --arg g "$group" 'any(.tasks[].group; . == $g or endswith("-" + $g))' >/dev/null; then
+    say "#$pr: a bugfix task for $group is already pending or queued"
+    return 0
+  fi
+  if [ ! -f "$task" ]; then
+    # The review writes none when an earlier head already got a `fix` verdict.
+    if gh pr view "$pr" --json comments --jq '.comments[].body' \
+      | grep -qE '<!-- dependency-reviewer [0-9a-f]{40} fix -->'; then
+      say "#$pr: a bugfix task was handed over for an earlier head"
+      return 0
+    fi
+    say "#$pr: fix verdict with no $task"
+    return 1
+  fi
+
+  [ "$(front pipeline "$task")" = bugfix ] || { say "#$pr: $task is not a bugfix task"; return 1; }
+  [ "$(front base "$task")" = main ] || { say "#$pr: $task is not based on main"; return 1; }
+  [ "$(front group "$task")" = "$group" ] || { say "#$pr: $task is not in group $group"; return 1; }
+  id="$(front id "$task")"
+  [[ "$id" =~ ^[a-z][a-z0-9-]{0,99}$ ]] || { say "#$pr: $task has no usable id"; return 1; }
+  if ! out="$(spoolway task contract --from "$task" 2>&1)"; then
+    say "#$pr: $task breaks the task contract:"
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  [ ! -e "$pending/$id.md" ] || { say "#$pr: $pending/$id.md already exists"; return 1; }
+  cp "$task" "$pending/$id.md"
+  say "#$pr: bugfix task $id is waiting on the queue screen"
+}
+
 # Read on fd 3, so no `gh` call inside the loop can swallow the verdicts.
 while IFS=$'\t' read -r pr head verdict <&3; do
   [ -n "$pr" ] || continue
@@ -146,9 +210,19 @@ while IFS=$'\t' read -r pr head verdict <&3; do
           || status=1
       fi
       ;;
-    hold | fix)
-      comment "$pr" "$head" "$verdict" || status=1
-      say "#$pr: $verdict"
+    fix)
+      # Hand over first: a comment left by a failed hand-over would stop the
+      # next run from reviewing it again.
+      if hand_off "$pr"; then
+        comment "$pr" "$head" fix || status=1
+        say "#$pr: fix"
+      else
+        status=1
+      fi
+      ;;
+    hold)
+      comment "$pr" "$head" hold || status=1
+      say "#$pr: hold"
       ;;
     *)
       say "#$pr: unknown verdict '$verdict'"

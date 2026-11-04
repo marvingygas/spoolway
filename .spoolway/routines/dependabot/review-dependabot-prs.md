@@ -4,7 +4,7 @@ title: "chore(deps): review and merge open Dependabot pull requests"
 group: dependabot
 group_description: |
   Review every open Dependabot pull request, merge the safe ones behind the required checks, and
-  queue a bugfix task for each one that needs code changes.
+  put a bugfix task on the queue screen for each one that needs code changes.
 pipeline: dependabot
 base: main
 tracking: off
@@ -24,7 +24,7 @@ tracking: off
 ## Goal
 
 Every open Dependabot pull request is either on its way to merging, held with a reason a person can
-read on the pull request, or has a bugfix task queued that makes it pass.
+read on the pull request, or has a bugfix task pending or queued that makes it pass.
 
 ## Non-goals
 
@@ -37,7 +37,8 @@ read on the pull request, or has a bugfix task queued that makes it pass.
 - every open Dependabot pull request with no `dependency-reviewer` comment for its current head
   has exactly one verdict in `tmp/dependabot/verdicts.tsv`, except approvals past the fifth
 - every `merge` verdict names the head SHA that was reviewed
-- every `fix` verdict has exactly one bugfix task queued or already queued for it
+- every `fix` verdict has exactly one bugfix task in `tmp/dependabot/<number>-task.md`, or one
+  already pending or queued for its group
 - no more than five `merge` verdicts
 
 ## References
