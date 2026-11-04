@@ -77,6 +77,7 @@ as JSON.
 | `unblocked_from` | the dispatcher | The step an unblocker's pass stood in for, kept when that pass sent the task to `done`. If the task is then held on `blocked` for work spoolway could not commit, the key becomes `blocked_from`, so the next unblocker is told the step the task stopped at. `spoolway queue add` clears it. |
 | `restart` | `spoolway restart` | The step to start over on, for one launch. The lane opens a new conversation even where the step has `session: true`, and its briefing says an earlier attempt's changes are still in the worktree. The launch clears the key. |
 | `missing_start_branch` | the dispatcher | The start branch that did not exist when the dispatcher paused the task. `spoolway resume` clears it. |
+| `parent_work_tip` | the dispatcher | The tip of the first dependency's branch, recorded the first time the dispatcher finds it inside the task's work. A matching record ends the check in [A task cut without its parent's commits](dispatcher.md#a-task-cut-without-its-parents-commits). Never set it by hand. `spoolway queue add` clears it. |
 | `hook_paused` | the dispatcher | `queued`, `started` or `done`: which one's issue-tracking hook failed and stopped the task on `hook_failed`. `spoolway resume` reads and clears it, forgetting that hook run so it fires again. `spoolway resume --skip-hook` clears it and records the event as passed. A task file on `paused` with this key set is read as `hook_failed`. |
 | `hook_error` | the dispatcher | The reason the hook failed, such as `issue_tracking hook exited 1`. The board's RECENT line and `spoolway queue route` print it. `spoolway resume`, with or without `--skip-hook`, clears it. |
 | `hook_skipped` | the dispatcher | `queued`, `started` or `done`: the hook event `spoolway resume --skip-hook` or the board's `k` last carried the task past. The board reads it to word RECENT as `skipped <event> hook`. The task's first stage move after it starts on a step clears it. Nothing routes on it. |
@@ -100,8 +101,8 @@ $ spoolway queue add --from mine.md
 mine.md sets `run:`, which spoolway sets on every task itself — remove it from the task
 ```
 
-Every other dispatcher field in a task is dropped, including `hook_paused`, `hook_error` and
-`missing_start_branch`.
+Every other dispatcher field in a task is dropped, including `hook_paused`, `hook_error`,
+`missing_start_branch` and `parent_work_tip`.
 
 A label in `labels:` holding whitespace or a comma is refused, naming the task and the label,
 since a hook reads the whole list comma-joined.

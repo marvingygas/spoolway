@@ -612,7 +612,7 @@ not. It takes exactly the tasks the board's `unqueue` takes: a task on `queued`,
 `paused`, `blocked` or `hook_failed` with no live agent lane, no unblocker lane at work and no
 worktree cut going. Every task after it in its group goes with it, directly or through another
 task. Each keeps its `group:` and `depends_on:`, with every reserved key, `hook_paused:`,
-`hook_error:` and `missing_start_branch:` stripped. The tasks' running hooks are stopped and their
+`hook_error:`, `missing_start_branch:` and `parent_work_tip:` stripped. The tasks' running hooks are stopped and their
 files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
 
 ```
