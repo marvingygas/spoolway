@@ -2202,8 +2202,8 @@ the task on `blocked` when all of these hold:
 
 - the first dependency is archived at `done` and its patch has files
 - GitHub knows no pull request for the dependency's branch, in any state
-- the dependency's branch exists, and its tip is in neither the task's branch nor the commit the
-  task was cut from. The second keeps the check quiet after handover squashes the task's branch
+- the dependency's branch exists, its tip is in neither the task's branch nor the commit the
+  task was cut from, and no earlier pass recorded the tip as inside
 
 The Status Log and `## Blocker` read:
 
@@ -2212,11 +2212,18 @@ The Status Log and `## Blocker` read:
 ```
 
 The dispatcher never merges the branch itself. Merge the dependency's branch into the task's
-branch in the task's worktree, then resume the task. The check reads the branches as they are on
-every pass, so it passes once the merge is in. A dependency whose pull request is open is stacked
-and may lag behind it, and a dependency with an empty patch has nothing to hand over, so neither
-is checked. When `gh` cannot say whether the dependency has a pull request, the task waits
-for the next pass and neither runs nor blocks. A project with no `origin` is not checked.
+branch in the task's worktree, then resume the task. The first pass that finds the branch inside
+the task records its tip as `parent_work_tip:` in the task file. The record is what keeps the
+check quiet once handover squashes the task's branch, which takes the tip out of its history.
+The check does not run while a lane or a foreground command is working the step, or on
+`blocked` itself, so an unblocker is never stopped by the fault it was sent to clear. When an
+unattended run's unblocker passes without merging the branch and the same reason comes up
+again, the task parks on `paused` for a person instead.
+
+A dependency whose pull request is open is stacked and may lag behind it, and a dependency with
+an empty patch has nothing to hand over, so neither is checked. When `gh` cannot say whether the
+dependency has a pull request, the task waits for the next pass and neither runs nor blocks. A
+project with no `origin` is not checked.
 
 ### Tearing down a stopped task
 

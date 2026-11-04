@@ -1567,6 +1567,7 @@ mod tests {
             hook_error: None,
             hook_skipped: None,
             missing_start_branch: None,
+            parent_work_tip: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),

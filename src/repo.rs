@@ -77,6 +77,10 @@ const REMOTE_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 pub enum ParentWork {
     /// Nothing is missing, or nothing can be: run on.
     Fine,
+    /// The dependency's branch tip `tip` is inside the task, which the caller
+    /// records in [`crate::task::Frontmatter::parent_work_tip`]: handover
+    /// squashes the branch later, and ancestry no longer shows it.
+    Inside { tip: String },
     /// The dependency's commits, on `branch`, are not in `task_branch`, and
     /// the dependency opened no pull request to carry them to the base.
     Missing {
@@ -1357,8 +1361,10 @@ impl Repo {
     /// from the base, and the fix to the cut cannot add them afterwards.
     /// [`ParentWork::Missing`] only when every one of these holds: the
     /// dependency is archived at `done` with commits to hand over, its
-    /// branch exists, that branch's tip is not inside the task's branch, and
-    /// GitHub knows no pull request for it. A parent whose pull request is
+    /// branch exists, that branch's tip is not inside the task's branch or
+    /// the commit it was cut from, no earlier pass recorded that tip as
+    /// inside ([`ParentWork::Inside`]), and GitHub knows no pull request for
+    /// it. A parent whose pull request is
     /// open is stacked, and a stacked dependent legitimately lags behind it.
     ///
     /// The cheap local facts are read first and `gh` last, so a healthy
@@ -1402,18 +1408,22 @@ impl Repo {
         if nothing_to_hand_over(&dep) || !exists(&own) || !exists(&task_branch) {
             return ParentWork::Fine;
         }
+        let Ok(tip) = self.git(&["rev-parse", &format!("refs/heads/{own}")]) else {
+            return ParentWork::Fine;
+        };
+        let tip = tip.trim().to_string();
+        if task.front.parent_work_tip.as_deref() == Some(tip.as_str()) {
+            return ParentWork::Fine;
+        }
         // Both refs exist, so a failure here is the answer "not an ancestor".
-        // The commit the task was cut from counts as well as its branch:
-        // `spoolway stack` squashes the branch onto its base at handover,
-        // which carries the parent's work in the tree but leaves the
-        // parent's tip out of the branch's history, and the steps after
-        // handover must not read that as work gone missing.
+        // The commit the task was cut from counts as well as its branch, for
+        // a task squashed before this ever looked.
         let inside = |tip: &str| {
             self.git(&["merge-base", "--is-ancestor", &own, tip])
                 .is_ok()
         };
         if inside(&task_branch) || task.front.base_commit.as_deref().is_some_and(inside) {
-            return ParentWork::Fine;
+            return ParentWork::Inside { tip };
         }
         if self.git(&["remote", "get-url", "origin"]).is_err() {
             return ParentWork::Fine;
@@ -6118,7 +6128,9 @@ mod tests {
         // Local facts alone settle these, so `broken` is never consulted.
         assert_eq!(
             repo.parent_work_asking(&child("healthy", "a"), &broken),
-            ParentWork::Fine,
+            ParentWork::Inside {
+                tip: git(&work, &["rev-parse", "task/a"]).trim().to_string()
+            },
             "the parent's tip is inside the task's branch"
         );
         let b = child("b", "empty");
@@ -6169,7 +6181,9 @@ mod tests {
         squashed.front.base_commit = Some(cut_from);
         assert_eq!(
             repo.parent_work_asking(&squashed, &none),
-            ParentWork::Fine,
+            ParentWork::Inside {
+                tip: git(&work, &["rev-parse", "task/a"]).trim().to_string()
+            },
             "cut from the parent, whatever handover did to the branch"
         );
 
@@ -6177,10 +6191,37 @@ mod tests {
         // `gh` is not asked again.
         git(&work, &["switch", "-q", "task/b"]);
         git(&work, &["merge", "-q", "--no-edit", "task/a"]);
+        let tip = git(&work, &["rev-parse", "task/a"]).trim().to_string();
         assert_eq!(
             repo.parent_work_asking(&b, &broken),
-            ParentWork::Fine,
+            ParentWork::Inside { tip: tip.clone() },
             "merged in"
+        );
+
+        // Handover squashes the branch onto its base, as `spoolway stack`
+        // does: the work stays in the tree and the tip leaves the history.
+        let tree = git(&work, &["rev-parse", "task/b^{tree}"])
+            .trim()
+            .to_string();
+        let base = git(&work, &["rev-parse", "plan/x"]).trim().to_string();
+        let squashed = git(&work, &["commit-tree", &tree, "-p", &base, "-m", "squash"]);
+        git(&work, &["switch", "-q", "plan/x"]);
+        git(&work, &["branch", "-f", "task/b", squashed.trim()]);
+        let mut b = b;
+        assert_eq!(
+            repo.parent_work_asking(&b, &none),
+            ParentWork::Missing {
+                dependency: "a".into(),
+                branch: "task/a".into(),
+                task_branch: "task/b".into(),
+            },
+            "ancestry alone no longer shows the work"
+        );
+        b.front.parent_work_tip = Some(tip);
+        assert_eq!(
+            repo.parent_work_asking(&b, &none),
+            ParentWork::Fine,
+            "the recorded tip settles it"
         );
     }
 

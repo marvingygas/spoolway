@@ -2013,14 +2013,25 @@ impl<'a> Dispatcher<'a> {
 
             // A task cut without the commits of a parent that opened no pull
             // request is stopped before this step starts. Not for a step
-            // already working: the check ran when it began.
+            // already working, a lane or a foreground command's run: the
+            // check ran when it began, and a branch that changes under it,
+            // as handover's squash does, is not work gone missing.
             //
             // Not on `blocked` itself: a staffed `blocked` step is the
             // unblocker, whose job is to merge that branch, and it must not
             // be stopped for the very fault it was called to clear.
-            if lane.is_none() && step.id != crate::pipeline::BLOCKED {
+            let live_command = !step.background
+                && step.kind() == StepKind::Command
+                && command_keys.get(tasks[index].id()).is_some_and(|keys| {
+                    keys.contains(&crate::command_step::Runs::key(&step.id, tasks[index].id()))
+                });
+            if lane.is_none() && !live_command && step.id != crate::pipeline::BLOCKED {
                 match self.repo.parent_work(&tasks[index]) {
                     ParentWork::Fine => {}
+                    ParentWork::Inside { tip } => {
+                        tasks[index].front.parent_work_tip = Some(tip);
+                        self.persist(&mut tasks[index])?;
+                    }
                     // `gh` could not say, so running on could drop the work
                     // and blocking could stall a healthy task. The task is
                     // held and asked again next pass, as a start branch
@@ -2045,6 +2056,29 @@ impl<'a> Dispatcher<'a> {
                             &task_branch,
                             &lands_on,
                         );
+                        // The same fault found again after an unblocker
+                        // passed without merging the branch. The dispatcher
+                        // would find it on every pass and the unblocker
+                        // would be sent for free each time, so the task
+                        // parks on `paused` for a person, as a spent
+                        // unblocker lap limit does.
+                        let repeated = task.body.contains(&format!("- {reason}\n"));
+                        let unblocker = pipeline
+                            .step(crate::pipeline::BLOCKED)
+                            .filter(|_| pipeline.blocked_is_staffed(self.unattended))
+                            .cloned();
+                        crate::commands::set_blocked_from(task, &step.id);
+                        if let (true, true, Some(unblocker)) =
+                            (repeated, self.unattended, unblocker)
+                        {
+                            self.escalate(task, &pipeline, &unblocker, &reason, false)?;
+                            report.actions.push(format!(
+                                "{}: parked at `{}` — {reason}",
+                                task.id(),
+                                step.id
+                            ));
+                            continue;
+                        }
                         // Straight to `blocked` in every mode, not through
                         // `escalate`: an unattended run whose pipeline staffs
                         // no `blocked` step would resume the task onto this
@@ -2052,7 +2086,6 @@ impl<'a> Dispatcher<'a> {
                         // for ever. The task rests on `blocked` until a
                         // person, or a staffed unblocker, merges the branch.
                         task.append_to_section("## Blocker", &format!("- {reason}\n"));
-                        crate::commands::set_blocked_from(task, &step.id);
                         task.set_stage(crate::pipeline::BLOCKED, Some(&reason));
                         self.persist(task)?;
                         report.actions.push(format!(
@@ -11412,6 +11445,7 @@ mod tests {
             hook_error: None,
             hook_skipped: None,
             missing_start_branch: None,
+            parent_work_tip: None,
             launched_at: None,
             steps: Default::default(),
             rounds: Default::default(),
@@ -26940,6 +26974,12 @@ mod tests {
         resumed.save().unwrap();
         run_pass(&repo, &mux);
         assert_ne!(reload(&path).stage(), crate::pipeline::BLOCKED);
+        let tip = git(&["rev-parse", "task/first"]);
+        assert_eq!(
+            reload(&path).front.parent_work_tip.as_deref(),
+            Some(tip.trim()),
+            "the tip found inside is recorded, for handover's squash to come"
+        );
     }
 
     /// An unattended run on a pipeline with no `blocked` step lands the same
@@ -26967,6 +27007,39 @@ mod tests {
             "{}",
             task.body
         );
+    }
+
+    /// With a staffed `blocked` step, the pass after the block does not block
+    /// the task again from `blocked` itself, so the unblocker is the one that
+    /// gets it. An unblocker that passes without merging the branch sends the
+    /// task back to its step, and the same fault found there parks it on
+    /// `paused` instead of sending the unblocker again.
+    #[cfg(unix)]
+    #[test]
+    fn a_staffed_unblocker_is_not_blocked_by_the_fault_and_a_repeat_parks() {
+        let (repo, _root_guard) = unattended_fixture("block-cut-missing-parent-staffed");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let mux = FakeMux::new(vec![]);
+        let home = crate::scratch::root("block-cut-missing-parent-staffed-home");
+
+        with_home(&home, || run_pass(&repo, &mux));
+        assert_eq!(reload(&path).stage(), crate::pipeline::BLOCKED);
+        with_home(&home, || run_pass(&repo, &mux));
+        let task = reload(&path);
+        assert_eq!(
+            task.body.matches("was cut without the work").count(),
+            2,
+            "the check must not run again on `blocked`: {}",
+            task.body
+        );
+
+        // The unblocker passed without merging: the task is back on its step.
+        let mut back = reload(&path);
+        back.set_stage("implement", None);
+        back.save().unwrap();
+        with_home(&home, || run_pass(&repo, &mux));
+        assert_eq!(reload(&path).stage(), crate::pipeline::PAUSED);
     }
 
     /// The late merge itself: the dependency is `done`, but its branch is gone.

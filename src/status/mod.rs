@@ -3744,6 +3744,7 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         map.remove("hook_paused");
         map.remove("hook_error");
         map.remove("missing_start_branch");
+        map.remove("parent_work_tip");
         map.remove("hook_skipped");
     }
     let yaml =
