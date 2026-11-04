@@ -134,18 +134,27 @@ if command -v npm >/dev/null 2>&1; then
   trap cleanup_install EXIT
   # The install reads the package documents, which npm's CDN can serve stale
   # for a while after the per-version reads above already succeed, so it gets
-  # a few tries of its own.
-  for attempt in 1 2 3 4 5; do
-    (
+  # tries of its own. A tarball can also lag its document: v0.18.0's
+  # linux-x64 tarball answered 404 for five minutes after the version read
+  # back, and npm skips an optional dependency it cannot fetch while still
+  # exiting 0. So an attempt counts only once the wrapper actually runs, and
+  # each one starts from an empty directory.
+  got=""
+  for attempt in $(seq 1 20); do
+    find "$install_dir" -mindepth 1 -delete
+    if (
       cd "$install_dir"
       npm install --silent --prefer-online "spoolway@$version" >/dev/null
-    ) && break
-    [ "$attempt" -lt 5 ] || die "npm install spoolway@$version failed in $install_dir"
-    say "release-verify: npm install spoolway@$version failed (attempt $attempt) — trying again in 30s"
+    ); then
+      got="$("$install_dir/node_modules/.bin/spoolway" --version 2>/dev/null)" && break
+      why="installed, but the wrapper would not run (most likely its platform package was skipped)"
+    else
+      why="failed"
+    fi
+    [ "$attempt" -lt 20 ] || die "npm install spoolway@$version $why in $install_dir after 10 minutes"
+    say "release-verify: npm install spoolway@$version $why (attempt $attempt) — trying again in 30s"
     sleep 30
   done
-  got="$("$install_dir/node_modules/.bin/spoolway" --version)" \
-    || die "the installed wrapper in $install_dir would not run"
   case "$got" in
     *"$version"*) ;;
     *) die "installed spoolway reports '$got', not $version" ;;
