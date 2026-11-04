@@ -1424,6 +1424,7 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
     // would word the first start in RECENT as a skip.
     front.hook_skipped = None;
     front.missing_start_branch = None;
+    front.parent_work_tip = None;
     front.resume = None;
     front.restart = None;
     front.branch = Some(format!("task/{}", front.id));
@@ -30755,12 +30756,13 @@ body\n";
     fn parse_submission_drops_the_pause_records() {
         let doc = task_text(
             "solo",
-            "group: g\nhook_paused: done\nmissing_start_branch: gone\n",
+            "group: g\nhook_paused: done\nmissing_start_branch: gone\nparent_work_tip: abc123\n",
             BODY,
         );
         let task = parse_submission("solo.md", &doc, Some("master")).unwrap();
         assert_eq!(task.front.hook_paused, None);
         assert_eq!(task.front.missing_start_branch, None);
+        assert_eq!(task.front.parent_work_tip, None);
     }
 
     /// A task on `queued` carries every task after it in its group to pending

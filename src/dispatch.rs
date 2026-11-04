@@ -27009,6 +27009,39 @@ mod tests {
         );
     }
 
+    /// A foreground command already running when the check would fire is left
+    /// to finish: handover's own squash moves the branch under it, and
+    /// blocking then would stop a task mid-push. Once the run is gone the
+    /// next pass checks as usual.
+    #[cfg(unix)]
+    #[test]
+    fn a_running_command_step_is_not_blocked_for_missing_a_parents_commits() {
+        let (repo, _root_guard) = fixture("block-cut-missing-parent-live-command");
+        let (path, gh) = second_lacks_firsts_commits(&repo);
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let yaml = "steps:\n  \
+             - id: work\n    run: sleep 30\n    on_pass: done\n";
+        let mut pipelines = Pipelines::builtin();
+        pipelines.pipelines.insert(
+            "default".into(),
+            crate::pipeline::Pipeline::parse("default", yaml).unwrap(),
+        );
+        let mut task = reload(&path);
+        task.set_stage("work", None);
+        task.save().unwrap();
+        let runs = crate::command_step::Runs::new(&repo.commands_dir());
+        let key = crate::command_step::Runs::key("work", "second");
+        runs.start(&key, "sleep 30", &repo.root, &Default::default())
+            .unwrap();
+
+        run_pass_with(&repo, &FakeMux::new(vec![]), &pipelines);
+        let live = reload(&path);
+        runs.stop(&key);
+
+        assert_eq!(live.stage(), "work", "{}", live.body);
+        assert!(!live.body.contains("was cut without the work"));
+    }
+
     /// With a staffed `blocked` step, the pass after the block does not block
     /// the task again from `blocked` itself, so the unblocker is the one that
     /// gets it. An unblocker that passes without merging the branch sends the
