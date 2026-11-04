@@ -1285,6 +1285,56 @@ mod tests {
         );
     }
 
+    /// A dependency that did its work and opened no pull request, because its
+    /// chain went on past the handover step, has nothing to stack onto. Its
+    /// dependent's pull request stands alone against the dependency's own
+    /// start, and `register_stack` says so rather than failing the handover
+    /// for want of a pull request on the dependency's branch. It registers no
+    /// stack, so `gh api` is never called.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_of_a_parent_with_commits_and_no_pull_request_stands_on_the_parent_s_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, _root_guard) = crate::commands::testutil::fixture("stack-parent-no-pr");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/project.git",
+            ],
+        )
+        .unwrap();
+        let doc = "---\nid: b\nstage: done\nbranch: task/b\nbase: main\nrun: run-b\n\
+                   starts_from: release/sprint-5\n\
+                   patch:\n  files: 2\n  insertions: 3\n  deletions: 1\n---\n## Goal\nok\n";
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(repo.archive_dir().join("b.md"), doc).unwrap();
+        // GitHub knows no pull request for any branch, and refuses a stack.
+        let gh = repo.root.join("gh-no-pull-requests");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               pr) if [ \"$2\" = list ]; then echo '[]'; exit 0; fi\n\
+                   echo 'no pull requests found for branch' >&2; exit 1;;\n\
+             esac\n\
+             echo \"unexpected gh $*\" >&2; exit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let said = register_stack(&repo, &repo.root, "c", &["b".to_string()], 7).unwrap();
+
+        assert_eq!(
+            said,
+            "none — dependency `b` opened no pull request, so `c` stands on `release/sprint-5`"
+        );
+    }
+
     /// Taken by every test in this module that sets `SPOOLWAY_WORKTREE` —
     /// the same reasoning as `usage::lane_env::AMBIENT_ENV`: the environment is
     /// the process's, not the test's, so two tests setting and restoring it
