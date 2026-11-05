@@ -262,6 +262,7 @@ slow_batch() {
 }
 says "a batch queues its tasks when origin never answers" "queued slow1" slow_batch
 SLOW_FOR=$((SECONDS - SLOW_FROM))
+works "origin really held the question" test -s "$LIVE/slow-group"
 if [ "$SLOW_FOR" -lt 25 ]; then
   ok "and it waited about one limit, not one per ask (${SLOW_FOR}s)"
 else

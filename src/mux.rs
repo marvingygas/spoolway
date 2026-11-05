@@ -3361,6 +3361,43 @@ pub(crate) fn git_bounded(
     timeout: Duration,
     capture: &GitCapture,
 ) -> GitWithin {
+    bounded("git", repo, args, envs, timeout, capture)
+}
+
+/// [`git_within`] for the forge client: `program` run in `dir`, stopped with
+/// its whole group once `timeout` has passed, its stdout kept. It is the same
+/// bound as git's, so a `gh` stuck on the network cannot hold a caller longer
+/// than a stuck `git` could.
+pub(crate) fn program_within(
+    program: &str,
+    dir: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> GitWithin {
+    bounded(
+        program,
+        dir,
+        args,
+        &[],
+        timeout,
+        &GitCapture {
+            stdout: true,
+            stderr: false,
+            at_deadline: &|_| {},
+        },
+    )
+}
+
+/// The one bounded runner behind [`git_bounded`] and [`program_within`], so
+/// that the stop, and the order it is done in, exist once.
+fn bounded(
+    program: &str,
+    repo: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+    capture: &GitCapture,
+) -> GitWithin {
     use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
@@ -3372,7 +3409,7 @@ pub(crate) fn git_bounded(
             Stdio::null()
         }
     };
-    let Ok(mut child) = std::process::Command::new("git")
+    let Ok(mut child) = std::process::Command::new(program)
         .args(args)
         .envs(envs.iter().copied())
         .current_dir(repo)
@@ -5749,6 +5786,35 @@ mod tests {
             "the stop waited for the stdout pipe's last holder: {:?}",
             started.elapsed()
         );
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// The forge client is held to the same stop as git: a program that never
+    /// ends is stopped at the deadline and reported as such, and one that
+    /// ends keeps its stdout. Without the stop, a `gh` stuck on the network
+    /// would hold a `queue add` for as long as it cared to.
+    #[test]
+    fn program_within_stops_a_program_that_outlives_its_deadline() {
+        let work = crate::scratch::root("mux-program-within");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let started = Instant::now();
+        let outcome = program_within("sleep", &work, &["30"], Duration::from_millis(300));
+        assert!(matches!(outcome, GitWithin::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the stop waited for the program: {:?}",
+            started.elapsed()
+        );
+
+        let GitWithin::Finished {
+            success, stdout, ..
+        } = program_within("echo", &work, &["hi"], Duration::from_secs(5))
+        else {
+            panic!("echo ends on its own");
+        };
+        assert!(success);
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
         std::fs::remove_dir_all(&work).ok();
     }
 
