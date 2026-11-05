@@ -553,6 +553,10 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 removes that value from a task it tears down, so a task sent again is cut again from its start
 branch. A `starts_from:` you set before the cut stays.
 
+A task that a `gate_at:` has paused, at the step `gate_at:` named, goes back with that `gate_at:`
+written again. Queued again, it pauses after the same step. A task paused any other way goes back
+with no `gate_at:`.
+
 `spoolway queue unqueue` tears a started task down the way cleanup does for a finished one, once
 it has stopped. A running task is refused, with `spoolway queue pause <task>` to run first.
 The teardown stops the
