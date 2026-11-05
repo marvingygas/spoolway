@@ -1592,7 +1592,16 @@ impl Repo {
     /// is the workspace root and says nothing about the lane, the command
     /// started under it.
     pub fn in_lane_worktree(&self) -> bool {
-        self.started_in_lane || crate::platform::is_within(&self.checkout, &self.worktree_root())
+        self.started_in_lane || self.checkout_in_lane_dir()
+    }
+
+    /// Whether `checkout` itself sits under [`Repo::worktree_root`], which is
+    /// only so for a lane that carries its own branch's setup. A caller that
+    /// reasons about that branch's files, as `pipeline check` does, asks this
+    /// rather than [`Repo::in_lane_worktree`]: a home-mode lane reads the
+    /// workspace's setup, the same files the dispatcher reads.
+    pub fn checkout_in_lane_dir(&self) -> bool {
+        crate::platform::is_within(&self.checkout, &self.worktree_root())
     }
 
     /// The `checkout:` fact a command that reads the tracked control plane

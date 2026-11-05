@@ -1213,8 +1213,9 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
     // gains a pipeline is worse than the gap: these are warnings there. The
     // gap is that a branch which itself deletes a pipeline or renames a step
     // is only warned too. Everywhere else the same finding is a real
-    // stranded task and fails.
-    let on_branch = repo.in_lane_worktree();
+    // stranded task and fails. A lane in home mode is everywhere else: it
+    // reads the workspace's pipelines, not its branch's.
+    let on_branch = repo.checkout_in_lane_dir();
     let mut queue_findings =
         live_task_problems(&repo.tasks().unwrap_or_default(), pipelines, on_branch);
 
@@ -5671,6 +5672,56 @@ mod tests {
         }
 
         pipeline_check(&repo, Ok(pipelines)).expect("other tasks' findings only warn in a lane");
+    }
+
+    /// A lane in home mode reads the workspace's pipelines, the ones the
+    /// dispatcher reads, so another task naming a pipeline it does not have
+    /// is stranded for real and fails the check, as it does for the person.
+    /// Fails before the change: the finding was softened to a warning that
+    /// blamed the lane's branch.
+    #[test]
+    fn pipeline_check_fails_a_stranded_task_in_a_home_mode_lane() {
+        let root = crate::scratch::root("commands-home-lane-check-fails");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        let person = Repo {
+            borrowed: false,
+            started_in_lane: false,
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+        };
+        let lane = Repo {
+            started_in_lane: true,
+            ..person.clone()
+        };
+        assert!(lane.in_lane_worktree());
+        assert!(!lane.checkout_in_lane_dir());
+
+        let pipeline =
+            Pipeline::parse("solo", "steps:\n  - id: a\n    run: x\n    on_pass: done\n").unwrap();
+        std::fs::create_dir_all(person.queue_dir()).unwrap();
+        crate::task::Task::parse(
+            person.queue_dir().join("newer.md"),
+            "---\nid: newer\nstage: queued\npipeline: newp\n---\n## Goal\nx\n",
+        )
+        .unwrap()
+        .save()
+        .unwrap();
+
+        for repo in [&person, &lane] {
+            let pipelines = Pipelines {
+                pipelines: [("solo".to_string(), pipeline.clone())]
+                    .into_iter()
+                    .collect(),
+                ignored_overrides: Vec::new(),
+                clashes: Default::default(),
+            };
+            pipeline_check(repo, Ok(pipelines)).expect_err("a stranded task fails the check");
+        }
     }
 
     /// A task's own `skip:` names steps by hand — a replay's copy, or one a

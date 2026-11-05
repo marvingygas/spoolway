@@ -5111,6 +5111,45 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// The same refusal for a lane in home mode, where `checkout` is the
+    /// workspace root and the lane is known only by where it started. Fails
+    /// before the change: the layer was rewritten, and the person's retired
+    /// keys were dropped from it by a lane.
+    #[test]
+    fn a_lane_in_home_mode_leaves_a_retired_override_key_in_the_layer() {
+        let (mut repo, _root_guard) = fixture("config-override-home-lane");
+        crate::scratch::stamped(&repo.root);
+        let home = crate::scratch::root("sync-config-override-home-lane-home");
+        let _ = std::fs::remove_dir_all(&home);
+        repo.started_in_lane = true;
+        std::fs::write(
+            crate::config::Config::path_in(&repo.checkout),
+            "[dispatch]\nlane_quiet = \"15m\"\n",
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home, || {
+            let overrides = crate::overrides::dir_for(&repo.checkout).unwrap();
+            std::fs::create_dir_all(&overrides).unwrap();
+            let override_path = crate::overrides::config_patch_path(&overrides);
+            let before = "[dispatch]\nworktree_root = \"/old/worktrees\"\n";
+            std::fs::write(&override_path, before).unwrap();
+
+            let mut outcomes = Vec::new();
+            config(&repo, &args(), &mut outcomes).unwrap();
+            assert_eq!(std::fs::read_to_string(&override_path).unwrap(), before);
+            let lines = outcome_lines(&outcomes);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("a lane does not change the project's setup")),
+                "{lines:?}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
     /// A mistake in a private override — a typo, not a key this binary
     /// retired — must never be deleted on the project's behalf: it is left
     /// in the layer, printing "override ignored" until the person who wrote
