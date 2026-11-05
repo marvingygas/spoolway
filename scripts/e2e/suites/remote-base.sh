@@ -198,6 +198,39 @@ says "and queues it once starts_from: main is written" "queued after" \
 says "the queued task starts from main" \
   "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/after.md"
 
+# A task whose own branch an earlier run left on `origin`. Unqueue deletes the
+# local branch and keeps the published one, and the shipped `create-pr` prompt
+# never force-pushes, so a redo of the same id would run to its push and be
+# rejected there. `queue add` refuses it first, naming the remote branch, the
+# open pull request and the ways out, and changes nothing: the task is not
+# queued and `origin` keeps the branch. With `origin` out of reach nothing can
+# be said about its branches, so the task queues as it always did.
+dispatcher_stop
+must "a task's own branch left on origin by an earlier run" \
+  git -C "$FORGE/origin.git" branch task/pushed main
+record_pr 9500 task/pushed OPEN
+task_doc "$LIVE/pushed.md" pushed "$BODY" "group: pushed" "base: plan/live"
+refuses "queue add refuses a task whose branch origin still has" \
+  "origin/task/pushed" "$SPOOLWAY" queue add --from "$LIVE/pushed.md"
+says "the refusal names the open pull request" "#9500" \
+  "$SPOOLWAY" queue add --from "$LIVE/pushed.md"
+says "and a command that deletes the remote branch" \
+  "git push origin --delete task/pushed" \
+  "$SPOOLWAY" queue add --from "$LIVE/pushed.md"
+works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/pushed.md"
+works "and origin still has the branch" \
+  git -C "$FORGE/origin.git" rev-parse --verify --quiet refs/heads/task/pushed
+
+must "a branch left on origin for a task that will be queued offline" \
+  git -C "$FORGE/origin.git" branch task/offline main
+task_doc "$LIVE/offline.md" offline "$BODY" "group: offline" "base: plan/live"
+ORIGIN_URL=$(git remote get-url origin)
+must "origin points at a path nothing answers on" \
+  git remote set-url origin "$LIVE/no-such-origin.git"
+says "queue add queues a task when origin cannot be asked" "queued offline" \
+  "$SPOOLWAY" queue add --from "$LIVE/offline.md"
+must "origin is back" git remote set-url origin "$ORIGIN_URL"
+
 # A fetch that hangs. `origin` is pointed at an ssh url whose transport is the
 # person's own `core.sshCommand`, a script that serves every call from the
 # real bare repo except a fetch, which it holds. Pushes keep going to the real
