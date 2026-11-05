@@ -1223,6 +1223,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let repo = crate::repo::Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: crate::config::Config::default(),

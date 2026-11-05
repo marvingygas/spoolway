@@ -517,13 +517,14 @@ hold an id already in use under another. Each file is listed with its reason. In
 entry of `unparseable` has a `path`, an `error` and a `duplicate` boolean, which is `true` for a
 file that holds an id already in use.
 
-A task whose pipeline is missing still has a row, and the other rows are drawn as usual. The row
-reads `unknown`, and NEXT says why. The command still exits 0, and `spoolway pipeline check` names
+A task whose pipeline is missing still has a row, and the other rows are drawn as usual. A task
+that names a pipeline that does not exist reads `held`, and one with no pipeline reads `unknown`.
+NEXT says why. The command still exits 0, and `spoolway pipeline check` names
 the task.
 
 | NEXT reads | When |
 |---|---|
-| ``names pipeline `<name>`, which is missing — restore it or run `spoolway pipeline check` `` | The task's `pipeline:` names a pipeline that does not exist. |
+| ``<name> is gone: set `pipeline:` in the task file (board: open task) to one that exists, then resume it. Branch and commits kept`` | The task's `pipeline:` names a pipeline that does not exist, and the task is paused or blocked. The row reads `held`. For any other task the line ends ``it then carries on by itself`` in place of ``then resume it``. |
 | ``has no pipeline — set `pipeline:` in the task file`` | The task file has no `pipeline:`. |
 | ``` `<id>` is not a task — fix `depends_on` ``` | A queued task depends on an id with no task in the queue and no task in the archive. |
 | ``` `<a>`, `<b>` are not tasks — fix `depends_on` ``` | The same, for several ids. |
@@ -760,8 +761,8 @@ Before anything else, each pre-loop check prints its own line as it returns:
 A check still running names what it is waiting on, in place of the `✓`. `backend available`
 names the backend, with no version.
 
-Before it starts, it checks every live task's `pipeline:` field. A missing or unknown pipeline
-refuses the whole start and dispatches nothing:
+Before it starts, it checks every live task's `pipeline:` field. A task with no `pipeline:` refuses
+the whole start and dispatches nothing:
 
 ```
 refusing to start: task `auth-refresh` has no `pipeline:`
@@ -769,6 +770,13 @@ refusing to start: task `auth-refresh` has no `pipeline:`
 
 nothing was dispatched.
 ```
+
+A task that names a pipeline that does not exist, such as one whose file was renamed or deleted
+while the task was paused or blocked, does not refuse the start. The dispatcher holds that one task
+and runs every other. The held line leads with the way out: set `pipeline:` in the task file to a
+pipeline that exists. The board's `open task` opens the file. A paused or blocked task is then
+resumed. Any other task carries on by itself, because `resume` refuses a task that is not stopped.
+The branch and commits are kept, and the task carries on from the step it stood on.
 
 It checks every live task's `base:` too. A task not yet cut whose base exists neither locally nor
 on `origin` refuses the whole start:
@@ -1330,7 +1338,11 @@ pipeline the branch lacks reads:
   warning: live task `l2` names pipeline `newp`, which this branch does not have yet
 ```
 
-Run anywhere else, the same finding is a failure and reads `which this project no longer defines`.
+Run anywhere else, the same finding is a failure. It reads:
+
+```
+  live task `l2` names pipeline `newp`, which this project no longer defines — the run holds it; set `pipeline:` in its task file to one that exists
+```
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 

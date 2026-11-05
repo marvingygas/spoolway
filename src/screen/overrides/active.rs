@@ -942,6 +942,7 @@ fn main_checkout(repo: &Repo) -> Repo {
     Repo {
         checkout: repo.root.clone(),
         borrowed: false,
+        started_in_lane: false,
         ..repo.clone()
     }
 }

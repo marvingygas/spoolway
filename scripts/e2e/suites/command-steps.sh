@@ -234,6 +234,31 @@ if [ "$(stage_of routeless)" = queued ]; then
 else bad "and the routeless task never left queued (at \`$(stage_of routeless)\`)"; fi
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/routeless.md"
 
+# ------------------------------------------------------ a pipeline that is gone
+# The other half of the routeless case: a task that names a pipeline no file
+# defines any more is held on its own, and the start goes ahead for everyone
+# else. Needs a real detached dispatcher: a unit test runs one pass, and the
+# claim here is that a dispatcher that is *running* neither refuses nor
+# restarts-advises over a name that no file will ever bring back.
+task_doc "$SPOOLWAY_PROJECT_HOME/queue/stranded.md" stranded "$BODY" \
+  "stage: queued" "group: stranded" "pipeline: vanished"
+task_doc "$LIVE/partner.md" partner "$BODY" "group: partner"
+must "a task queued beside it" "$SPOOLWAY" queue add --from "$LIVE/partner.md"
+if drive partner gone 180; then ok "a task on a pipeline that exists still runs to its end"
+else bad "a task on a pipeline that exists still runs to its end (at \`$(stage_of partner)\`)"; fi
+if [ "$(stage_of stranded)" = queued ]; then
+  ok "and the task on the missing pipeline is held where it stood"
+else bad "and the task on the missing pipeline is held where it stood (at \`$(stage_of stranded)\`)"; fi
+OUT=$("$SPOOLWAY" queue list 2>&1)
+if grep -qF '`vanished`' <<<"$OUT" && grep -qF 'Branch and commits kept' <<<"$OUT"; then
+  ok "and queue list names the missing pipeline and a way out that keeps its work"
+else bad "and queue list names the missing pipeline and a way out that keeps its work"; sed 's/^/        /' <<<"$OUT"; fi
+if grep -qF 'restart the dispatcher' <<<"$OUT"; then
+  bad "and a running dispatcher is not told to restart over a deleted pipeline"
+else ok "and a running dispatcher is not told to restart over a deleted pipeline"; fi
+dispatcher_stop
+rm -f "$SPOOLWAY_PROJECT_HOME/queue/stranded.md"
+
 # ------------------------------------------------------------- blocking, failing
 # A non-zero exit is a failure, and it takes the step's own `on_fail` — the
 # whole point of putting a build in the graph is that a broken one routes to the
@@ -1361,12 +1386,12 @@ fi
 
 # `panedfail` landed on `blocked` and that was the point of it — but
 # `blocked` is a live stage, so it is still a task in this queue, and
-# `paneflaky` is about to be deleted out from under it. `check_task_routes`
-# reads every live task's `pipeline:` whole, ahead of the lock, and refuses
-# the whole run when one of them names a pipeline that is not there: left
-# queued, this one task refuses every `spoolway dispatch` for the rest of
-# the file. Taken out here rather than at the end of the suite, and with
-# paused first because it has a worktree of its own by now, and
+# `paneflaky` is about to be deleted out from under it. The start check no
+# longer reads a named pipeline, and the dispatcher's pass holds a task on one
+# that is gone: left queued, this one task would be held for the rest of the
+# file and show up in every `queue list`. Taken out here rather than at the
+# end of the suite, and with paused first because it has a worktree of its
+# own by now, and
 # `dispatcher_stop` ahead of it so no pass is running while the pipeline is
 # taken out from under the queue. The next scenario starts its own with
 # `dispatcher_restart`, so nothing is left without one.

@@ -9761,6 +9761,46 @@ mod tests {
         assert!(!log.to_lowercase().contains("unblocked"), "{log}");
     }
 
+    /// The way out the held line names works: a task blocked on a pipeline
+    /// that was since deleted cannot be resumed, the refusal says to correct
+    /// `pipeline:` and why, and once the key names a pipeline that exists a
+    /// bare resume carries it on from the step it stood on, with its branch
+    /// and commits untouched. Fails before the change only on the refusal's
+    /// words; the second half pins that the way out keeps the step.
+    #[test]
+    fn a_blocked_task_on_a_deleted_pipeline_resumes_once_its_pipeline_is_corrected() {
+        let (repo, _root_guard) = fixture("resume-after-pipeline-fix");
+        add(&repo, "stranded", &[]);
+        let mut task = queued(&repo, "stranded");
+        task.front.pipeline = Some("retired".into());
+        task.front.branch = Some("task/stranded".into());
+        task.set_stage("implement", None);
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.front.blocked_from = Some("implement".into());
+        task.save().unwrap();
+        let pipelines = Pipelines::builtin();
+
+        let err = resume(&repo, &pipelines, &resume_args("stranded", None), None).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("task `stranded` is held"), "{message}");
+        assert!(message.contains("`retired` is gone"), "{message}");
+        assert!(message.contains("then resume it"), "{message}");
+        assert!(
+            message.contains("set `pipeline:` in the task file"),
+            "{message}"
+        );
+        assert_eq!(queued(&repo, "stranded").stage(), crate::pipeline::BLOCKED);
+
+        let mut task = queued(&repo, "stranded");
+        task.front.pipeline = Some("default".into());
+        task.save().unwrap();
+        resume(&repo, &pipelines, &resume_args("stranded", None), None).unwrap();
+
+        let task = queued(&repo, "stranded");
+        assert_eq!(task.stage(), "implement");
+        assert_eq!(task.front.branch.as_deref(), Some("task/stranded"));
+    }
+
     /// Pausing a command step and resuming it runs the command again in full:
     /// the exit code its last run left on disk is not the answer to the new
     /// visit, so the run reads as never started rather than as `Exited`.

@@ -14156,6 +14156,7 @@ mod tests {
         off.housekeeping.archive_retention_days = 0;
         let repo_off = Repo {
             borrowed: false,
+            started_in_lane: false,
             config: off,
             ..repo.clone()
         };

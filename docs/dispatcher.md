@@ -456,8 +456,8 @@ stateDiagram-v2
 | `hook_failed` | The task's own stage is `hook_failed`: an issue-tracking hook failed on `queued`, `started` or `done`. Drawn `● hook failed`. NEXT reads `[r] rerun hook  [k] skip hook`. |
 | `waiting` | The task cannot start its step yet. NEXT names why, for example `serial: after <task>`. See [Background and headless](pipelines.md#background-and-headless). |
 | `blocked` | A step reported a block, a launch failed, a loop budget ran out, or, in an unattended run, the dispatcher stopped a lane that ended without reporting or crossed a ceiling. Read the latest `## Status Log` entry that contains `→ blocked`, and the entries just above it, for the reason. A failed launch or a spent `loop:` logs its reason on the entry above. `## Blocker` holds a stop the dispatcher made. Entries above a `Cleared` line belong to a stop that is over. Cleanup also parks a task here when its worktree is off its branch. See [A worktree that is off its branch](#a-worktree-that-is-off-its-branch). A task cut without the commits of a dependency that opened no pull request stops here before its next step. See [A task cut without its parent's commits](#a-task-cut-without-its-parents-commits). |
-| `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing, or names a pipeline that does not exist, also reads `unknown`. NEXT says which, and the other rows are drawn as usual. The dispatcher does not start such a task. |
-| `held` | The task's pipeline name belongs to both a tracked and a private pipeline. The dispatcher starts nothing for the task. Drawn `○ held`. NEXT reads ``private `<name>` clashes with the tracked one: spoolway pipeline rename <name> <new-name>``. Other tasks run as usual. See [`pipeline rename`](cli-reference.md#spoolway-pipeline-rename-old-new). |
+| `unknown` | The task file's `stage:` names a step the task's pipeline does not have. `spoolway resume <task> --stage <step>` puts it on a step the pipeline has, and the refusal says so. Or correct `stage:` in the task file. A task whose `pipeline:` is missing also reads `unknown`. NEXT says so, and the other rows are drawn as usual. The dispatcher does not start such a task. A task that names a pipeline that does not exist reads `held` instead. See `held` below. |
+| `held` | The dispatcher starts nothing for the task, and other tasks run as usual. Drawn `○ held`. Two causes. The task's pipeline name belongs to both a tracked and a private pipeline, and NEXT reads ``private `<name>` clashes with the tracked one: spoolway pipeline rename <name> <new-name>``. Or the task's `pipeline:` names a pipeline that does not exist, and NEXT reads ``<name> is gone: set `pipeline:` in the task file (board: open task) to one that exists, then resume it. Branch and commits kept``. A task that is not paused or blocked ends ``it then carries on by itself`` instead, because `resume` refuses a task that is not stopped. See [`pipeline rename`](cli-reference.md#spoolway-pipeline-rename-old-new). |
 | `done` | Finished and archived. The row stays, dimmed, until the whole group is done. A group with a live copy of a routine draws no `done` rows. |
 | `finished` | Only on a stopped dispatch tab: a step whose lane has settled, or whose command run has exited, with nothing up to move it on. TIME stops where the board first saw it settle. NEXT reads `moves on when dispatching starts`. The same step reads `running` while a dispatcher is up, since it moves on within the pass that settles it. An open, idle lane left from an earlier visit to the step does not make a row `finished`. |
 
@@ -1590,8 +1590,9 @@ Each reads only the pipelines its own tasks name. With no dispatcher running, th
 pipeline files.
 
 `spoolway queue route`, `spoolway queue list` and the board therefore name the step that
-`spoolway resume` takes. A task whose pipeline the running dispatcher did not load shows as
-`unknown`, with NEXT telling you to restart the dispatcher. While a dispatcher runs,
+`spoolway resume` takes. A task whose pipeline file was added since the dispatcher started shows
+as `unknown`, with NEXT telling you to restart the dispatcher. A task whose pipeline no file
+defines shows as `held`, with the line from [States](#states) that names the way out. While a dispatcher runs,
 `spoolway queue list` still answers when a pipeline file does not parse.
 
 An edit to a pipeline file changes nothing until the dispatcher restarts or reloads. A pipeline
@@ -1642,7 +1643,7 @@ The dispatcher refuses a reload and changes nothing when one of these is true:
 | `config.toml` does not load | The load error, and to fix `config.toml`. |
 | A pipeline file does not load | The load error, and to fix the file it names. |
 | A task sits on a step the new pipelines lack, or is held at one | The task and the missing step, and to put the step back or wait until the task has left it. |
-| A task names a pipeline the new pipelines lack | The task and the pipeline, and to put its file back or wait until the task is done. |
+| A task names a pipeline the new pipelines lack, and the running pipelines have it | The task and the pipeline, and to put its file back or wait until the task is done. A task on a pipeline the running pipelines lack too does not refuse a reload. The dispatcher already holds it. |
 | A queue file does not parse, or the queue cannot be read | The file and the error, and to fix or remove it. |
 | `unattended.enabled` is on and `unattended.blocked_model` is blank | Both keys, and to set the model or turn `unattended.enabled` off. |
 | The project home cannot be written | That the new pipelines could not be recorded. |
@@ -2093,8 +2094,15 @@ could not cut a worktree for `task/cart-totals` at <path>: `git worktree add --n
 When the dispatcher cannot tell which hook was running, the failure says the call was still
 running and lists the git hooks it could have been.
 
-The dispatcher removes the stopped checkout, and the branch it created, so the next attempt cuts
-afresh. A failed cut is tried again on a later pass. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
+A git hook that exits with an error fails the cut as well. The failure carries the hook's output:
+
+```
+could not cut a worktree for `task/cart-totals` at <path>: `git worktree add` failed (exit status: 1): hook: npm install failed
+```
+
+The dispatcher removes the checkout of a stopped or failed cut, and the branch the cut created,
+so the next attempt cuts afresh and runs the hook again. A checkout that was already at the path
+when the cut began is left alone. A failed cut is tried again on a later pass. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
 failure gives the by-hand command shown under [A removal that was stopped or
 failed](#a-removal-that-was-stopped-or-failed). Run it before the task is resumed.
 The failure counts toward the launch-failure ceiling described under [Restarts, laps and

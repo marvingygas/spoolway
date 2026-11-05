@@ -88,6 +88,7 @@ mod tests {
         std::fs::write(dir.join(".spoolway/prompts/reviewer.md"), "review it\n").unwrap();
         Repo {
             borrowed: false,
+            started_in_lane: false,
             root: dir.to_path_buf(),
             checkout: dir.to_path_buf(),
             config: crate::config::Config::default(),

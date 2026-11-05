@@ -130,6 +130,14 @@ fn made_note(runs: &Runs, key: &str) -> std::path::PathBuf {
     runs.log_path(key).with_extension("made")
 }
 
+/// The note kept beside a run whose start found nothing at the checkout's
+/// path, so that what is there when the run fails is the run's own. Absent
+/// when a checkout the cut did not make was in the way, which a failed
+/// `git worktree add` must leave alone.
+fn placed_note(runs: &Runs, key: &str) -> std::path::PathBuf {
+    runs.log_path(key).with_extension("placed")
+}
+
 /// The note kept beside a run holding the `git worktree add` it runs, as it is
 /// shown in an error.
 fn shown_note(runs: &Runs, key: &str) -> std::path::PathBuf {
@@ -149,7 +157,14 @@ fn where_note(runs: &Runs, key: &str) -> std::path::PathBuf {
 /// included. A stopped task's `.stopped` note left behind would be read as
 /// the failure of the cut that follows it.
 fn clear_notes(runs: &Runs, key: &str) {
-    for note in [fetch_note, made_note, shown_note, where_note, stopped_note] {
+    for note in [
+        fetch_note,
+        made_note,
+        placed_note,
+        shown_note,
+        where_note,
+        stopped_note,
+    ] {
         let _ = std::fs::remove_file(note(runs, key));
     }
 }
@@ -227,14 +242,37 @@ fn poll_within(
         RunState::Exited(code) => {
             let base = std::fs::read_to_string(fetch_note(&runs, &key)).ok();
             let said = failure_text(&runs, &key);
+            let made = made_note(&runs, &key).exists();
+            let placed = placed_note(&runs, &key).exists();
             clear_notes(&runs, &key);
             runs.forget(&key)?;
+            let failure = format!(
+                "could not cut a worktree for `{branch}` at {}: `git worktree add` failed \
+                 (exit status: {code}): {said}",
+                path.display()
+            );
+            // A `post-checkout` hook runs after git has made the checkout and
+            // the branch, so a hook that exits non-zero leaves both behind.
+            // Left, the next pass would adopt them as a finished cut and the
+            // hook would never run again. Taken away here, as the stop at the
+            // time limit does, so the next attempt cuts afresh. Only when
+            // nothing was at `path` as the cut began. When something was,
+            // `git worktree add` refused before making anything, and what is
+            // there is somebody's work. The branch goes only if this cut
+            // made it. The full stop ends the sentence the removal's own
+            // message continues, when the removal fails.
+            if placed {
+                crate::mux::undo_stopped_cut(
+                    &repo.root,
+                    path,
+                    branch,
+                    !made,
+                    &format!("{failure}."),
+                    "resume the task",
+                )?;
+            }
             Err(anyhow::anyhow!(crate::mux::cut_failure(
-                &format!(
-                    "could not cut a worktree for `{branch}` at {}: `git worktree add` failed \
-                     (exit status: {code}): {said}",
-                    path.display()
-                ),
+                &failure,
                 base.as_deref().unwrap_or_default(),
                 base.is_some(),
             )))
@@ -396,6 +434,9 @@ fn begin_within(
     if !command.branch_existed {
         let _ = std::fs::write(made_note(&runs, &key), "");
     }
+    if !path.exists() {
+        let _ = std::fs::write(placed_note(&runs, &key), "");
+    }
     let _ = std::fs::write(
         shown_note(&runs, &key),
         format!("git {}", command.args.join(" ")),
@@ -536,6 +577,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -970,6 +1012,111 @@ mod tests {
             Poll::Idle,
             "a failed run was not forgotten"
         );
+    }
+
+    /// A `post-checkout` hook that exits non-zero fails the cut and takes
+    /// away the checkout and the branch that cut made, with the hook's output
+    /// in the error. The next attempt then cuts afresh and runs the hook
+    /// again, instead of adopting a checkout whose hook never succeeded.
+    #[test]
+    fn a_cut_whose_hook_fails_leaves_nothing_and_the_next_attempt_runs_the_hook_again() {
+        let (repo, _guard) = fixture("hookfails");
+        hook(
+            &repo,
+            "echo ran >>\"$(dirname \"$0\")/../../hook-ran\"; echo 'hook: npm install failed'; exit 1",
+        );
+        let path = target(&repo);
+
+        let err = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<CutPending>().is_none(), "{text}");
+        assert!(text.contains("hook: npm install failed"), "{text}");
+        assert!(
+            !path.exists(),
+            "the checkout of the failed cut was left: {text}"
+        );
+        assert!(
+            !branch_exists(&repo, "task/t1"),
+            "the branch of the failed cut was left: {text}"
+        );
+
+        let again = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+        assert!(
+            format!("{again:#}").contains("hook: npm install failed"),
+            "{again:#}"
+        );
+        let ran = std::fs::read_to_string(repo.root.join("hook-ran")).unwrap();
+        assert_eq!(
+            ran.lines().count(),
+            2,
+            "the hook did not run again: {ran:?}"
+        );
+    }
+
+    /// A cut whose `git worktree add` refuses before making anything must
+    /// not take away the finished checkout that was in its way, nor the
+    /// branch that checkout holds.
+    #[test]
+    fn a_cut_refused_before_making_anything_leaves_the_checkout_in_its_way() {
+        let (repo, _guard) = fixture("inway");
+        let path = target(&repo);
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "someone",
+                &path.display().to_string(),
+            ],
+        )
+        .unwrap();
+        std::fs::write(path.join("work.txt"), "unsaved").unwrap();
+
+        let err = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<CutPending>().is_none(), "{text}");
+        assert!(path.join("work.txt").exists(), "work was deleted: {text}");
+        assert!(branch_exists(&repo, "someone"), "{text}");
+    }
+
+    /// A failed cut whose checkout cannot be taken away reports the hook's
+    /// output and the command to remove it by hand, and leaves the checkout
+    /// locked as unfinished, not as one for the next attempt to adopt.
+    #[test]
+    fn a_failed_cut_that_cannot_be_removed_names_the_hook_and_the_command() {
+        // SAFETY: `geteuid` reads the process's own id and has no failure.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (repo, _guard) = fixture("stuck");
+        hook(
+            &repo,
+            "chmod 555 ..; echo 'hook: npm install failed'; exit 1",
+        );
+        let path = target(&repo);
+
+        let err = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<CutPending>().is_none(), "{text}");
+        assert!(text.contains("hook: npm install failed."), "{text}");
+        assert!(text.contains("could not be removed"), "{text}");
+        assert!(text.contains("worktree prune"), "{text}");
+        assert!(path.exists(), "the premise: the removal failed");
+        assert!(
+            !crate::mux::cut_is_finished(&repo.root, &path, "task/t1"),
+            "the leftover would be adopted as a finished checkout: {text}"
+        );
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     /// A folder git has no record of, left by a cut killed before it was

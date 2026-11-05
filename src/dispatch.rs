@@ -11415,6 +11415,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -14983,6 +14984,38 @@ mod tests {
             report.problems.iter().any(|p| p.contains("ghost")),
             "the problem names the missing profile: {:?}",
             report.problems
+        );
+    }
+
+    /// One task on a pipeline that no longer exists is held with the line
+    /// that names the way out, and a runnable task beside it still gets its
+    /// lane in the same pass. Fails before the change on the line's words:
+    /// the old problem named neither the way out nor the kept branch.
+    #[test]
+    fn a_task_on_a_deleted_pipeline_is_held_and_the_rest_still_run() {
+        let (repo, _root_guard) = fixture("missing-pipeline-held");
+        add_task_with(&repo, "stranded", "queued", |f| {
+            f.pipeline = Some("retired".to_string());
+        });
+        add_task(&repo, "fine", "queued");
+        let mux = FakeMux::new(vec![]);
+
+        let report = Dispatcher::new(&repo, &Pipelines::builtin(), &mux)
+            .pass(&mut || {})
+            .unwrap();
+
+        assert_eq!(mux.did("start"), ["start fine · implement"]);
+        let held: Vec<_> = report
+            .problems
+            .iter()
+            .filter(|p| p.contains("`stranded`"))
+            .collect();
+        assert_eq!(held.len(), 1, "{:?}", report.problems);
+        assert!(held[0].contains("`retired` is gone"), "{}", held[0]);
+        assert!(held[0].contains("carries on by itself"), "{}", held[0]);
+        assert_eq!(
+            reload(&repo.queue_dir().join("stranded.md")).stage(),
+            "queued"
         );
     }
 

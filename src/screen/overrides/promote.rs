@@ -353,6 +353,7 @@ impl Promotion {
                     let borrowed = Repo {
                         checkout: repo.root.clone(),
                         borrowed: true,
+                        started_in_lane: false,
                         ..repo.clone()
                     };
                     borrowed
@@ -714,6 +715,7 @@ mod tests {
         );
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: scratch.join("home"),
             checkout: root.clone(),
             root,
@@ -1429,6 +1431,7 @@ mod tests {
         .unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: scratch.join("home"),
             checkout: root.clone(),
             root,

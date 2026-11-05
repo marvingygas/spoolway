@@ -2802,19 +2802,51 @@ impl Pipelines {
     /// [`crate::commands::dispatch`]'s own start preflight refuses the whole
     /// run before any lane reaches this — so a task still missing one here
     /// is a defensive refusal, not the first place the absence is caught.
+    /// A task naming a pipeline that does not exist is held instead, with
+    /// [`Pipelines::missing_line`], and every other task runs.
     pub fn for_task(&self, task: &crate::task::Task) -> Result<&Pipeline> {
         let name = task
             .front
             .pipeline
             .as_deref()
+            // A blank key reads as an absent one, as the start check reads it.
+            .filter(|name| !name.trim().is_empty())
             .with_context(|| format!("task `{}` has no `pipeline:`", task.id()))?;
         // A clash is no missing pipeline: the name is defined twice, and the
         // line must send the person to the command that settles it.
         if let Some(clash) = self.clashes.get(name) {
             bail!("task `{}` is held — {}", task.id(), clash.held_line(name));
         }
-        self.get(name)
-            .with_context(|| format!("task `{}` names a pipeline that does not exist", task.id()))
+        self.get(name).map_err(|_| {
+            anyhow::anyhow!(
+                "task `{}` is held — {}",
+                task.id(),
+                Pipelines::missing_line(task, name.trim())
+            )
+        })
+    }
+
+    /// The short line a task on a pipeline that no longer exists carries, on
+    /// the board, in `queue list` and in the dispatcher's own pass: what is
+    /// missing, and the way out that costs the task nothing.
+    ///
+    /// The way out leads the line because the board clips a row's NEXT to the
+    /// pane, and the cause is already in the PIPELINE column. It is to correct
+    /// `pipeline:` in the task file, which the board's `open task` opens. The
+    /// branch, the worktree and the commits are untouched and the task stays
+    /// on the step it stood on. Only a stopped task needs a resume; resume
+    /// refuses any other, which carries on by itself once the key is right.
+    /// Moving the task with `unqueue` instead would strip it back to a fresh
+    /// start.
+    pub fn missing_line(task: &crate::task::Task, name: &str) -> String {
+        let then = match task.stage() {
+            PAUSED | BLOCKED => "then resume it",
+            _ => "it then carries on by itself",
+        };
+        format!(
+            "`{name}` is gone: set `pipeline:` in the task file (board: open task) to one that \
+             exists, {then}. Branch and commits kept"
+        )
     }
 
     pub fn names(&self) -> Vec<&str> {
@@ -5834,6 +5866,7 @@ mod tests {
 
             let repo = crate::repo::Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

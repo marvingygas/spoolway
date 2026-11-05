@@ -1370,6 +1370,7 @@ mod tests {
         let checkout = crate::scratch::root("models-refresh-report");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: checkout.to_path_buf(),
             checkout: checkout.to_path_buf(),
             config: Default::default(),
@@ -1406,6 +1407,7 @@ mod tests {
         let checkout = crate::scratch::root("models-vendor-report");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: checkout.to_path_buf(),
             checkout: checkout.to_path_buf(),
             config: Default::default(),
@@ -1434,6 +1436,7 @@ mod tests {
         let checkout = crate::scratch::root("models-vendor-refused");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: checkout.to_path_buf(),
             checkout: checkout.to_path_buf(),
             config: Default::default(),

@@ -30,6 +30,7 @@ pub fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
     (
         Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -247,4 +248,17 @@ pub fn edit_a_pipeline_since_start(repo: &Repo) {
     let dir = Pipelines::dir_in(&repo.root);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("t.yml"), "# edited\n").unwrap();
+}
+
+/// Puts a file for pipeline `name` on disk, as a person adds one after a
+/// dispatcher started. The snapshot does not have it, so a task naming it is
+/// one a restart would fix, unlike a name no file defines. Only the file name
+/// matters to the readers this serves; the text is never parsed.
+pub fn define_since_start(repo: &Repo, name: &str) {
+    std::fs::create_dir_all(Pipelines::dir_in(&repo.root)).unwrap();
+    std::fs::write(
+        Pipelines::file_in(&repo.root, name),
+        "# added since the dispatcher started\n",
+    )
+    .unwrap();
 }

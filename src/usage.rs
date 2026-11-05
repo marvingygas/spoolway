@@ -7932,6 +7932,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,

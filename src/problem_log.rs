@@ -277,6 +277,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: base.clone(),
             checkout: base.clone(),
             config: Config::default(),
@@ -294,6 +295,7 @@ mod tests {
         let home = crate::scratch::root("problem-log-home-k7f2q9");
         let before = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: crate::scratch::root("problem-log-before").to_path_buf(),
             checkout: crate::scratch::root("problem-log-before").to_path_buf(),
             config: Config::default(),
@@ -301,6 +303,7 @@ mod tests {
         };
         let after = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: crate::scratch::root("problem-log-after-renamed").to_path_buf(),
             checkout: crate::scratch::root("problem-log-after-renamed").to_path_buf(),
             config: Config::default(),
@@ -424,6 +427,7 @@ mod tests {
         let fixture_root = crate::scratch::root("problem-log-leak-home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: fixture_root.to_path_buf(),
             checkout: fixture_root.to_path_buf(),
             config: Config::default(),

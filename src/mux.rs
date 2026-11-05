@@ -3002,8 +3002,9 @@ fn cut_worktree_within(
     Ok(())
 }
 
-/// Take away what a cut left when it was stopped, with the branch if the cut
-/// made it. `stopped` is the message the stop gave, and `next` finishes the
+/// Take away what a cut left when it was stopped or failed, with the branch
+/// if the cut made it. `stopped` is the message that ends the cut, as a full
+/// sentence the removal's own message can follow, and `next` finishes the
 /// advice "Run `<command>`, then ..." when the removal fails.
 ///
 /// `post-checkout` runs after git has written the files and dropped its

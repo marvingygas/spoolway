@@ -602,6 +602,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&pending).unwrap(), before);
     }
 
+    /// Fails before the change: in home mode a lane's `checkout` is the
+    /// workspace root, so the lane was not recognised and moved the pages.
+    #[test]
+    fn a_lane_in_home_mode_moves_nothing() {
+        let (mut shop, _shop_2, _root) = two_clones("sync-plans-home-lane");
+        let old = page(&own_plans(&shop), "i.html", "I");
+        let pending = task(&shop, "pending", "p", &old);
+        let before = std::fs::read_to_string(&pending).unwrap();
+        shop.started_in_lane = true;
+
+        let summary = run(&shop, false).unwrap();
+
+        assert!(!summary.changed && !summary.refused);
+        assert!(old.exists());
+        assert_eq!(std::fs::read_to_string(&pending).unwrap(), before);
+    }
+
     /// Fails before the change: a clone folder linked to the workspace's had
     /// its only copy of a page removed by the finishing step of a move.
     #[cfg(unix)]

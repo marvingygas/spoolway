@@ -758,6 +758,7 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -1184,6 +1185,7 @@ mod tests {
             .unwrap();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.clone(),
                 root: root.clone(),
                 config: Config::load(&root).unwrap(),
@@ -1415,6 +1417,7 @@ mod tests {
                 updated.save_key(root, "unattended.blocked_model").unwrap();
                 let repo = Repo {
                     borrowed: false,
+                    started_in_lane: false,
                     checkout: root.to_path_buf(),
                     root: root.to_path_buf(),
                     config: Config::load(root).unwrap(),

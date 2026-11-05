@@ -1112,10 +1112,13 @@ fn live_task_problems(
             continue;
         }
         let Ok(pipeline) = pipelines.get(name) else {
+            // The run holds such a task and starts every other, so the finding
+            // carries the way out the held line gives, not only the fact.
             let lack = if on_branch {
                 "this branch does not have yet"
             } else {
-                "this project no longer defines"
+                "this project no longer defines — the run holds it; set `pipeline:` in its \
+                 task file to one that exists"
             };
             problems.push(format!(
                 "live task `{}` names pipeline `{name}`, which {lack}",
@@ -1213,8 +1216,9 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
     // gains a pipeline is worse than the gap: these are warnings there. The
     // gap is that a branch which itself deletes a pipeline or renames a step
     // is only warned too. Everywhere else the same finding is a real
-    // stranded task and fails.
-    let on_branch = repo.in_lane_worktree();
+    // stranded task and fails. A lane in home mode is everywhere else: it
+    // reads the workspace's pipelines, not its branch's.
+    let on_branch = repo.checkout_in_lane_dir();
     let mut queue_findings =
         live_task_problems(&repo.tasks().unwrap_or_default(), pipelines, on_branch);
 
@@ -2744,6 +2748,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
@@ -2852,7 +2857,10 @@ mod tests {
         let elsewhere = live_task_problems(&tasks, &pipelines, false);
         assert_eq!(
             elsewhere,
-            ["live task `l2` names pipeline `newp`, which this project no longer defines"]
+            [
+                "live task `l2` names pipeline `newp`, which this project no longer defines — \
+                 the run holds it; set `pipeline:` in its task file to one that exists"
+            ]
         );
     }
 
@@ -4538,6 +4546,7 @@ mod tests {
             .unwrap();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -4744,6 +4753,7 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -4797,6 +4807,7 @@ mod tests {
             .expect("init");
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -4994,6 +5005,7 @@ mod tests {
         std::fs::write(root.join(".spoolway/implementer.md"), "outside\n").unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -5050,6 +5062,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -5086,6 +5099,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5118,6 +5132,7 @@ mod tests {
         init_at(&root);
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5166,6 +5181,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5213,6 +5229,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5259,6 +5276,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5408,6 +5426,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5444,6 +5463,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5487,6 +5507,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5528,6 +5549,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -5569,6 +5591,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5609,6 +5632,7 @@ mod tests {
         init_at(&root);
         let main = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5656,6 +5680,57 @@ mod tests {
         pipeline_check(&repo, Ok(pipelines)).expect("other tasks' findings only warn in a lane");
     }
 
+    /// A lane in home mode reads the workspace's pipelines, the ones the
+    /// dispatcher reads, so another task naming a pipeline it does not have
+    /// is stranded for real and fails the check, as it does for the person.
+    /// Fails if `on_branch` asks `in_lane_worktree`, which counts a home-mode
+    /// lane by where it started: the finding is softened to a warning that
+    /// blames the lane's branch.
+    #[test]
+    fn pipeline_check_fails_a_stranded_task_in_a_home_mode_lane() {
+        let root = crate::scratch::root("commands-home-lane-check-fails");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        let person = Repo {
+            borrowed: false,
+            started_in_lane: false,
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+        };
+        let lane = Repo {
+            started_in_lane: true,
+            ..person.clone()
+        };
+        assert!(lane.in_lane_worktree());
+        assert!(!lane.checkout_in_lane_dir());
+
+        let pipeline =
+            Pipeline::parse("solo", "steps:\n  - id: a\n    run: x\n    on_pass: done\n").unwrap();
+        std::fs::create_dir_all(person.queue_dir()).unwrap();
+        crate::task::Task::parse(
+            person.queue_dir().join("newer.md"),
+            "---\nid: newer\nstage: queued\npipeline: newp\n---\n## Goal\nx\n",
+        )
+        .unwrap()
+        .save()
+        .unwrap();
+
+        for repo in [&person, &lane] {
+            let pipelines = Pipelines {
+                pipelines: [("solo".to_string(), pipeline.clone())]
+                    .into_iter()
+                    .collect(),
+                ignored_overrides: Vec::new(),
+                clashes: Default::default(),
+            };
+            pipeline_check(repo, Ok(pipelines)).expect_err("a stranded task fails the check");
+        }
+    }
+
     /// A task's own `skip:` names steps by hand — a replay's copy, or one a
     /// person edited in — and a pipeline's steps can be renamed out from
     /// under it. `pipeline check` is where that mismatch is caught, not left
@@ -5671,6 +5746,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5895,6 +5971,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5971,6 +6048,7 @@ mod tests {
             let config = Config::default();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
