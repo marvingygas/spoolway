@@ -359,7 +359,9 @@ of a pipeline or config patch. A file left with no key is removed from the layer
 ### Commands in a lane
 
 A dispatcher lane does not write the layer. In a task's worktree, these commands exit 1 and
-write nothing:
+write nothing. This holds in repo mode and in home mode, where a lane's worktree sits under the
+dispatcher folder's `worktrees/`. `spoolway config set` refuses there too.
+Run from your own checkout, the same commands work.
 
 | Command | What it would write |
 |---|---|
