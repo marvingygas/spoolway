@@ -2802,6 +2802,8 @@ impl Pipelines {
     /// [`crate::commands::dispatch`]'s own start preflight refuses the whole
     /// run before any lane reaches this — so a task still missing one here
     /// is a defensive refusal, not the first place the absence is caught.
+    /// A task naming a pipeline that does not exist is held instead, with
+    /// [`Pipelines::missing_line`], and every other task runs.
     pub fn for_task(&self, task: &crate::task::Task) -> Result<&Pipeline> {
         let name = task
             .front
@@ -2813,8 +2815,30 @@ impl Pipelines {
         if let Some(clash) = self.clashes.get(name) {
             bail!("task `{}` is held — {}", task.id(), clash.held_line(name));
         }
-        self.get(name)
-            .with_context(|| format!("task `{}` names a pipeline that does not exist", task.id()))
+        self.get(name).map_err(|_| {
+            anyhow::anyhow!(
+                "task `{}` is held — {}",
+                task.id(),
+                self.missing_line(task.id(), name)
+            )
+        })
+    }
+
+    /// The short line a task on a pipeline that no longer exists carries, on
+    /// the board, in `queue list` and in the dispatcher's own pass: what is
+    /// missing, and the way out that costs the task nothing.
+    ///
+    /// The way out is to correct `pipeline:` in the task file and resume. The
+    /// branch, the worktree and the commits are untouched, and the task stays
+    /// on the step it stood on, so resuming carries it on from there. Moving
+    /// it with `unqueue` instead would strip the task back to a fresh start.
+    pub fn missing_line(&self, id: &str, name: &str) -> String {
+        format!(
+            "names pipeline `{name}`, which does not exist — set `pipeline:` in the task file \
+             (`spoolway queue show {id}` prints it) to one of: {}, then resume it. Its branch \
+             and commits are kept",
+            self.names().join(", ")
+        )
     }
 
     pub fn names(&self) -> Vec<&str> {

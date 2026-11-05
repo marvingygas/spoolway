@@ -1628,12 +1628,18 @@ fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
     Ok(())
 }
 
-/// Refuse the whole start over any live task whose `pipeline:` does not
-/// resolve — absent, or naming a pipeline this project does not define.
-/// There is no project default any more, so a task that cannot route here
-/// never will on its own; refusing before the lock and before any lane
-/// starts is what keeps that from being found only once a lane tries to run
-/// it, on whichever task happens to reach it first.
+/// Refuse the whole start over any live task that names no `pipeline:` at
+/// all. There is no project default any more, so a task without one never
+/// routes on its own; refusing before the lock and before any lane starts is
+/// what keeps that from being found only once a lane tries to run it, on
+/// whichever task happens to reach it first.
+///
+/// A task naming a pipeline that does not exist is another matter. A person
+/// who renames or deletes a pipeline file while an old task on it is paused
+/// or blocked has not made every other task unrunnable, so the start goes
+/// on, exactly as it does for a name clash, and the pass holds that one task
+/// with [`Pipelines::missing_line`]. Refusing here would stop every other
+/// task too.
 ///
 /// Deliberately its own function rather than a third [`Refusal`] fed through
 /// [`refuse`]: `doctor` has no use for this one — a task file is not a
@@ -1643,21 +1649,19 @@ fn check_dispatcher_visible(mux: &dyn crate::mux::Mux) -> Result<()> {
 fn check_task_routes(pipelines: &Pipelines, tasks: &[Task]) -> Result<()> {
     let choices = pipelines.names().join(", ");
     for task in tasks {
-        match task.front.pipeline.as_deref().map(str::trim) {
-            None | Some("") => bail!(
+        if task
+            .front
+            .pipeline
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            bail!(
                 "refusing to start: task `{}` has no `pipeline:`\n  set `pipeline:` to one of: \
                  {choices}.\n\nnothing was dispatched.",
                 task.id()
-            ),
-            // A name clash holds only the tasks on it, once the run is going;
-            // refusing the start here would stop every other task too.
-            Some(name) if pipelines.clashes.contains_key(name) => {}
-            Some(name) if pipelines.get(name).is_err() => bail!(
-                "refusing to start: task `{}` names a pipeline that does not exist: `{name}`\n  \
-                 set `pipeline:` to one of: {choices}.\n\nnothing was dispatched.",
-                task.id()
-            ),
-            Some(_) => {}
+            );
         }
     }
     Ok(())
@@ -2110,30 +2114,18 @@ mod tests {
         assert!(message.contains("nothing was dispatched."), "{message}");
     }
 
-    /// A task naming a pipeline this project does not define refuses the
-    /// whole start too, naming both the task and the pipeline it could not
-    /// find, alongside the same list of defined choices.
+    /// A task naming a pipeline this project does not define does not stop
+    /// the start: the pass holds that one task, and the rest run. Before, a
+    /// renamed pipeline file under one old task refused every `dispatch`.
     #[test]
-    fn check_task_routes_refuses_a_task_naming_an_unknown_pipeline() {
+    fn check_task_routes_lets_a_task_naming_an_unknown_pipeline_through() {
         let pipelines = Pipelines::builtin();
         let unknown = crate::task::Task::parse(
             std::path::PathBuf::from("unknown.md"),
             "---\nid: unknown\nstage: queued\npipeline: not-a-real-pipeline\n---\nbody\n",
         )
         .unwrap();
-        let err = check_task_routes(&pipelines, &[unknown]).unwrap_err();
-        let message = format!("{err:#}");
-        assert!(
-            message.contains(
-                "refusing to start: task `unknown` names a pipeline that does not exist: \
-                 `not-a-real-pipeline`"
-            ),
-            "{message}"
-        );
-        assert!(
-            message.contains("set `pipeline:` to one of: bugfix, default."),
-            "{message}"
-        );
+        assert!(check_task_routes(&pipelines, &[unknown]).is_ok());
     }
 
     /// A batch where every task names an existing pipeline passes through

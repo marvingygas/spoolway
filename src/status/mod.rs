@@ -5779,8 +5779,8 @@ fn rows_on(
             // A task naming a pipeline that is not on disk is one row's
             // problem, not the whole listing's: failing here made one stale
             // `pipeline:` hide every other task from `queue list` and the
-            // board. The dispatcher still refuses to start it; this only
-            // keeps the row drawn, saying why.
+            // board. The dispatcher holds it and starts the rest; this keeps
+            // the row drawn, saying why.
             Err(_) => {
                 let name = task.front.pipeline.as_deref().unwrap_or("");
                 if let Some(clash) = pipelines.clashes.get(name) {
@@ -5789,13 +5789,14 @@ fn rows_on(
                     rows.push(row);
                     continue;
                 }
-                let why = match name.is_empty() {
-                    true => "has no pipeline — set `pipeline:` in the task file".to_string(),
-                    false => format!(
-                        "names pipeline `{name}`, which is missing — restore it \
-                         or run `spoolway pipeline check`"
-                    ),
-                };
+                if !name.is_empty() {
+                    let why = pipelines.missing_line(task.id(), name);
+                    let mut row = unroutable_row(repo, tasks, graph, task, &why);
+                    row.state = State::Held;
+                    rows.push(row);
+                    continue;
+                }
+                let why = "has no pipeline — set `pipeline:` in the task file".to_string();
                 rows.push(unroutable_row(repo, tasks, graph, task, &why));
                 continue;
             }
@@ -15283,9 +15284,9 @@ mod tests {
         );
     }
 
-    /// One live task naming a pipeline that is not on disk is drawn as a row
-    /// that names it, and every other task is still drawn. Before, the
-    /// whole reading failed on the one task.
+    /// One live task naming a pipeline that is not on disk is drawn `held`,
+    /// naming it and the way out, and every other task is still drawn.
+    /// Before, the whole reading failed on the one task.
     #[test]
     fn a_task_naming_a_missing_pipeline_is_drawn_and_the_rest_still_are() {
         let (repo, _root_guard) = fixture("row-missing-pipeline");
@@ -15299,11 +15300,18 @@ mod tests {
         let rows = rows(&repo, &pipelines).unwrap();
         assert!(rows.iter().any(|r| r.id == "fine"));
         let row = rows.iter().find(|r| r.id == "stale").unwrap();
-        assert!(matches!(row.state, State::Unknown));
+        assert!(matches!(row.state, State::Held));
         assert!(!row.resumable);
         assert!(
-            row.next.contains("`deleted-pipeline`, which is missing"),
+            row.next
+                .contains("`deleted-pipeline`, which does not exist"),
             "{}",
+            row.next
+        );
+        assert!(
+            row.next.contains("set `pipeline:` in the task file")
+                && row.next.contains("then resume it"),
+            "the row names the way out: {}",
             row.next
         );
     }
