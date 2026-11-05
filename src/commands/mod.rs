@@ -49,11 +49,12 @@ pub const TASK_ENV: &str = "SPOOLWAY_TASK";
 /// step. Everywhere else, `spoolway resume` run from a lane would let it
 /// answer its own gate, with nobody outside it ever asked.
 ///
-/// `what` names the verb this refusal is about, so the message reads as a
+/// `refusal.what()` names the verb this refusal is about, so the message reads as a
 /// sentence: `"a gate is answered"`, `"a lane is answered"`, `"the queue is
 /// mutated"`.
-pub fn refuse_from_lane(what: &str, in_lane: bool) -> Result<()> {
+pub fn refuse_from_lane(refusal: &LaneRefusal, in_lane: bool) -> Result<()> {
     if in_lane {
+        let what = refusal.what();
         bail!(
             "this is a lane's own environment, and {what} from outside it. ask the person \
              watching the board."
@@ -92,6 +93,7 @@ pub(crate) mod pending;
 mod pending_delete;
 mod pipeline;
 mod queue;
+pub(crate) mod refusal;
 mod report;
 mod routines;
 mod stack;
@@ -112,6 +114,7 @@ pub use lanes::*;
 pub use r#override::*;
 pub use pipeline::*;
 pub use queue::*;
+pub use refusal::{LANE_REFUSALS, LaneRefusal};
 pub use report::*;
 pub use stack::*;
 pub use task::*;

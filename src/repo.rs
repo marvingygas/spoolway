@@ -1635,7 +1635,15 @@ impl Repo {
     /// branch, and one lone file there would leave half a setup. A worktree
     /// under [`Repo::worktree_root`] is a dispatcher lane's, and a task must
     /// not move a person's private files out of their home.
-    pub fn tracked_write_root(&self, reads: &str, typed: &str) -> Result<TrackedWrite<'_>> {
+    ///
+    /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
+    /// command asking, for the same reason as in [`Repo::refuse_in_lane`].
+    pub fn tracked_write_root(
+        &self,
+        _command: &crate::commands::LaneRefusal,
+        reads: &str,
+        typed: &str,
+    ) -> Result<TrackedWrite<'_>> {
         // A lane in home mode has `checkout == root`, so it is not a linked
         // worktree by that test. It still has to reach the refusal below.
         if !self.in_linked_worktree() && !self.in_lane_worktree() {
@@ -1692,7 +1700,16 @@ impl Repo {
     /// restore it. The copy commands write `local/` in repo mode, which is
     /// private too, and the workspace's setup folders in home mode. Like
     /// the tracked refusal, this one prints no `-C` line.
-    pub fn refuse_in_lane(&self, owner: &str) -> Result<()> {
+    ///
+    /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
+    /// command being refused. Its only job is to make every caller name its
+    /// entry, so the test in `src/commands/refusal.rs` finds an entry no
+    /// refusal reads.
+    pub fn refuse_in_lane(
+        &self,
+        _command: &crate::commands::LaneRefusal,
+        owner: &str,
+    ) -> Result<()> {
         if self.in_lane_worktree() {
             bail!(
                 "{owner} belongs to the project, not this worktree.\n  \
@@ -8858,7 +8875,10 @@ mod tests {
 
             let in_lane = Repo::discover(&lane).unwrap();
             let err = in_lane
-                .refuse_in_lane("the overrides layer")
+                .refuse_in_lane(
+                    &crate::commands::refusal::OVERRIDE_DROP,
+                    "the overrides layer",
+                )
                 .expect_err("a lane in home mode must be refused, as in repo mode");
             assert!(
                 err.to_string()
@@ -8867,22 +8887,36 @@ mod tests {
             );
             assert!(in_lane.in_lane_worktree());
             let err = in_lane
-                .tracked_write_root("config", "config set a b")
+                .tracked_write_root(
+                    &crate::commands::refusal::CONFIG_SET,
+                    "config",
+                    "config set a b",
+                )
                 .expect_err("`config set` in a home-mode lane must be refused");
             assert!(
                 err.to_string()
                     .contains("a lane does not change the project's setup"),
                 "{err}"
             );
-            own.tracked_write_root("config", "config set a b")
-                .expect("the person's own checkout may write the workspace config");
+            own.tracked_write_root(
+                &crate::commands::refusal::CONFIG_SET,
+                "config",
+                "config set a b",
+            )
+            .expect("the person's own checkout may write the workspace config");
 
-            own.refuse_in_lane("the overrides layer")
-                .expect("the person's own checkout is not a lane");
+            own.refuse_in_lane(
+                &crate::commands::refusal::OVERRIDE_DROP,
+                "the overrides layer",
+            )
+            .expect("the person's own checkout is not a lane");
             assert!(!own.in_lane_worktree());
             Repo::discover(&elsewhere)
                 .unwrap()
-                .refuse_in_lane("the overrides layer")
+                .refuse_in_lane(
+                    &crate::commands::refusal::OVERRIDE_DROP,
+                    "the overrides layer",
+                )
                 .expect("a worktree outside the dispatcher's worktree folder is not a lane");
         });
     }
@@ -8917,7 +8951,10 @@ mod tests {
             let in_lane = Repo::discover(&lane).unwrap();
             assert!(in_lane.borrowed && in_lane.checkout == in_lane.root);
             let err = in_lane
-                .refuse_in_lane("the overrides layer")
+                .refuse_in_lane(
+                    &crate::commands::refusal::OVERRIDE_DROP,
+                    "the overrides layer",
+                )
                 .expect_err("a borrowed lane is a lane");
             assert!(
                 err.to_string()
@@ -8925,7 +8962,11 @@ mod tests {
                 "{err}"
             );
             let err = in_lane
-                .tracked_write_root("config", "config set a b")
+                .tracked_write_root(
+                    &crate::commands::refusal::CONFIG_SET,
+                    "config",
+                    "config set a b",
+                )
                 .expect_err("a borrowed lane may not write the main checkout's setup");
             let said = err.to_string();
             assert!(

@@ -2449,8 +2449,10 @@ fn resume_checked(
 ) -> Result<()> {
     let from_blocked = from_step == Some(crate::pipeline::BLOCKED);
     if !from_blocked {
-        refuse_from_lane("a gate is answered", from_step.is_some())?;
-    } else if args.stage.is_some() {
+        refuse_from_lane(&refusal::RESUME, from_step.is_some())?;
+    } else if args.stage.is_some()
+        && refusal::RESUME_STAGE_ON_BLOCKED.applies_on(crate::pipeline::BLOCKED)
+    {
         bail!(
             "a lane on `blocked` may resume another stopped task, but never with `--stage` — \
              that is a person's to decide."
@@ -2468,7 +2470,7 @@ fn resume_checked(
     }
     refuse_if_archived(repo, &task)?;
     if args.skip_hook {
-        refuse_from_lane("a hook is skipped", from_step.is_some())?;
+        refuse_from_lane(&refusal::RESUME_SKIP_HOOK, from_step.is_some())?;
         return skip_hook(repo, pipelines, task, args);
     }
     // `--stage done` closes the task rather than resuming it: a live
@@ -3407,7 +3409,7 @@ pub fn restart(
     args: &RestartArgs,
     from_step: Option<&str>,
 ) -> Result<()> {
-    refuse_from_lane("a step is restarted", from_step.is_some())?;
+    refuse_from_lane(&refusal::RESTART, from_step.is_some())?;
     let mux = crate::mux::backend(repo)?;
     restart_with(repo, pipelines, args, mux.as_ref())
 }

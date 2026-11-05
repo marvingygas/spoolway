@@ -221,9 +221,28 @@ The step says where the role sits. The prompt says what the role does.
 spoolway pipeline check             # reads every prompt against the steps that run it
 ```
 
-It refuses a prompt that names a `spoolway` command or flag this release does not have. It
-warns, without refusing, on a prompt that names `spoolway report` or one of its flags — the
-report contract spoolway already injects at launch.
+It refuses a prompt that names a `spoolway` command or flag this release does not have. It also
+refuses a prompt that tells its lane to run a command spoolway refuses in a lane. It warns,
+without refusing, on a prompt that names `spoolway report` or one of its flags — the report
+contract spoolway already injects at launch.
+
+Each refusal names the prompt, the step, the command and what the lane would do from outside
+itself. The check judges every step that runs the prompt on its own.
+
+| A prompt that names | Fails on |
+|---|---|
+| `spoolway queue add` with `--from` | Every step. Bare `spoolway queue add` passes. |
+| `spoolway lane` with `-m` or `--message` | Every step. |
+| `spoolway restart` | Every step. |
+| `spoolway resume` | Every step except `blocked`. |
+| `spoolway resume --skip-hook` | Every step. |
+| `spoolway resume --stage` | `blocked`. On any other step it fails as `spoolway resume`. |
+| `spoolway config set`, `spoolway config override` | Every step. |
+| `spoolway override promote`, `spoolway override drop`, `spoolway pipeline promote` | Every step. |
+| `spoolway pipeline override`, `copy` or `rename`; `spoolway prompt override` or `copy` | Every step. |
+
+A prompt that names such a command only to forbid it fails too. Describe the action in words
+instead, such as "do not restart the step".
 
 A command that ends a sentence passes. In `Report with spoolway report.` the check reads the
 command as `spoolway report`. The same holds for a closing `:`, `!` or `?`.

@@ -86,7 +86,11 @@ pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
 /// reads. A dispatcher lane's worktree is refused too, but without that
 /// line: the lane is told to put the setting in its report instead.
 pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
-    let write = repo.tracked_write_root("config", &format!("config set {key} {value}"))?;
+    let write = repo.tracked_write_root(
+        &crate::commands::refusal::CONFIG_SET,
+        "config",
+        &format!("config set {key} {value}"),
+    )?;
     let write_root = write.root;
     crate::confkv::check_typed(key, value)?;
     // Held from the load to the save: a config loaded before the lock was
@@ -804,10 +808,14 @@ mod tests {
             "the main checkout's file must be byte-identical"
         );
         assert_eq!(
-            repo.tracked_write_root("config", "config set k v")
-                .unwrap()
-                .note()
-                .as_deref(),
+            repo.tracked_write_root(
+                &crate::commands::refusal::CONFIG_SET,
+                "config",
+                "config set k v"
+            )
+            .unwrap()
+            .note()
+            .as_deref(),
             Some("  the main checkout keeps its own copy until task/x merges")
         );
     }

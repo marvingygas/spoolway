@@ -357,7 +357,11 @@ impl Promotion {
                         ..repo.clone()
                     };
                     borrowed
-                        .tracked_write_root("tracked files", &typed)
+                        .tracked_write_root(
+                            &crate::commands::refusal::OVERRIDE_PROMOTE,
+                            "tracked files",
+                            &typed,
+                        )
                         .map_err(refused)?;
                 }
                 self.make(repo, path)?;
@@ -366,7 +370,11 @@ impl Promotion {
         let checkout = self.folder();
         let target = checkout_repo(repo, checkout);
         let write = target
-            .tracked_write_root("tracked files", &typed)
+            .tracked_write_root(
+                &crate::commands::refusal::OVERRIDE_PROMOTE,
+                "tracked files",
+                &typed,
+            )
             .map_err(refused)?;
         // `Repo::discover` takes a worktree nested inside the main
         // checkout's folder for the main checkout, so the write would land

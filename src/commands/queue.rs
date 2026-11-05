@@ -599,7 +599,7 @@ pub fn queue_add(
     if args.from.is_empty() {
         return print_skeleton_task(repo, pipelines);
     }
-    refuse_from_lane("the queue is mutated", in_lane)?;
+    refuse_from_lane(&refusal::QUEUE_ADD_FROM, in_lane)?;
 
     let tasks = gather_tasks(&args.from)?;
     queue_add_gathered(repo, pipelines, args, &tasks)
@@ -626,7 +626,7 @@ pub fn queue_add_on(
         // now could actually run on, which is every one the dispatcher has.
         return print_skeleton_task(repo, &loaded.pipelines(&loaded.names())?);
     }
-    refuse_from_lane("the queue is mutated", in_lane)?;
+    refuse_from_lane(&refusal::QUEUE_ADD_FROM, in_lane)?;
 
     let tasks = gather_tasks(&args.from)?;
     let named: Vec<String> = tasks

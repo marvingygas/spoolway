@@ -61,7 +61,7 @@ pub fn lane_cmd(
         return attach(repo, pipelines, mux, &AttachArgs { lane });
     }
     if let Some(message) = &args.message {
-        refuse_from_lane("a lane is answered", in_lane)?;
+        refuse_from_lane(&refusal::LANE_ANSWER, in_lane)?;
         let lane = args.lane.clone().expect("clap requires a lane with -m");
         // A one-element Vec, not a flattened String: `answer`'s body — kept
         // byte-for-byte per the acceptance criteria — still does
