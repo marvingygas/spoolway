@@ -1970,7 +1970,9 @@ fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
 }
 
 /// The refusal for an id whose worktree or branch an earlier task left
-/// behind, or `None` when neither exists.
+/// behind, or `None` when nothing is left. A leftover local checkout or
+/// branch is reported first; only when there is none is `origin` asked, so a
+/// refusal that needs no network never waits for one.
 ///
 /// Deleting a running task's queue file drops it without cleaning up.
 /// Queueing the id again would adopt the leftover checkout without a word, so
@@ -1983,7 +1985,7 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
     let has_worktree = worktree.exists();
     let has_branch = ref_exists(repo, branch);
     if !has_worktree && !has_branch {
-        return None;
+        return remote_leftover_refusal(repo, id, branch);
     }
     let mut what = Vec::new();
     let mut remove = Vec::new();
@@ -2014,6 +2016,45 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
          queued.",
         what.join(" and "),
         remove.join(", then "),
+    ))
+}
+
+/// The refusal for a task whose branch an earlier run left on `origin`, or
+/// `None` when `origin` does not have it or cannot be asked.
+///
+/// `queue unqueue` deletes the local branch and keeps the published one,
+/// because it belongs to the forge. The shipped `create-pr` step never
+/// force-pushes, so a redo would run to its push and be rejected there,
+/// leaving the task blocked and its dependents unstarted. Nothing is pushed,
+/// deleted or renamed here: the old branch and its pull request are the
+/// person's to settle.
+///
+/// An `origin` that does not answer (offline, no credential, the ten-second
+/// limit of [`Repo::remote_branch_answer`]) refuses nothing, so a task still
+/// queues when the network is out. The open pull request is named only when
+/// `gh` lists one; without `gh` the refusal names the branch alone.
+fn remote_leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
+    if repo.remote_branch_answer(branch) != Some(true) {
+        return None;
+    }
+    let open = crate::repo::head_pull_requests("gh", &repo.root, branch)
+        .ok()
+        .flatten()
+        .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out).ok())
+        .and_then(|list| {
+            list.iter()
+                .find(|pr| pr["state"].as_str() == Some("OPEN"))
+                .and_then(|pr| pr["number"].as_u64())
+        });
+    let pull_request = open.map_or(String::new(), |n| {
+        format!(" and its open pull request #{n}")
+    });
+    Some(format!(
+        "task id `{id}` cannot be queued: `origin/{branch}`{pull_request} from an earlier task \
+         with that id is still there, and the new task's push of `{branch}` would be rejected \
+         because publishing never overwrites a branch. to drop it, run `git push origin \
+         --delete {branch}`. to keep it under another name, run `git fetch origin {branch} && \
+         git push origin FETCH_HEAD:refs/heads/<name>`, then drop it. nothing was queued."
     ))
 }
 
