@@ -23,7 +23,9 @@
 //! And it *reads* what a project wrote, against the step that runs it. Two
 //! rules, of two different kinds. [`stale_commands`] is a fact, not an
 //! opinion — a `spoolway …` command this release does not have, checked
-//! against clap's own command tree. This is what an upgrade used to prevent
+//! against clap's own command tree. [`lane_refused_commands`] is a fact too:
+//! a command spoolway refuses inside a lane, read from the list the refusals
+//! themselves use. This is what an upgrade used to prevent
 //! by regenerating half the file, and nothing is regenerated now, so the
 //! drift has to be found by reading instead, which is the trade the format's
 //! removal actually made. A surviving finding fails `spoolway pipeline
@@ -955,13 +957,13 @@ pub fn show(repo: &Repo, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read every prompt against the steps that run it, for [`stale_commands`] —
+/// Read every prompt against the steps that run it, for [`failing_rules`] —
 /// the rule that fails `spoolway pipeline check`. A prompt no step runs yet
 /// still gets read, the same as every other rule this lint ever had, since a
 /// prompt written before its step is wired up is the normal state halfway
 /// through adding one.
 pub fn lint(repo: &Repo, pipelines: &Pipelines) -> Result<Vec<Finding>> {
-    read_prompts(repo, pipelines, stale_commands)
+    read_prompts(repo, pipelines, failing_rules)
 }
 
 /// Read every prompt against the steps that run it, for
@@ -1042,7 +1044,7 @@ fn stale_commands(name: &str, body: &str, at: &str) -> Vec<Finding> {
     let cli = crate::cli::Cli::command();
     let mut out = Vec::new();
 
-    for (line, path, flags) in invocations(body) {
+    for (line, path, flags, _shorts) in invocations(body) {
         // Walk as far down the tree as the prose actually names, so `spoolway
         // queue show` is checked as a pair and `spoolway dispatch` as one word.
         let mut node = &cli;
@@ -1122,6 +1124,83 @@ fn stale_commands(name: &str, body: &str, at: &str) -> Vec<Finding> {
     out
 }
 
+/// A prompt telling its lane to run a command spoolway refuses in a lane.
+///
+/// The refusals come from [`crate::commands::LANE_REFUSALS`], the same list
+/// the refusing call sites read, so a new refusal is caught here without a
+/// second edit. Each step a prompt runs on is judged on its own, because the
+/// same line can be allowed on `blocked` and refused everywhere else: `at`
+/// is `pipeline/step`, and a prompt no step runs is judged as a step other
+/// than `blocked`, the strictest reading.
+///
+/// A prompt that names such a command only to forbid it fails too. The
+/// message says to describe the action in words, since the lint reads prose
+/// for commands and cannot tell a ban from an order.
+fn lane_refused_commands(name: &str, body: &str, at: &str) -> Vec<Finding> {
+    use crate::commands::{LANE_REFUSALS, RefusedOn};
+
+    let step = at.rsplit_once('/').map_or("", |(_, step)| step);
+    let mut out = Vec::new();
+
+    for (line, path, flags, shorts) in invocations(body) {
+        let mut hits: Vec<_> = LANE_REFUSALS
+            .iter()
+            .filter(|refusal| {
+                path.len() >= refusal.command.len()
+                    && path.iter().zip(refusal.command).all(|(a, b)| a == b)
+            })
+            .filter(|refusal| match refusal.on {
+                RefusedOn::Every => true,
+                RefusedOn::Except(allowed) => step != allowed,
+                RefusedOn::Only(only) => step == only,
+            })
+            .filter(|refusal| match refusal.flag {
+                None => true,
+                Some(flag) => {
+                    flags.iter().any(|f| f == flag)
+                        || refusal.short.is_some_and(|c| shorts.contains(&c))
+                }
+            })
+            .collect();
+        // `resume --skip-hook` is one refusal, not that and the plain
+        // `resume` one as well.
+        if hits.iter().any(|refusal| refusal.flag.is_some()) {
+            hits.retain(|refusal| refusal.flag.is_some());
+        }
+        for refusal in hits {
+            let mut command = format!("spoolway {}", refusal.command.join(" "));
+            if let Some(flag) = refusal.flag {
+                match refusal.short {
+                    Some(short) if shorts.contains(&short) => {
+                        command.push_str(&format!(" -{short}"))
+                    }
+                    _ => command.push_str(&format!(" --{flag}")),
+                }
+            }
+            out.push(Finding {
+                prompt: name.to_string(),
+                at: at.to_string(),
+                message: format!(
+                    "tells the lane to run `{command}`, which spoolway refuses in a lane: \
+                     {} from outside it. Describe the action in words instead of naming the \
+                     command — the line is `{}`",
+                    refusal.what,
+                    line.trim()
+                ),
+            });
+        }
+    }
+
+    out
+}
+
+/// Both rules that fail `spoolway pipeline check`.
+fn failing_rules(name: &str, body: &str, at: &str) -> Vec<Finding> {
+    let mut findings = stale_commands(name, body, at);
+    findings.extend(lane_refused_commands(name, body, at));
+    findings
+}
+
 /// The subcommand names of one node, for an error message that says what the
 /// available spellings are rather than only that this one is wrong.
 fn subcommands(node: &clap::Command) -> Vec<String> {
@@ -1164,7 +1243,7 @@ fn restated_report_contract(name: &str, body: &str, at: &str) -> Vec<Finding> {
     let flags = report_flags();
     let mut out = Vec::new();
 
-    for (line, path, _flags) in invocations(body) {
+    for (line, path, _flags, _shorts) in invocations(body) {
         if path.first().map(String::as_str) == Some("report") {
             out.push(Finding {
                 prompt: name.to_string(),
@@ -1228,7 +1307,10 @@ fn flags_named(segment: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every `spoolway …` invocation in some prose, as `(line, words, long flags)`.
+/// One `spoolway …` invocation: `(line, words, long flags, short flags)`.
+type Invocation = (String, Vec<String>, Vec<String>, Vec<char>);
+
+/// Every `spoolway …` invocation in some prose.
 ///
 /// Deliberately line-scoped: a prompt writes commands one to a line, in prose
 /// or in an indented block, and a flag three paragraphs later belongs to a
@@ -1236,7 +1318,7 @@ fn flags_named(segment: &str) -> Vec<String> {
 /// meant to substitute, and never a subcommand. A closing backtick ends the
 /// command too: "`spoolway lane` say what you left running" names `spoolway
 /// lane`, and the prose after it is not a subcommand of anything.
-fn invocations(body: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
+fn invocations(body: &str) -> Vec<Invocation> {
     let mut out = Vec::new();
 
     for line in body.lines() {
@@ -1249,7 +1331,7 @@ fn invocations(body: &str) -> Vec<(String, Vec<String>, Vec<String>)> {
 }
 
 /// One backtick-delimited stretch of `line`, scanned for `spoolway …`.
-fn invocations_in(line: &str, segment: &str, out: &mut Vec<(String, Vec<String>, Vec<String>)>) {
+fn invocations_in(line: &str, segment: &str, out: &mut Vec<Invocation>) {
     {
         // Quotes, list bullets and code fences are punctuation around the
         // command, not part of it.
@@ -1311,10 +1393,25 @@ fn invocations_in(line: &str, segment: &str, out: &mut Vec<(String, Vec<String>,
                 .map(|word| word.to_string())
                 .collect();
 
+            // `-m` and its kind: a single dash and a single letter. Kept apart
+            // from `flags` because `stale_commands` checks those against clap's
+            // long names, and a short one would never match.
+            let shorts: Vec<char> = rest
+                .iter()
+                .filter_map(|word| word.strip_prefix('-'))
+                .filter(|word| !word.starts_with('-'))
+                .filter_map(|word| {
+                    let mut chars = word.chars();
+                    chars
+                        .next()
+                        .filter(|c| c.is_ascii_alphabetic() && chars.next().is_none())
+                })
+                .collect();
+
             if path.is_empty() {
                 continue;
             }
-            out.push((line.to_string(), path, flags));
+            out.push((line.to_string(), path, flags, shorts));
         }
     }
 }
@@ -1489,6 +1586,85 @@ mod tests {
         findings.iter().map(|f| &f.message).collect()
     }
 
+    fn refused(body: &str, at: &str) -> Vec<Finding> {
+        lane_refused_commands("p", body, at)
+    }
+
+    #[test]
+    fn a_refused_command_names_prompt_step_command_and_the_refusal() {
+        for (body, command) in [
+            (
+                "Run `spoolway queue add --base main --from -`.",
+                "spoolway queue add --from",
+            ),
+            ("Run `spoolway lane review -m hello`.", "spoolway lane -m"),
+            ("Run `spoolway restart <task>`.", "spoolway restart"),
+            ("Run `spoolway resume <task>`.", "spoolway resume"),
+        ] {
+            let findings = refused(body, "impl/implement");
+            assert_eq!(findings.len(), 1, "{body}: {:?}", messages(&findings));
+            let rendered = findings[0].render();
+            assert!(rendered.contains("p (impl/implement)"), "{rendered}");
+            assert!(rendered.contains(command), "{rendered}");
+            assert!(rendered.contains("refuses in a lane"), "{rendered}");
+            assert!(rendered.contains("in words"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn bare_queue_add_and_a_resume_on_blocked_pass() {
+        assert!(
+            refused(
+                "Run `spoolway queue add` for the skeleton.",
+                "impl/implement"
+            )
+            .is_empty()
+        );
+        assert!(refused("Run `spoolway resume <task>`.", "impl/blocked").is_empty());
+    }
+
+    #[test]
+    fn resume_skip_hook_and_stage_fail_on_blocked() {
+        for body in [
+            "Run `spoolway resume <task> --skip-hook`.",
+            "Run `spoolway resume <task> --stage done`.",
+        ] {
+            assert_eq!(refused(body, "impl/blocked").len(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn stage_on_another_step_is_the_plain_resume_finding_only() {
+        let findings = refused(
+            "Run `spoolway resume <task> --stage done`.",
+            "impl/implement",
+        );
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+    }
+
+    #[test]
+    fn a_prompt_on_blocked_and_another_step_is_judged_per_step() {
+        let (repo, _root_guard) = crate::commands::testutil::fixture("refused-per-step");
+        let dir = repo.prompts_dir().join("both");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("PROMPT.md"), "Run `spoolway resume <task>`.\n").unwrap();
+        let pipeline = crate::pipeline::Pipeline::parse(
+            "t",
+            "steps:\n  - id: a\n    agent: claude\n    prompt: both\n    model: m\n    \
+             on_pass: done\n  - id: blocked\n    agent: claude\n    prompt: both\n    \
+             model: m\n",
+        )
+        .unwrap();
+        let pipelines = crate::pipeline::Pipelines {
+            pipelines: [("t".to_string(), pipeline)].into_iter().collect(),
+            ignored_overrides: Vec::new(),
+            clashes: Default::default(),
+        };
+        let findings = lint(&repo, &pipelines).unwrap();
+        assert_eq!(findings.len(), 1, "{:?}", messages(&findings));
+        assert_eq!(findings[0].at, "t/a");
+    }
+
     /// The check that replaced the file format. A prompt naming a command this
     /// binary does not have used to be survivable because half the file was
     /// regenerated on upgrade; nothing is regenerated now, so this has to be
@@ -1547,7 +1723,7 @@ mod tests {
     #[test]
     fn every_shipped_prompt_names_only_real_commands() {
         for prompt in crate::assets::PROMPTS {
-            let findings = stale_commands(prompt.name, prompt.body, "");
+            let findings = failing_rules(prompt.name, prompt.body, "");
             assert!(
                 findings.is_empty(),
                 "{}: {:?}",
