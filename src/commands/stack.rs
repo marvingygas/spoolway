@@ -1057,7 +1057,7 @@ fn register_stack(
     // rebuilt as `task/<dep_id>` — the name its pull request was opened on,
     // and the one `gh pr view` is asked for below. An unresolvable
     // dependency fails by name here.
-    let dep_branch = repo.dependency_branch(dep_id)?;
+    let dep_branch = repo.dependency_own_branch(dep_id)?;
     let Some(dep) = pr_view(&gh, worktree, &dep_branch)? else {
         // A dependency that did its work and walked past the handover step
         // opened no pull request: its commits reach the base through this

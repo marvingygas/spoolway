@@ -27291,6 +27291,55 @@ mod tests {
         );
     }
 
+    /// A dependency whose pull request merged and whose branch was deleted
+    /// leaves its remote-tracking ref behind. The cut, the recorded start and
+    /// the missing-branch check all name where the pull request landed, so the
+    /// stale ref neither passes for a branch to cut from nor pauses the task.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_of_a_merged_parent_with_a_stale_tracking_ref_starts_where_it_landed() {
+        let (repo, _root_guard) = fixture("start-merged-parent-stale-ref");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/task/first", "HEAD"])
+            .unwrap();
+        let landed = repo.branch().unwrap();
+        let archived = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.run = Some("run-first".into());
+            f.starts_from = Some(landed.clone());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
+        let task = reload(&add_task_with(&repo, "second", "queued", |f| {
+            f.depends_on = vec!["first".into()];
+            f.base = Some(landed.clone());
+        }));
+        let gh = repo.root.join("gh-merged");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\necho '[{{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"{landed}\"}}]'\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _gh = crate::platform::GhOverride::new(gh.display().to_string());
+
+        assert_eq!(start_branch(&repo, &task, &landed).unwrap(), landed);
+        assert_eq!(recorded_start(&repo, &task, &landed).unwrap(), landed);
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        assert_eq!(
+            dispatcher.missing_start_branch(&task, &mut HashMap::new()),
+            None
+        );
+    }
+
     /// An `origin` that cannot be asked proves nothing about the branch, and
     /// the pause waits for a person, so it is not taken on a blip.
     #[test]

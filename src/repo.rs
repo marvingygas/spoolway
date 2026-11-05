@@ -1172,12 +1172,23 @@ impl Repo {
     /// asked for by its default name before this gives up — see the body.
     ///
     /// A dependency closed with nothing to hand over hands where it stood on
-    /// instead — see [`Repo::closed_dependency_base`].
+    /// instead — see [`Repo::closed_dependency_base`]. One whose pull request
+    /// merged hands on the branch that pull request merged into. When `gh`
+    /// cannot answer, the dependency's own branch is kept.
     pub fn dependency_branch(&self, dep_id: &str) -> Result<String> {
-        match self.closed_dependency_base(dep_id) {
-            Some(base) => Ok(base),
-            None => self.dependency_own_branch(dep_id),
+        if let Some(base) = self.closed_dependency_base(dep_id) {
+            return Ok(base);
         }
+        let own = self.dependency_own_branch(dep_id)?;
+        // The squash merge deleted `own` on the remote, yet its
+        // remote-tracking ref lingers and would pass for a branch to cut
+        // from; the work is where the pull request landed.
+        if self.archived_done(dep_id).is_some()
+            && let Some(landed) = self.merged_landing(&gh_program(), &own)
+        {
+            return Ok(landed);
+        }
+        Ok(own)
     }
 
     /// The branch `dep_id`'s own work lives on, whether or not it was ever
@@ -1310,6 +1321,10 @@ impl Repo {
     /// base through the dependent's pull request, cut from its branch. When
     /// `gh` cannot answer, the dependency's branch is kept, as it was before
     /// the rule existed.
+    ///
+    /// A third case is a dependency whose pull request merged: its work is in
+    /// the branch the pull request merged into, so that branch is recorded,
+    /// and the dependency's own branch, which a merge usually deletes, is not.
     pub fn dependency_start(&self, dep_id: &str) -> Result<String> {
         self.dependency_start_asking(dep_id, &gh_program(), 0)
     }
@@ -1326,8 +1341,13 @@ impl Repo {
         let Some(dep) = self.archived_done(dep_id) else {
             return Ok(own);
         };
-        if !nothing_to_hand_over(&dep) && self.has_pull_request(gh, &own) != Some(false) {
-            return Ok(own);
+        if !nothing_to_hand_over(&dep) {
+            if let Some(landed) = self.merged_landing(gh, &own) {
+                return Ok(landed);
+            }
+            if self.has_pull_request(gh, &own) != Some(false) {
+                return Ok(own);
+            }
         }
         if let Some(from) = dep.front.starts_from.clone() {
             return Ok(from);
@@ -1443,23 +1463,40 @@ impl Repo {
     /// its head. `None` when `gh` could not be asked, or when the project has
     /// no `origin` for it to ask about.
     ///
-    /// A pull request, once opened, stays in the list, so a `true` is kept for
-    /// the life of the process. A `false` is only right until a person opens
-    /// one by hand, and a dispatcher can run for weeks, so a `false` and a
-    /// failed ask are both kept for a minute: the board asks on every redraw,
-    /// and this bounds that to one ask a minute per branch.
+    /// Kept as [`Repo::pull_request_facts`] keeps its answers.
     pub(crate) fn has_pull_request(&self, gh: &str, branch: &str) -> Option<bool> {
+        self.pull_request_facts(gh, branch).map(|facts| facts.any)
+    }
+
+    /// The branch the merged pull request of `branch` landed in, when one
+    /// merged and none is open. `None` for every other answer, one `gh` could
+    /// not give included, so a caller that cannot tell keeps the branch.
+    fn merged_landing(&self, gh: &str, branch: &str) -> Option<String> {
+        self.pull_request_facts(gh, branch)?.merged_into
+    }
+
+    /// What GitHub knows of the pull requests with `branch` for their head.
+    /// `None` when `gh` could not be asked, or when the project has no
+    /// `origin` for it to ask about.
+    ///
+    /// A merged pull request stays merged, so that answer is kept for the
+    /// life of the process. Anything else is only right until a person opens
+    /// or merges one, and a dispatcher can run for weeks, so it and a failed
+    /// ask are kept for a minute: the board asks on every redraw, and this
+    /// bounds that to one ask a minute per branch.
+    fn pull_request_facts(&self, gh: &str, branch: &str) -> Option<PullRequestFacts> {
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock};
         use std::time::{Duration, Instant};
-        type Asked = HashMap<String, (Option<bool>, Instant)>;
+        type Asked = HashMap<String, (Option<PullRequestFacts>, Instant)>;
         static ASKED: OnceLock<Mutex<Asked>> = OnceLock::new();
         let key = format!("{gh}\0{}\0{branch}", self.root.display());
         let asked = ASKED.get_or_init(Default::default);
         if let Some((answer, at)) = asked.lock().ok()?.get(&key)
-            && (*answer == Some(true) || at.elapsed() < Duration::from_secs(60))
+            && (answer.as_ref().is_some_and(|f| f.merged_into.is_some())
+                || at.elapsed() < Duration::from_secs(60))
         {
-            return *answer;
+            return answer.clone();
         }
         // No forge to ask: `gh` would fail in such a repository anyway, or,
         // given a stub, answer for a project that has no pull requests at all.
@@ -1468,9 +1505,9 @@ impl Repo {
             .ok()
             .and_then(|_| head_pull_requests(gh, &self.root, branch).ok().flatten())
             .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out).ok())
-            .map(|list| !list.is_empty());
+            .map(|list| PullRequestFacts::from_list(&list));
         if let Ok(mut asked) = asked.lock() {
-            asked.insert(key, (answer, Instant::now()));
+            asked.insert(key, (answer.clone(), Instant::now()));
         }
         answer
     }
@@ -4526,6 +4563,32 @@ fn nothing_to_hand_over(task: &Task) -> bool {
         .as_ref()
         .is_some_and(|patch| patch.files == 0)
         || task.front.run.is_none()
+}
+
+/// What the pull requests listed for one head branch add up to.
+#[derive(Clone, Debug)]
+struct PullRequestFacts {
+    /// Whether any pull request, in any state, was listed.
+    any: bool,
+    /// The base of the merged pull request, when one merged and none is still
+    /// open. An open one wins: the branch is being stacked on, not landed.
+    merged_into: Option<String>,
+}
+
+impl PullRequestFacts {
+    fn from_list(list: &[serde_json::Value]) -> Self {
+        let state = |pr: &serde_json::Value| pr["state"].as_str().map(str::to_ascii_uppercase);
+        let open = list.iter().any(|pr| state(pr).as_deref() == Some("OPEN"));
+        let merged_into = list
+            .iter()
+            .filter(|pr| state(pr).as_deref() == Some("MERGED"))
+            .find_map(|pr| pr["baseRefName"].as_str().map(str::to_string))
+            .filter(|_| !open);
+        Self {
+            any: !list.is_empty(),
+            merged_into,
+        }
+    }
 }
 
 /// What `gh pr list --head <branch> --state all` printed, as JSON bytes with
