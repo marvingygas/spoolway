@@ -1588,8 +1588,9 @@ Each reads only the pipelines its own tasks name. With no dispatcher running, th
 pipeline files.
 
 `spoolway queue route`, `spoolway queue list` and the board therefore name the step that
-`spoolway resume` takes. A task whose pipeline the running dispatcher did not load shows as
-`unknown`, with NEXT telling you to restart the dispatcher. While a dispatcher runs,
+`spoolway resume` takes. A task whose pipeline file was added since the dispatcher started shows
+as `unknown`, with NEXT telling you to restart the dispatcher. A task whose pipeline no file
+defines shows as `held`, with the line from [States](#states) that names the way out. While a dispatcher runs,
 `spoolway queue list` still answers when a pipeline file does not parse.
 
 An edit to a pipeline file changes nothing until the dispatcher restarts or reloads. A pipeline
@@ -1640,7 +1641,7 @@ The dispatcher refuses a reload and changes nothing when one of these is true:
 | `config.toml` does not load | The load error, and to fix `config.toml`. |
 | A pipeline file does not load | The load error, and to fix the file it names. |
 | A task sits on a step the new pipelines lack, or is held at one | The task and the missing step, and to put the step back or wait until the task has left it. |
-| A task names a pipeline the new pipelines lack | The task and the pipeline, and to put its file back or wait until the task is done. |
+| A task names a pipeline the new pipelines lack, and the running pipelines have it | The task and the pipeline, and to put its file back or wait until the task is done. A task on a pipeline the running pipelines lack too does not refuse a reload. The dispatcher already holds it. |
 | A queue file does not parse, or the queue cannot be read | The file and the error, and to fix or remove it. |
 | `unattended.enabled` is on and `unattended.blocked_model` is blank | Both keys, and to set the model or turn `unattended.enabled` off. |
 | The project home cannot be written | That the new pipelines could not be recorded. |

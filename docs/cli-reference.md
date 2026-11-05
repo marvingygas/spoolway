@@ -1332,7 +1332,11 @@ pipeline the branch lacks reads:
   warning: live task `l2` names pipeline `newp`, which this branch does not have yet
 ```
 
-Run anywhere else, the same finding is a failure and reads `which this project no longer defines`.
+Run anywhere else, the same finding is a failure. It reads:
+
+```
+  live task `l2` names pipeline `newp`, which this project no longer defines — the run holds it; set `pipeline:` in its task file to one that exists
+```
 
 A first step of `blocked` and a `loop: 0` are failures. See [Routing](pipelines.md#routing).
 
