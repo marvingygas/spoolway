@@ -2118,9 +2118,10 @@ fn open_pull_request(repo: &Repo, branch: &str) -> Option<u64> {
 /// times that wait is paid. The open pull request is named only when the
 /// forge client lists one; without it the refusal names the branch alone.
 ///
-/// Deleting a branch closes the pull request opened from it, so when one is
-/// named the refusal says so and has the person keep the branch first if they
-/// want that pull request's history.
+/// Deleting a branch closes the pull request opened from it, and a pull
+/// request's head branch cannot be moved, so keeping the commits under another
+/// name does not keep the pull request open. When one is named the refusal says
+/// that, so the person is not led to close it believing otherwise.
 fn remote_leftover_refusal(
     repo: &Repo,
     id: &str,
@@ -2130,23 +2131,25 @@ fn remote_leftover_refusal(
     if asks.has_branch(repo, branch) != Some(true) {
         return None;
     }
-    let keep = format!(
-        "to keep it under another name, run `git fetch origin {branch} && git push origin \
-         FETCH_HEAD:refs/heads/<name>`"
-    );
+    let keep =
+        format!("`git fetch origin {branch} && git push origin FETCH_HEAD:refs/heads/<name>`");
     let (what, are, drop) = match open_pull_request(repo, branch) {
         Some(number) => (
             format!("`origin/{branch}` and its open pull request #{number}"),
             "are",
             format!(
-                "to drop it, run `git push origin --delete {branch}`, which also closes \
-                 #{number}. {keep} first if #{number} should stay open under it"
+                "to drop it, run `git push origin --delete {branch}`, which closes #{number} \
+                 whatever else is kept. to keep its commits under another name first, run \
+                 {keep}"
             ),
         ),
         None => (
             format!("`origin/{branch}`"),
             "is",
-            format!("to drop it, run `git push origin --delete {branch}`. {keep}, then drop it"),
+            format!(
+                "to drop it, run `git push origin --delete {branch}`. to keep it under \
+                 another name, run {keep}, then drop it"
+            ),
         ),
     };
     Some(format!(
@@ -2852,9 +2855,11 @@ fn open_and_prefix_waiting(
     // the message names it, so the run after the leftover is cleared reuses
     // it instead of opening a second one.
     //
-    // `origin` is asked only about a branch the prefix has just renamed:
-    // `validate_batch` already asked about every `task/<id>`, and asking again
-    // would double the wait on an `origin` that does not answer.
+    // `origin` is asked only about a branch the prefix has just renamed,
+    // since `validate_batch` already asked about every `task/<id>`. The asks
+    // here start afresh, so a renamed branch can cost a second limit on an
+    // `origin` that did not answer there. The silence is not carried across
+    // the issue hook, which the board may wait on for a person's answer.
     let mut asks = OriginAsks::default();
     for task in tasks.iter() {
         let branch = task_branch(task);
@@ -13755,6 +13760,12 @@ mod tests {
         )
         .unwrap();
         let path = write_doc(&repo, "redo.md", &task_text("redo", "group: redos\n", BODY));
+        // A forge client of the test's own, never whichever `gh` the machine
+        // has: it lists one open pull request for the branch.
+        let gh = repo.root.join("gh-stub");
+        std::fs::write(&gh, "#!/bin/sh\necho '[{\"number\":77}]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
 
         let err = queue_add(
             &repo,
@@ -13766,7 +13777,15 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("`origin/task/redo`"), "{err}");
+        assert!(
+            err.contains("`origin/task/redo` and its open pull request #77"),
+            "{err}"
+        );
+        assert!(err.contains("are still there"), "{err}");
+        assert!(
+            err.contains("which closes #77 whatever else is kept"),
+            "{err}"
+        );
         assert!(err.contains("git push origin --delete task/redo"), "{err}");
         assert!(err.contains("FETCH_HEAD:refs/heads/<name>"), "{err}");
         assert!(err.contains("nothing was queued"), "{err}");
