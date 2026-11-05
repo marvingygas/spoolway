@@ -2412,7 +2412,11 @@ fn applying_note(path: &str, branch: Option<&str>) -> String {
 /// outright, where [`crate::local::is_repo_mode`] is false because the whole
 /// setup is already private and there is nothing to promote into.
 pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
-    let write = repo.tracked_write_root("pipelines", &format!("pipeline promote {name}"))?;
+    let write = repo.tracked_write_root(
+        &crate::commands::refusal::PIPELINE_PROMOTE,
+        "pipelines",
+        &format!("pipeline promote {name}"),
+    )?;
     let write_root = write.root;
     if !crate::local::is_repo_mode(&repo.checkout) {
         bail!(

@@ -192,6 +192,32 @@ pub const CONFIG_OVERRIDE: LaneRefusal = entry!(
     None,
     RefusedOn::Every,
 );
+/// The three promote commands and `config set` write the tracked setup, which
+/// [`crate::repo::Repo::tracked_write_root`] refuses in a lane.
+pub const CONFIG_SET: LaneRefusal = entry!(
+    "CONFIG_SET",
+    SETUP,
+    &["config", "set"],
+    None,
+    None,
+    RefusedOn::Every,
+);
+pub const OVERRIDE_PROMOTE: LaneRefusal = entry!(
+    "OVERRIDE_PROMOTE",
+    SETUP,
+    &["override", "promote"],
+    None,
+    None,
+    RefusedOn::Every,
+);
+pub const PIPELINE_PROMOTE: LaneRefusal = entry!(
+    "PIPELINE_PROMOTE",
+    SETUP,
+    &["pipeline", "promote"],
+    None,
+    None,
+    RefusedOn::Every,
+);
 pub const OVERRIDE_DROP: LaneRefusal = entry!(
     "OVERRIDE_DROP",
     SETUP,
@@ -216,6 +242,9 @@ pub const LANE_REFUSALS: &[&LaneRefusal] = &[
     &PROMPT_OVERRIDE,
     &CONFIG_OVERRIDE,
     &OVERRIDE_DROP,
+    &CONFIG_SET,
+    &OVERRIDE_PROMOTE,
+    &PIPELINE_PROMOTE,
 ];
 
 #[cfg(test)]

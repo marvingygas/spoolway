@@ -1620,12 +1620,14 @@ mod tests {
             "Run `spoolway config override`.",
             "Run `spoolway config override --set a=b`.",
             "Run `spoolway override drop prompts/x`.",
+            "Run `spoolway override promote x`.",
+            "Run `spoolway pipeline promote x`.",
+            "Run `spoolway config set k v`.",
         ] {
             for step in ["impl/implement", "impl/blocked"] {
                 assert_eq!(refused(body, step).len(), 1, "{body} on {step}");
             }
         }
-        assert!(refused("Run `spoolway override promote x`.", "impl/implement").is_empty());
         assert!(refused("Run `spoolway pipeline show x`.", "impl/implement").is_empty());
     }
 

@@ -1506,7 +1506,15 @@ impl Repo {
     /// branch, and one lone file there would leave half a setup. A worktree
     /// under [`Repo::worktree_root`] is a dispatcher lane's, and a task must
     /// not move a person's private files out of their home.
-    pub fn tracked_write_root(&self, reads: &str, typed: &str) -> Result<TrackedWrite<'_>> {
+    ///
+    /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
+    /// command asking, for the same reason as in [`Repo::refuse_in_lane`].
+    pub fn tracked_write_root(
+        &self,
+        _command: &crate::commands::LaneRefusal,
+        reads: &str,
+        typed: &str,
+    ) -> Result<TrackedWrite<'_>> {
         if !self.in_linked_worktree() {
             return Ok(TrackedWrite {
                 root: &self.checkout,
@@ -1563,8 +1571,9 @@ impl Repo {
     /// the tracked refusal, this one prints no `-C` line.
     ///
     /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
-    /// command being refused. Its only job is to make every caller name one,
-    /// so `spoolway pipeline check` knows to fail a prompt that runs it.
+    /// command being refused. Its only job is to make every caller name its
+    /// entry, so the test in `src/commands/refusal.rs` finds an entry no
+    /// refusal reads.
     pub fn refuse_in_lane(
         &self,
         _command: &crate::commands::LaneRefusal,

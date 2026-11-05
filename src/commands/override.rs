@@ -501,7 +501,11 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
 
 /// `spoolway override promote <target>`.
 pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
-    let write = repo.tracked_write_root("tracked files", &format!("override promote {target}"))?;
+    let write = repo.tracked_write_root(
+        &crate::commands::refusal::OVERRIDE_PROMOTE,
+        "tracked files",
+        &format!("override promote {target}"),
+    )?;
     let write_root = write.root;
     let lines = promote_override(repo, write_root, target)?;
     for line in lines {
@@ -1254,7 +1258,13 @@ mod tests {
         with_worktrees("promote-main", |[main, ..], root| {
             override_promote(main, "demo").unwrap();
             assert!(tracked_demo(root).contains("model: claude-opus-5"));
-            let write = main.tracked_write_root("tracked files", "x").unwrap();
+            let write = main
+                .tracked_write_root(
+                    &crate::commands::refusal::OVERRIDE_PROMOTE,
+                    "tracked files",
+                    "x",
+                )
+                .unwrap();
             assert!(write.note().is_none());
         });
     }
@@ -1638,7 +1648,13 @@ mod tests {
                 ("prompts/reviewer", "prompts/reviewer"),
                 ("config.toml", "config.toml"),
             ] {
-                let write = repo.tracked_write_root("tracked files", "test").unwrap();
+                let write = repo
+                    .tracked_write_root(
+                        &crate::commands::refusal::OVERRIDE_PROMOTE,
+                        "tracked files",
+                        "test",
+                    )
+                    .unwrap();
                 let lines = promote_override(repo, write.root, target).unwrap();
                 assert_eq!(
                     lines.last().unwrap(),
