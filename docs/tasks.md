@@ -652,7 +652,8 @@ list points at it. A report that a gate holds needs at least one note. See
 ## Archiving
 
 On `done` the dispatcher removes the worktree and the branch and moves the task file to the
-archive directory. The branch is kept while a remote still lacks one of its commits. The usage
+archive directory. The branch is kept while a remote still lacks one of its commits. It is also kept while a queued
+task or a task in the pending directory depends on it, so a task queued again can be cut from it. The usage
 ledger keeps its lines after the task is archived.
 
 A task with a step that runs the deprecated stack command keeps its pull request and predicted
