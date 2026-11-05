@@ -587,6 +587,14 @@ worktree or branch` and names both. `spoolway queue add` refuses that id until t
 and the message gives the `git worktree remove --force` and `git branch -D` commands, or the
 `git branch -m` rename that keeps the work.
 
+`queue unqueue` deletes the local `task/<id>` branch and leaves the one on `origin`, with its pull
+request. `spoolway queue add` also refuses an id whose `task/<id>` branch `origin` still has,
+because the new task's push of that branch would be rejected. The message names `origin/task/<id>`
+and its open pull request when `gh` lists one. It gives `git push origin --delete task/<id>`, which
+closes that pull request, and a `git fetch` and `git push` pair that keeps the commits under
+another name. Nothing is queued, pushed, deleted or renamed. `queue add` asks `origin` once per
+branch and gives up after 10 seconds. An `origin` that cannot be asked refuses nothing.
+
 ### The stop is yours to work in
 
 The pane a stop left open is still there. Type into it, and the lane does what you ask,
