@@ -1179,16 +1179,30 @@ impl Repo {
         if let Some(base) = self.closed_dependency_base(dep_id) {
             return Ok(base);
         }
-        let own = self.dependency_own_branch(dep_id)?;
-        // The squash merge deleted `own` on the remote, yet its
-        // remote-tracking ref lingers and would pass for a branch to cut
-        // from; the work is where the pull request landed.
-        if self.archived_done(dep_id).is_some()
-            && let Some(landed) = self.merged_landing(&gh_program(), &own)
-        {
-            return Ok(landed);
+        self.branch_handed_on(dep_id)
+    }
+
+    /// The branch `dep_id` hands on when it was not closed with nothing to
+    /// hand over: where its pull request merged, else its own branch.
+    ///
+    /// A merged pull request's branch is usually deleted on the remote, yet
+    /// its remote-tracking ref lingers and would pass for a branch to cut
+    /// from; the work is where the pull request landed.
+    fn branch_handed_on(&self, dep_id: &str) -> Result<String> {
+        match self.merged_dependency_landing(dep_id) {
+            Some(landed) => Ok(landed),
+            None => self.dependency_own_branch(dep_id),
         }
-        Ok(own)
+    }
+
+    /// The branch the merged pull request of the archived, finished
+    /// dependency `dep_id` landed in, when GitHub says so. `None` for a
+    /// dependency in the queue, one whose pull request is open or unknown,
+    /// and one `gh` could not be asked about.
+    pub fn merged_dependency_landing(&self, dep_id: &str) -> Option<String> {
+        let own = self.dependency_own_branch(dep_id).ok()?;
+        let dep = self.archived_done(dep_id)?;
+        self.merged_landing(&gh_program(), &own, dep.front.base.as_deref())
     }
 
     /// The branch `dep_id`'s own work lives on, whether or not it was ever
@@ -1301,7 +1315,7 @@ impl Repo {
         if let Some(first) = dep.front.depends_on.first() {
             return match self.closed_dependency_base_at(first, depth + 1) {
                 Some(base) => Some(base),
-                None => self.dependency_own_branch(first).ok(),
+                None => self.branch_handed_on(first).ok(),
             };
         }
         dep.front.starts_from.clone().or(dep.front.base.clone())
@@ -1323,8 +1337,9 @@ impl Repo {
     /// the rule existed.
     ///
     /// A third case is a dependency whose pull request merged: its work is in
-    /// the branch the pull request merged into, so that branch is recorded,
-    /// and the dependency's own branch, which a merge usually deletes, is not.
+    /// the branch the pull request merged into (followed on through that
+    /// branch's own merged pull request), so that branch is recorded, and the
+    /// dependency's own branch, which a merge usually deletes, is not.
     pub fn dependency_start(&self, dep_id: &str) -> Result<String> {
         self.dependency_start_asking(dep_id, &gh_program(), true, 0)
     }
@@ -1350,7 +1365,9 @@ impl Repo {
             return Ok(own);
         };
         if !nothing_to_hand_over(&dep) {
-            if follow_merged && let Some(landed) = self.merged_landing(gh, &own) {
+            if follow_merged
+                && let Some(landed) = self.merged_landing(gh, &own, dep.front.base.as_deref())
+            {
                 return Ok(landed);
             }
             if self.has_pull_request(gh, &own) != Some(false) {
@@ -1358,6 +1375,15 @@ impl Repo {
             }
         }
         if let Some(from) = dep.front.starts_from.clone() {
+            // A dependent cut while its own dependency's pull request was
+            // still coming records that dependency's branch here, which may
+            // since have merged or closed without a pull request: ask about
+            // it again rather than hand its stale name on.
+            if let Some(first) = dep.front.depends_on.first()
+                && self.dependency_own_branch(first).ok().as_deref() == Some(from.as_str())
+            {
+                return self.dependency_start_asking(first, gh, follow_merged, depth + 1);
+            }
             return Ok(from);
         }
         match dep.front.depends_on.first() {
@@ -1482,16 +1508,40 @@ impl Repo {
     /// its head. `None` when `gh` could not be asked, or when the project has
     /// no `origin` for it to ask about.
     ///
-    /// Kept as [`Repo::pull_request_facts`] keeps its answers.
+    /// A `true` is kept for the life of the process, since a pull request,
+    /// once opened, stays in the list. [`Repo::parent_work_asking`] holds a
+    /// task whenever this cannot be answered, so an outage must not turn a
+    /// known `true` into a stall after a minute.
     pub(crate) fn has_pull_request(&self, gh: &str, branch: &str) -> Option<bool> {
-        self.pull_request_facts(gh, branch).map(|facts| facts.any)
+        self.pull_request_facts(gh, branch, true)
+            .map(|facts| facts.any)
     }
 
     /// The branch the merged pull request of `branch` landed in, when one
     /// merged and none is open. `None` for every other answer, one `gh` could
     /// not give included, so a caller that cannot tell keeps the branch.
-    fn merged_landing(&self, gh: &str, branch: &str) -> Option<String> {
-        self.pull_request_facts(gh, branch)?.merged_into
+    ///
+    /// A stacked pull request lands in its parent's branch, and that branch's
+    /// own pull request may have merged since, deleting it in turn. So the
+    /// landing branch is followed through its own merged pull request, to
+    /// the branch where the chain finally landed. The walk stops at `base`
+    /// when the caller knows it, since nothing merges "into" it further, and
+    /// at 16 steps, so a cycle in hand-edited state cannot loop.
+    fn merged_landing(&self, gh: &str, branch: &str, base: Option<&str>) -> Option<String> {
+        let mut landed = self.pull_request_facts(gh, branch, false)?.merged_into?;
+        for _ in 0..16 {
+            if base == Some(landed.as_str()) {
+                break;
+            }
+            match self
+                .pull_request_facts(gh, &landed, false)
+                .and_then(|facts| facts.merged_into)
+            {
+                Some(next) if next != landed => landed = next,
+                _ => break,
+            }
+        }
+        Some(landed)
     }
 
     /// What GitHub knows of the pull requests with `branch` for their head.
@@ -1499,11 +1549,18 @@ impl Repo {
     /// `origin` for it to ask about.
     ///
     /// A merged pull request stays merged, so that answer is kept for the
-    /// life of the process. Anything else is only right until a person opens
-    /// or merges one, and a dispatcher can run for weeks, so it and a failed
-    /// ask are kept for a minute: the board asks on every redraw, and this
-    /// bounds that to one ask a minute per branch.
-    fn pull_request_facts(&self, gh: &str, branch: &str) -> Option<PullRequestFacts> {
+    /// life of the process. So is any listed pull request when `any_is_final`
+    /// is set, for a caller that only asks whether one exists. Anything else
+    /// is only right until a person opens or merges one, and a dispatcher can
+    /// run for weeks, so it and a failed ask are kept for a minute: the board
+    /// asks on every redraw, and this bounds that to one ask a minute per
+    /// branch.
+    fn pull_request_facts(
+        &self,
+        gh: &str,
+        branch: &str,
+        any_is_final: bool,
+    ) -> Option<PullRequestFacts> {
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock};
         use std::time::{Duration, Instant};
@@ -1512,7 +1569,9 @@ impl Repo {
         let key = format!("{gh}\0{}\0{branch}", self.root.display());
         let asked = ASKED.get_or_init(Default::default);
         if let Some((answer, at)) = asked.lock().ok()?.get(&key)
-            && (answer.as_ref().is_some_and(|f| f.merged_into.is_some())
+            && (answer
+                .as_ref()
+                .is_some_and(|f| f.merged_into.is_some() || (any_is_final && f.any))
                 || at.elapsed() < Duration::from_secs(60))
         {
             return answer.clone();
@@ -6157,6 +6216,36 @@ mod tests {
             Some("main")
         );
         assert_eq!(repo.retarget_cut_start(&cut, "task/into-main", false), None);
+    }
+
+    /// A stacked pull request that merged into its parent's branch has not
+    /// landed yet when that parent's own pull request merged afterwards and
+    /// its branch went: the work is where the parent landed. A task closed
+    /// with nothing to hand over hands on the same, whether it was cut while
+    /// its own dependency's pull request was still open or not.
+    #[cfg(unix)]
+    #[test]
+    fn a_merged_chain_is_followed_to_where_it_finally_landed() {
+        let (_origin, work, _base_guard) = fixture("merged-chain-landing");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        archive_done(&repo, "a", 2, "starts_from: main\n");
+        archive_done(&repo, "b", 2, "depends_on: [a]\nstarts_from: task/a\n");
+        archive_done(&repo, "empty", 0, "depends_on: [a]\nstarts_from: task/a\n");
+        let gh = stub_gh(
+            &work,
+            "merged-chain",
+            "case \"$4\" in\n\
+             task/a) echo '[{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"main\"}]';;\n\
+             task/b) echo '[{\"number\":2,\"state\":\"MERGED\",\"baseRefName\":\"task/a\"}]';;\n\
+             *) echo '[]';;\n\
+             esac",
+        );
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        assert_eq!(repo.dependency_branch("b").unwrap(), "main", "b's work");
+        assert_eq!(repo.dependency_start("b").unwrap(), "main");
+        assert_eq!(repo.dependency_branch("empty").unwrap(), "main", "empty");
+        assert_eq!(repo.dependency_start("empty").unwrap(), "main");
     }
 
     /// In a chain `a -> b -> c` where `b` closes with nothing to hand over,

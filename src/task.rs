@@ -445,6 +445,8 @@ pub struct Frontmatter {
     /// `starts_from` here rather than the branch it was cut from, so the
     /// chain's one pull request opens against the chain's base — see
     /// [`crate::repo::Repo::dependency_start`].
+    /// A dependent of a dependency whose pull request merged is cut from, and
+    /// records, the branch that pull request merged into instead.
     /// Recorded separately from `base`, which keeps its own meaning — the
     /// branch the plan lands in — whether or not the two agree.
     ///

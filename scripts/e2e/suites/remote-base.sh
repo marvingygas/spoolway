@@ -14,13 +14,18 @@
 # a branch made directly in it, never fetched by this project's own checkout,
 # is exactly a base only `origin` has.
 #
-# The last two cases are the opposite: a start branch that exists nowhere. A
-# dependency's pull request merges, GitHub deletes its branch, and the
-# dependent — queued while the branch was still there — has nothing to be cut
-# from. It pauses with one line saying so, and starts from `main` once the
-# person writes `starts_from: main` into its front matter and resumes it. A
-# dependent queued after the branch is gone is refused by `queue add` instead,
-# with the same advice, and queues once `starts_from: main` is written.
+# The next cases are the opposite: a start branch that exists nowhere. A
+# person pointed `starts_from:` at a dependency's branch, the dependency's pull
+# request merges, GitHub deletes the branch, and the dependent — queued while
+# the branch was still there — has nothing to be cut from. It pauses with one
+# line saying so, and starts from `main` once the person writes
+# `starts_from: main` into its front matter and resumes it. A dependent queued
+# after the branch is gone is refused by `queue add` instead, with the same
+# advice, and queues once `starts_from: main` is written.
+#
+# A dependent that names no `starts_from:` of its own is different: the pull
+# request of its dependency merged into `plan/live`, so it is cut from, and
+# records, `plan/live`, with no pause and no refusal.
 #
 # The last case is a fetch that hangs. The cut of a remote-only base runs
 # `git fetch origin <base>` inside the dispatcher's pass, so a transport stuck
@@ -102,6 +107,7 @@ record_pr() {
 
 # A finished dependency whose pull request is still open: its task file is
 # archived and names `task/gh-413-merged`, which `origin` still has. The
+# dependent pins `starts_from:` to that branch itself. The
 # dispatcher is stopped first, so nothing cuts the dependent's worktree
 # between queueing it and the branch going.
 dispatcher_stop
@@ -122,7 +128,7 @@ run: r-archived
 DOC
 echo hang > "$CTL/late"
 task_doc "$LIVE/late.md" late "$BODY" "group: late" "depends_on: [merged]" \
-  "base: plan/live"
+  "base: plan/live" "starts_from: task/gh-413-merged"
 must "a dependent of a finished task queues" \
   "$SPOOLWAY" queue add --from "$LIVE/late.md"
 
@@ -149,7 +155,7 @@ says "and the dispatch log says what to set" \
   cat "$E2E_DISPATCH_LOG"
 
 # The person's fix: name a branch that exists, then resume.
-sed -i 's/^base: plan\/live$/&\nstarts_from: main/' "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+sed -i 's/^starts_from: task\/gh-413-merged$/starts_from: main/' "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 says "resume puts it back on queued" "late: -> queued" "$SPOOLWAY" resume late
 
 if drive late implement 60; then ok "and it starts, from the branch the person named"
@@ -158,6 +164,39 @@ says "the task file records \`main\` as starts_from" \
   "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 lacks "and no longer carries the missing branch" \
   "missing_start_branch" "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+
+# A dependent that pinned nothing: `landed` finished, its pull request merged
+# into `plan/live`, and its branch `task/gh-415-landed` was deleted on
+# `origin`. The dependent is cut from `plan/live`, where the work is, and
+# records it, so its own pull request opens there.
+must "the dependency's branch, deleted on origin after its pull request merged" \
+  git -C "$FORGE/origin.git" branch task/gh-415-landed main
+must "its pull request merges and the branch goes" \
+  git -C "$FORGE/origin.git" branch -D task/gh-415-landed
+record_pr 9415 task/gh-415-landed MERGED
+cat > "$SPOOLWAY_PROJECT_HOME/archive/landed.md" <<'DOC'
+---
+id: landed
+title: landed, its branch deleted
+stage: done
+group: landed
+base: plan/live
+branch: task/gh-415-landed
+run: r-archived
+---
+DOC
+echo hang > "$CTL/follows"
+task_doc "$LIVE/follows.md" follows "$BODY" "group: follows" \
+  "depends_on: [landed]" "base: plan/live"
+says "queue add accepts a dependent of a merged task whose branch is gone" \
+  "queued follows" "$SPOOLWAY" queue add --from "$LIVE/follows.md"
+if drive follows implement 60; then
+  ok "and it starts instead of pausing"
+else
+  bad "and it starts instead of pausing (at \`$(stage_of follows)\`)"
+fi
+says "the task file records where the pull request merged" \
+  "starts_from: plan/live" cat "$SPOOLWAY_PROJECT_HOME/queue/follows.md"
 
 # A dependent sent after the branch is gone: `shipped` finished, its pull
 # request merged, and its branch `task/gh-414-shipped` was deleted on
@@ -184,7 +223,7 @@ run: r-archived
 ---
 DOC
 task_doc "$LIVE/after.md" after "$BODY" "group: after" "depends_on: [shipped]" \
-  "base: plan/live"
+  "base: plan/live" "starts_from: task/gh-414-shipped"
 refuses "queue add refuses a dependent whose start branch was deleted" \
   "after starts from task/gh-414-shipped, which doesn't exist. set starts_from: in the task front matter and requeue." \
   "$SPOOLWAY" queue add --from "$LIVE/after.md"

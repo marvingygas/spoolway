@@ -2695,10 +2695,11 @@ impl<'a> Dispatcher<'a> {
                 TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             if graph.ready(&id) {
-                // A start branch that vanished after the task was queued —
-                // its dependency's pull request merged and GitHub deleted the
-                // branch — would fail the cut three times and then fail again
-                // on every `blocked` pass. Nobody is at the queue tab by now,
+                // A start branch that vanished after the task was queued — a
+                // person's own `starts_from:` deleted, or a dependency's
+                // merged pull request that `gh` could not say where it landed
+                // — would fail the cut three times and then fail again on
+                // every `blocked` pass. Nobody is at the queue tab by now,
                 // so the task waits on `paused` for a person to name another
                 // start branch. Checked before `started` fires, since a task
                 // that cannot start has not started.
@@ -7328,7 +7329,9 @@ pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 /// first dependency's branch, else `base`, which the cut reads from `origin`
 /// when `origin` has it (see [`crate::mux::resolve_task_base`]). A dependency
 /// closed with nothing to hand over counts as where it stood here, not its
-/// branch — see [`Repo::closed_dependency_base`].
+/// branch — see [`Repo::closed_dependency_base`] — and one whose pull request
+/// merged counts as the branch that pull request landed in — see
+/// [`Repo::dependency_branch`].
 ///
 /// This is where the worktree is cut, not what is recorded as `starts_from`:
 /// see [`recorded_start`].
@@ -7540,12 +7543,16 @@ fn ensure_checkout(
 
     // A dependent cut while its dependency's pull request still seemed to be
     // coming records that dependency's branch as `starts_from`. When the
-    // dependency then closes with nothing to hand over, or ends with commits
-    // and no pull request, that branch is never pushed, and the pull request
-    // opens against `starts_from` (the shipped `create-pr` prompt says so), so
-    // it is pointed at the dependency's own `starts_from` (else its first
-    // dependency's start, else its base) instead. Only the recorded
-    // name moves: the worktree, its branch and `base_commit` are left alone.
+    // dependency then closes with nothing to hand over, ends with commits
+    // and no pull request, or has its pull request merged, that branch is
+    // never pushed or has been deleted, and the pull request opens against
+    // `starts_from` (the shipped `create-pr` prompt says so), so it is
+    // pointed elsewhere instead: at the dependency's own `starts_from` (else
+    // its first dependency's start, else its base), or, for a merged pull
+    // request, at the branch it merged into. Only the recorded name moves:
+    // the worktree, its branch and `base_commit` are left alone. A merged
+    // dependency's squashed commits are then not in the base of the pull
+    // request, which shows them again until the branch is rebased onto it.
     // A `starts_from` a person pointed elsewhere is not the dependency's
     // branch and is kept.
     if cut_before
@@ -11065,6 +11072,52 @@ mod tests {
             "{prompt}"
         );
         assert!(!prompt.contains("branch `work`"), "{prompt}");
+    }
+
+    /// A dependency whose pull request merged into the task's `base` is not
+    /// the branch the lane sits on: the brief says where the work landed, and
+    /// reads the diff from `origin/<base>`, the ref the cut used, since a local
+    /// `<base>` that sits behind `origin` would show everything merged since
+    /// as the task's own.
+    #[cfg(unix)]
+    #[test]
+    fn what_you_have_says_a_merged_dependency_landed_and_anchors_on_origin() {
+        let (repo, _root_guard) = fixture("what-you-have-merged");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/work", "HEAD"])
+            .unwrap();
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.require_step("implement").unwrap();
+        let archived = add_task_with(&repo, "a-merged", "done", |f| {
+            f.branch = Some("task/a-merged".into());
+            f.base = Some("work".into());
+            f.run = Some("run-a-merged".into());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("a-merged.md")).unwrap();
+        let dependent = Task::load(&add_task_with(&repo, "b-dep", "implement", |front| {
+            front.depends_on = vec!["a-merged".into()];
+            front.base = Some("work".into());
+        }))
+        .unwrap();
+        let gh = repo.root.join("gh-merged");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\necho '[{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"work\"}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let prompt = sent(&repo, &dependent, pipeline, step);
+
+        assert!(prompt.contains("`git diff origin/work...HEAD`"), "{prompt}");
+        assert!(
+            prompt.contains("you sit on    `work`, where `a-merged`'s pull request merged"),
+            "{prompt}"
+        );
     }
 
     /// `what_you_have`'s own choice of base is the subtle part of it: `base:`
