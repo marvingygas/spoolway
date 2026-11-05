@@ -227,14 +227,31 @@ fn poll_within(
         RunState::Exited(code) => {
             let base = std::fs::read_to_string(fetch_note(&runs, &key)).ok();
             let said = failure_text(&runs, &key);
+            let made = made_note(&runs, &key).exists();
             clear_notes(&runs, &key);
             runs.forget(&key)?;
+            let failure = format!(
+                "could not cut a worktree for `{branch}` at {}: `git worktree add` failed \
+                 (exit status: {code}): {said}",
+                path.display()
+            );
+            // A `post-checkout` hook runs after git has made the checkout and
+            // the branch, so a hook that exits non-zero leaves both behind.
+            // Left, the next pass would adopt them as a finished cut and the
+            // hook would never run again. Taken away here, as the stop at the
+            // time limit does, so the next attempt cuts afresh. `begin` has
+            // cleared any earlier checkout, so what is at `path` is this
+            // cut's own; the branch goes only if this cut made it.
+            crate::mux::undo_stopped_cut(
+                &repo.root,
+                path,
+                branch,
+                !made,
+                &failure,
+                "resume the task",
+            )?;
             Err(anyhow::anyhow!(crate::mux::cut_failure(
-                &format!(
-                    "could not cut a worktree for `{branch}` at {}: `git worktree add` failed \
-                     (exit status: {code}): {said}",
-                    path.display()
-                ),
+                &failure,
                 base.as_deref().unwrap_or_default(),
                 base.is_some(),
             )))
