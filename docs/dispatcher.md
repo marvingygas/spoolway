@@ -164,7 +164,9 @@ A task with a `depends_on` is cut from its first dependency's branch. When that 
 [closed without a pull request](tasks.md#a-dependency-closed-without-a-pull-request), meaning it
 changed nothing, the task is cut from the branch that dependency stood on. A task is always cut
 from the branch of a dependency with commits, even when that dependency opened no pull request,
-so a group's one pull request carries every task's commits. A task without a `depends_on` is cut from
+so a group's one pull request carries every task's commits. When the dependency's pull request has
+[merged](tasks.md#a-dependency-whose-pull-request-merged), the task is cut from the branch that
+pull request merged into, usually `origin/<base>`. A task without a `depends_on` is cut from
 `origin/<base>` when `origin` has the base, and from the local `<base>` branch when it does
 not. A `starts_from:` set in the task file wins over both. When the branch to cut from
 exists nowhere, the task pauses instead, as
@@ -2158,8 +2160,8 @@ When a task reaches `done`:
 3. Every lane of the task is stopped, its pane closes, and its spend is banked.
 4. The dispatcher writes the file `removing/<task>` in the project home. The file holds the
    task's run. Then the worktree is removed, unless it was borrowed.
-5. The branch is deleted, unless a queued task still depends on it or the work is not safe
-   elsewhere. With a remote, that means it has commits no remote has. With no remote at all, it
+5. The branch is deleted, unless a queued task or a task in `pending/` still depends on it, or the
+   work is not safe elsewhere. With a remote, that means it has commits no remote has. With no remote at all, it
    means the task's base branch does not contain it. A kept branch is named on a `kept branch`
    line. A branch that does not exist is skipped without a message.
 6. The `removing/<task>` file is deleted. The `conflicts` and `pull req` lines that the handover

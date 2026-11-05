@@ -2695,10 +2695,11 @@ impl<'a> Dispatcher<'a> {
                 TrackingGate::Pending => return Ok(Routed::NextTask),
             }
             if graph.ready(&id) {
-                // A start branch that vanished after the task was queued —
-                // its dependency's pull request merged and GitHub deleted the
-                // branch — would fail the cut three times and then fail again
-                // on every `blocked` pass. Nobody is at the queue tab by now,
+                // A start branch that vanished after the task was queued — a
+                // person's own `starts_from:` deleted, or a dependency's
+                // merged pull request that `gh` could not say where it landed
+                // — would fail the cut three times and then fail again on
+                // every `blocked` pass. Nobody is at the queue tab by now,
                 // so the task waits on `paused` for a person to name another
                 // start branch. Checked before `started` fires, since a task
                 // that cannot start has not started.
@@ -7328,7 +7329,9 @@ pub(crate) type RemoteCache = HashMap<String, Option<bool>>;
 /// first dependency's branch, else `base`, which the cut reads from `origin`
 /// when `origin` has it (see [`crate::mux::resolve_task_base`]). A dependency
 /// closed with nothing to hand over counts as where it stood here, not its
-/// branch — see [`Repo::closed_dependency_base`].
+/// branch — see [`Repo::closed_dependency_base`] — and one whose pull request
+/// merged counts as the branch that pull request landed in — see
+/// [`Repo::dependency_branch`].
 ///
 /// This is where the worktree is cut, not what is recorded as `starts_from`:
 /// see [`recorded_start`].
@@ -7540,17 +7543,21 @@ fn ensure_checkout(
 
     // A dependent cut while its dependency's pull request still seemed to be
     // coming records that dependency's branch as `starts_from`. When the
-    // dependency then closes with nothing to hand over, or ends with commits
-    // and no pull request, that branch is never pushed, and the pull request
-    // opens against `starts_from` (the shipped `create-pr` prompt says so), so
-    // it is pointed at the dependency's own `starts_from` (else its first
-    // dependency's start, else its base) instead. Only the recorded
-    // name moves: the worktree, its branch and `base_commit` are left alone.
+    // dependency then closes with nothing to hand over, ends with commits
+    // and no pull request, or has its pull request merged, that branch is
+    // never pushed or has been deleted, and the pull request opens against
+    // `starts_from` (the shipped `create-pr` prompt says so), so it is
+    // pointed elsewhere instead: at the dependency's own `starts_from` (else
+    // its first dependency's start, else its base), or, for a merged pull
+    // request, at the branch it merged into. Only the recorded name moves:
+    // the worktree, its branch and `base_commit` are left alone. A merged
+    // dependency's squashed commits are then not in the base of the pull
+    // request, which shows them again until the branch is rebased onto it.
     // A `starts_from` a person pointed elsewhere is not the dependency's
     // branch and is kept.
     if cut_before
         && let Some(from) = task.front.starts_from.clone()
-        && let Some(base) = repo.retarget_cut_start(task, &from)
+        && let Some(base) = repo.retarget_cut_start(task, &from, true)
     {
         task.front.starts_from = Some(base);
         persist_task(repo, task, file_seen)?;
@@ -11067,6 +11074,52 @@ mod tests {
         assert!(!prompt.contains("branch `work`"), "{prompt}");
     }
 
+    /// A dependency whose pull request merged into the task's `base` is not
+    /// the branch the lane sits on: the brief says where the work landed, and
+    /// reads the diff from `origin/<base>`, the ref the cut used, since a local
+    /// `<base>` that sits behind `origin` would show everything merged since
+    /// as the task's own.
+    #[cfg(unix)]
+    #[test]
+    fn what_you_have_says_a_merged_dependency_landed_and_anchors_on_origin() {
+        let (repo, _root_guard) = fixture("what-you-have-merged");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/work", "HEAD"])
+            .unwrap();
+        let pipelines = Pipelines::builtin();
+        let pipeline = pipelines.get("default").unwrap();
+        let step = pipeline.require_step("implement").unwrap();
+        let archived = add_task_with(&repo, "a-merged", "done", |f| {
+            f.branch = Some("task/a-merged".into());
+            f.base = Some("work".into());
+            f.run = Some("run-a-merged".into());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("a-merged.md")).unwrap();
+        let dependent = Task::load(&add_task_with(&repo, "b-dep", "implement", |front| {
+            front.depends_on = vec!["a-merged".into()];
+            front.base = Some("work".into());
+        }))
+        .unwrap();
+        let gh = repo.root.join("gh-merged");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\necho '[{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"work\"}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let prompt = sent(&repo, &dependent, pipeline, step);
+
+        assert!(prompt.contains("`git diff origin/work...HEAD`"), "{prompt}");
+        assert!(
+            prompt.contains("you sit on    `work`, where `a-merged`'s pull request merged"),
+            "{prompt}"
+        );
+    }
+
     /// `what_you_have`'s own choice of base is the subtle part of it: `base:`
     /// with no dependency, and the dependency's own recorded `branch:` —
     /// never `task.front.base` — when there is one. Pinned here rather than
@@ -12568,6 +12621,162 @@ mod tests {
         assert!(
             has_branch(&repo, "task/first"),
             "nothing queued needs it, but `work` does not contain it"
+        );
+    }
+
+    /// A task waiting in `pending/` — unqueued to be redone — is cut from its
+    /// first dependency's branch when it is queued again. Cleanup of any other
+    /// task therefore keeps that branch, even when a remote-tracking ref
+    /// already reaches all its commits, exactly as it does for a task still
+    /// in the queue. Once the draft is gone, the next cleanup frees it.
+    #[test]
+    fn cleanup_keeps_a_branch_that_a_pending_task_is_still_cut_from() {
+        let (repo, _root_guard) = fixture("sweep-keeps-pending-parent");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        let tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let second = add_task_with(&repo, "second", "queued", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+        let other = add_task_with(&repo, "other", "done", |f| {
+            f.branch = Some("task/other".into());
+        });
+
+        // `second`'s pull request is pushed, so a remote branch reaches
+        // `first`: only the dependency keeps it from being freed.
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` is queued and has not been cut from it yet"
+        );
+
+        // `second` is unqueued: its file moves to `pending/`.
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        let draft = repo.pending_dir().join("second.md");
+        std::fs::rename(&second, &draft).unwrap();
+        std::fs::write(repo.pending_dir().join("broken.md"), "not a task").unwrap();
+
+        dispatcher
+            .clean_up(&mut reload(&other), &[], &mut report)
+            .unwrap();
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` waits in `pending/` and is cut from this branch"
+        );
+
+        std::fs::remove_file(&draft).unwrap();
+        let third = add_task_with(&repo, "third", "done", |f| {
+            f.branch = Some("task/third".into());
+        });
+        dispatcher
+            .clean_up(&mut reload(&third), &[], &mut report)
+            .unwrap();
+        assert!(
+            !has_branch(&repo, "task/first"),
+            "with the draft deleted nothing needs the branch and a remote has it"
+        );
+    }
+
+    /// `tear_down_checkout` asks the same question as the sweep: when the
+    /// task that owns a branch is itself cleaned up while a task in
+    /// `pending/` is still to be cut from it, the branch stays even though a
+    /// remote already reaches it.
+    #[test]
+    fn a_tasks_own_cleanup_keeps_its_branch_for_a_pending_dependent() {
+        let (repo, _root_guard) = fixture("cleanup-own-branch-pending-dependent");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        let tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let second = add_task_with(&repo, "second", "queued", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::rename(&second, repo.pending_dir().join("second.md")).unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` waits in `pending/` and is cut from this branch"
+        );
+    }
+
+    /// A `pending/` that cannot be read hides the drafts in it, and the one
+    /// mistake that cannot be taken back is deleting the branch they need.
+    #[test]
+    fn an_unreadable_pending_folder_keeps_every_finished_branch() {
+        let (repo, _root_guard) = fixture("sweep-unreadable-pending");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        let tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let other = add_task_with(&repo, "other", "done", |f| {
+            f.branch = Some("task/other".into());
+        });
+        // A file where the folder belongs: `read_dir` fails with something
+        // other than "not found".
+        let pending = repo.pending_dir();
+        std::fs::remove_dir_all(&pending).unwrap();
+        std::fs::write(&pending, "").unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        dispatcher
+            .clean_up(&mut reload(&other), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/first"),
+            "a draft in the unreadable folder may need this branch"
         );
     }
 
@@ -27129,6 +27338,55 @@ mod tests {
         let pipelines = Pipelines::builtin();
         let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
 
+        assert_eq!(
+            dispatcher.missing_start_branch(&task, &mut HashMap::new()),
+            None
+        );
+    }
+
+    /// A dependency whose pull request merged and whose branch was deleted
+    /// leaves its remote-tracking ref behind. The cut, the recorded start and
+    /// the missing-branch check all name where the pull request landed, so the
+    /// stale ref neither passes for a branch to cut from nor pauses the task.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_of_a_merged_parent_with_a_stale_tracking_ref_starts_where_it_landed() {
+        let (repo, _root_guard) = fixture("start-merged-parent-stale-ref");
+        repo.git(&["remote", "add", "origin", "/nonexistent/forge.git"])
+            .unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/task/first", "HEAD"])
+            .unwrap();
+        let landed = repo.branch().unwrap();
+        let archived = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.run = Some("run-first".into());
+            f.starts_from = Some(landed.clone());
+        });
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::rename(&archived, repo.archive_dir().join("first.md")).unwrap();
+        let task = reload(&add_task_with(&repo, "second", "queued", |f| {
+            f.depends_on = vec!["first".into()];
+            f.base = Some(landed.clone());
+        }));
+        let gh = repo.root.join("gh-merged");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\necho '[{{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"{landed}\"}}]'\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _gh = crate::platform::GhOverride::new(gh.display().to_string());
+
+        assert_eq!(start_branch(&repo, &task, &landed).unwrap(), landed);
+        assert_eq!(recorded_start(&repo, &task, &landed).unwrap(), landed);
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
         assert_eq!(
             dispatcher.missing_start_branch(&task, &mut HashMap::new()),
             None

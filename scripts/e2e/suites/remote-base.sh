@@ -14,13 +14,18 @@
 # a branch made directly in it, never fetched by this project's own checkout,
 # is exactly a base only `origin` has.
 #
-# The last two cases are the opposite: a start branch that exists nowhere. A
-# dependency's pull request merges, GitHub deletes its branch, and the
-# dependent — queued while the branch was still there — has nothing to be cut
-# from. It pauses with one line saying so, and starts from `main` once the
-# person writes `starts_from: main` into its front matter and resumes it. A
-# dependent queued after the branch is gone is refused by `queue add` instead,
-# with the same advice, and queues once `starts_from: main` is written.
+# The next cases are the opposite: a start branch that exists nowhere. A
+# person pointed `starts_from:` at a dependency's branch, the dependency's pull
+# request merges, GitHub deletes the branch, and the dependent — queued while
+# the branch was still there — has nothing to be cut from. It pauses with one
+# line saying so, and starts from `main` once the person writes
+# `starts_from: main` into its front matter and resumes it. A dependent queued
+# after the branch is gone is refused by `queue add` instead, with the same
+# advice, and queues once `starts_from: main` is written.
+#
+# A dependent that names no `starts_from:` of its own is different: the pull
+# request of its dependency merged into `plan/live`, so it is cut from, and
+# records, `plan/live`, with no pause and no refusal.
 #
 # The last case is a fetch that hangs. The cut of a remote-only base runs
 # `git fetch origin <base>` inside the dispatcher's pass, so a transport stuck
@@ -102,6 +107,7 @@ record_pr() {
 
 # A finished dependency whose pull request is still open: its task file is
 # archived and names `task/gh-413-merged`, which `origin` still has. The
+# dependent pins `starts_from:` to that branch itself. The
 # dispatcher is stopped first, so nothing cuts the dependent's worktree
 # between queueing it and the branch going.
 dispatcher_stop
@@ -122,7 +128,7 @@ run: r-archived
 DOC
 echo hang > "$CTL/late"
 task_doc "$LIVE/late.md" late "$BODY" "group: late" "depends_on: [merged]" \
-  "base: plan/live"
+  "base: plan/live" "starts_from: task/gh-413-merged"
 must "a dependent of a finished task queues" \
   "$SPOOLWAY" queue add --from "$LIVE/late.md"
 
@@ -149,7 +155,7 @@ says "and the dispatch log says what to set" \
   cat "$E2E_DISPATCH_LOG"
 
 # The person's fix: name a branch that exists, then resume.
-sed -i 's/^base: plan\/live$/&\nstarts_from: main/' "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+sed -i 's/^starts_from: task\/gh-413-merged$/starts_from: main/' "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 says "resume puts it back on queued" "late: -> queued" "$SPOOLWAY" resume late
 
 if drive late implement 60; then ok "and it starts, from the branch the person named"
@@ -158,6 +164,39 @@ says "the task file records \`main\` as starts_from" \
   "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/late.md"
 lacks "and no longer carries the missing branch" \
   "missing_start_branch" "$SPOOLWAY_PROJECT_HOME/queue/late.md"
+
+# A dependent that pinned nothing: `landed` finished, its pull request merged
+# into `plan/live`, and its branch `task/gh-415-landed` was deleted on
+# `origin`. The dependent is cut from `plan/live`, where the work is, and
+# records it, so its own pull request opens there.
+must "the dependency's branch, deleted on origin after its pull request merged" \
+  git -C "$FORGE/origin.git" branch task/gh-415-landed main
+must "its pull request merges and the branch goes" \
+  git -C "$FORGE/origin.git" branch -D task/gh-415-landed
+record_pr 9415 task/gh-415-landed MERGED
+cat > "$SPOOLWAY_PROJECT_HOME/archive/landed.md" <<'DOC'
+---
+id: landed
+title: landed, its branch deleted
+stage: done
+group: landed
+base: plan/live
+branch: task/gh-415-landed
+run: r-archived
+---
+DOC
+echo hang > "$CTL/follows"
+task_doc "$LIVE/follows.md" follows "$BODY" "group: follows" \
+  "depends_on: [landed]" "base: plan/live"
+says "queue add accepts a dependent of a merged task whose branch is gone" \
+  "queued follows" "$SPOOLWAY" queue add --from "$LIVE/follows.md"
+if drive follows implement 60; then
+  ok "and it starts instead of pausing"
+else
+  bad "and it starts instead of pausing (at \`$(stage_of follows)\`)"
+fi
+says "the task file records where the pull request merged" \
+  "starts_from: plan/live" cat "$SPOOLWAY_PROJECT_HOME/queue/follows.md"
 
 # A dependent sent after the branch is gone: `shipped` finished, its pull
 # request merged, and its branch `task/gh-414-shipped` was deleted on
@@ -184,7 +223,7 @@ run: r-archived
 ---
 DOC
 task_doc "$LIVE/after.md" after "$BODY" "group: after" "depends_on: [shipped]" \
-  "base: plan/live"
+  "base: plan/live" "starts_from: task/gh-414-shipped"
 refuses "queue add refuses a dependent whose start branch was deleted" \
   "after starts from task/gh-414-shipped, which doesn't exist. set starts_from: in the task front matter and requeue." \
   "$SPOOLWAY" queue add --from "$LIVE/after.md"
@@ -197,6 +236,89 @@ says "and queues it once starts_from: main is written" "queued after" \
   "$SPOOLWAY" queue add --from "$LIVE/after.md"
 says "the queued task starts from main" \
   "starts_from: main" cat "$SPOOLWAY_PROJECT_HOME/queue/after.md"
+
+# A task whose own branch an earlier run left on `origin`. Unqueue deletes the
+# local branch and keeps the published one, and the shipped `create-pr` prompt
+# never force-pushes, so a redo of the same id would run to its push and be
+# rejected there. `queue add` refuses it first, naming the remote branch, the
+# open pull request and the ways out, and changes nothing: the task is not
+# queued and `origin` keeps the branch. With `origin` out of reach nothing can
+# be said about its branches, so the task queues as it always did.
+dispatcher_stop
+must "a task's own branch left on origin by an earlier run" \
+  git -C "$FORGE/origin.git" branch task/pushed main
+record_pr 9500 task/pushed OPEN
+task_doc "$LIVE/pushed.md" pushed "$BODY" "group: pushed" "base: plan/live"
+refuses "queue add refuses a task whose branch origin still has" \
+  "origin/task/pushed" "$SPOOLWAY" queue add --from "$LIVE/pushed.md"
+says "the refusal names the open pull request" "#9500" \
+  "$SPOOLWAY" queue add --from "$LIVE/pushed.md"
+says "and a command that deletes the remote branch" \
+  "git push origin --delete task/pushed" \
+  "$SPOOLWAY" queue add --from "$LIVE/pushed.md"
+works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/pushed.md"
+works "and origin still has the branch" \
+  git -C "$FORGE/origin.git" rev-parse --verify --quiet refs/heads/task/pushed
+
+must "a branch left on origin for a task that will be queued offline" \
+  git -C "$FORGE/origin.git" branch task/offline main
+task_doc "$LIVE/offline.md" offline "$BODY" "group: offline" "base: plan/live"
+ORIGIN_URL=$(git remote get-url origin)
+must "origin points at a path nothing answers on" \
+  git remote set-url origin "$LIVE/no-such-origin.git"
+says "queue add queues a task when origin cannot be asked" "queued offline" \
+  "$SPOOLWAY" queue add --from "$LIVE/offline.md"
+must "origin is back" git remote set-url origin "$ORIGIN_URL"
+
+# An `origin` that hangs on the question. `queue add` asks it whether each
+# task's branch is there, from more than one place per task, and each ask is
+# given up on after ten seconds. A batch of three that paid the limit at every
+# ask would hold the person for over a minute with nothing printed. The first
+# ask that gets no answer is remembered, so the whole batch waits one limit and
+# every task still queues. The transport is the person's own `core.sshCommand`,
+# a script that holds `git ls-remote` and serves everything else.
+for n in 1 2 3; do
+  task_doc "$LIVE/slow$n.md" "slow$n" "$BODY" "group: slow$n" "base: plan/live"
+done
+ORIGIN_URL=$(git remote get-url origin)
+cat > "$LIVE/slow-ssh.sh" <<SH
+#!/bin/sh
+if ps -o args= -p \$PPID | grep -q ' ls-remote '; then
+  ps -o pgid= -p \$\$ | tr -d ' ' > '$LIVE/slow-group'
+  sleep 40
+fi
+exec git-upload-pack '$FORGE/origin.git'
+SH
+chmod +x "$LIVE/slow-ssh.sh"
+must "origin is an ssh url" \
+  git remote set-url origin ssh://spoolway-e2e.invalid/nowhere.git
+must "the person's own ssh command holds a question about branches" \
+  git config core.sshCommand "$LIVE/slow-ssh.sh"
+SLOW_FROM=$SECONDS
+slow_batch() {
+  "$SPOOLWAY" queue add --from "$LIVE/slow1.md" --from "$LIVE/slow2.md" \
+    --from "$LIVE/slow3.md"
+}
+says "a batch queues its tasks when origin never answers" "queued slow1" slow_batch
+SLOW_FOR=$((SECONDS - SLOW_FROM))
+works "origin really held the question" test -s "$LIVE/slow-group"
+if [ "$SLOW_FOR" -lt 25 ]; then
+  ok "and it waited about one limit, not one per ask (${SLOW_FOR}s)"
+else
+  bad "and it waited about one limit, not one per ask (${SLOW_FOR}s)"
+fi
+for n in 1 2 3; do
+  works "slow$n is queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/slow$n.md"
+done
+if [ -s "$LIVE/slow-group" ]; then
+  kill -TERM -- "-$(cat "$LIVE/slow-group")" 2>/dev/null
+fi
+git config --unset core.sshCommand
+must "origin is back" git remote set-url origin "$ORIGIN_URL"
+# Taken out again so the dispatcher below has only the two tasks it is about.
+for n in 1 2 3; do
+  must "slow$n is unqueued" "$SPOOLWAY" queue unqueue "slow$n"
+done
 
 # A fetch that hangs. `origin` is pointed at an ssh url whose transport is the
 # person's own `core.sshCommand`, a script that serves every call from the

@@ -63,7 +63,7 @@ as JSON.
 | `stage` | the pipeline | The step the task is on. |
 | `routine` | the routines tab, or a job | The `id:` of the routine file this task is a queued copy of. The board and the `queued` popup show it in place of the numbered id. See [Routines](planning.md#routines). |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. A group whose every task in the batch sets `tracking: off` keeps `task/<id>`. |
-| `starts_from` | the dispatcher, or you | The branch the worktree is cut from and the pull request opens against: the first dependency's branch, else `base`. A dependency with commits and no pull request is the exception: the worktree is cut from its branch, and `starts_from` records that dependency's own `starts_from`. A task cut from `base` starts at `origin/<base>` when `origin` has it, so your unpushed commits stay out of its pull request, and at the local branch otherwise. A dependency [closed without a pull request](#a-dependency-closed-without-a-pull-request) is the other exception: its dependent is cut from the branch that dependency stood on and records that dependency's own `starts_from`, as the commits case does. Set it yourself before the task starts to cut from another branch. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
+| `starts_from` | the dispatcher, or you | The branch the worktree is cut from and the pull request opens against: the first dependency's branch, else `base`. A dependency with commits and no pull request is the exception: the worktree is cut from its branch, and `starts_from` records that dependency's own `starts_from`. A task cut from `base` starts at `origin/<base>` when `origin` has it, so your unpushed commits stay out of its pull request, and at the local branch otherwise. A dependency [closed without a pull request](#a-dependency-closed-without-a-pull-request) is the other exception: its dependent is cut from the branch that dependency stood on and records that dependency's own `starts_from`, as the commits case does. A dependency whose pull request has [merged](#a-dependency-whose-pull-request-merged) is a third: its dependent is cut from the branch that pull request merged into and records that branch. Set it yourself before the task starts to cut from another branch. A branch only `origin` has is fetched for at most 10 seconds, then cut from directly, with no local branch made for it. See [Where work happens on disk](dispatcher.md#where-work-happens-on-disk) and [A start branch that does not exist](#a-start-branch-that-does-not-exist). |
 | `base_commit` | the dispatcher | The commit `starts_from` pointed at when the worktree was cut. |
 | `run` | the dispatcher | The run id. `spoolway eval --by task` groups ledger lines by it. |
 | `patch` | the dispatcher | Files, insertions and deletions of the branch, measured at cleanup. |
@@ -494,9 +494,11 @@ That includes a task that walked past its pipeline's `last:` step because a depe
 group runs it. Its dependent is cut from its branch, so the group's one pull request carries its
 commits. The dependent records the dependency's own `starts_from:` as its `starts_from:`, so that
 pull request opens against the group's base and not against a branch that is never pushed. Only
-when GitHub lists a pull request for the dependency's branch, in any state, or cannot be asked,
-does the dependent record the dependency's branch, so a stacked pull request opens against its
-dependency's.
+when GitHub lists a pull request for the dependency's branch that has not merged, or cannot be
+asked, does the
+dependent record the dependency's branch, so a stacked pull request opens against its
+dependency's. A merged pull request sends the dependent to the branch it merged into, as
+[A dependency whose pull request merged](#a-dependency-whose-pull-request-merged) describes.
 
 A dependent whose own `starts_from:` you set is left alone. A dependent already cut from the
 dependency's branch has its `starts_from:` moved to the recorded start before its next step. Its
@@ -508,10 +510,36 @@ worktree stays as it is.
 based on `main`: `a-noop` closed without a pull request
 ```
 
+### A dependency whose pull request merged
+
+When GitHub lists a merged pull request for the first dependency's branch and no open one, the
+dependent is cut from the branch that pull request merged into. The dependent records that
+branch as its `starts_from:`, and its own pull request opens against it. For a squash merge into
+`main`, the dependent starts from `origin/main`, which holds the dependency's change.
+
+A stacked pull request that merged into its parent's branch follows the parent's own merged pull
+request in turn, until it reaches the branch where the chain finally landed. This holds in a
+chain of dependents too: when a task closed without a pull request stands between, its dependent
+is cut from where the first dependency landed.
+
+A dependent whose own `starts_from:` you set is left alone. A dependent already cut from the
+dependency's branch has its `starts_from:` moved to the merge target before its next step. Its
+branch still holds the dependency's original commits, so its pull request shows that change
+again until you rebase the branch onto the new base.
+
+The lane's brief names the branch the work landed on:
+
+```
+`main`, where `fa`'s pull request merged
+```
+
+When `gh` cannot say where the pull request merged, the dependent keeps the dependency's own
+branch. If that branch is gone, the task pauses as the next section describes.
+
 ### A start branch that does not exist
 
-A dependent is cut from its first dependency's branch. GitHub deletes that branch when the
-dependency's pull request merges. A task not yet cut whose start branch exists nowhere is not
+A dependent is cut from its first dependency's branch, or from the branch that dependency's
+pull request merged into. A task not yet cut whose start branch exists nowhere is not
 started. The dispatcher moves it to `paused`, writes `missing_start_branch: <branch>` and prints
 one line:
 
@@ -521,7 +549,8 @@ one line:
 
 This applies to a task that sets `starts_from:` or names a `depends_on`. The start branch is its
 own `starts_from:`, else its first dependency's branch once that dependency has finished, or the
-branch a dependency closed without a pull request stood on. A branch
+branch a dependency closed without a pull request stood on, or the branch a merged dependency
+landed on. A branch
 counts as existing when it is a local branch, a remote-tracking branch or a branch on `origin`.
 When `origin` cannot be reached, the task is not paused.
 
@@ -553,6 +582,10 @@ Once a task is cut, its `starts_from:` holds the branch it was cut from. `spoolw
 removes that value from a task it tears down, so a task sent again is cut again from its start
 branch. A `starts_from:` you set before the cut stays.
 
+A task that a `gate_at:` has paused, at the step `gate_at:` named, goes back with that `gate_at:`
+written again. Queued again, it pauses after the same step. A task paused any other way goes back
+with no `gate_at:`.
+
 `spoolway queue unqueue` tears a started task down the way cleanup does for a finished one, once
 it has stopped. A running task is refused, with `spoolway queue pause <task>` to run first.
 The teardown stops the
@@ -582,6 +615,14 @@ worktree keeps running. `spoolway doctor` fails the row `no deleted task left a
 worktree or branch` and names both. `spoolway queue add` refuses that id until they are gone,
 and the message gives the `git worktree remove --force` and `git branch -D` commands, or the
 `git branch -m` rename that keeps the work.
+
+`queue unqueue` deletes the local `task/<id>` branch and leaves the one on `origin`, with its pull
+request. `spoolway queue add` also refuses an id whose `task/<id>` branch `origin` still has,
+because the new task's push of that branch would be rejected. The message names `origin/task/<id>`
+and its open pull request when `gh` lists one. It gives `git push origin --delete task/<id>`, which
+closes that pull request, and a `git fetch` and `git push` pair that keeps the commits under
+another name. Nothing is queued, pushed, deleted or renamed. `queue add` asks `origin` once per
+branch and gives up after 10 seconds. An `origin` that cannot be asked refuses nothing.
 
 ### The stop is yours to work in
 
@@ -648,7 +689,8 @@ list points at it. A report that a gate holds needs at least one note. See
 ## Archiving
 
 On `done` the dispatcher removes the worktree and the branch and moves the task file to the
-archive directory. The branch is kept while a remote still lacks one of its commits. The usage
+archive directory. The branch is kept while a remote still lacks one of its commits. It is also kept while a queued
+task or a task in the pending directory depends on it, so a task queued again can be cut from it. The usage
 ledger keeps its lines after the task is archived.
 
 A task with a step that runs the deprecated stack command keeps its pull request and predicted

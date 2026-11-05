@@ -3704,8 +3704,9 @@ pub(crate) enum Unqueued {
 
 /// The move itself, shared with `spoolway queue unqueue`: `task`'s task
 /// written to pending with every reserved key and the dispatcher's pause
-/// records dropped, then its queue file removed and its hook runs under
-/// `tracking/` stopped and reclaimed. The caller decides whether `task` may
+/// records dropped, except that a `gate_at:` which already fired is written
+/// back, then its queue file removed and its hook runs under `tracking/`
+/// stopped and reclaimed. The caller decides whether `task` may
 /// go — [`unqueue_in`] only carries a task that has not started, and
 /// `commands::queue::unqueue_stopped`, which the board's `unqueue` and
 /// `queue unqueue` run on a stopped task, one whose checkout it has
@@ -3746,6 +3747,18 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         map.remove("missing_start_branch");
         map.remove("parent_work_tip");
         map.remove("hook_skipped");
+        // A `gate_at:` that fired was cleared from the task so a loop back
+        // onto the step would not gate twice, and `paused_at` with
+        // `paused_by: schedule` is the mark it leaves. The person unqueueing
+        // to redo the work wrote that gate, so it is written back and the
+        // redo stops at the same step. A pause by any other mark is a
+        // step's own `gate:` and is not turned into a `gate_at:`.
+        if task.front.gate_at.is_none()
+            && task.front.paused_by.as_deref() == Some(crate::commands::Gate::Schedule.as_str())
+            && let Some(step) = &task.front.paused_at
+        {
+            map.insert("gate_at".into(), step.clone().into());
+        }
     }
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
@@ -18010,6 +18023,42 @@ mod tests {
         let read = |id: &str| std::fs::read_to_string(repo.pending_dir().join(format!("{id}.md")));
         assert!(!read("cut").unwrap().contains("starts_from"));
         assert!(read("uncut").unwrap().contains("starts_from: main"));
+    }
+
+    /// A task unqueued while it sits at the pause its own `gate_at:` raised
+    /// goes back to pending still carrying `gate_at:`, so the redo stops at
+    /// the same step again. A task paused for any other reason, or never gated,
+    /// gets no `gate_at:`.
+    #[test]
+    fn a_task_unqueued_at_its_gate_at_pause_keeps_its_gate_at() {
+        let (repo, _root_guard) = fixture("unqueue-gate-at");
+        for id in ["scheduled", "gated", "plain"] {
+            add_to(&repo, id, &[], None, Some(id));
+        }
+        // The gate fired: `gate_at:` is cleared, the pause records stay.
+        let mut scheduled = repo.task("scheduled").unwrap();
+        scheduled.front.paused_at = Some("implement".into());
+        scheduled.front.paused_by = Some("schedule".into());
+        scheduled.set_stage(crate::pipeline::PAUSED, None);
+        scheduled.save().unwrap();
+        // Held by a step's own `gate:`, which is never stored in the task.
+        let mut gated = repo.task("gated").unwrap();
+        gated.front.paused_at = Some("implement".into());
+        gated.front.paused_by = Some("gate".into());
+        gated.set_stage(crate::pipeline::PAUSED, None);
+        gated.save().unwrap();
+
+        for id in ["scheduled", "gated", "plain"] {
+            let task = repo.task(id).unwrap();
+            assert!(carry_to_pending(&repo, &task).unwrap().is_some(), "{id}");
+        }
+
+        let read = |id: &str| {
+            std::fs::read_to_string(repo.pending_dir().join(format!("{id}.md"))).unwrap()
+        };
+        assert!(read("scheduled").contains("gate_at: implement"));
+        assert!(!read("gated").contains("gate_at:"));
+        assert!(!read("plain").contains("gate_at:"));
     }
 
     /// The letter that opens the resume picker no longer answers it, and

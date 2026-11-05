@@ -228,11 +228,11 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
     (
         "starts_from",
         "The branch this task's worktree is cut from, when it is not the \
-         default — its first dependency's branch for a dependent, `base` \
-         otherwise. Set it when that dependency's branch no longer exists, \
-         for instance because its pull request merged and the branch was \
-         deleted. Must name a branch the repository has locally or on \
-         `origin` by the time the task starts, or the task pauses until a \
+         default — its first dependency's branch for a dependent (the branch \
+         its pull request merged into, once it has merged), `base` \
+         otherwise. Set it when that dependency's branch no longer exists \
+         and GitHub cannot say where its pull request merged. Must name a \
+         branch the repository has locally or on `origin` by the time the task starts, or the task pauses until a \
          person sets another and resumes it. Never picked for a task automatically.",
     ),
     (

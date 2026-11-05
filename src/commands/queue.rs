@@ -1540,6 +1540,7 @@ fn validate_batch_undescribed(
     }
 
     let mut tasks = Vec::new();
+    let mut asks = OriginAsks::default();
     for (name, raw) in submitted {
         let mut task = parse_submission(name, raw, base)?;
         // Whatever base a task ends up with — a task's own, or the
@@ -1591,7 +1592,9 @@ fn validate_batch_undescribed(
         // After the existing-task check: a task still in the queue owns its
         // own worktree and branch, and telling a person to remove those would
         // be advice to destroy live work.
-        if let Some(refusal) = leftover_refusal(repo, &task.front.id, &task_branch(&task)) {
+        if let Some(refusal) =
+            leftover_refusal(repo, &task.front.id, &task_branch(&task), Some(&mut asks))
+        {
             bail!("{refusal}");
         }
         if tasks.iter().any(|t: &Task| t.id() == task.id()) {
@@ -1970,7 +1973,14 @@ fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
 }
 
 /// The refusal for an id whose worktree or branch an earlier task left
-/// behind, or `None` when neither exists.
+/// behind, or `None` when nothing is left. A leftover local checkout or
+/// branch is reported first; only when there is none is `origin` asked, so a
+/// refusal that needs no network never waits for one.
+///
+/// `origin` is asked only when the caller passes `asks`. The save path calls
+/// this with the group and task locks held, which wait three seconds for
+/// each other, and a question to `origin` can take ten. Nothing those locks
+/// guard lives on `origin`, so that call stays local.
 ///
 /// Deleting a running task's queue file drops it without cleaning up.
 /// Queueing the id again would adopt the leftover checkout without a word, so
@@ -1978,12 +1988,17 @@ fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
 /// alone is not adopted, but the first cut would refuse it later. Nothing is
 /// deleted here: the person may mean to continue that work, so the refusal
 /// names both and the commands that remove or rename them.
-fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
+fn leftover_refusal(
+    repo: &Repo,
+    id: &str,
+    branch: &str,
+    asks: Option<&mut OriginAsks>,
+) -> Option<String> {
     let worktree = repo.worktree_root().join(crate::mux::branch_slug(branch));
     let has_worktree = worktree.exists();
     let has_branch = ref_exists(repo, branch);
     if !has_worktree && !has_branch {
-        return None;
+        return remote_leftover_refusal(repo, id, branch, asks?);
     }
     let mut what = Vec::new();
     let mut remove = Vec::new();
@@ -2014,6 +2029,133 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
          queued.",
         what.join(" and "),
         remove.join(", then "),
+    ))
+}
+
+/// What one submission has learnt from `origin`: per branch whether it is
+/// there, and whether `origin` has failed to answer at all.
+///
+/// Each question is bounded by [`Repo::remote_branch_answer`], but a batch
+/// holds several tasks. An `origin` that hangs would cost the full limit at
+/// every one of them, tens of seconds with nothing printed. So the first
+/// non-answer is remembered and every later question is declined without
+/// asking: the wait stays at one limit however many tasks there are.
+///
+/// It lives for one check of one submission and is never kept beyond it. A
+/// person refused on the board deletes the branch the refusal named and
+/// submits again, and that second submission must ask `origin` afresh.
+#[derive(Default)]
+struct OriginAsks {
+    silent: bool,
+    branches: BTreeMap<String, bool>,
+}
+
+impl OriginAsks {
+    /// Whether `origin` has `branch`, or `None` when it could not be asked.
+    fn has_branch(&mut self, repo: &Repo, branch: &str) -> Option<bool> {
+        if self.silent {
+            return None;
+        }
+        if let Some(&has) = self.branches.get(branch) {
+            return Some(has);
+        }
+        let answer = repo.remote_branch_answer(branch);
+        match answer {
+            Some(has) => {
+                self.branches.insert(branch.to_string(), has);
+            }
+            None => self.silent = true,
+        }
+        answer
+    }
+}
+
+/// How long [`open_pull_request`] waits for `gh`, the same as the question
+/// to `origin` that precedes it.
+const GH_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The number of the open pull request for `branch`, when the forge client
+/// lists one.
+///
+/// The client is [`crate::repo::gh_program`], as everywhere else, and it is
+/// stopped with its whole group after [`GH_ASK_TIMEOUT`]: it talks to the
+/// forge over the network, and one stuck there would otherwise hold
+/// `queue add` with nothing printed. A client that is missing, fails or is
+/// stopped answers `None`, which leaves the refusal naming the branch alone.
+fn open_pull_request(repo: &Repo, branch: &str) -> Option<u64> {
+    let crate::mux::GitWithin::Finished {
+        success: true,
+        stdout,
+        ..
+    } = crate::mux::program_within(
+        &crate::repo::gh_program(),
+        &repo.root,
+        &[
+            "pr", "list", "--head", branch, "--state", "open", "--json", "number",
+        ],
+        GH_ASK_TIMEOUT,
+    )
+    else {
+        return None;
+    };
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&stdout).ok()?;
+    list.first()?["number"].as_u64()
+}
+
+/// The refusal for a task whose branch an earlier run left on `origin`, or
+/// `None` when `origin` does not have it or cannot be asked.
+///
+/// `queue unqueue` deletes the local branch and keeps the published one,
+/// because it belongs to the forge. The shipped `create-pr` step never
+/// force-pushes, so a redo would run to its push and be rejected there,
+/// leaving the task blocked and its dependents unstarted. Nothing is pushed,
+/// deleted or renamed here: the old branch and its pull request are the
+/// person's to settle.
+///
+/// An `origin` that does not answer (offline, no credential, or the
+/// ten-second limit of [`Repo::remote_branch_answer`]) refuses nothing, so a
+/// task still queues when the network is out; see [`OriginAsks`] for how few
+/// times that wait is paid. The open pull request is named only when the
+/// forge client lists one; without it the refusal names the branch alone.
+///
+/// Deleting a branch closes the pull request opened from it, and a pull
+/// request's head branch cannot be moved, so keeping the commits under another
+/// name does not keep the pull request open. When one is named the refusal says
+/// that, so the person is not led to close it believing otherwise.
+fn remote_leftover_refusal(
+    repo: &Repo,
+    id: &str,
+    branch: &str,
+    asks: &mut OriginAsks,
+) -> Option<String> {
+    if asks.has_branch(repo, branch) != Some(true) {
+        return None;
+    }
+    let keep =
+        format!("`git fetch origin {branch} && git push origin FETCH_HEAD:refs/heads/<name>`");
+    let (what, are, drop) = match open_pull_request(repo, branch) {
+        Some(number) => (
+            format!("`origin/{branch}` and its open pull request #{number}"),
+            "are",
+            format!(
+                "to drop it, run `git push origin --delete {branch}`, which closes #{number} \
+                 whatever else is kept. to keep its commits under another name first, run \
+                 {keep}"
+            ),
+        ),
+        None => (
+            format!("`origin/{branch}`"),
+            "is",
+            format!(
+                "to drop it, run `git push origin --delete {branch}`. to keep it under \
+                 another name, run {keep}, then drop it"
+            ),
+        ),
+    };
+    Some(format!(
+        "task id `{id}` cannot be queued: {what}, left by an earlier task with that id, {are} \
+         still there, and the new task's push of `{branch}` would be rejected because \
+         publishing never overwrites a branch. {drop}. nothing was queued."
     ))
 }
 
@@ -2527,7 +2669,7 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
         // The branch the task will really get: `task/<slug>-<id>` once
         // `issue_tracking.key_in_names` has prefixed it, which `validate_batch`
         // could not know when it ran.
-        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task)) {
+        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task), None) {
             bail!("{refusal}");
         }
     }
@@ -2712,8 +2854,19 @@ fn open_and_prefix_waiting(
     // that issue from being lost: its id goes back into the pending file and
     // the message names it, so the run after the leftover is cleared reuses
     // it instead of opening a second one.
+    //
+    // `origin` is asked only about a branch the prefix has just renamed,
+    // since `validate_batch` already asked about every `task/<id>`. The asks
+    // here start afresh, so a renamed branch can cost a second limit on an
+    // `origin` that did not answer there. The silence is not carried across
+    // the issue hook, which the board may wait on for a person's answer.
+    let mut asks = OriginAsks::default();
     for task in tasks.iter() {
-        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task)) {
+        let branch = task_branch(task);
+        let renamed = branch != crate::task::default_branch(task.id());
+        if let Some(refusal) =
+            leftover_refusal(repo, task.id(), &branch, renamed.then_some(&mut asks))
+        {
             let written_back = write_back_ids(repo, submitted, tasks, &opened.tasks)?;
             let rows = lost_ids_rows(&opened.opened, &written_back);
             if rows.is_empty() {
@@ -13578,6 +13731,125 @@ mod tests {
         assert!(!err.contains("git worktree remove"), "{err}");
     }
 
+    /// A branch an earlier run left on `origin` refuses the id before
+    /// anything is queued, naming the remote branch and the commands that
+    /// drop it or keep it under another name. The advice works: once the
+    /// branch is deleted the same task queues. Nothing is pushed or deleted
+    /// by the refusal itself.
+    #[test]
+    fn queue_add_refuses_a_branch_origin_still_has_and_queues_once_it_is_gone() {
+        let (repo, _root_guard) = fixture("queue-add-origin-branch");
+        let origin = repo.root.join("origin.git");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["init", "-q", "--bare", &origin.display().to_string()],
+        )
+        .unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["remote", "add", "origin", &origin.display().to_string()],
+        )
+        .unwrap();
+        crate::repo::run(&repo.root, "git", &["push", "-q", "origin", "plan/demo"]).unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["push", "-q", "origin", "plan/demo:task/redo"],
+        )
+        .unwrap();
+        let path = write_doc(&repo, "redo.md", &task_text("redo", "group: redos\n", BODY));
+        // A forge client of the test's own, never whichever `gh` the machine
+        // has: it lists one open pull request for the branch.
+        let gh = repo.root.join("gh-stub");
+        std::fs::write(&gh, "#!/bin/sh\necho '[{\"number\":77}]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        let err = queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            err.contains("`origin/task/redo` and its open pull request #77"),
+            "{err}"
+        );
+        assert!(err.contains("are still there"), "{err}");
+        assert!(
+            err.contains("which closes #77 whatever else is kept"),
+            "{err}"
+        );
+        assert!(err.contains("git push origin --delete task/redo"), "{err}");
+        assert!(err.contains("FETCH_HEAD:refs/heads/<name>"), "{err}");
+        assert!(err.contains("nothing was queued"), "{err}");
+        assert!(!repo.queue_dir().join("redo.md").exists());
+        let kept = crate::repo::run(&origin, "git", &["branch", "--list", "task/redo"]).unwrap();
+        assert!(kept.contains("task/redo"), "the refusal must not delete it");
+
+        crate::repo::run(&origin, "git", &["branch", "-D", "task/redo"]).unwrap();
+        queue_add(
+            &repo,
+            &Pipelines::builtin(),
+            &from_args(&[&path]),
+            &repo.root,
+            false,
+        )
+        .expect("the advice, once followed, lets the id through");
+    }
+
+    /// One submission asks a silent `origin` once. After the first question
+    /// goes unanswered every later one is declined without being put, so a
+    /// batch waits one limit however many tasks it holds. A fresh set of asks
+    /// puts the question again: a person refused on the board who fixes the
+    /// remote and submits again must not be told what `origin` said before.
+    #[test]
+    fn origin_asks_remember_a_silence_for_one_submission_only() {
+        let (repo, _root_guard) = fixture("origin-asks-silence");
+        let origin = repo.root.join("origin.git");
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["remote", "add", "origin", &origin.display().to_string()],
+        )
+        .unwrap();
+        let mut asks = OriginAsks::default();
+        assert_eq!(
+            asks.has_branch(&repo, "task/a"),
+            None,
+            "no repository is there to answer"
+        );
+
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["init", "-q", "--bare", &origin.display().to_string()],
+        )
+        .unwrap();
+        crate::repo::run(
+            &repo.root,
+            "git",
+            &["push", "-q", "origin", "plan/demo:task/b"],
+        )
+        .unwrap();
+        assert_eq!(
+            asks.has_branch(&repo, "task/b"),
+            None,
+            "origin is back, but this submission has already given up on it"
+        );
+        assert_eq!(
+            OriginAsks::default().has_branch(&repo, "task/b"),
+            Some(true),
+            "the next submission asks again"
+        );
+    }
+
     /// A branch alone is not adopted by a new task; its first cut would
     /// refuse it. The refusal says that, and not that the task would "pick
     /// it up", which is only true of a worktree.
@@ -20984,6 +21256,44 @@ mod tests {
                 why: NotQueuedWhy::MissingStart("task/nowhere".to_string()),
             }]
         );
+    }
+
+    /// A dependency with commits whose pull request merged and whose branch
+    /// GitHub deleted is not a start branch to look for: the dependent is cut
+    /// from where the pull request landed, so queueing leaves nothing out.
+    #[cfg(unix)]
+    #[test]
+    fn not_queued_follows_a_merged_dependency_to_where_it_landed() {
+        let (repo, _root_guard) = fixture("not-queued-merged-dependency");
+        let origin = repo.root.join("origin.git");
+        let origin = origin.display().to_string();
+        crate::repo::run(&repo.root, "git", &["init", "-q", "--bare", &origin]).unwrap();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        crate::repo::run(&repo.root, "git", &["push", "-q", "origin", "plan/demo"]).unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("merged.md"),
+            "---\nid: merged\ngroup: landed\nstage: done\nbranch: task/merged\n\
+             run: run-merged\nstarts_from: plan/demo\npatch:\n  files: 2\n  insertions: 0\n  \
+             deletions: 0\n---\nbody\n",
+        )
+        .unwrap();
+        let gh = repo.root.join("gh-merged");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\necho '[{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"plan/demo\"}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let next = parse_submission(
+            "next",
+            &task_text("next", "group: landed\ndepends_on: [merged]\n", BODY),
+            Some("plan/demo"),
+        )
+        .unwrap();
+
+        assert_eq!(not_queued(&repo, &[next]), []);
     }
 
     /// A dependent is left out with what it depends on, however far down

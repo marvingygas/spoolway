@@ -225,7 +225,8 @@ pub(crate) fn situating(
 ///
 /// The diff and log read against `task.front.base` when there is no
 /// dependency, and against the first dependency's own branch when there is
-/// (where it stood, if it was closed with nothing to hand over) —
+/// (where it stood, if it was closed with nothing to hand over, and where
+/// its pull request landed, if that merged) —
 /// read from that task's own `branch:` field through
 /// [`Repo::dependency_branch`], not `task.front.base` even then: `base` is
 /// only the queueing worktree's branch at the moment this task was added,
@@ -279,12 +280,25 @@ fn what_you_have(repo: &Repo, task: &Task) -> Result<String> {
             // A dependency closed without a pull request has no branch of its
             // own worth sitting on: the worktree is cut from where it
             // stood, and naming it beside that branch would tell the lane
-            // the branch is the dependency's own.
-            let sits_value = match repo.closed_dependency_base(first) {
-                Some(_) => format!("`{branch}`, where `{first}` closed without a pull request"),
-                None => format!("`{first}`, branch `{branch}`"),
+            // the branch is the dependency's own. The same holds for one
+            // whose pull request merged: its work is in the branch it landed
+            // in.
+            let sits_value = if repo.closed_dependency_base(first).is_some() {
+                format!("`{branch}`, where `{first}` closed without a pull request")
+            } else if repo.merged_dependency_landing(first).is_some() {
+                format!("`{branch}`, where `{first}`'s pull request merged")
+            } else {
+                format!("`{first}`, branch `{branch}`")
             };
-            (branch, sits_value, extra)
+            // A branch that is the task's own `base` was cut from
+            // `origin/<base>` when `origin` has it, so the diff and the log
+            // read from that ref: a local `<base>` that sits behind `origin`
+            // would count every commit merged there since as this task's own.
+            let anchor = match task.front.base.as_deref() == Some(branch.as_str()) {
+                true => crate::mux::known_origin_ref(&repo.root, &branch).unwrap_or(branch),
+                false => branch,
+            };
+            (anchor, sits_value, extra)
         }
         None => {
             let base = task

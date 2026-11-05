@@ -423,7 +423,12 @@ A task whose `task-<id>` worktree or `task/<id>` branch is still on disk refuses
 Those are the leftovers of an earlier task with that id, such as one whose queue file was
 deleted. Nothing is queued. The message names the worktree and the branch, the `git worktree
 remove --force` and `git branch -D` commands that drop them, and the `git branch -m` rename that
-keeps the work. The queue screen and routines refuse the same id. A task still in the queue is
+keeps the work. A task whose `task/<id>` branch only `origin` still has is refused too. The message
+names `origin/task/<id>` and the open pull request opened from it, when `gh` lists one. It gives
+`git push origin --delete task/<id>` to drop the branch, which also closes that pull request, and a
+`git fetch` and `git push` pair that keeps its commits under another name. `queue add` asks
+`origin` once per branch and gives up after 10 seconds. An `origin` that cannot be asked refuses
+nothing. The queue screen and routines refuse the same id. A task still in the queue is
 reported as already existing instead. See [A start branch that does not
 exist](tasks.md#a-start-branch-that-does-not-exist).
 
@@ -613,7 +618,8 @@ not. It takes exactly the tasks the board's `unqueue` takes: a task on `queued`,
 worktree cut going. Every task after it in its group goes with it, directly or through another
 task. Each keeps its `group:` and `depends_on:`, with every reserved key, `hook_paused:`,
 `hook_error:`, `missing_start_branch:` and `parent_work_tip:` stripped. The tasks' running hooks are stopped and their
-files under `tracking/` are removed. `spoolway queue add --from` takes the result again unchanged.
+files under `tracking/` are removed. A task paused by its own `gate_at:` keeps that `gate_at:`.
+`spoolway queue add --from` takes the result again unchanged.
 
 ```
 spoolway queue unqueue <task>

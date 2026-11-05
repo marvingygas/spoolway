@@ -830,10 +830,12 @@ impl<'a> Dispatcher<'a> {
         // to — a repository setting, and not something to reimplement one
         // `git push --delete` at a time. Under `person` the pull request may
         // still be open here, and deleting its branch would close it.
-        // Something queued still has to be cut from this branch — see
+        // Something queued, or waiting in `pending/` to be queued again, still
+        // has to be cut from this branch — see
         // `Dispatcher::branch_still_needed`. Deleting it now would leave that
-        // dependent with nothing to start from; `Dispatcher::sweep_orphaned_branches`
-        // is what frees it later, once the last such task has been cut.
+        // dependent with nothing to start from;
+        // `Dispatcher::sweep_orphaned_branches` is what frees it later, once
+        // the last such task has been cut.
         let depended_on = self.branch_still_needed(task.id());
         let made_its_branch = !task.front.borrowed && (delete_branch || !depended_on);
         if let Some(branch) = task.front.branch.clone().filter(|_| made_its_branch) {
@@ -1032,31 +1034,56 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Whether some task still in the queue names `id` in its own
-    /// `depends_on` — the branch `id` was cut on is what that task's own
-    /// worktree still has to be cut from, whatever stage `id` itself is on.
+    /// Whether some task still in the queue, or waiting in `pending/`, names
+    /// `id` in its own `depends_on` — the branch `id` was cut on is what that
+    /// task's own worktree still has to be cut from, whatever stage `id`
+    /// itself is on.
     fn branch_still_needed(&self, id: &str) -> bool {
-        self.repo
-            .tasks()
-            .unwrap_or_default()
-            .iter()
-            .any(|t| t.front.depends_on.iter().any(|dep| dep == id))
+        let queued = self.repo.tasks().unwrap_or_default();
+        self.names_as_dependency(id, &queued, self.pending_drafts().as_deref())
+    }
+
+    /// Every draft waiting in `pending/`, or `None` when the folder cannot be
+    /// read.
+    ///
+    /// `queue unqueue` moves a stopped task and every later task of its group
+    /// here, and queueing one again cuts it from its first dependency's
+    /// branch. That branch has to survive the wait, or `queue add` is refused
+    /// for want of it. The folder is read fresh on every call, so deleting a
+    /// draft frees the branch on the next sweep. A draft that will not parse
+    /// is skipped — see [`crate::task::load_dir`] — rather than stopping the
+    /// sweep.
+    fn pending_drafts(&self) -> Option<Vec<Task>> {
+        crate::task::load_dir(&self.repo.pending_dir())
+            .ok()
+            .map(|(drafts, _)| drafts)
+    }
+
+    /// Whether any of `queued`, or any of the `pending` drafts, lists `id` in
+    /// its `depends_on`.
+    ///
+    /// `pending` of `None` — the folder could not be read — answers yes: a
+    /// draft that cannot be seen may be the one that needs the branch, and
+    /// deleting it is the one mistake that cannot be taken back.
+    fn names_as_dependency(&self, id: &str, queued: &[Task], pending: Option<&[Task]>) -> bool {
+        let names = |t: &Task| t.front.depends_on.iter().any(|dep| dep == id);
+        queued.iter().any(names) || pending.is_none_or(|drafts| drafts.iter().any(names))
     }
 
     /// Delete every local `task/…` branch whose task has already finished —
     /// there is no `<id>.md` left in the queue — and that nothing still
-    /// queued names in `depends_on` any more. The branch is `task/<id>`, or
-    /// `task/<slug>-<id>` when `issue_tracking.key_in_names` prefixed it;
-    /// either way the owning task is found by an exact match against its
-    /// recorded `branch:` field — see [`task_for_branch`] — not by taking the
-    /// branch name apart.
+    /// queued or pending names in `depends_on` any more. The branch is
+    /// `task/<id>`, or `task/<slug>-<id>` when `issue_tracking.key_in_names`
+    /// prefixed it; either way the owning task is found by an exact match
+    /// against its recorded `branch:` field — see [`task_for_branch`] — not
+    /// by taking the branch name apart.
     ///
     /// Reaching `done` retains a depended-on branch rather than deleting it,
     /// and nothing revisits that task once its file has moved to the
     /// archive — so the branch is only ever freed by *another* task's own
     /// cleanup finding it now unneeded. Cheap enough to run on every cleanup
-    /// rather than tracked separately: one `for-each-ref` and a scan of the
-    /// tasks already in hand.
+    /// rather than tracked separately: one `for-each-ref`, one read of
+    /// `pending/`, and a scan of the tasks already in hand.
     ///
     /// The same check `tear_down_checkout` used to spare this branch in the
     /// first place is asked again here, for the same reason: nothing about
@@ -1072,6 +1099,8 @@ impl<'a> Dispatcher<'a> {
         ]) else {
             return;
         };
+        // Read once, so every branch in this sweep sees the same drafts.
+        let pending = self.pending_drafts();
         for branch in listing.lines() {
             // The task that recorded this exact branch, if any is still on
             // disk. A branch no queue or archive task claims — its task swept
@@ -1086,11 +1115,9 @@ impl<'a> Dispatcher<'a> {
             if self.repo.queue_dir().join(format!("{id}.md")).exists() {
                 continue;
             }
-            // Something still queued has not been cut from it yet.
-            if tasks
-                .iter()
-                .any(|t| t.front.depends_on.iter().any(|dep| dep == id))
-            {
+            // Something still queued, or waiting in `pending/` to be queued
+            // again, has not been cut from it yet.
+            if self.names_as_dependency(id, tasks, pending.as_deref()) {
                 continue;
             }
             // Only a branch spoolway made, for a task that actually
@@ -1494,12 +1521,12 @@ impl<'a> Dispatcher<'a> {
         self.tear_down_checkout(task, report);
 
         // `tear_down_checkout` retains a branch that something still queued
-        // names in its own `depends_on` — and inside a trial that dependent
-        // is a sibling arm being discarded in the same breath, so the reason
-        // to keep it is gone before the call even returns. Nothing else will
-        // free it either: `sweep_orphaned_branches` finds a branch's owner by
-        // reading the task that recorded it, and a discard has just
-        // removed that task. So the arm's own branch goes here, directly.
+        // or pending names in its own `depends_on` — and inside a trial that
+        // dependent is a sibling arm being discarded in the same breath, so
+        // the reason to keep it is gone before the call even returns. Nothing
+        // else will free it either: `sweep_orphaned_branches` finds a
+        // branch's owner by reading the task that recorded it, and a discard
+        // has just removed that task. So the arm's own branch goes here, directly.
         // A second delete of one `tear_down_checkout` already took is a git
         // failure and nothing more.
         if let Some(branch) = task.front.branch.clone().filter(|_| !task.front.borrowed) {
