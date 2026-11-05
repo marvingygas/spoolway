@@ -3704,8 +3704,9 @@ pub(crate) enum Unqueued {
 
 /// The move itself, shared with `spoolway queue unqueue`: `task`'s task
 /// written to pending with every reserved key and the dispatcher's pause
-/// records dropped, then its queue file removed and its hook runs under
-/// `tracking/` stopped and reclaimed. The caller decides whether `task` may
+/// records dropped, except that a `gate_at:` which already fired is written
+/// back, then its queue file removed and its hook runs under `tracking/`
+/// stopped and reclaimed. The caller decides whether `task` may
 /// go — [`unqueue_in`] only carries a task that has not started, and
 /// `commands::queue::unqueue_stopped`, which the board's `unqueue` and
 /// `queue unqueue` run on a stopped task, one whose checkout it has
@@ -3746,6 +3747,18 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         map.remove("missing_start_branch");
         map.remove("parent_work_tip");
         map.remove("hook_skipped");
+        // A `gate_at:` that fired was cleared from the task so a loop back
+        // onto the step would not gate twice, and only `paused_at` with
+        // `paused_by: schedule` remembers it. The person unqueueing to redo
+        // the work wrote that gate, so it is written back and the redo
+        // stops at the same step. Any other `paused_by` is a pause that was
+        // not the task's own gate, and must not become one.
+        if task.front.gate_at.is_none()
+            && task.front.paused_by.as_deref() == Some("schedule")
+            && let Some(step) = &task.front.paused_at
+        {
+            map.insert("gate_at".into(), step.clone().into());
+        }
     }
     let yaml =
         serde_norway::to_string(&front).with_context(|| format!("rendering {id}'s frontmatter"))?;
