@@ -1326,14 +1326,22 @@ impl Repo {
     /// the branch the pull request merged into, so that branch is recorded,
     /// and the dependency's own branch, which a merge usually deletes, is not.
     pub fn dependency_start(&self, dep_id: &str) -> Result<String> {
-        self.dependency_start_asking(dep_id, &gh_program(), 0)
+        self.dependency_start_asking(dep_id, &gh_program(), true, 0)
     }
 
     /// [`Repo::dependency_start`] asking `gh` for its pull requests, so a test
     /// can stand a script in for it without touching the environment, at
     /// recursion `depth` (past 16 a cycle among hand-edited `depends_on` lists
-    /// ends and the dependency's own branch is kept).
-    fn dependency_start_asking(&self, dep_id: &str, gh: &str, depth: usize) -> Result<String> {
+    /// ends and the dependency's own branch is kept). With `follow_merged`
+    /// false a merged pull request is treated as any other that exists, which
+    /// is how the rule read before merges were followed.
+    fn dependency_start_asking(
+        &self,
+        dep_id: &str,
+        gh: &str,
+        follow_merged: bool,
+        depth: usize,
+    ) -> Result<String> {
         let own = self.dependency_own_branch(dep_id)?;
         if depth > 16 {
             return Ok(own);
@@ -1342,7 +1350,7 @@ impl Repo {
             return Ok(own);
         };
         if !nothing_to_hand_over(&dep) {
-            if let Some(landed) = self.merged_landing(gh, &own) {
+            if follow_merged && let Some(landed) = self.merged_landing(gh, &own) {
                 return Ok(landed);
             }
             if self.has_pull_request(gh, &own) != Some(false) {
@@ -1353,7 +1361,7 @@ impl Repo {
             return Ok(from);
         }
         match dep.front.depends_on.first() {
-            Some(first) => self.dependency_start_asking(first, gh, depth + 1),
+            Some(first) => self.dependency_start_asking(first, gh, follow_merged, depth + 1),
             None => Ok(dep.front.base.clone().unwrap_or(own)),
         }
     }
@@ -1366,9 +1374,20 @@ impl Repo {
     ///
     /// The one rule behind both places that move an already-cut dependent: the
     /// dispatcher, before a step starts, and `spoolway stack` at handover.
-    pub fn retarget_cut_start(&self, task: &Task, from: &str) -> Option<String> {
+    /// The dispatcher also follows a dependency whose pull request merged to
+    /// the branch it merged into; `spoolway stack` does not (`follow_merged`
+    /// false), because its handover already says where a landed dependency's
+    /// pull request opens.
+    pub fn retarget_cut_start(
+        &self,
+        task: &Task,
+        from: &str,
+        follow_merged: bool,
+    ) -> Option<String> {
         let dep = task.front.depends_on.first()?;
-        let start = self.dependency_start(dep).ok()?;
+        let start = self
+            .dependency_start_asking(dep, &gh_program(), follow_merged, 0)
+            .ok()?;
         (start != from && self.dependency_own_branch(dep).ok().as_deref() == Some(from))
             .then_some(start)
     }
@@ -6077,7 +6096,7 @@ mod tests {
                 assert_eq!(repo.dependency_branch(id).unwrap(), format!("task/{id}"));
             }
         }
-        let start = |id: &str, gh: &str| repo.dependency_start_asking(id, gh, 0).unwrap();
+        let start = |id: &str, gh: &str| repo.dependency_start_asking(id, gh, true, 0).unwrap();
         assert_eq!(start("unfiled", &none), "release");
         assert_eq!(start("filed", &some), "task/filed", "a pull request");
         assert_eq!(start("unsure", &broken), "task/unsure", "gh could not say");
@@ -6123,6 +6142,21 @@ mod tests {
             repo.dependency_branch("still-open").unwrap(),
             "task/still-open"
         );
+
+        // A dependent already cut from the merged parent's branch is moved
+        // by the dispatcher, and left to `spoolway stack` as it was.
+        let cut = Task::parse(
+            PathBuf::from("cut.md"),
+            "---\nid: cut\nstage: handover\ndepends_on: [into-main]\n\
+             starts_from: task/into-main\n---\n## Goal\nok\n",
+        )
+        .unwrap();
+        assert_eq!(
+            repo.retarget_cut_start(&cut, "task/into-main", true)
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(repo.retarget_cut_start(&cut, "task/into-main", false), None);
     }
 
     /// In a chain `a -> b -> c` where `b` closes with nothing to hand over,
@@ -6149,7 +6183,10 @@ mod tests {
             );
         }
         assert_eq!(repo.dependency_branch("b").unwrap(), "task/a");
-        assert_eq!(repo.dependency_start_asking("b", &none, 0).unwrap(), "main");
+        assert_eq!(
+            repo.dependency_start_asking("b", &none, true, 0).unwrap(),
+            "main"
+        );
 
         let mut c = Task::parse(
             PathBuf::from("c.md"),
@@ -6157,10 +6194,10 @@ mod tests {
         )
         .unwrap();
         // `b` has an empty patch, so no pull request is asked about.
-        let retargeted = repo.retarget_cut_start(&c, "task/b");
-        let elsewhere = repo.retarget_cut_start(&c, "somewhere-else");
+        let retargeted = repo.retarget_cut_start(&c, "task/b", true);
+        let elsewhere = repo.retarget_cut_start(&c, "somewhere-else", true);
         c.front.depends_on.clear();
-        let none_dep = repo.retarget_cut_start(&c, "task/b");
+        let none_dep = repo.retarget_cut_start(&c, "task/b", true);
 
         assert_eq!(retargeted.as_deref(), Some("main"));
         assert_eq!(elsewhere, None);
@@ -6193,7 +6230,7 @@ mod tests {
         assert_eq!(from_b.unwrap(), "task/b", "c is cut from b's branch");
         for id in ["a", "b"] {
             assert_eq!(
-                repo.dependency_start_asking(id, &none, 0).unwrap(),
+                repo.dependency_start_asking(id, &none, true, 0).unwrap(),
                 "main",
                 "{id}'s dependent still opens against the chain's base"
             );
@@ -6354,7 +6391,10 @@ mod tests {
         archive_done(&repo, "a", 2, "starts_from: main\n");
         let gh = stub_gh(&base, "empty", "echo '[]'");
 
-        assert_eq!(repo.dependency_start_asking("a", &gh, 0).unwrap(), "task/a");
+        assert_eq!(
+            repo.dependency_start_asking("a", &gh, true, 0).unwrap(),
+            "task/a"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 

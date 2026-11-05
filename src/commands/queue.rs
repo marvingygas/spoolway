@@ -21258,6 +21258,44 @@ mod tests {
         );
     }
 
+    /// A dependency with commits whose pull request merged and whose branch
+    /// GitHub deleted is not a start branch to look for: the dependent is cut
+    /// from where the pull request landed, so queueing leaves nothing out.
+    #[cfg(unix)]
+    #[test]
+    fn not_queued_follows_a_merged_dependency_to_where_it_landed() {
+        let (repo, _root_guard) = fixture("not-queued-merged-dependency");
+        let origin = repo.root.join("origin.git");
+        let origin = origin.display().to_string();
+        crate::repo::run(&repo.root, "git", &["init", "-q", "--bare", &origin]).unwrap();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        crate::repo::run(&repo.root, "git", &["push", "-q", "origin", "plan/demo"]).unwrap();
+        std::fs::create_dir_all(repo.archive_dir()).unwrap();
+        std::fs::write(
+            repo.archive_dir().join("merged.md"),
+            "---\nid: merged\ngroup: landed\nstage: done\nbranch: task/merged\n\
+             run: run-merged\nstarts_from: plan/demo\npatch:\n  files: 2\n  insertions: 0\n  \
+             deletions: 0\n---\nbody\n",
+        )
+        .unwrap();
+        let gh = repo.root.join("gh-merged");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\necho '[{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"plan/demo\"}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let next = parse_submission(
+            "next",
+            &task_text("next", "group: landed\ndepends_on: [merged]\n", BODY),
+            Some("plan/demo"),
+        )
+        .unwrap();
+
+        assert_eq!(not_queued(&repo, &[next]), []);
+    }
+
     /// A dependent is left out with what it depends on, however far down
     /// the chain and in whatever order the batch lists it.
     #[test]

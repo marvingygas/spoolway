@@ -7550,7 +7550,7 @@ fn ensure_checkout(
     // branch and is kept.
     if cut_before
         && let Some(from) = task.front.starts_from.clone()
-        && let Some(base) = repo.retarget_cut_start(task, &from)
+        && let Some(base) = repo.retarget_cut_start(task, &from, true)
     {
         task.front.starts_from = Some(base);
         persist_task(repo, task, file_seen)?;

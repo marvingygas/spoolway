@@ -158,8 +158,10 @@ pub fn stack(repo: &Repo, args: &StackArgs) -> Result<()> {
     // and never will be. Its pull request opens against where that
     // dependency stood instead, the base a dependent cut afterwards is given
     // at the cut.
+    // A dependency whose pull request merged is not followed here: the
+    // fall-through below already handles its deleted branch.
     let starts_from = repo
-        .retarget_cut_start(&task, &starts_from)
+        .retarget_cut_start(&task, &starts_from, false)
         .unwrap_or(starts_from);
 
     // A dependency's branch was published by its own handover, and this
