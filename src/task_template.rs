@@ -182,6 +182,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -202,6 +203,7 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::TASK_TEMPLATES_DIR)).unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -228,6 +230,7 @@ mod tests {
         std::fs::write(dir.join("impl-strict.md"), "the tracked skeleton\n").unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -266,6 +269,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -304,6 +308,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),
@@ -353,6 +358,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             home: root.join(".home"),
             root: root.to_path_buf(),

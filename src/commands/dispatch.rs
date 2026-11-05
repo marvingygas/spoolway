@@ -2567,6 +2567,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 root: dir.to_path_buf(),
                 checkout: dir.to_path_buf(),
                 config: Config::default(),
@@ -2607,6 +2608,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             root: main.clone(),
             checkout: release.clone(),
             config: Config::default(),

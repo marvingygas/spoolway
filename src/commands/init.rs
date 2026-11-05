@@ -2465,6 +2465,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -2842,6 +2843,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             config: Config::load(&root).unwrap(),
             home: root.join(".home"),

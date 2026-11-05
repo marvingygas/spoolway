@@ -32,6 +32,13 @@ pub struct Repo {
     /// no setup of this worktree's for a command to write — see
     /// [`Repo::checkout_note`] and `sync::run`.
     pub borrowed: bool,
+    /// Whether the command started in a worktree under
+    /// [`Repo::worktree_root`], which is a dispatcher lane's. In home mode
+    /// `checkout` is the workspace root whatever the start, so this is the
+    /// only record of where the command ran. It is read from the starting
+    /// directory and never from `SPOOLWAY_WORKTREE`, which a person's shell
+    /// can carry by accident. See [`Repo::in_lane_worktree`].
+    pub started_in_lane: bool,
     pub config: Config,
     /// `~/.spoolway/<label>-<id>/` — where every runtime file this project's
     /// spoolway writes actually lives, `<label>` and `<id>` being
@@ -153,8 +160,10 @@ impl Repo {
         // `bind` makes one.
         let home = bind(&root)?;
         let config = Config::load(&root)?;
+        let started_in_lane = started_in_lane(&start, &home);
         Ok(Repo {
             borrowed,
+            started_in_lane,
             root,
             checkout,
             config,
@@ -262,6 +271,7 @@ impl Repo {
         let root = Repo::root(&start, main.as_deref())?;
         let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         let (home, home_error) = bind_lenient(&root, mode);
+        let started_in_lane = started_in_lane(&start, &home);
         // `Config::load` reads the overrides layer out of the home that
         // `home_error` above just failed to settle, so calling it the
         // ordinary way here could fail again for the identical reason and
@@ -279,6 +289,7 @@ impl Repo {
             Ok(config) => Ok((
                 Repo {
                     borrowed,
+                    started_in_lane,
                     root,
                     checkout,
                     config,
@@ -290,6 +301,7 @@ impl Repo {
             Err(err) => Ok((
                 Repo {
                     borrowed,
+                    started_in_lane,
                     root,
                     checkout,
                     config: Config::default(),
@@ -1507,7 +1519,9 @@ impl Repo {
     /// under [`Repo::worktree_root`] is a dispatcher lane's, and a task must
     /// not move a person's private files out of their home.
     pub fn tracked_write_root(&self, reads: &str, typed: &str) -> Result<TrackedWrite<'_>> {
-        if !self.in_linked_worktree() {
+        // A lane in home mode has `checkout == root`, so it is not a linked
+        // worktree by that test. It still has to reach the refusal below.
+        if !self.in_linked_worktree() && !self.in_lane_worktree() {
             return Ok(TrackedWrite {
                 root: &self.checkout,
                 branch: None,
@@ -1573,9 +1587,12 @@ impl Repo {
         Ok(())
     }
 
-    /// Whether `checkout` sits under [`Repo::worktree_root`].
+    /// Whether the command runs in a dispatcher lane's worktree: `checkout`
+    /// sits under [`Repo::worktree_root`], or, in home mode, where `checkout`
+    /// is the workspace root and says nothing about the lane, the command
+    /// started under it.
     pub fn in_lane_worktree(&self) -> bool {
-        crate::platform::is_within(&self.checkout, &self.worktree_root())
+        self.started_in_lane || crate::platform::is_within(&self.checkout, &self.worktree_root())
     }
 
     /// The `checkout:` fact a command that reads the tracked control plane
@@ -4509,6 +4526,11 @@ pub(crate) fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (P
     checkout_of(start, root, main)
 }
 
+/// Whether `start` sits under the worktree folder of the project home `home`.
+fn started_in_lane(start: &Path, home: &Path) -> bool {
+    crate::platform::is_within(start, &home.join(crate::mux::WORKTREES_DIR))
+}
+
 /// `gh`'s program name. Overridable so a local end-to-end suite — which has
 /// no forge to talk to — can point this at a stub and still drive everything
 /// around it for real.
@@ -5354,6 +5376,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config: Config::default(),
@@ -6241,6 +6264,7 @@ mod tests {
         crate::scratch::git_init(&base, &["-b", "main"]);
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config: Config::default(),
@@ -6529,6 +6553,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config: crate::config::Config::default(),
@@ -8595,6 +8620,16 @@ mod tests {
                 "{err}"
             );
             assert!(in_lane.in_lane_worktree());
+            let err = in_lane
+                .tracked_write_root("config", "config set a b")
+                .expect_err("`config set` in a home-mode lane must be refused");
+            assert!(
+                err.to_string()
+                    .contains("a lane does not change the project's setup"),
+                "{err}"
+            );
+            own.tracked_write_root("config", "config set a b")
+                .expect("the person's own checkout may write the workspace config");
 
             own.refuse_in_lane("the overrides layer")
                 .expect("the person's own checkout is not a lane");

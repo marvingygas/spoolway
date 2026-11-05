@@ -30,6 +30,7 @@ pub fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
     (
         Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),

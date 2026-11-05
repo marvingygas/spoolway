@@ -3383,6 +3383,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
@@ -3441,6 +3442,7 @@ mod tests {
             config: Config::default(),
             home: root.join(".home"),
             borrowed: false,
+            started_in_lane: false,
         };
         (repo, root, home)
     }
@@ -5172,6 +5174,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: checkout.clone(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -5210,6 +5213,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: checkout.clone(),
             root: root.to_path_buf(),
             config: Config::default(),

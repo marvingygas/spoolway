@@ -4448,6 +4448,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 root: checkout.to_path_buf(),
                 home: checkout.join(".home"),
                 checkout: checkout.to_path_buf(),
@@ -6087,6 +6088,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6146,6 +6148,7 @@ mod tests {
         .unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6187,6 +6190,7 @@ mod tests {
         std::fs::write(broken.join(crate::repo::BINDING_FILE), "garbage = [\n").unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6230,6 +6234,7 @@ mod tests {
         .unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6262,6 +6267,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6297,6 +6303,7 @@ mod tests {
         assert!(!home.exists());
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6335,6 +6342,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -6483,6 +6491,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),

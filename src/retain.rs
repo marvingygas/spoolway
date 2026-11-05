@@ -413,6 +413,7 @@ mod tests {
         config.housekeeping.archive_retention_days = 0;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -454,6 +455,7 @@ mod tests {
         assert_eq!(config.housekeeping.archive_retention_days, 0);
         let mut repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -492,6 +494,7 @@ mod tests {
         config.housekeeping.retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -527,6 +530,7 @@ mod tests {
         config.housekeeping.retention_days = 30;
         let mut repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -601,6 +605,7 @@ mod tests {
         config.housekeeping.archive_retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -652,6 +657,7 @@ mod tests {
         config.housekeeping.retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -718,6 +724,7 @@ mod tests {
         config.housekeeping.retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -781,6 +788,7 @@ mod tests {
         config.housekeeping.archive_retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -822,6 +830,7 @@ mod tests {
         config.housekeeping.archive_retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -864,6 +873,7 @@ mod tests {
         config.housekeeping.archive_retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -902,6 +912,7 @@ mod tests {
         config.housekeeping.archive_retention_days = 30;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,
@@ -939,6 +950,7 @@ mod tests {
         config.housekeeping.retention_days = 1;
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: base.to_path_buf(),
             root: base.to_path_buf(),
             config,

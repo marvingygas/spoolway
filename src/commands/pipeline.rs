@@ -2744,6 +2744,7 @@ mod tests {
         (
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
@@ -4538,6 +4539,7 @@ mod tests {
             .unwrap();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -4744,6 +4746,7 @@ mod tests {
             let home = crate::mux::project_home(&root).unwrap();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -4797,6 +4800,7 @@ mod tests {
             .expect("init");
             Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config: Config::default(),
@@ -4994,6 +4998,7 @@ mod tests {
         std::fs::write(root.join(".spoolway/implementer.md"), "outside\n").unwrap();
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config: Config::default(),
@@ -5050,6 +5055,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -5086,6 +5092,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5118,6 +5125,7 @@ mod tests {
         init_at(&root);
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5166,6 +5174,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5213,6 +5222,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5259,6 +5269,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5408,6 +5419,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5444,6 +5456,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5487,6 +5500,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5528,6 +5542,7 @@ mod tests {
         let home = root.join(".home");
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
             config,
@@ -5569,6 +5584,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5609,6 +5625,7 @@ mod tests {
         init_at(&root);
         let main = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5671,6 +5688,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5895,6 +5913,7 @@ mod tests {
 
         let repo = Repo {
             borrowed: false,
+            started_in_lane: false,
             home: root.join(".home"),
             checkout: root.to_path_buf(),
             root: root.to_path_buf(),
@@ -5971,6 +5990,7 @@ mod tests {
             let config = Config::default();
             let repo = Repo {
                 borrowed: false,
+                started_in_lane: false,
                 checkout: root.to_path_buf(),
                 root: root.to_path_buf(),
                 config,
