@@ -8540,6 +8540,72 @@ mod tests {
         });
     }
 
+    /// A lane's worktree is refused the setup commands in home mode as it is
+    /// in repo mode, because `config set` and `override drop` would change the
+    /// workspace config every clone shares, or the person's private overrides.
+    /// The person's own checkout, and a linked worktree of theirs outside the
+    /// dispatcher's worktree folder, are not refused.
+    #[test]
+    fn a_lane_in_home_mode_is_refused_setup_commands_but_the_person_is_not() {
+        let work = bind_fixture("home-mode-lane-refused");
+        let canon = work.canonical().unwrap();
+        let (home, _home_guard) = workspace_fixture("home-mode-lane-refused", &canon, "api");
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("README"), "hello\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "root"]);
+
+        crate::platform::test_home::with_home(&home, || {
+            let own = Repo::discover(&work).unwrap();
+            let lane = own.worktree_root().join("task-x");
+            std::fs::create_dir_all(lane.parent().unwrap()).unwrap();
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/x",
+                    lane.to_str().unwrap(),
+                ],
+            );
+            let elsewhere = crate::scratch::root("home-mode-lane-refused-elsewhere");
+            let _ = std::fs::remove_dir_all(&elsewhere);
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/y",
+                    elsewhere.to_str().unwrap(),
+                ],
+            );
+
+            let in_lane = Repo::discover(&lane).unwrap();
+            let err = in_lane
+                .refuse_in_lane("the overrides layer")
+                .expect_err("a lane in home mode must be refused, as in repo mode");
+            assert!(
+                err.to_string()
+                    .contains("a lane does not change the project's setup"),
+                "{err}"
+            );
+            assert!(in_lane.in_lane_worktree());
+
+            own.refuse_in_lane("the overrides layer")
+                .expect("the person's own checkout is not a lane");
+            assert!(!own.in_lane_worktree());
+            Repo::discover(&elsewhere)
+                .unwrap()
+                .refuse_in_lane("the overrides layer")
+                .expect("a worktree outside the dispatcher's worktree folder is not a lane");
+        });
+    }
+
     /// A checkout carrying a tracked `.spoolway/` *and* listed by a
     /// workspace is ambiguous — refused, naming both the tracked directory
     /// and the workspace's own record.
