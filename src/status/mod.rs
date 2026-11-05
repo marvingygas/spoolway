@@ -5790,7 +5790,7 @@ fn rows_on(
                     continue;
                 }
                 if !name.is_empty() {
-                    let why = pipelines.missing_line(task.id(), name);
+                    let why = Pipelines::missing_line(task, name);
                     let mut row = unroutable_row(repo, tasks, graph, task, &why);
                     row.state = State::Held;
                     rows.push(row);
@@ -15303,17 +15303,29 @@ mod tests {
         assert!(matches!(row.state, State::Held));
         assert!(!row.resumable);
         assert!(
-            row.next
-                .contains("`deleted-pipeline`, which does not exist"),
+            row.next.contains("`deleted-pipeline` is gone"),
             "{}",
             row.next
         );
+        // On a step, not stopped: `resume` would refuse it, so the line says
+        // it carries on by itself instead of sending the person there.
         assert!(
             row.next.contains("set `pipeline:` in the task file")
-                && row.next.contains("then resume it"),
+                && row.next.contains("it then carries on by itself"),
             "the row names the way out: {}",
             row.next
         );
+        // The board clips NEXT to the pane, so the way out must come early.
+        let at = row.next.find("set `pipeline:`").unwrap();
+        assert!(at < 40, "the way out leads the line: {}", row.next);
+
+        // A blocked task is stopped, and is the one `resume` takes.
+        let mut task = repo.task("stale").unwrap();
+        task.set_stage(crate::pipeline::BLOCKED, None);
+        task.save().unwrap();
+        let blocked_rows = super::rows(&repo, &pipelines).unwrap();
+        let row = blocked_rows.iter().find(|r| r.id == "stale").unwrap();
+        assert!(row.next.contains("then resume it"), "{}", row.next);
     }
 
     /// A task on a clashing pipeline name is drawn `held`, with the one

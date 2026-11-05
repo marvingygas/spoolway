@@ -201,12 +201,13 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
         idle_announced = true;
     }
 
-    // Every live task's own routing source, checked whole before anything
-    // starts: `pipeline:` is the only place a task's pipeline comes from any
-    // more — there is no project default to fall back to — and a task that
-    // cannot resolve one is broken whether or not a lane ever reaches it.
-    // Refused here, ahead of the lock, for the same reason as the three
-    // checks below: found and fixed by a person reading this line, not
+    // Every live task's own routing source, checked before anything starts:
+    // `pipeline:` is the only place a task's pipeline comes from any more —
+    // there is no project default to fall back to — and a task with none is
+    // broken whether or not a lane ever reaches it. A task naming a pipeline
+    // that does not exist is held by the pass instead, so one stale name
+    // does not stop the rest. Refused here, ahead of the lock, for the same
+    // reason as the three checks below: found and fixed by a person reading this line, not
     // discovered mid-run and left for someone to stop by hand. The base check
     // refuses only over a base that exists nowhere; a chain whose bases
     // disagree is held task by task by the first pass instead, which prints

@@ -2819,7 +2819,7 @@ impl Pipelines {
             anyhow::anyhow!(
                 "task `{}` is held — {}",
                 task.id(),
-                self.missing_line(task.id(), name)
+                Pipelines::missing_line(task, name)
             )
         })
     }
@@ -2828,16 +2828,22 @@ impl Pipelines {
     /// the board, in `queue list` and in the dispatcher's own pass: what is
     /// missing, and the way out that costs the task nothing.
     ///
-    /// The way out is to correct `pipeline:` in the task file and resume. The
-    /// branch, the worktree and the commits are untouched, and the task stays
-    /// on the step it stood on, so resuming carries it on from there. Moving
-    /// it with `unqueue` instead would strip the task back to a fresh start.
-    pub fn missing_line(&self, id: &str, name: &str) -> String {
+    /// The way out leads the line because the board clips a row's NEXT to the
+    /// pane, and the cause is already in the PIPELINE column. It is to correct
+    /// `pipeline:` in the task file, which the board's `open task` opens. The
+    /// branch, the worktree and the commits are untouched and the task stays
+    /// on the step it stood on. Only a stopped task needs a resume; resume
+    /// refuses any other, which carries on by itself once the key is right.
+    /// Moving the task with `unqueue` instead would strip it back to a fresh
+    /// start.
+    pub fn missing_line(task: &crate::task::Task, name: &str) -> String {
+        let then = match task.stage() {
+            PAUSED | BLOCKED => "then resume it",
+            _ => "it then carries on by itself",
+        };
         format!(
-            "names pipeline `{name}`, which does not exist — set `pipeline:` in the task file \
-             (`spoolway queue show {id}` prints it) to one of: {}, then resume it. Its branch \
-             and commits are kept",
-            self.names().join(", ")
+            "`{name}` is gone: set `pipeline:` in the task file (board: open task) to one that \
+             exists, {then}. Branch and commits kept"
         )
     }
 

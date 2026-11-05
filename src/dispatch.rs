@@ -14802,8 +14802,8 @@ mod tests {
             .filter(|p| p.contains("`stranded`"))
             .collect();
         assert_eq!(held.len(), 1, "{:?}", report.problems);
-        assert!(held[0].contains("names pipeline `retired`"), "{}", held[0]);
-        assert!(held[0].contains("then resume it"), "{}", held[0]);
+        assert!(held[0].contains("`retired` is gone"), "{}", held[0]);
+        assert!(held[0].contains("carries on by itself"), "{}", held[0]);
         assert_eq!(
             reload(&repo.queue_dir().join("stranded.md")).stage(),
             "queued"

@@ -9783,7 +9783,8 @@ mod tests {
         let err = resume(&repo, &pipelines, &resume_args("stranded", None), None).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("task `stranded` is held"), "{message}");
-        assert!(message.contains("names pipeline `retired`"), "{message}");
+        assert!(message.contains("`retired` is gone"), "{message}");
+        assert!(message.contains("then resume it"), "{message}");
         assert!(
             message.contains("set `pipeline:` in the task file"),
             "{message}"
