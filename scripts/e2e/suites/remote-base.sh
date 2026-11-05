@@ -231,6 +231,55 @@ says "queue add queues a task when origin cannot be asked" "queued offline" \
   "$SPOOLWAY" queue add --from "$LIVE/offline.md"
 must "origin is back" git remote set-url origin "$ORIGIN_URL"
 
+# An `origin` that hangs on the question. `queue add` asks it whether each
+# task's branch is there, from more than one place per task, and each ask is
+# given up on after ten seconds. A batch of three that paid the limit at every
+# ask would hold the person for over a minute with nothing printed. The first
+# ask that gets no answer is remembered, so the whole batch waits one limit and
+# every task still queues. The transport is the person's own `core.sshCommand`,
+# a script that holds `git ls-remote` and serves everything else.
+for n in 1 2 3; do
+  task_doc "$LIVE/slow$n.md" "slow$n" "$BODY" "group: slow$n" "base: plan/live"
+done
+ORIGIN_URL=$(git remote get-url origin)
+cat > "$LIVE/slow-ssh.sh" <<SH
+#!/bin/sh
+if ps -o args= -p \$PPID | grep -q ' ls-remote '; then
+  ps -o pgid= -p \$\$ | tr -d ' ' > '$LIVE/slow-group'
+  sleep 40
+fi
+exec git-upload-pack '$FORGE/origin.git'
+SH
+chmod +x "$LIVE/slow-ssh.sh"
+must "origin is an ssh url" \
+  git remote set-url origin ssh://spoolway-e2e.invalid/nowhere.git
+must "the person's own ssh command holds a question about branches" \
+  git config core.sshCommand "$LIVE/slow-ssh.sh"
+SLOW_FROM=$SECONDS
+slow_batch() {
+  "$SPOOLWAY" queue add --from "$LIVE/slow1.md" --from "$LIVE/slow2.md" \
+    --from "$LIVE/slow3.md"
+}
+says "a batch queues its tasks when origin never answers" "queued slow1" slow_batch
+SLOW_FOR=$((SECONDS - SLOW_FROM))
+if [ "$SLOW_FOR" -lt 25 ]; then
+  ok "and it waited about one limit, not one per ask (${SLOW_FOR}s)"
+else
+  bad "and it waited about one limit, not one per ask (${SLOW_FOR}s)"
+fi
+for n in 1 2 3; do
+  works "slow$n is queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/slow$n.md"
+done
+if [ -s "$LIVE/slow-group" ]; then
+  kill -TERM -- "-$(cat "$LIVE/slow-group")" 2>/dev/null
+fi
+git config --unset core.sshCommand
+must "origin is back" git remote set-url origin "$ORIGIN_URL"
+# Taken out again so the dispatcher below has only the two tasks it is about.
+for n in 1 2 3; do
+  must "slow$n is unqueued" "$SPOOLWAY" queue unqueue "slow$n"
+done
+
 # A fetch that hangs. `origin` is pointed at an ssh url whose transport is the
 # person's own `core.sshCommand`, a script that serves every call from the
 # real bare repo except a fetch, which it holds. Pushes keep going to the real

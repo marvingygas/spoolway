@@ -2019,6 +2019,101 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
     ))
 }
 
+/// How long a question put to `origin` stays answered. One `queue add` asks
+/// about the same branch from up to three places per task, and finishes well
+/// inside this; a longer-lived process asks again after it.
+const ORIGIN_MEMORY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What this process has already learnt from `origin`: per branch whether it
+/// is there, and when `origin` last failed to answer at all.
+#[derive(Default)]
+struct OriginMemory {
+    silent_since: Option<std::time::Instant>,
+    branches: BTreeMap<String, (bool, std::time::Instant)>,
+}
+
+/// Whether `origin` has `branch`, or `None` when it could not be asked.
+///
+/// Each ask is bounded by [`Repo::remote_branch_answer`], but a `queue add`
+/// reaches [`leftover_refusal`] up to three times per task, and a batch holds
+/// several tasks. An `origin` that hangs would cost the full limit at every
+/// one of them, tens of seconds with nothing printed. So an answer is
+/// remembered for the branch, and the first non-answer is remembered for the
+/// repository: every later question in that time is declined without asking,
+/// and the wait stays at one limit however many tasks there are.
+fn origin_has_branch(repo: &Repo, branch: &str) -> Option<bool> {
+    use std::sync::{Mutex, OnceLock};
+    static MEMORY: OnceLock<Mutex<BTreeMap<std::path::PathBuf, OriginMemory>>> = OnceLock::new();
+    let now = std::time::Instant::now();
+    let fresh = |at: std::time::Instant| now.duration_since(at) < ORIGIN_MEMORY;
+    {
+        let memory = MEMORY.get_or_init(Default::default).lock().ok()?;
+        let known = memory.get(&repo.root);
+        if known.and_then(|m| m.silent_since).is_some_and(fresh) {
+            return None;
+        }
+        if let Some(&(has, at)) = known.and_then(|m| m.branches.get(branch))
+            && fresh(at)
+        {
+            return Some(has);
+        }
+    }
+    let answer = repo.remote_branch_answer(branch);
+    if let Ok(mut memory) = MEMORY.get_or_init(Default::default).lock() {
+        let entry = memory.entry(repo.root.clone()).or_default();
+        match answer {
+            Some(has) => {
+                entry.silent_since = None;
+                entry
+                    .branches
+                    .insert(branch.to_string(), (has, std::time::Instant::now()));
+            }
+            None => entry.silent_since = Some(std::time::Instant::now()),
+        }
+    }
+    answer
+}
+
+/// The number of the open pull request for `branch`, when `gh` lists one.
+///
+/// `gh` is given the same ten seconds as the question to `origin`, and its
+/// whole process group is stopped after that: it talks to the forge over the
+/// network, and one stuck there would otherwise hold `queue add` with nothing
+/// printed. No `gh`, a `gh` that fails, and one that is stopped all answer
+/// `None`, which leaves the refusal naming the branch alone.
+fn open_pull_request(repo: &Repo, branch: &str) -> Option<u64> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let mut child = std::process::Command::new("gh")
+        .args([
+            "pr", "list", "--head", branch, "--state", "open", "--json", "number",
+        ])
+        .current_dir(&repo.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let mut pipe = child.stdout.take()?;
+    let (sender, text) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = pipe.read_to_end(&mut out);
+        let _ = sender.send(out);
+    });
+    let pid = child.id();
+    let out = text.recv_timeout(std::time::Duration::from_secs(10));
+    if out.is_err() {
+        crate::headless::kill_group(pid);
+    }
+    let succeeded = child.wait().is_ok_and(|status| status.success());
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&out.ok().filter(|_| succeeded)?).ok()?;
+    list.first()?["number"].as_u64()
+}
+
 /// The refusal for a task whose branch an earlier run left on `origin`, or
 /// `None` when `origin` does not have it or cannot be asked.
 ///
@@ -2029,24 +2124,16 @@ fn leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
 /// deleted or renamed here: the old branch and its pull request are the
 /// person's to settle.
 ///
-/// An `origin` that does not answer (offline, no credential, the ten-second
-/// limit of [`Repo::remote_branch_answer`]) refuses nothing, so a task still
-/// queues when the network is out. The open pull request is named only when
+/// An `origin` that does not answer (offline, no credential, or the
+/// ten-second limit of [`Repo::remote_branch_answer`]) refuses nothing, so a
+/// task still queues when the network is out; see [`origin_has_branch`] for
+/// how few times that wait is paid. The open pull request is named only when
 /// `gh` lists one; without `gh` the refusal names the branch alone.
 fn remote_leftover_refusal(repo: &Repo, id: &str, branch: &str) -> Option<String> {
-    if repo.remote_branch_answer(branch) != Some(true) {
+    if origin_has_branch(repo, branch) != Some(true) {
         return None;
     }
-    let open = crate::repo::head_pull_requests("gh", &repo.root, branch)
-        .ok()
-        .flatten()
-        .and_then(|out| serde_json::from_slice::<Vec<serde_json::Value>>(&out).ok())
-        .and_then(|list| {
-            list.iter()
-                .find(|pr| pr["state"].as_str() == Some("OPEN"))
-                .and_then(|pr| pr["number"].as_u64())
-        });
-    let pull_request = open.map_or(String::new(), |n| {
+    let pull_request = open_pull_request(repo, branch).map_or(String::new(), |n| {
         format!(" and its open pull request #{n}")
     });
     Some(format!(
