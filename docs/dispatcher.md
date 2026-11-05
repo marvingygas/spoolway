@@ -2091,8 +2091,15 @@ could not cut a worktree for `task/cart-totals` at <path>: `git worktree add --n
 When the dispatcher cannot tell which hook was running, the failure says the call was still
 running and lists the git hooks it could have been.
 
-The dispatcher removes the stopped checkout, and the branch it created, so the next attempt cuts
-afresh. A failed cut is tried again on a later pass. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
+A git hook that exits with an error fails the cut as well. The failure carries the hook's output:
+
+```
+could not cut a worktree for `task/cart-totals` at <path>: `git worktree add` failed (exit status: 1): hook: npm install failed
+```
+
+The dispatcher removes the checkout of a stopped or failed cut, and the branch the cut created,
+so the next attempt cuts afresh and runs the hook again. A checkout that was already at the path
+when the cut began is left alone. A failed cut is tried again on a later pass. When the checkout cannot be removed, the dispatcher locks it as `initializing` and the
 failure gives the by-hand command shown under [A removal that was stopped or
 failed](#a-removal-that-was-stopped-or-failed). Run it before the task is resumed.
 The failure counts toward the launch-failure ceiling described under [Restarts, laps and
