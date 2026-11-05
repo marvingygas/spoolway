@@ -24,97 +24,6 @@ use crate::task::{Task, write_atomic};
 /// with no arguments and still hit the right task.
 pub const TASK_ENV: &str = "SPOOLWAY_TASK";
 
-/// Which steps a [`LaneRefusal`] applies to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefusedOn {
-    /// Every step.
-    Every,
-    /// Every step except the named one, where the command is allowed.
-    Except(&'static str),
-    /// Only the named step; it is allowed, in this form, anywhere else.
-    Only(&'static str),
-}
-
-/// One command a lane is refused, written once.
-///
-/// This list is read twice: by the call sites that refuse, and by
-/// `spoolway pipeline check`, which fails a prompt that tells its lane to run
-/// one of these. A second copy of it in the lint would drift from the
-/// refusals, and the drift would show up as a lane blocked twenty minutes in.
-#[derive(Debug, Clone, Copy)]
-pub struct LaneRefusal {
-    /// The verb the message is about; see [`refuse_from_lane`].
-    pub what: &'static str,
-    /// The words after `spoolway` that name the command.
-    pub command: &'static [&'static str],
-    /// The long flag that triggers the refusal, when the bare command is allowed.
-    pub flag: Option<&'static str>,
-    /// The short spelling of `flag`.
-    pub short: Option<char>,
-    pub on: RefusedOn,
-}
-
-pub mod refusal {
-    use super::{LaneRefusal, RefusedOn};
-
-    pub const QUEUE_ADD_FROM: LaneRefusal = LaneRefusal {
-        what: "the queue is mutated",
-        command: &["queue", "add"],
-        // Bare `queue add` prints the task skeleton, so only `--from` refuses.
-        flag: Some("from"),
-        short: None,
-        on: RefusedOn::Every,
-    };
-    pub const LANE_ANSWER: LaneRefusal = LaneRefusal {
-        what: "a lane is answered",
-        command: &["lane"],
-        flag: Some("message"),
-        short: Some('m'),
-        on: RefusedOn::Every,
-    };
-    pub const RESTART: LaneRefusal = LaneRefusal {
-        what: "a step is restarted",
-        command: &["restart"],
-        flag: None,
-        short: None,
-        on: RefusedOn::Every,
-    };
-    /// A lane on `blocked` may resume another stopped task.
-    pub const RESUME: LaneRefusal = LaneRefusal {
-        what: "a gate is answered",
-        command: &["resume"],
-        flag: None,
-        short: None,
-        on: RefusedOn::Except(crate::pipeline::BLOCKED),
-    };
-    pub const RESUME_SKIP_HOOK: LaneRefusal = LaneRefusal {
-        what: "a hook is skipped",
-        command: &["resume"],
-        flag: Some("skip-hook"),
-        short: None,
-        on: RefusedOn::Every,
-    };
-    /// Refused in its own words by `resume_checked`, because on `blocked` the
-    /// generic gate refusal does not apply and this one is narrower.
-    pub const RESUME_STAGE_ON_BLOCKED: LaneRefusal = LaneRefusal {
-        what: "a task is rerouted",
-        command: &["resume"],
-        flag: Some("stage"),
-        short: None,
-        on: RefusedOn::Only(crate::pipeline::BLOCKED),
-    };
-}
-
-/// Every refusal a lane meets, for the lint in `src/prompt.rs`.
-pub const LANE_REFUSALS: &[&LaneRefusal] = &[
-    &refusal::QUEUE_ADD_FROM,
-    &refusal::LANE_ANSWER,
-    &refusal::RESTART,
-    &refusal::RESUME,
-    &refusal::RESUME_SKIP_HOOK,
-    &refusal::RESUME_STAGE_ON_BLOCKED,
-];
-
 /// Refuse a command that is a person's to answer, when it is run from inside
 /// a lane's own environment.
 ///
@@ -140,12 +49,12 @@ pub const LANE_REFUSALS: &[&LaneRefusal] = &[
 /// step. Everywhere else, `spoolway resume` run from a lane would let it
 /// answer its own gate, with nobody outside it ever asked.
 ///
-/// `refusal.what` names the verb this refusal is about, so the message reads as a
+/// `refusal.what()` names the verb this refusal is about, so the message reads as a
 /// sentence: `"a gate is answered"`, `"a lane is answered"`, `"the queue is
 /// mutated"`.
 pub fn refuse_from_lane(refusal: &LaneRefusal, in_lane: bool) -> Result<()> {
     if in_lane {
-        let what = refusal.what;
+        let what = refusal.what();
         bail!(
             "this is a lane's own environment, and {what} from outside it. ask the person \
              watching the board."
@@ -184,6 +93,7 @@ pub(crate) mod pending;
 mod pending_delete;
 mod pipeline;
 mod queue;
+pub(crate) mod refusal;
 mod report;
 mod routines;
 mod stack;
@@ -204,6 +114,7 @@ pub use lanes::*;
 pub use r#override::*;
 pub use pipeline::*;
 pub use queue::*;
+pub use refusal::{LANE_REFUSALS, LaneRefusal};
 pub use report::*;
 pub use stack::*;
 pub use task::*;
@@ -243,52 +154,6 @@ pub mod testutil;
 
 #[cfg(test)]
 mod tests {
-    /// Every `refuse_from_lane(` call passes an entry of `refusal::`, and every
-    /// entry the list names is passed by some call site (the `--stage` one is
-    /// the exception: `resume_checked` refuses it in its own words).
-    #[test]
-    fn call_sites_and_the_refusal_list_agree() {
-        let sources = [
-            include_str!("queue.rs"),
-            include_str!("lanes.rs"),
-            include_str!("report.rs"),
-        ];
-        let mut used = Vec::new();
-        for source in sources {
-            for line in source.lines() {
-                let line = line.trim();
-                if line.starts_with("///") || line.starts_with("//") {
-                    continue;
-                }
-                let Some(rest) = line.strip_prefix("refuse_from_lane(") else {
-                    continue;
-                };
-                let arg = rest.split(',').next().unwrap();
-                let name = arg
-                    .strip_prefix("&refusal::")
-                    .unwrap_or_else(|| panic!("call site not from the list: {line}"));
-                used.push(name.to_string());
-            }
-        }
-        for refusal in super::LANE_REFUSALS {
-            if refusal.command == ["resume"] && refusal.flag == Some("stage") {
-                continue;
-            }
-            let found = used.iter().any(|name| {
-                let entry = match name.as_str() {
-                    "QUEUE_ADD_FROM" => &super::refusal::QUEUE_ADD_FROM,
-                    "LANE_ANSWER" => &super::refusal::LANE_ANSWER,
-                    "RESTART" => &super::refusal::RESTART,
-                    "RESUME" => &super::refusal::RESUME,
-                    "RESUME_SKIP_HOOK" => &super::refusal::RESUME_SKIP_HOOK,
-                    other => panic!("unknown refusal {other}"),
-                };
-                entry.what == refusal.what
-            });
-            assert!(found, "no call site refuses {:?}", refusal.what);
-        }
-    }
-
     /// A prose-only command must refuse `--json` by name, and stay silent
     /// without it. Before the refusal existed, `--json` was accepted and
     /// prose came out on stdout.

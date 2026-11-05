@@ -52,7 +52,10 @@ fn parse_target(target: &str) -> Result<Target> {
 /// actually running, same as [`prompt::show`] — and writes the project-wide
 /// layer, so the fork is there for a lane in any worktree on its next start.
 pub fn prompt_override(repo: &Repo, name: &str) -> Result<()> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::PROMPT_OVERRIDE,
+        "the overrides layer",
+    )?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -83,7 +86,10 @@ pub(crate) struct PromptOverrideWrite {
 /// print nothing. `prompt override` prints around it; the OVERRIDES tab
 /// calls it directly, and checks for an existing copy first.
 pub(crate) fn write_prompt_override(repo: &Repo, name: &str) -> Result<PromptOverrideWrite> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::PROMPT_OVERRIDE,
+        "the overrides layer",
+    )?;
     let tracked = crate::prompt::path_for_tracked(repo, name);
     // A private prompt is never tracked, so forking from it reads
     // `local/prompts/` instead — but the layer this writes into only ever
@@ -118,7 +124,10 @@ pub(crate) fn write_prompt_override(repo: &Repo, name: &str) -> Result<PromptOve
 /// project's home, so this refuses before doing anything else rather than
 /// silently guess.
 pub fn config_override(repo: &Repo, home_error: Option<&anyhow::Error>) -> Result<()> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::CONFIG_OVERRIDE,
+        "the overrides layer",
+    )?;
     if let Some(err) = home_error {
         return Err(anyhow::anyhow!(
             "{err:#} — {}'s stamped home could not be resolved, so `config override` has \
@@ -593,7 +602,10 @@ pub(crate) fn write_config_override(
     key: &str,
     value: &str,
 ) -> Result<ConfigOverrideWrite> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::CONFIG_OVERRIDE,
+        "the overrides layer",
+    )?;
     // Held from the read of the patch to its write, so a parallel set of
     // another key starts from what this one saved instead of replacing it.
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
@@ -609,7 +621,10 @@ pub(crate) fn write_config_override(
 
 /// `spoolway config override --set <key>=<value>`.
 pub fn config_override_set(repo: &Repo, set: &str) -> Result<()> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::CONFIG_OVERRIDE,
+        "the overrides layer",
+    )?;
     let (key, value) = set
         .split_once('=')
         .with_context(|| format!("`--set {set}` — expected `<key>=<value>`"))?;
@@ -661,7 +676,10 @@ pub(crate) fn drop_override_key(repo: &Repo, target: &str, key: &str) -> Result<
 /// The OVERRIDES tab calls this once per file, so a delete across several
 /// files that stops partway has changed whole files only.
 pub(crate) fn drop_override_keys(repo: &Repo, target: &str, keys: &[String]) -> Result<String> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::OVERRIDE_DROP,
+        "the overrides layer",
+    )?;
     let dir = repo.overrides_dir();
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     match parse_target(target)? {
@@ -685,7 +703,10 @@ pub(crate) fn drop_override_keys(repo: &Repo, target: &str, keys: &[String]) -> 
 ///
 /// `override drop <target>` calls this, and so does the OVERRIDES tab.
 pub(crate) fn drop_override_target(repo: &Repo, target: &str) -> Result<String> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::OVERRIDE_DROP,
+        "the overrides layer",
+    )?;
     let dir = repo.overrides_dir();
     // Held across the removal, so a parallel `pipeline override --set` that
     // read the patch first does not write it back after it is gone.
@@ -718,7 +739,10 @@ pub fn override_drop(repo: &Repo, target: Option<&str>, key: Option<&str>) -> Re
         println!("cleared {file} from the layer");
         return Ok(());
     }
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::OVERRIDE_DROP,
+        "the overrides layer",
+    )?;
     let dir = repo.overrides_dir();
     // Held for the same reason as in `drop_override_target`: a parallel
     // write would otherwise bring back the file it read.

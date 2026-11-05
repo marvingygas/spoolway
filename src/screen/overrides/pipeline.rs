@@ -1177,7 +1177,10 @@ pub(super) fn write(
     value: &str,
     targets: &[(String, Vec<String>)],
 ) -> std::result::Result<(), Unwritten> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::PIPELINE_OVERRIDE,
+        "the overrides layer",
+    )?;
     let parsed: serde_norway::Value = serde_norway::from_str(value)
         .with_context(|| format!("`{value}` does not read as YAML, so nothing was written"))?;
     let overrides = repo.overrides_dir();

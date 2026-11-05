@@ -1254,15 +1254,16 @@ pub fn pipeline_check(repo: &Repo, pipelines: Result<Pipelines>) -> Result<()> {
         problems.extend(queue_findings);
     }
 
-    // Read the prompts against the steps that run them: this rule is a fact,
-    // not an opinion — a prompt naming a `spoolway …` command this binary
-    // does not have, checked against clap's own command tree. Nothing
-    // regenerates a prompt on upgrade any more, so this is the only place
-    // left that catches the drift, and it fails the check rather than
+    // Read the prompts against the steps that run them: these two rules are
+    // facts, not opinions. One finds a prompt naming a `spoolway …` command
+    // this binary does not have, checked against clap's own command tree.
+    // The other finds a prompt naming a command spoolway refuses in a lane.
+    // Nothing regenerates a prompt on upgrade any more, so this is the only
+    // place left that catches the drift, and it fails the check rather than
     // printing beneath a green result — the alternative is a lane running a
-    // command that no longer exists, twenty minutes in, in a pane nobody is
-    // watching. The lint's other rule, below, reads the same prompts for a
-    // restated report contract, and warns instead.
+    // command that no longer exists or is refused, twenty minutes in, in a
+    // pane nobody is watching. The lint's third rule, below, reads the same
+    // prompts for a restated report contract, and warns instead.
     for finding in crate::prompt::lint(repo, pipelines)? {
         problems.push(finding.render());
     }
@@ -1319,7 +1320,10 @@ fn report_gate_warnings(warnings: &[String]) {
 /// project-wide (`repo.overrides_dir()`), so a lane in any worktree sees the
 /// same fork on its next pass.
 pub fn pipeline_override(repo: &Repo, name: &str, set: &str) -> Result<()> {
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::PIPELINE_OVERRIDE,
+        "the overrides layer",
+    )?;
     if let Some(note) = repo.checkout_note()? {
         note.print(false)?;
     }
@@ -1505,13 +1509,13 @@ fn copy_target_dirs(repo: &Repo) -> (PathBuf, PathBuf) {
 /// naming what each would have written or changed: `local/` in repo mode,
 /// the workspace's own setup folders in home mode, the same split
 /// [`copy_target_dirs`] draws.
-fn refuse_copy_in_lane(repo: &Repo) -> Result<()> {
+fn refuse_copy_in_lane(repo: &Repo, command: &crate::commands::LaneRefusal) -> Result<()> {
     let owner = if crate::local::is_repo_mode(&repo.checkout) {
         "the private `local/` folder"
     } else {
         "this workspace's setup"
     };
-    repo.refuse_in_lane(owner)
+    repo.refuse_in_lane(command, owner)
 }
 
 /// Where `prompt copy <from> <to>` writes: `local/prompts/<to>/PROMPT.md`
@@ -1706,7 +1710,7 @@ fn print_wrote(json: bool, paths: &[&Path]) -> Result<()> {
 /// `<to>.md` would be a file neither reads, and rewriting the shared file
 /// would change what `from` reads too.
 pub fn pipeline_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
-    refuse_copy_in_lane(repo)?;
+    refuse_copy_in_lane(repo, &crate::commands::refusal::PIPELINE_COPY)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
@@ -1805,7 +1809,7 @@ const STILL_STAGES: &[&str] = &[
 /// pipeline with no `task_template:` of its own resolves by name, so it moves
 /// with the pipeline.
 pub fn pipeline_rename(repo: &Repo, old: &str, new: &str, json: bool) -> Result<()> {
-    refuse_copy_in_lane(repo)?;
+    refuse_copy_in_lane(repo, &crate::commands::refusal::PIPELINE_RENAME)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }
@@ -2075,7 +2079,7 @@ fn rename_json(
 /// whole; the legacy flat `<name>.md` shape has no folder of its own, so it
 /// is copied as the single file it is.
 pub fn prompt_copy(repo: &Repo, from: &str, to: &str, json: bool) -> Result<()> {
-    refuse_copy_in_lane(repo)?;
+    refuse_copy_in_lane(repo, &crate::commands::refusal::PROMPT_COPY)?;
     if let Some(note) = repo.checkout_note()? {
         note.print(json)?;
     }

@@ -2450,7 +2450,9 @@ fn resume_checked(
     let from_blocked = from_step == Some(crate::pipeline::BLOCKED);
     if !from_blocked {
         refuse_from_lane(&refusal::RESUME, from_step.is_some())?;
-    } else if args.stage.is_some() {
+    } else if args.stage.is_some()
+        && refusal::RESUME_STAGE_ON_BLOCKED.applies_on(crate::pipeline::BLOCKED)
+    {
         bail!(
             "a lane on `blocked` may resume another stopped task, but never with `--stage` — \
              that is a person's to decide."

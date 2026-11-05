@@ -918,7 +918,10 @@ fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Re
         let targets = [(pipeline.to_string(), vec![step.to_string()])];
         return super::pipeline::write(repo, field, value, &targets).map_err(|failed| failed.err);
     }
-    repo.refuse_in_lane("the overrides layer")?;
+    repo.refuse_in_lane(
+        &crate::commands::refusal::PIPELINE_OVERRIDE,
+        "the overrides layer",
+    )?;
     let overrides = repo.overrides_dir();
     // Held from the read of the patch to its write, so a parallel
     // `pipeline override --set` starts from what this saved.

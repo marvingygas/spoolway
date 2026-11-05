@@ -1561,7 +1561,15 @@ impl Repo {
     /// restore it. The copy commands write `local/` in repo mode, which is
     /// private too, and the workspace's setup folders in home mode. Like
     /// the tracked refusal, this one prints no `-C` line.
-    pub fn refuse_in_lane(&self, owner: &str) -> Result<()> {
+    ///
+    /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
+    /// command being refused. Its only job is to make every caller name one,
+    /// so `spoolway pipeline check` knows to fail a prompt that runs it.
+    pub fn refuse_in_lane(
+        &self,
+        _command: &crate::commands::LaneRefusal,
+        owner: &str,
+    ) -> Result<()> {
         if self.in_lane_worktree() {
             bail!(
                 "{owner} belongs to the project, not this worktree.\n  \
