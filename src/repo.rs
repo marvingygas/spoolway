@@ -33,9 +33,11 @@ pub struct Repo {
     /// [`Repo::checkout_note`] and `sync::run`.
     pub borrowed: bool,
     /// Whether the command started in a worktree under
-    /// [`Repo::worktree_root`], which is a dispatcher lane's. In home mode
-    /// `checkout` is the workspace root whatever the start, so this is the
-    /// only record of where the command ran. It is read from the starting
+    /// [`Repo::worktree_root`], which is a dispatcher lane's. Where
+    /// `checkout` is `root` and says nothing about the lane, this is the
+    /// only record of where the command ran: in home mode, and in a lane
+    /// whose branch has no `.spoolway/` and so [`borrowed`](Repo::borrowed)
+    /// the main checkout's. It is read from the starting
     /// directory and never from `SPOOLWAY_WORKTREE`, which a person's shell
     /// can carry by accident. See [`Repo::in_lane_worktree`].
     pub started_in_lane: bool,
@@ -1588,9 +1590,10 @@ impl Repo {
     }
 
     /// Whether the command runs in a dispatcher lane's worktree: `checkout`
-    /// sits under [`Repo::worktree_root`], or, in home mode, where `checkout`
-    /// is the workspace root and says nothing about the lane, the command
-    /// started under it.
+    /// sits under [`Repo::worktree_root`], or, where `checkout` is `root` and
+    /// says nothing about the lane (home mode, or a lane whose branch has no
+    /// `.spoolway/` and borrows the main checkout's), the command started
+    /// under it.
     pub fn in_lane_worktree(&self) -> bool {
         self.started_in_lane || self.checkout_in_lane_dir()
     }
@@ -8647,6 +8650,55 @@ mod tests {
                 .unwrap()
                 .refuse_in_lane("the overrides layer")
                 .expect("a worktree outside the dispatcher's worktree folder is not a lane");
+        });
+    }
+
+    /// A lane whose branch carries no `.spoolway/` borrows the main
+    /// checkout's, so its `checkout` is `root` as in home mode. It is still
+    /// a lane: the overrides layer and the tracked write are refused, and
+    /// the tracked refusal is the lane's, which prints no `-C` line for the
+    /// lane to run.
+    #[test]
+    fn a_borrowed_lane_in_repo_mode_is_refused_setup_commands() {
+        let (_origin, work, _base_guard) = fixture("borrowed-lane-refused");
+        let (home, _home_guard) = scratch_home("borrowed-lane-refused");
+        crate::platform::test_home::with_home(&home, || {
+            let own = Repo::discover(&work).unwrap();
+            let lane = own.worktree_root().join("task-x");
+            std::fs::create_dir_all(lane.parent().unwrap()).unwrap();
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/x",
+                    lane.to_str().unwrap(),
+                ],
+            );
+            git(&lane, &["rm", "-q", "-r", crate::config::STATE_DIR]);
+            git(&lane, &["commit", "-q", "-m", "drop the control plane"]);
+
+            let in_lane = Repo::discover(&lane).unwrap();
+            assert!(in_lane.borrowed && in_lane.checkout == in_lane.root);
+            let err = in_lane
+                .refuse_in_lane("the overrides layer")
+                .expect_err("a borrowed lane is a lane");
+            assert!(
+                err.to_string()
+                    .contains("a lane does not change the project's setup"),
+                "{err}"
+            );
+            let err = in_lane
+                .tracked_write_root("config", "config set a b")
+                .expect_err("a borrowed lane may not write the main checkout's setup");
+            let said = err.to_string();
+            assert!(
+                said.contains("a lane does not change the project's setup"),
+                "{said}"
+            );
+            assert!(!said.contains("spoolway -C"), "{said}");
         });
     }
 

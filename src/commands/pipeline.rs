@@ -5677,8 +5677,9 @@ mod tests {
     /// A lane in home mode reads the workspace's pipelines, the ones the
     /// dispatcher reads, so another task naming a pipeline it does not have
     /// is stranded for real and fails the check, as it does for the person.
-    /// Fails before the change: the finding was softened to a warning that
-    /// blamed the lane's branch.
+    /// Fails if `on_branch` asks `in_lane_worktree`, which counts a home-mode
+    /// lane by where it started: the finding is softened to a warning that
+    /// blames the lane's branch.
     #[test]
     fn pipeline_check_fails_a_stranded_task_in_a_home_mode_lane() {
         let root = crate::scratch::root("commands-home-lane-check-fails");

@@ -1282,8 +1282,9 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         if !dropped.is_empty() && repo.in_lane_worktree() {
             // The layer is the person's private file in the project home,
             // outside git, and a lane's rewrite of it cannot be reviewed or
-            // undone. Sync still refreshes the lane's tracked files, so
-            // this only leaves the layer alone and says so.
+            // undone. Sync still refreshes the tracked setup it reads, which
+            // in home mode is the workspace's `config/`, so this only leaves
+            // the layer alone and says so.
             let override_path = crate::overrides::config_patch_path(&overrides_dir);
             outcomes.push(Outcome::blocked(
                 crate::platform::relative(&repo.checkout, &override_path),
