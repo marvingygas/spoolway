@@ -972,6 +972,46 @@ mod tests {
         );
     }
 
+    /// A `post-checkout` hook that exits non-zero fails the cut and takes
+    /// away the checkout and the branch that cut made, with the hook's output
+    /// in the error. The next attempt then cuts afresh and runs the hook
+    /// again, instead of adopting a checkout whose hook never succeeded.
+    #[test]
+    fn a_cut_whose_hook_fails_leaves_nothing_and_the_next_attempt_runs_the_hook_again() {
+        let (repo, _guard) = fixture("hookfails");
+        hook(
+            &repo,
+            "echo ran >>\"$(dirname \"$0\")/../../hook-ran\"; echo 'hook: npm install failed'; exit 1",
+        );
+        let path = target(&repo);
+
+        let err = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<CutPending>().is_none(), "{text}");
+        assert!(text.contains("hook: npm install failed"), "{text}");
+        assert!(
+            !path.exists(),
+            "the checkout of the failed cut was left: {text}"
+        );
+        assert!(
+            !branch_exists(&repo, "task/t1"),
+            "the branch of the failed cut was left: {text}"
+        );
+
+        let again = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+        assert!(
+            format!("{again:#}").contains("hook: npm install failed"),
+            "{again:#}"
+        );
+        let ran = std::fs::read_to_string(repo.root.join("hook-ran")).unwrap();
+        assert_eq!(
+            ran.lines().count(),
+            2,
+            "the hook did not run again: {ran:?}"
+        );
+    }
+
     /// A folder git has no record of, left by a cut killed before it was
     /// registered, is cleared away, not spent as a failed launch on
     /// `already exists`.
