@@ -6020,6 +6020,48 @@ mod tests {
         assert_eq!(start("unsure", &broken), "task/unsure", "gh could not say");
     }
 
+    /// A dependent of a task whose pull request has merged is cut from, and
+    /// records as its `starts_from`, the branch that pull request merged
+    /// into: `main` after a squash merge, or the parent's own branch after a
+    /// stacked pull request merged into it. A dependent of a task whose pull
+    /// request is still open is cut from that task's branch.
+    #[cfg(unix)]
+    #[test]
+    fn a_dependent_of_a_merged_parent_is_cut_from_where_the_parent_landed() {
+        let (_origin, work, _base_guard) = fixture("merged-parent-landing");
+        let (repo, _home) = discover_registered(&work).unwrap();
+        for id in ["into-main", "into-parent", "still-open"] {
+            archive_done(&repo, id, 2, "starts_from: main\n");
+        }
+        let gh = stub_gh(
+            &work,
+            "merged-and-open",
+            "case \"$4\" in\n\
+             task/into-main) echo '[{\"number\":1,\"state\":\"MERGED\",\"baseRefName\":\"main\"}]';;\n\
+             task/into-parent) echo '[{\"number\":2,\"state\":\"MERGED\",\"baseRefName\":\"task/release\"}]';;\n\
+             *) echo '[{\"number\":3,\"state\":\"OPEN\",\"baseRefName\":\"main\"}]';;\n\
+             esac",
+        );
+        let _gh = crate::platform::GhOverride::new(&gh);
+
+        for (id, landed) in [("into-main", "main"), ("into-parent", "task/release")] {
+            assert_eq!(repo.dependency_start(id).unwrap(), landed, "{id}: records");
+            assert_eq!(
+                repo.dependency_branch(id).unwrap(),
+                landed,
+                "{id}: is cut from"
+            );
+        }
+        assert_eq!(
+            repo.dependency_start("still-open").unwrap(),
+            "task/still-open"
+        );
+        assert_eq!(
+            repo.dependency_branch("still-open").unwrap(),
+            "task/still-open"
+        );
+    }
+
     /// In a chain `a -> b -> c` where `b` closes with nothing to hand over,
     /// `c` is cut from where `b` stood, which is `a`'s branch: `a`'s work is
     /// not on `main` yet. It records the chain's base, which is where `a`
