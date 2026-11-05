@@ -12599,6 +12599,11 @@ mod tests {
             f.branch = Some("task/other".into());
         });
 
+        // `second`'s pull request is pushed, so a remote branch reaches
+        // `first`: only the dependency keeps it from being freed.
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+
         let mux = FakeMux::new(vec![]);
         let pipelines = Pipelines::builtin();
         let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
@@ -12611,10 +12616,7 @@ mod tests {
             "`second` is queued and has not been cut from it yet"
         );
 
-        // `second`'s pull request is pushed and then it is unqueued: its file
-        // moves to `pending/`, and a remote branch now reaches `first`.
-        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
-            .unwrap();
+        // `second` is unqueued: its file moves to `pending/`.
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
         let draft = repo.pending_dir().join("second.md");
         std::fs::rename(&second, &draft).unwrap();
@@ -12638,6 +12640,90 @@ mod tests {
         assert!(
             !has_branch(&repo, "task/first"),
             "with the draft deleted nothing needs the branch and a remote has it"
+        );
+    }
+
+    /// `tear_down_checkout` asks the same question as the sweep: when the
+    /// task that owns a branch is itself cleaned up while a task in
+    /// `pending/` is still to be cut from it, the branch stays even though a
+    /// remote already reaches it.
+    #[test]
+    fn a_tasks_own_cleanup_keeps_its_branch_for_a_pending_dependent() {
+        let (repo, _root_guard) = fixture("cleanup-own-branch-pending-dependent");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        let tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let second = add_task_with(&repo, "second", "queued", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::rename(&second, repo.pending_dir().join("second.md")).unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut report = Report::default();
+        Dispatcher::new(&repo, &pipelines, &mux)
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` waits in `pending/` and is cut from this branch"
+        );
+    }
+
+    /// A `pending/` that cannot be read hides the drafts in it, and the one
+    /// mistake that cannot be taken back is deleting the branch they need.
+    #[test]
+    fn an_unreadable_pending_folder_keeps_every_finished_branch() {
+        let (repo, _root_guard) = fixture("sweep-unreadable-pending");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        let tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let other = add_task_with(&repo, "other", "done", |f| {
+            f.branch = Some("task/other".into());
+        });
+        // A file where the folder belongs: `read_dir` fails with something
+        // other than "not found".
+        let pending = repo.pending_dir();
+        std::fs::remove_dir_all(&pending).unwrap();
+        std::fs::write(&pending, "").unwrap();
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        dispatcher
+            .clean_up(&mut reload(&other), &[], &mut report)
+            .unwrap();
+
+        assert!(
+            has_branch(&repo, "task/first"),
+            "a draft in the unreadable folder may need this branch"
         );
     }
 
