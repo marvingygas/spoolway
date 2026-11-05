@@ -1032,24 +1032,40 @@ impl<'a> Dispatcher<'a> {
         }
     }
 
-    /// Whether some task still in the queue names `id` in its own
-    /// `depends_on` — the branch `id` was cut on is what that task's own
-    /// worktree still has to be cut from, whatever stage `id` itself is on.
+    /// Whether some task still in the queue, or waiting in `pending/`, names
+    /// `id` in its own `depends_on` — the branch `id` was cut on is what that
+    /// task's own worktree still has to be cut from, whatever stage `id`
+    /// itself is on.
     fn branch_still_needed(&self, id: &str) -> bool {
-        self.repo
-            .tasks()
-            .unwrap_or_default()
-            .iter()
-            .any(|t| t.front.depends_on.iter().any(|dep| dep == id))
+        let queued = self.repo.tasks().unwrap_or_default();
+        self.names_as_dependency(id, &queued)
+    }
+
+    /// Whether any of `queued`, or any draft in `pending/`, lists `id` in its
+    /// `depends_on`.
+    ///
+    /// `queue unqueue` moves a stopped task and every later task of its group
+    /// to `pending/`, and queueing one again cuts it from its first
+    /// dependency's branch. That branch has to survive the wait, or `queue
+    /// add` is refused for want of it. `pending/` is read fresh on every
+    /// call, so deleting a draft frees the branch on the next sweep, and a
+    /// draft that will not parse is skipped — see [`crate::task::load_dir`] —
+    /// rather than stopping the sweep.
+    fn names_as_dependency(&self, id: &str, queued: &[Task]) -> bool {
+        let names = |t: &Task| t.front.depends_on.iter().any(|dep| dep == id);
+        queued.iter().any(names)
+            || crate::task::load_dir(&self.repo.pending_dir())
+                .map(|(drafts, _)| drafts.iter().any(names))
+                .unwrap_or(false)
     }
 
     /// Delete every local `task/…` branch whose task has already finished —
     /// there is no `<id>.md` left in the queue — and that nothing still
-    /// queued names in `depends_on` any more. The branch is `task/<id>`, or
-    /// `task/<slug>-<id>` when `issue_tracking.key_in_names` prefixed it;
-    /// either way the owning task is found by an exact match against its
-    /// recorded `branch:` field — see [`task_for_branch`] — not by taking the
-    /// branch name apart.
+    /// queued or pending names in `depends_on` any more. The branch is
+    /// `task/<id>`, or `task/<slug>-<id>` when `issue_tracking.key_in_names`
+    /// prefixed it; either way the owning task is found by an exact match
+    /// against its recorded `branch:` field — see [`task_for_branch`] — not
+    /// by taking the branch name apart.
     ///
     /// Reaching `done` retains a depended-on branch rather than deleting it,
     /// and nothing revisits that task once its file has moved to the
@@ -1086,11 +1102,9 @@ impl<'a> Dispatcher<'a> {
             if self.repo.queue_dir().join(format!("{id}.md")).exists() {
                 continue;
             }
-            // Something still queued has not been cut from it yet.
-            if tasks
-                .iter()
-                .any(|t| t.front.depends_on.iter().any(|dep| dep == id))
-            {
+            // Something still queued, or waiting in `pending/` to be queued
+            // again, has not been cut from it yet.
+            if self.names_as_dependency(id, tasks) {
                 continue;
             }
             // Only a branch spoolway made, for a task that actually
