@@ -3748,13 +3748,13 @@ pub(crate) fn carry_to_pending(repo: &Repo, task: &crate::task::Task) -> Result<
         map.remove("parent_work_tip");
         map.remove("hook_skipped");
         // A `gate_at:` that fired was cleared from the task so a loop back
-        // onto the step would not gate twice, and only `paused_at` with
-        // `paused_by: schedule` remembers it. The person unqueueing to redo
-        // the work wrote that gate, so it is written back and the redo
-        // stops at the same step. Any other `paused_by` is a pause that was
-        // not the task's own gate, and must not become one.
+        // onto the step would not gate twice, and `paused_at` with
+        // `paused_by: schedule` is the mark it leaves. The person unqueueing
+        // to redo the work wrote that gate, so it is written back and the
+        // redo stops at the same step. A pause by any other mark is a
+        // step's own `gate:` and is not turned into a `gate_at:`.
         if task.front.gate_at.is_none()
-            && task.front.paused_by.as_deref() == Some("schedule")
+            && task.front.paused_by.as_deref() == Some(crate::commands::Gate::Schedule.as_str())
             && let Some(step) = &task.front.paused_at
         {
             map.insert("gate_at".into(), step.clone().into());
@@ -18027,8 +18027,8 @@ mod tests {
 
     /// A task unqueued while it sits at the pause its own `gate_at:` raised
     /// goes back to pending still carrying `gate_at:`, so the redo stops at
-    /// the same step again. A task paused for any other reason gets no
-    /// `gate_at:`, and one that never had it is written as it always was.
+    /// the same step again. A task paused for any other reason, or never gated,
+    /// gets no `gate_at:`.
     #[test]
     fn a_task_unqueued_at_its_gate_at_pause_keeps_its_gate_at() {
         let (repo, _root_guard) = fixture("unqueue-gate-at");
