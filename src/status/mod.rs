@@ -18012,6 +18012,42 @@ mod tests {
         assert!(read("uncut").unwrap().contains("starts_from: main"));
     }
 
+    /// A task unqueued while it sits at the pause its own `gate_at:` raised
+    /// goes back to pending still carrying `gate_at:`, so the redo stops at
+    /// the same step again. A task paused for any other reason gets no
+    /// `gate_at:`, and one that never had it is written as it always was.
+    #[test]
+    fn a_task_unqueued_at_its_gate_at_pause_keeps_its_gate_at() {
+        let (repo, _root_guard) = fixture("unqueue-gate-at");
+        for id in ["scheduled", "gated", "plain"] {
+            add_to(&repo, id, &[], None, Some(id));
+        }
+        // The gate fired: `gate_at:` is cleared, the pause records stay.
+        let mut scheduled = repo.task("scheduled").unwrap();
+        scheduled.front.paused_at = Some("implement".into());
+        scheduled.front.paused_by = Some("schedule".into());
+        scheduled.set_stage(crate::pipeline::PAUSED, None);
+        scheduled.save().unwrap();
+        // Held by a step's own `gate:`, which is never stored in the task.
+        let mut gated = repo.task("gated").unwrap();
+        gated.front.paused_at = Some("implement".into());
+        gated.front.paused_by = Some("gate".into());
+        gated.set_stage(crate::pipeline::PAUSED, None);
+        gated.save().unwrap();
+
+        for id in ["scheduled", "gated", "plain"] {
+            let task = repo.task(id).unwrap();
+            assert!(carry_to_pending(&repo, &task).unwrap().is_some(), "{id}");
+        }
+
+        let read = |id: &str| {
+            std::fs::read_to_string(repo.pending_dir().join(format!("{id}.md"))).unwrap()
+        };
+        assert!(read("scheduled").contains("gate_at: implement"));
+        assert!(!read("gated").contains("gate_at:"));
+        assert!(!read("plain").contains("gate_at:"));
+    }
+
     /// The letter that opens the resume picker no longer answers it, and
     /// neither `o` nor the `u` that once opened it answers the unqueue
     /// panel, the same as any other unrecognised key — `enter` is the only
