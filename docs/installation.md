@@ -593,7 +593,8 @@ on Unix, whether or not its text changed.
 | `.spoolway/config.toml` | The file as `sync` rewrites it. Your values stay. |
 
 `spoolway doctor` reports files that are behind, and lists each refused file on its own line.
-`spoolway pipeline check` reports a prompt that names a command or flag this binary does not have.
+`spoolway pipeline check` reports a prompt that names a command or flag this binary does not have,
+or a command a lane is refused.
 
 A relative path that starts with `.spoolway/` names the project's setup folder. In home mode that
 folder is the workspace's `config/`, so the file is written there and its `.bak` sits beside it.

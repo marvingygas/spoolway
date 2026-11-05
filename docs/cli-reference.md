@@ -1298,6 +1298,9 @@ reported. It also fails, naming the task and the gate, when the task's `gate_at:
 pipeline does not have, including a reserved word such as `done`, or a step that runs a command.
 A task at `done` is not reported. Pending tasks and routines are not read.
 
+The check also fails, naming the prompt, the step and the command, when a prompt tells its lane
+to run a command that spoolway refuses in a lane. See [Prompts](prompts.md#writing-your-own).
+
 The check also fails when two routine files hold one task id. It prints `routines:` followed by the
 text of the `routines` row of `spoolway doctor`.
 
