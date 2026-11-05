@@ -256,16 +256,18 @@ fn poll_within(
             // Left, the next pass would adopt them as a finished cut and the
             // hook would never run again. Taken away here, as the stop at the
             // time limit does, so the next attempt cuts afresh. Only when
-            // nothing was at `path` as the cut began: `git worktree add`
-            // then refuses before making anything, and whatever is there is
-            // somebody's work. The branch goes only if this cut made it.
+            // nothing was at `path` as the cut began. When something was,
+            // `git worktree add` refused before making anything, and what is
+            // there is somebody's work. The branch goes only if this cut
+            // made it. The full stop ends the sentence the removal's own
+            // message continues, when the removal fails.
             if placed {
                 crate::mux::undo_stopped_cut(
                     &repo.root,
                     path,
                     branch,
                     !made,
-                    &failure,
+                    &format!("{failure}."),
                     "resume the task",
                 )?;
             }
@@ -1079,6 +1081,41 @@ mod tests {
         assert!(err.downcast_ref::<CutPending>().is_none(), "{text}");
         assert!(path.join("work.txt").exists(), "work was deleted: {text}");
         assert!(branch_exists(&repo, "someone"), "{text}");
+    }
+
+    /// A failed cut whose checkout cannot be taken away reports the hook's
+    /// output and the command to remove it by hand, and leaves the checkout
+    /// locked as unfinished, not as one for the next attempt to adopt.
+    #[test]
+    fn a_failed_cut_that_cannot_be_removed_names_the_hook_and_the_command() {
+        // SAFETY: `geteuid` reads the process's own id and has no failure.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (repo, _guard) = fixture("stuck");
+        hook(
+            &repo,
+            "chmod 555 ..; echo 'hook: npm install failed'; exit 1",
+        );
+        let path = target(&repo);
+
+        let err = begin(&repo, "t1", &path, "task/t1", "main").unwrap_err();
+
+        let text = format!("{err:#}");
+        assert!(err.downcast_ref::<CutPending>().is_none(), "{text}");
+        assert!(text.contains("hook: npm install failed."), "{text}");
+        assert!(text.contains("could not be removed"), "{text}");
+        assert!(text.contains("worktree prune"), "{text}");
+        assert!(path.exists(), "the premise: the removal failed");
+        assert!(
+            !crate::mux::cut_is_finished(&repo.root, &path, "task/t1"),
+            "the leftover would be adopted as a finished checkout: {text}"
+        );
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     /// A folder git has no record of, left by a cut killed before it was
