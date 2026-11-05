@@ -12571,6 +12571,76 @@ mod tests {
         );
     }
 
+    /// A task waiting in `pending/` — unqueued to be redone — is cut from its
+    /// first dependency's branch when it is queued again. Cleanup of any other
+    /// task therefore keeps that branch, even when a remote-tracking ref
+    /// already reaches all its commits, exactly as it does for a task still
+    /// in the queue. Once the draft is gone, the next cleanup frees it.
+    #[test]
+    fn cleanup_keeps_a_branch_that_a_pending_task_is_still_cut_from() {
+        let (repo, _root_guard) = fixture("sweep-keeps-pending-parent");
+        let origin = repo.root.display().to_string();
+        crate::repo::run(&repo.root, "git", &["remote", "add", "origin", &origin]).unwrap();
+        repo.git(&["checkout", "-q", "-b", "task/first"]).unwrap();
+        repo.git(&["commit", "-q", "--allow-empty", "-m", "first"])
+            .unwrap();
+        let tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        repo.git(&["checkout", "-q", "work"]).unwrap();
+
+        let first = add_task_with(&repo, "first", "done", |f| {
+            f.branch = Some("task/first".into());
+            f.base = Some("work".into());
+        });
+        let second = add_task_with(&repo, "second", "queued", |f| {
+            f.branch = Some("task/second".into());
+            f.depends_on = vec!["first".into()];
+        });
+        let other = add_task_with(&repo, "other", "done", |f| {
+            f.branch = Some("task/other".into());
+        });
+
+        let mux = FakeMux::new(vec![]);
+        let pipelines = Pipelines::builtin();
+        let mut dispatcher = Dispatcher::new(&repo, &pipelines, &mux);
+        let mut report = Report::default();
+        dispatcher
+            .clean_up(&mut reload(&first), &[], &mut report)
+            .unwrap();
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` is queued and has not been cut from it yet"
+        );
+
+        // `second`'s pull request is pushed and then it is unqueued: its file
+        // moves to `pending/`, and a remote branch now reaches `first`.
+        repo.git(&["update-ref", "refs/remotes/origin/task/second", &tip])
+            .unwrap();
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        let draft = repo.pending_dir().join("second.md");
+        std::fs::rename(&second, &draft).unwrap();
+        std::fs::write(repo.pending_dir().join("broken.md"), "not a task").unwrap();
+
+        dispatcher
+            .clean_up(&mut reload(&other), &[], &mut report)
+            .unwrap();
+        assert!(
+            has_branch(&repo, "task/first"),
+            "`second` waits in `pending/` and is cut from this branch"
+        );
+
+        std::fs::remove_file(&draft).unwrap();
+        let third = add_task_with(&repo, "third", "done", |f| {
+            f.branch = Some("task/third".into());
+        });
+        dispatcher
+            .clean_up(&mut reload(&third), &[], &mut report)
+            .unwrap();
+        assert!(
+            !has_branch(&repo, "task/first"),
+            "with the draft deleted nothing needs the branch and a remote has it"
+        );
+    }
+
     /// A base that no longer exists cannot be told to merge anything, so the
     /// line names the missing base rather than asking for a merge into it.
     #[test]
