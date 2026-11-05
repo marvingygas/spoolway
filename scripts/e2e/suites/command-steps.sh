@@ -1361,12 +1361,12 @@ fi
 
 # `panedfail` landed on `blocked` and that was the point of it — but
 # `blocked` is a live stage, so it is still a task in this queue, and
-# `paneflaky` is about to be deleted out from under it. `check_task_routes`
-# reads every live task's `pipeline:` whole, ahead of the lock, and holds
-# only that one task when it names a pipeline that is not there: left
-# queued, this one task would be held for the rest of the file and show up
-# in every `queue list`. Taken out here rather than at the end of the suite, and with
-# paused first because it has a worktree of its own by now, and
+# `paneflaky` is about to be deleted out from under it. The start check no
+# longer reads a named pipeline, and the dispatcher's pass holds a task on one
+# that is gone: left queued, this one task would be held for the rest of the
+# file and show up in every `queue list`. Taken out here rather than at the
+# end of the suite, and with paused first because it has a worktree of its
+# own by now, and
 # `dispatcher_stop` ahead of it so no pass is running while the pipeline is
 # taken out from under the queue. The next scenario starts its own with
 # `dispatcher_restart`, so nothing is left without one.

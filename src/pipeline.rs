@@ -2809,6 +2809,8 @@ impl Pipelines {
             .front
             .pipeline
             .as_deref()
+            // A blank key reads as an absent one, as the start check reads it.
+            .filter(|name| !name.trim().is_empty())
             .with_context(|| format!("task `{}` has no `pipeline:`", task.id()))?;
         // A clash is no missing pipeline: the name is defined twice, and the
         // line must send the person to the command that settles it.
@@ -2819,7 +2821,7 @@ impl Pipelines {
             anyhow::anyhow!(
                 "task `{}` is held — {}",
                 task.id(),
-                Pipelines::missing_line(task, name)
+                Pipelines::missing_line(task, name.trim())
             )
         })
     }

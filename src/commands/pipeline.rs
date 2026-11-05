@@ -1112,10 +1112,13 @@ fn live_task_problems(
             continue;
         }
         let Ok(pipeline) = pipelines.get(name) else {
+            // The run holds such a task and starts every other, so the finding
+            // carries the way out the held line gives, not only the fact.
             let lack = if on_branch {
                 "this branch does not have yet"
             } else {
-                "this project no longer defines"
+                "this project no longer defines — the run holds it; set `pipeline:` in its \
+                 task file to one that exists"
             };
             problems.push(format!(
                 "live task `{}` names pipeline `{name}`, which {lack}",
@@ -2854,7 +2857,10 @@ mod tests {
         let elsewhere = live_task_problems(&tasks, &pipelines, false);
         assert_eq!(
             elsewhere,
-            ["live task `l2` names pipeline `newp`, which this project no longer defines"]
+            [
+                "live task `l2` names pipeline `newp`, which this project no longer defines — \
+                 the run holds it; set `pipeline:` in its task file to one that exists"
+            ]
         );
     }
 

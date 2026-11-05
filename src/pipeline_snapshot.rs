@@ -361,7 +361,19 @@ pub fn for_task(repo: &Repo, task: Option<&str>) -> Option<Result<Pipelines>> {
         .filter(|id| crate::config::check_task_id(id).is_ok())
         .and_then(|id| repo.task(id).ok())
         .and_then(|task| task.front.pipeline);
-    let names: Vec<&str> = name.as_deref().into_iter().collect();
+    // A name no file defines any more is left out, so the graph comes back
+    // without it and the command's own `for_task` refuses the task with the
+    // held line, as it does with no dispatcher running. Asking for it would
+    // answer with a restart, which cannot bring a deleted file back.
+    let names: Vec<&str> = name
+        .as_deref()
+        .filter(|name| {
+            loaded.written.pipelines.contains_key(*name)
+                || loaded.written.clashes.contains_key(*name)
+                || !gone_from_disk(&repo.root, name.trim())
+        })
+        .into_iter()
+        .collect();
     Some(loaded.pipelines(&names))
 }
 
@@ -386,7 +398,8 @@ pub struct Routed {
 ///
 /// A task whose pipeline the dispatcher never loaded, or whose entry will
 /// not decode, comes back in [`Routed::refused`] instead of failing the
-/// reading. One such task is a pipeline added since the run started, which
+/// reading. A task whose pipeline no file defines any more is neither: it is
+/// left out of both, and the reader holds it with [`Pipelines::missing_line`]. One such task is a pipeline added since the run started, which
 /// the board's own queue tab can still queue, and a reading that failed on
 /// it would stop the board redrawing for every other task. A task naming no
 /// pipeline adds nothing here, and the reader's own read of that task fails
@@ -405,6 +418,14 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
             continue;
         };
         if !refusals.contains_key(name) && !routed.pipelines.contains_key(name) {
+            // Not loaded and not on disk either: nothing to refuse. The row
+            // is drawn held, with the line that says the pipeline is gone.
+            if !loaded.written.pipelines.contains_key(name)
+                && !loaded.written.clashes.contains_key(name)
+                && gone_from_disk(&repo.root, name.trim())
+            {
+                continue;
+            }
             match loaded.pipelines(&[name]) {
                 Ok(one) => {
                     routed.pipelines.extend(one.pipelines);
@@ -498,6 +519,24 @@ fn changed_between(then: &BTreeMap<String, String>, now: &BTreeMap<String, Strin
     changed.sort();
     changed.dedup();
     changed
+}
+
+/// Whether no pipeline file under `root` is named `name` — the pipeline a
+/// task names was deleted or renamed, rather than added since the run started.
+///
+/// Only the files that define a pipeline count, not the override patches: a
+/// patch for a pipeline that does not exist defines nothing. A name the
+/// dispatcher did not load but that a file now defines is a restart away; a
+/// name no file defines is no restart's to fix, and the reader holds the task
+/// with [`Pipelines::missing_line`] instead of sending the person to one.
+fn gone_from_disk(root: &Path, name: &str) -> bool {
+    !sources(root)
+        .keys()
+        .filter(|label| !label.starts_with("overrides/"))
+        .any(|label| {
+            let file = label.rsplit('/').next().unwrap_or(label);
+            Path::new(file).file_stem().is_some_and(|stem| stem == name)
+        })
 }
 
 /// Every file [`Pipelines::load`] reads for `root`, label to text: the
@@ -712,6 +751,61 @@ mod tests {
 
         drop(lock);
         assert!(config_changed_since_start(&repo).is_empty());
+    }
+
+    /// With a dispatcher running, a task on a pipeline no file defines any
+    /// more is held with the line that says so, on the board's reading and on
+    /// the command that moves it, and is not sent to restart a dispatcher that
+    /// could never bring the file back. A pipeline added since the run started
+    /// still is. Fails before the change: both said "restart the dispatcher".
+    #[test]
+    fn a_pipeline_deleted_before_the_run_is_held_not_sent_to_a_restart() {
+        let (repo, _root, pipelines) = project("snapshot-deleted-pipeline");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        write(&repo, &pipelines, &repo.config.unattended).unwrap();
+        std::fs::write(
+            Pipelines::file_in(&repo.root, "added"),
+            std::fs::read_to_string(Pipelines::file_in(&repo.root, "t")).unwrap(),
+        )
+        .unwrap();
+        let task = |id: &str, pipeline: &str| {
+            crate::task::Task::parse(
+                PathBuf::from(format!("{id}.md")),
+                &format!("---\nid: {id}\nstage: blocked\npipeline: {pipeline}\n---\n"),
+            )
+            .unwrap()
+        };
+        let gone = task("gone", "retired");
+        let added = task("added", "added");
+
+        let routed = for_tasks(&repo, &[gone.clone(), added.clone()]).unwrap();
+        assert!(!routed.refused.contains_key("gone"), "{:?}", routed.refused);
+        let held = routed.pipelines.for_task(&gone).unwrap_err();
+        assert!(
+            format!("{held:#}").contains("`retired` is gone"),
+            "{held:#}"
+        );
+        assert!(
+            routed.refused["added"].contains("restart the dispatcher"),
+            "{:?}",
+            routed.refused
+        );
+
+        // The command that moves one task: `resume` and `report` route on this.
+        crate::commands::testutil::add(&repo, "stranded", &[]);
+        let mut stranded = repo.task("stranded").unwrap();
+        stranded.front.pipeline = Some("retired".into());
+        stranded.save().unwrap();
+        let graph = for_task(&repo, Some("stranded")).unwrap().unwrap();
+        let held = graph.for_task(&stranded).unwrap_err();
+        assert!(
+            format!("{held:#}").contains("`retired` is gone"),
+            "{held:#}"
+        );
+        let loaded = LoadedPipelines::live(&repo).unwrap();
+        assert!(gone_from_disk(&repo.root, "retired"));
+        assert!(!gone_from_disk(&repo.root, "added"));
+        assert!(loaded.pipelines(&["retired"]).is_err());
     }
 
     #[test]

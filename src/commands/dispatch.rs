@@ -207,11 +207,11 @@ pub fn dispatch(repo: &Repo, pipelines: &Pipelines, args: &DispatchArgs) -> Resu
     // broken whether or not a lane ever reaches it. A task naming a pipeline
     // that does not exist is held by the pass instead, so one stale name
     // does not stop the rest. Refused here, ahead of the lock, for the same
-    // reason as the three checks below: found and fixed by a person reading this line, not
-    // discovered mid-run and left for someone to stop by hand. The base check
-    // refuses only over a base that exists nowhere; a chain whose bases
-    // disagree is held task by task by the first pass instead, which prints
-    // the same line.
+    // reason as the three checks below: found and fixed by a person reading
+    // this line, not discovered mid-run and left for someone to stop by
+    // hand. The base check refuses only over a base that exists nowhere; a
+    // chain whose bases disagree is held task by task by the first pass
+    // instead, which prints the same line.
     check_task_routes(pipelines, &live_tasks)?;
     check_task_bases(repo, &live_tasks)?;
 

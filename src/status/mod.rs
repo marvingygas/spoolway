@@ -151,11 +151,12 @@ pub enum State {
     /// waits on is one named run, not a slot or a dependency — the NEXT
     /// column names that task.
     Waiting,
-    /// The task's pipeline name is claimed by both a tracked and a private
-    /// pipeline, so the dispatcher starts nothing for it. Apart from
-    /// `Unknown` because the pipeline exists: one command, named in the NEXT
-    /// column, settles it, and the task then keeps the steps it was queued
-    /// with.
+    /// The dispatcher starts nothing for the task, for one of two reasons.
+    /// Its pipeline name is claimed by both a tracked and a private
+    /// pipeline, or its `pipeline:` names one that no longer exists. Apart
+    /// from `Unknown` because the NEXT column names the one fix, a command or
+    /// a corrected `pipeline:`, and the task then keeps the steps it was
+    /// queued with.
     Held,
     /// Archived — its pipeline finished and its file moved to the project's
     /// own `archive/`. Kept on the board, dimmed, for as long as its
@@ -5789,8 +5790,8 @@ fn rows_on(
                     rows.push(row);
                     continue;
                 }
-                if !name.is_empty() {
-                    let why = Pipelines::missing_line(task, name);
+                if !name.trim().is_empty() {
+                    let why = Pipelines::missing_line(task, name.trim());
                     let mut row = unroutable_row(repo, tasks, graph, task, &why);
                     row.state = State::Held;
                     rows.push(row);
@@ -6630,7 +6631,8 @@ fn cached_queue_in(
 ///
 /// Drawn from the task alone: its pipeline is the one thing nothing can read
 /// a step, a state or a destination from. It reads `unknown` and offers no
-/// resume, since `spoolway resume` refuses it with the same restart.
+/// resume unless the caller sets another state, and `spoolway resume` refuses
+/// the task with whatever `refusal` says.
 fn unroutable_row(
     repo: &Repo,
     tasks: &[crate::task::Task],
@@ -15003,6 +15005,7 @@ mod tests {
         let default = loaded.pipelines.remove("default").unwrap();
         loaded.pipelines.insert("renamed".into(), default);
         hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
+        define_since_start(&repo, "default");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
 
@@ -15041,6 +15044,7 @@ mod tests {
         renamed.pipelines.insert("renamed".into(), default);
         hook_failed_task(&repo, "retry-flag", crate::pipeline::QUEUED, None);
         let before = std::fs::read_to_string(&repo.task("retry-flag").unwrap().path).unwrap();
+        define_since_start(&repo, "default");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         crate::pipeline_snapshot::write(&repo, &renamed, &repo.config.unattended).unwrap();
 
@@ -15269,6 +15273,7 @@ mod tests {
         let mut task = repo.task("newcomer").unwrap();
         task.front.pipeline = Some("added".into());
         task.save().unwrap();
+        define_since_start(&repo, "added");
 
         let rows = rows(&repo, &edited).unwrap();
         let row = rows.iter().find(|r| r.id == "newcomer").unwrap();
@@ -15326,6 +15331,30 @@ mod tests {
         let blocked_rows = super::rows(&repo, &pipelines).unwrap();
         let row = blocked_rows.iter().find(|r| r.id == "stale").unwrap();
         assert!(row.next.contains("then resume it"), "{}", row.next);
+    }
+
+    /// With a dispatcher running, a task on a pipeline no file defines is
+    /// drawn `held` with the line that names the way out, not `unknown` with
+    /// a restart that could never bring the file back. Fails before the
+    /// change: the dispatcher's refusal was drawn first.
+    #[test]
+    fn a_task_on_a_deleted_pipeline_is_held_while_a_dispatcher_runs() {
+        let (repo, _root_guard) = fixture("row-missing-pipeline-live");
+        let (edited, _next, _lock) = gate_on_edited_pipeline(&repo, "gate");
+        add_to(&repo, "stale", &[], Some("implement"), Some("stale"));
+        let mut task = repo.task("stale").unwrap();
+        task.front.pipeline = Some("deleted-pipeline".into());
+        task.save().unwrap();
+
+        let all = rows(&repo, &edited).unwrap();
+        let row = all.iter().find(|r| r.id == "stale").unwrap();
+        assert!(matches!(row.state, State::Held), "{}", row.next);
+        assert!(
+            row.next.contains("`deleted-pipeline` is gone"),
+            "{}",
+            row.next
+        );
+        assert!(!row.next.contains("restart"), "{}", row.next);
     }
 
     /// A task on a clashing pipeline name is drawn `held`, with the one
@@ -16144,6 +16173,7 @@ mod tests {
         let key = crate::command_step::Runs::key("handover", "login");
         runs.start(&key, "sleep 30", &repo.root, &BTreeMap::new())
             .unwrap();
+        define_since_start(&repo, "default");
         let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
         crate::pipeline_snapshot::write(&repo, &loaded, &repo.config.unattended).unwrap();
 

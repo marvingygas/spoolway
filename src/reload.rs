@@ -262,7 +262,7 @@ pub(crate) fn serve(live: &mut Repo, pipelines: &mut Pipelines) -> Option<Served
     let ids = pending(live);
     let first = ids.first()?.clone();
     let mut problems = Vec::new();
-    let outcome = match try_reload(live) {
+    let outcome = match try_reload(live, pipelines) {
         Ok((config, loaded)) => apply(live, pipelines, config, loaded, &mut problems),
         Err(reasons) => Outcome::Refused(reasons),
     };
@@ -350,7 +350,10 @@ fn apply(
 
 /// The config and pipelines as the files now stand, when nothing in the queue
 /// would be stranded by them.
-fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipelines), Vec<Reason>> {
+fn try_reload(
+    live: &Repo,
+    running: &Pipelines,
+) -> std::result::Result<(crate::config::Config, Pipelines), Vec<Reason>> {
     let config = crate::config::Config::load_present(&live.root).map_err(|err| {
         vec![Reason {
             what: format!("config.toml does not load: {err:#}"),
@@ -394,7 +397,7 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
             fix: "fix or remove that queue file, then reload again.".to_string(),
         })
         .collect();
-    refusals.extend(stranded(&loaded, &tasks));
+    refusals.extend(stranded(&loaded, running, &tasks));
     if refusals.is_empty() {
         Ok((config, loaded))
     } else {
@@ -409,8 +412,10 @@ fn try_reload(live: &Repo) -> std::result::Result<(crate::config::Config, Pipeli
 /// at — see [`crate::commands::missing_recorded_steps`], which `pipeline check`
 /// reads as well. A task on a name two files claim is held by the dispatcher in
 /// any case, and a task naming no pipeline is refused at the start of a run, so
-/// neither says anything about this reload.
-fn stranded(loaded: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
+/// neither says anything about this reload. Nor does a task on a pipeline the
+/// `running` set already lacks: this reload did not strand it, the dispatcher
+/// holds it already, and waiting for it to finish would wait for ever.
+fn stranded(loaded: &Pipelines, running: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
     let mut reasons = Vec::new();
     for task in tasks {
         let Some(name) = task.front.pipeline.as_deref().map(str::trim) else {
@@ -421,6 +426,9 @@ fn stranded(loaded: &Pipelines, tasks: &[crate::task::Task]) -> Vec<Reason> {
         }
         let id = task.id();
         let Some(pipeline) = loaded.pipelines.get(name) else {
+            if !running.pipelines.contains_key(name) {
+                continue;
+            }
             reasons.push(Reason {
                 what: format!("{id}: names pipeline `{name}`, which is no longer defined"),
                 fix: format!(
@@ -483,7 +491,7 @@ mod tests {
             task("fresh", "feature", "queued"),
             task("parked", "feature", "paused"),
         ];
-        let reasons = stranded(&loaded, &tasks);
+        let reasons = stranded(&loaded, &loaded, &tasks);
         assert_eq!(
             reasons,
             [Reason {
@@ -505,7 +513,11 @@ mod tests {
             task("old", "retired", "queued"),
             task("on", "feature", "build"),
         ];
-        let reasons = stranded(&loaded, &tasks);
+        let mut running = pipelines("steps:\n  - id: build\n    run: x\n    on_pass: done\n");
+        running
+            .pipelines
+            .insert("retired".into(), running.pipelines["feature"].clone());
+        let reasons = stranded(&loaded, &running, &tasks);
         assert_eq!(reasons.len(), 1, "{reasons:?}");
         assert_eq!(
             reasons[0].what,
@@ -515,6 +527,17 @@ mod tests {
             reasons[0].fix,
             "put `retired.yml` back, or wait until old is done, then reload again."
         );
+    }
+
+    /// A task on a pipeline the running set already lacks was not stranded by
+    /// this reload: the dispatcher holds it, and a reload that refused over it
+    /// would refuse every later edit until the task was done, which it never
+    /// is. Fails before the change: it was refused with "wait until done".
+    #[test]
+    fn a_task_on_a_pipeline_the_run_already_lacks_does_not_refuse_a_reload() {
+        let loaded = pipelines("steps:\n  - id: build\n    run: x\n    on_pass: done\n");
+        let tasks = [task("old", "retired", "blocked")];
+        assert_eq!(stranded(&loaded, &loaded, &tasks), []);
     }
 
     /// An answer names its request, and reads as nothing until one exists.
@@ -800,7 +823,7 @@ mod tests {
             "---\nid: held\npipeline: feature\nstage: paused\nparked_from: review\n---\nbody\n",
         )
         .unwrap();
-        let reasons = stranded(&loaded, &[held]);
+        let reasons = stranded(&loaded, &loaded, &[held]);
         assert_eq!(reasons.len(), 1, "{reasons:?}");
         assert_eq!(
             reasons[0].what,
