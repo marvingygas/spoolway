@@ -207,7 +207,7 @@ pub(crate) fn quit_hint() -> &'static [(&'static str, &'static str)] {
 const FALLBACK_WIDTH: usize = 100 - 2 * super::MARGIN;
 
 /// The gap between two neighbouring labels on the strip while every label
-/// fits on one row at this width.
+/// fits on one row at this gap.
 const LABEL_GAP: &str = "        ";
 
 /// The gap between two neighbouring labels once one row at [`LABEL_GAP`] is

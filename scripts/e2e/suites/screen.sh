@@ -71,12 +71,13 @@ pending_doc cart-totals "$BODY" "group: cart"
 # screen reads `2` and then runs out of keys, which ends it. The typescript
 # `script` writes is everything the screen drew.
 #
-# Every run whose strip is matched below sets the pty to 100 columns first.
-# Left alone it takes the size of whatever terminal runs the suite, and in
-# one narrower than 88 columns the strip narrows its gap or breaks onto a
-# second row, so the eight-column `$STRIP` and `lit` would no longer match.
-# With no terminal around the suite at all the pty has no rows, and the
-# screen falls back to the same 100 columns it draws at here.
+# Every run whose eight-column strip is matched below sets the pty to 88
+# columns or more first, 100 where nothing else asks for a size. Left alone
+# it takes the size of whatever terminal runs the suite, and in one narrower
+# than 88 columns the strip narrows its gap or breaks onto a second row, so
+# `$STRIP` and `lit` would no longer match. With no terminal around the
+# suite at all the pty has no rows, and the screen falls back to the same
+# 100 columns it draws at here.
 DRAWN="$LIVE/drawn.txt"
 works "bare spoolway opens and ends when its keys run out" \
   script -qec "stty cols 100; printf '2' | '$SPOOLWAY'" "$DRAWN"
