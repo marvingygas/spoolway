@@ -431,9 +431,9 @@ stateDiagram-v2
   running --> starting: step passes or fails, the next lane starts
   running --> prompt: a permission prompt in its pane
   prompt --> running: the prompt is answered
-  running --> paused: gate, p on the board, or the stop popup's i
+  running --> paused: gate, o then pause on the board, or the stop popup's i
   running --> blocked: a step reports a block or a budget runs out
-  paused --> running: spoolway resume, or a p/Escape park's lane working again
+  paused --> running: spoolway resume, or a board pause's or an Escape park's lane working again
   blocked --> running: spoolway resume
   running --> done: last step passes
   queued --> hook_failed: the queued or started hook fails

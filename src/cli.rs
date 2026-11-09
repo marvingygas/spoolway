@@ -82,7 +82,8 @@ pub enum Command {
     VersionCheck,
 
     /// Bare `spoolway` in a terminal: the one screen, with its dispatch,
-    /// queue, jobs and eval tabs — see [`crate::screen::shell`].
+    /// queue, routines, overrides and eval tabs — see
+    /// [`crate::screen::shell`].
     ///
     /// Skipped by the parser, so nobody can type it: [`parse`] is the only
     /// thing that ever builds it, and only when no command was typed at all.
