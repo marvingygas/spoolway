@@ -399,7 +399,7 @@ jobs   2 active
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`config changed` line](#the-config-changed-line) still shows while a reload has something to load. The wordmark turns while a dispatcher is running, and holds still otherwise.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`config changed` line](#the-config-changed-line) still shows while a reload has something to load, and [the tip row](#the-tip-row) shows otherwise. The wordmark turns while a dispatcher is running, and holds still otherwise.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
@@ -999,6 +999,32 @@ The line names no file or key. Press `u` to load them; see
 [Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). A prompt edit adds no kind,
 because each lane reads its `PROMPT.md` when it starts. With nothing to load, neither board draws
 the line, and `[u] update config` is off the key line.
+
+### The tip row
+
+Inside the dispatch tab, the box ends on one tip from [the tip list](#the-tip-list). It is the
+box's last row, with a blank row above it, on the busy board and the empty board alike. The row
+starts with `tip`, two spaces and the tip. The label and the tip are drawn in grey teal,
+256-colour 109, a colour no task state uses.
+
+```
+jobs     2 active
+         ○ nightly-audit   Tue 20 Oct 03:00   (in 5h 22m)
+
+tip  r opens the resume picker. pick any step to resume the task there.
+```
+
+The tip's row comes out of the rows the table and `RECENT` share, so the board is no taller with
+it. On a narrow pane the tip is cut at the box's border.
+
+A tip stays up for 30 seconds, then the next one takes its place. The board keeps its own clock,
+so the tip changes whether or not a dispatcher is running. The board shuffles the list when it
+opens. Every tip shows once before any tip shows again, and then the board shuffles the list
+again. A new round never opens on the tip that closed the last one.
+
+While a reload has something to load, [the `config changed` line](#the-config-changed-line) takes
+the row and no tip is drawn. The board is the same height either way. Once `u` loads the change,
+the tip comes back on the next redraw.
 
 ### The tip list
 
