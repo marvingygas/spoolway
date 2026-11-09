@@ -399,7 +399,7 @@ jobs   2 active
        ○ weekly-deps     Mon 12 Oct 09:00   (in 1d 11h)
 ```
 
-An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`config changed` line](#the-config-changed-line) still shows while a reload has something to load, and [the tip row](#the-tip-row) shows otherwise. The wordmark turns while a dispatcher is running, and holds still otherwise.
+An empty board draws none of the following, and each returns once a task is on the board: the rule, the slots lines and the parse warning. The keys that act on a row are left off the key line. The [`config changed` line](#the-config-changed-line) still shows while a reload has something to load, and [the tip row](#the-tip-row) shows otherwise while `dispatch.tips` is on. The wordmark turns while a dispatcher is running, and holds still otherwise.
 
 An empty board draws no `RECENT`, whether a dispatcher is running or not. The board still remembers it, and shows it again once a task is back. The wordmark, the two lines and the job ledger are centred together. A pane too short for all of them drops the whole job ledger first, then the wordmark, and always keeps the two lines. Once the wordmark is gone the job ledger stays gone.
 
@@ -1025,6 +1025,9 @@ again. A new round never opens on the tip that closed the last one.
 While a reload has something to load, [the `config changed` line](#the-config-changed-line) takes
 the row and no tip is drawn. The board is the same height either way. Once `u` loads the change,
 the tip comes back on the next redraw.
+
+Set `dispatch.tips = false` to draw no tip row. The table and `RECENT` then keep that row. An open
+screen reads the setting when it starts, so a change takes effect the next time you open `spoolway`.
 
 ### The tip list
 
