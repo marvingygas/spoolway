@@ -1032,22 +1032,7 @@ impl Herdr {
 
     fn call<T: for<'de> Deserialize<'de>>(&self, args: &[&str]) -> Result<T> {
         let raw = run(&self.cwd, "herdr", args)?;
-        let envelope: Envelope<T> = serde_json::from_str(&raw).with_context(|| {
-            format!(
-                "herdr {} returned output that is not the expected JSON envelope: {}",
-                args.join(" "),
-                raw.chars().take(200).collect::<String>()
-            )
-        })?;
-
-        match (envelope.result, envelope.error) {
-            (Some(result), _) => Ok(result),
-            (None, Some(error)) => bail!("herdr {}: {}", args.join(" "), error.message),
-            (None, None) => bail!(
-                "herdr {} returned neither a result nor an error",
-                args.join(" ")
-            ),
-        }
+        parse_envelope(args, &raw)
     }
 
     /// Type `text` into a pane and submit it — the one way spoolway reaches
@@ -1845,6 +1830,29 @@ struct PaneLocation {
     pane_id: String,
 }
 
+/// The result out of the JSON envelope `raw`, which herdr printed for the call
+/// `args`: its error's message when it carries one, and a description of what
+/// was wrong with the output otherwise. The one reading for [`Herdr::call`]
+/// and for [`Herdr::focus_pane`]'s `pane get`.
+fn parse_envelope<T: for<'de> Deserialize<'de>>(args: &[&str], raw: &str) -> Result<T> {
+    let envelope: Envelope<T> = serde_json::from_str(raw).with_context(|| {
+        format!(
+            "herdr {} returned output that is not the expected JSON envelope: {}",
+            args.join(" "),
+            raw.chars().take(200).collect::<String>()
+        )
+    })?;
+
+    match (envelope.result, envelope.error) {
+        (Some(result), _) => Ok(result),
+        (None, Some(error)) => bail!("herdr {}: {}", args.join(" "), error.message),
+        (None, None) => bail!(
+            "herdr {} returned neither a result nor an error",
+            args.join(" ")
+        ),
+    }
+}
+
 /// What `herdr pane get` answers: where the pane sits, which
 /// [`Herdr::focus_pane`] needs to switch the person's view there.
 #[derive(Debug, Deserialize)]
@@ -2015,21 +2023,14 @@ impl Mux for Herdr {
     /// nothing has switched by then, so a refusal never leaves the person in
     /// another workspace with the popup on the board they left.
     ///
-    /// Spawned here rather than through [`Herdr::call_ignoring_result`],
-    /// because a person reads each refusal, in the board's `focus` popup:
-    /// `repo::run`'s message carries herdr's whole JSON envelope, and
-    /// [`herdr_refusal`] carries only the sentence inside it.
+    /// Each call goes through [`Herdr::focus_call`] rather than
+    /// [`Herdr::call`] or [`Herdr::call_ignoring_result`], because a person
+    /// reads each refusal, in the board's `focus` popup: `repo::run`'s message
+    /// carries herdr's whole JSON envelope, and [`herdr_refusal`] carries only
+    /// the sentence inside it.
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
         let got = self.focus_call(&pane_get_argv(pane_id))?;
-        let envelope: Envelope<PaneGetResult> = serde_json::from_str(&got).with_context(|| {
-            format!(
-                "herdr pane get {pane_id} returned output that is not the expected JSON envelope: {}",
-                got.chars().take(200).collect::<String>()
-            )
-        })?;
-        let Some(PaneGetResult { pane }) = envelope.result else {
-            bail!("herdr pane get {pane_id} returned no pane to focus");
-        };
+        let PaneGetResult { pane } = parse_envelope(&["pane", "get", pane_id], &got)?;
         self.focus_call(&workspace_focus_argv(&pane.workspace_id))?;
         self.focus_call(&tab_focus_argv(&pane.tab_id))?;
         self.focus_call(&pane_zoom_argv(pane_id))?;

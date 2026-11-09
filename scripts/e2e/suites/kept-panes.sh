@@ -158,8 +158,9 @@ else
 fi
 
 # ------------------------------------------------------ focus from the board
-# `focus` in the board's options menu brings the running step's pane forward
-# with `herdr pane zoom <pane> --on`, which the double writes down in
+# `focus` in the board's options menu brings the running step's pane forward:
+# it looks the pane up with `pane get`, switches to its workspace and tab, then
+# runs `herdr pane zoom <pane> --on`, which the double writes down in
 # `zoomed.index`. The board is opened on the dispatch tab without dispatching
 # — `screen_start` stops the resident dispatcher — so nothing moves the task
 # while the menu is read; the dispatcher is started again after.
@@ -235,7 +236,7 @@ else bad "and closes the menu"; board_now | sed 's/^/        /'; fi
 # the JSON envelope it came in. The double is told to refuse only once the
 # menu stands on `focus`, so the lane is still listed when the menu opens and
 # when `enter` looks its pane up again: what fails is the zoom alone, as when
-# herdr closes the pane between the two.
+# herdr closes the pane after `pane get` found it and before the zoom ran.
 screen_press o
 if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
   && poll_until 10 board_shows "> pause" && screen_press $'\x1b[B' \

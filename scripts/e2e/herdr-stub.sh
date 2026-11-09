@@ -519,8 +519,8 @@ case "$DOMAIN $VERB" in
     [ "${FLAG[on]+set}" = set ] || fail unsupported "this double only implements \`herdr pane zoom <pane> --on\`"
     [ -n "$(field "$pane" 1 "$STATE/panes")" ] || fail pane_not_found "no pane $pane"
     # A pane named in `zoom.refused` is refused the same way while it still
-    # stands. That is herdr closing a pane after `agent list` showed its
-    # agent and before the zoom reached it. Removing the pane's row cannot
+    # stands. That is herdr closing a pane after `pane get` found it and
+    # before the zoom reached it. Removing the pane's row cannot
     # stand in for that here, because `agent list` above reads the same row
     # and would stop listing the agent too.
     if grep -qxF -- "$pane" "$STATE/zoom.refused" 2>/dev/null; then
