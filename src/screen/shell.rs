@@ -472,10 +472,13 @@ pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
 ///
 /// `None` too for a strip with no dim code at all: that is a strip whose
 /// codes were already taken out, and every label in it would pass for lit,
-/// so the first, `DISPATCH`, would name every frame it heads.
+/// so the first, `DISPATCH`, would name every frame it heads. The same goes
+/// for a strip dimmed whole behind a popup — see [`crate::screen::dim`] —
+/// which opens on its dim where [`strip_line`] opens on its bold.
 #[cfg(test)]
 pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
-    if !plain(line).contains("[1] DISPATCH") || !line.contains(crate::status::DIM) {
+    use crate::status::DIM;
+    if !plain(line).contains("[1] DISPATCH") || !line.contains(DIM) || line.starts_with(DIM) {
         return None;
     }
     TABS.into_iter().map(Tab::label).find(|label| {
@@ -1540,12 +1543,16 @@ mod tests {
     }
 
     // The test helper that names a frame by its lit tab reads the codes, so
-    // a strip they were taken out of names no tab rather than the first.
+    // a strip they were taken out of, or one dimmed whole behind a popup,
+    // names no tab rather than the first.
     #[test]
     fn lit_tab_names_the_lit_label_and_no_tab_on_a_plain_strip() {
         let line = strip_line(Tab::Overrides, &TABS, 106);
         assert_eq!(lit_tab(&line), Some("OVERRIDES"));
         assert_eq!(lit_tab(&plain(&line)), None);
+        let mut dimmed = vec![line.clone()];
+        crate::screen::dim(&mut dimmed);
+        assert_eq!(lit_tab(&dimmed[0]), None);
         assert_eq!(lit_tab("│   dispatch   │"), None);
     }
 
@@ -1909,7 +1916,7 @@ mod tests {
         let _hosting = Hosting::open(Tab::Dispatch);
         let mut board = crate::status::Board::hosted();
         let mut tab = DispatchTab::default();
-        let mut rows = |board: &mut crate::status::Board, tab: &DispatchTab| {
+        let rows = |board: &mut crate::status::Board, tab: &DispatchTab| {
             board_frame_rows(&repo, &pipelines, board, tab)
                 .expect("the board's own frame must build")
         };

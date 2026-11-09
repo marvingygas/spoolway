@@ -2807,9 +2807,9 @@ pub(super) fn clamp_rows(frame: &str, height: Option<usize>) -> String {
 ///
 /// Used to measure a row by the columns it takes on screen, and by the board
 /// to draw a panel over a frame with its colour taken out, so every row pads
-/// to one width: a panel carries no colour of its own, so the frame beneath
-/// one can afford to lose its while it is up; the next frame, once the panel
-/// closes, is read fresh and in colour again.
+/// to one width. The frame is drawn dim behind the panel instead — see
+/// [`crate::screen::dim`] — and the next frame, once the panel closes, is
+/// read fresh and in colour again.
 pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
