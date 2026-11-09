@@ -684,10 +684,10 @@ any other Linux uses `xdg-open`. When the page is gone, or the platform's progra
 `PATH`, a popup titled `open plan` says what went wrong and what to do, and `enter` closes it.
 
 `focus` looks the pane up again when you press `enter`. When the lane or the run has ended since
-the menu opened, it does nothing. When herdr refuses any of those four calls, a popup titled `focus` shows
-the call and herdr's message on an `o:` line and says the step's pane may have been closed. On a running row,
-a blocked row an unblocker lane is working on included, it adds that `restart` in this menu starts
-the step again in a new pane. On any other `paused`, `blocked` or `hook_failed` row it ends there,
+the menu opened, it does nothing. When herdr refuses `pane get`, `workspace focus`, `tab focus` or
+`pane zoom`, a popup titled `focus` shows the call and herdr's message on an `o:` line and says the
+step's pane may have been closed. On a running row, a blocked row an unblocker lane is working on
+included, it adds that `restart` in this menu starts the step again in a new pane. On any other `paused`, `blocked` or `hook_failed` row it ends there,
 with no restart or resume advice:
 
 ```
@@ -701,7 +701,7 @@ with no restart or resume advice:
 ```
 
 A command step's pane that you closed by hand leaves its record behind, so it can still be
-listed, and its zoom is refused this way. `enter` closes the popup.
+listed, and `focus` on it is refused this way. `enter` closes the popup.
 
 On the queue screen, a group lists `open plan` when any of its tasks sets `plan:`. Picking it opens every distinct page the group's tasks name, in task order. A task on that screen does not list it. A plan row lists it too, and opens its own page. The routines pane does not list it.
 
