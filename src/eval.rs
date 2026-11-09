@@ -5104,6 +5104,27 @@ fn footer(table: TableKind, figures: Figures, mode: &Mode, rows: usize) -> Strin
     format!(" {}", key_hint(keys))
 }
 
+/// The key line of every table in each state it draws at rest, for the test
+/// that holds the board's tips complete.
+#[cfg(test)]
+pub(crate) fn resting_key_lines() -> Vec<String> {
+    let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Eval);
+    let mut lines = Vec::new();
+    for table in [TableKind::Lanes, TableKind::Dirs, TableKind::Trials] {
+        for figures in [Figures::Totals, Figures::Average] {
+            for rows in [0, 1] {
+                lines.push(crate::screen::shell::plain(&footer(
+                    table,
+                    figures,
+                    &Mode::Browsing,
+                    rows,
+                )));
+            }
+        }
+    }
+    lines
+}
+
 /// One frame, painted through `writer` — see [`eval_frame_rows`] for the
 /// rows themselves, split out so a test can play the very same rows through
 /// today's frozen write and through [`crate::screen::frame_writer`] and

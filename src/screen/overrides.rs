@@ -964,6 +964,36 @@ fn footer(state: &State) -> String {
     super::key_hint(&pairs)
 }
 
+/// The key line of every section, in each state it draws at rest: with
+/// something under the cursor, and with a search that left nothing. The
+/// test that holds the board's tips complete reads the keys off them.
+#[cfg(test)]
+pub(crate) fn resting_key_lines() -> Vec<String> {
+    let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+    let mut lines = Vec::new();
+    // One project with a prompt and a layer to list, one with neither.
+    for (name, stocked) in [("resting-stocked", true), ("resting-bare", false)] {
+        let (repo, _guard) = tests::project(name);
+        if stocked {
+            let prompt = crate::prompt::directory_form(&repo, "implementer");
+            std::fs::create_dir_all(prompt.parent().unwrap()).unwrap();
+            std::fs::write(&prompt, "implementer\n").unwrap();
+            let patch = crate::overrides::config_patch_path(&repo.overrides_dir());
+            std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+            std::fs::write(&patch, "[dispatch]\nlane_quiet = \"5m\"\n").unwrap();
+        }
+        for arrows in 0..SECTIONS.len() {
+            for typed in ["", "fzzz\r"] {
+                let mut state = State::new(&repo);
+                tests::type_keys(&repo, &mut state, &"\x1b[C".repeat(arrows));
+                tests::type_keys(&repo, &mut state, typed);
+                lines.push(tests::key_line(&state));
+            }
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
