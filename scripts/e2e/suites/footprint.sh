@@ -57,11 +57,16 @@ LANES=5
 TRANSCRIPTS=5000
 LEDGER_MB=40
 # How long a window of idle passes is watched, and how long the process is left
-# alone first. Three passes fit in a window at the dispatcher's ten-second rate,
-# and the settle is longer than one pass so the sweep a fresh dispatcher makes
-# on its first pass is over before the window opens.
+# alone first. Three passes fit in a window at the dispatcher's ten-second rate.
+# The settle outlasts the start and the first ten-second wait, and the window
+# then opens at the end of the next pass, so it never cuts a pass in two. The
+# first pass after that wait still reloads the config once: the start wrote
+# the record of the last good config, a file that reload watches. That pass
+# lands near the fifteenth second, and a window opened on the clock there
+# caught half of its git calls.
 SETTLE_S=15
 WINDOW_S=35
+PASS_WAIT_S=30         # longest wait for that next pass, three passes' worth
 UI_SETTLE_S=5
 UI_WINDOW_S=5
 
@@ -196,6 +201,18 @@ spawns_under() { # from-line pid
     { n = split($2, a, " "); for (i = 1; i <= n; i++) if (a[i] == pid) { print; break } }'
 }
 
+# The spawn log's line number of the first `herdr agent list` from line $1 on
+# made under pid $2, or nothing yet. A pass reloads the config before it asks
+# herdr for its agents, so everything after that line is a later pass's.
+pass_end_line() { # from-line pid
+  tail -n "+$1" "$SPAWNS" | awk -F'|' -v pid="$2" -v from="$1" '
+    $1 == "herdr" && $3 == "agent list" {
+      n = split($2, a, " ")
+      for (i = 1; i <= n; i++) if (a[i] == pid) { print from + NR - 1; exit }
+    }'
+}
+pass_ended() { [ -n "$(pass_end_line "$1" "$2")" ]; }
+
 # Reads the spawns of one window into per-pass counts: how many git, and how
 # many herdr, calls fall between one `herdr agent list` and the next.
 #   passes   how many passes the window held
@@ -247,6 +264,11 @@ measure() { # history-name
   sleep "$SETTLE_S"
   dpid=$(dispatch_pid)
   mark=$(($(wc -l < "$SPAWNS") + 1))
+  if [ -z "$dpid" ] || ! poll_until "$PASS_WAIT_S" pass_ended "$mark" "$dpid"; then
+    printf '  \033[31mSETUP\033[0m the dispatcher made no pass within %s s (%s)\n' "$PASS_WAIT_S" "$h" >&2
+    exit 2
+  fi
+  mark=$(($(pass_end_line "$mark" "$dpid") + 1))
   sleep "$WINDOW_S"
   if [ -z "$dpid" ] || [ "$dpid" != "$(dispatch_pid)" ]; then
     printf '  \033[31mSETUP\033[0m the dispatcher restarted while it was measured (%s)\n' "$h" >&2
