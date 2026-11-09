@@ -6009,10 +6009,11 @@ fn dispatcher_line(repo: &Repo) -> Option<&'static str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenExit {
     Quit,
-    /// A tab's digit or `q` on a tab's home screen with no popup open, inside
-    /// bare `spoolway`'s queue or routines tab — see
-    /// [`crate::screen::shell::leave_on`]. Never reached outside those tabs,
-    /// where nothing is hosting the screen to hand a key back to.
+    /// A tab's digit or `q` on a tab's home screen, inside bare `spoolway`'s
+    /// queue or routines tab, with no popup open but the clean `queued`
+    /// popup, which reads no key — see [`crate::screen::shell::leave_on`].
+    /// Never reached outside those tabs, where nothing is hosting the screen
+    /// to hand a key back to.
     Leave(crate::screen::shell::Leave),
 }
 
@@ -6769,8 +6770,10 @@ fn run_screen_from(
         // Inside bare `spoolway`, a tab's digit and `q` belong to the shell on
         // each tab's own home screen — browsing on the queue tab, the
         // routines pane on the routines tab — the two modes with no popup
-        // or sub-mode open. Every other mode keeps them: a popup over
-        // either tab, the trial picker, the filter's `q` typed
+        // or sub-mode open. The clean `queued` popup is the one popup drawn
+        // over them: `settle_queued` keeps it off the mode, so the digits
+        // and `q` reach the shell under it too. Every other mode keeps them:
+        // a popup over either tab, the trial picker, the filter's `q` typed
         // into its query.
         if matches!(state.mode, Mode::Browsing | Mode::Routines(_))
             && let Some(leave) = crate::screen::shell::leave_on(key)
@@ -7307,10 +7310,11 @@ fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
 /// The same wait `commands::dispatch`'s own board takes over its pass
 /// interval: [`PollableRead::byte_pending`] stands in for a sleep, so a slice
 /// with nothing typed into it costs the loop nothing beyond what a plain
-/// `thread::sleep(POLL)` would have. Every in-memory reader used in tests
+/// `thread::sleep(POLL)` would have. The in-memory reader most tests use
 /// reports a byte pending unconditionally (see [`PollableRead`]), so this
-/// falls straight through to `read_key` there — the idle tick's own wake
-/// below only ever runs against a real, currently idle terminal. A cooked
+/// falls straight through to `read_key` there. The idle tick's own wake
+/// below runs against a real, currently idle terminal, or a test reader
+/// that reports nothing pending on purpose to drive it. A cooked
 /// stdin — no raw mode, no `poll` — reports the opposite without waiting,
 /// and is read straight away instead: blocking on the line the terminal
 /// will deliver is the whole of what this loop is for, where spinning on
@@ -26330,6 +26334,48 @@ mod tests {
         assert!(!last.contains("[r] routines"), "{last}");
     }
 
+    /// A reader that hands over `keys` first, then reports nothing pending
+    /// for `quiet` waits, sleeping each one out in full, and then a byte
+    /// that reads as the end of the input and ends the screen. Every quiet
+    /// wait's length is recorded, so a test can see how long the screen
+    /// asked to wait.
+    struct Idle {
+        keys: std::io::Cursor<Vec<u8>>,
+        quiet: usize,
+        waits: std::cell::RefCell<Vec<std::time::Duration>>,
+    }
+
+    impl Idle {
+        fn new(keys: &str, quiet: usize) -> Idle {
+            Idle {
+                keys: std::io::Cursor::new(keys.as_bytes().to_vec()),
+                quiet,
+                waits: Default::default(),
+            }
+        }
+    }
+
+    impl std::io::Read for Idle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.keys.read(buf)
+        }
+    }
+
+    impl PollableRead for Idle {
+        fn byte_pending(&self, timeout: std::time::Duration) -> bool {
+            if self.keys.position() < self.keys.get_ref().len() as u64 {
+                return true;
+            }
+            let mut waits = self.waits.borrow_mut();
+            if waits.len() == self.quiet {
+                return true;
+            }
+            waits.push(timeout);
+            std::thread::sleep(timeout);
+            false
+        }
+    }
+
     /// The popup a queued routine opens is drawn over the routine list, not
     /// the pending screen, with nothing left ticked under it to queue the
     /// same routine twice. When its time is up it closes back onto that
@@ -26355,25 +26401,38 @@ mod tests {
             "{under}"
         );
 
-        let mut state = ScreenState::new();
-        state.mode = queued_panel(
-            &["audit-deps".to_string()],
-            false,
-            &[],
-            None,
-            Some(RoutineNav::new()),
+        // The same submit again, in a fresh project since the routine is
+        // already in the first one's queue, then left idle until the popup
+        // closes itself onto the list the submit handed it.
+        let (repo, _root_guard) = fixture("routines-queued-close-idle");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
         );
-        settle_queued(&mut state);
-        assert!(matches!(state.mode, Mode::Routines(_)), "{:?}", state.mode);
-        if let Some(shown) = state.clean_queued.as_mut() {
-            shown.closes_at = Some(std::time::Instant::now());
-        }
-        settle_queued(&mut state);
-        assert!(state.clean_queued.is_none());
-        let Mode::Routines(nav) = &state.mode else {
-            panic!("closed onto the routine list: {:?}", state.mode);
-        };
-        assert!(nav.selected.is_empty());
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let mut state = ScreenState::new();
+        state.mode = Mode::Routines(RoutineNav::new());
+        let mut input = Idle::new(" \r", 2);
+        let mut out = Vec::new();
+        run_screen_from(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            (Vec::new(), routines),
+            state,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(drawn.contains("queued 1 task"), "drawn first: {drawn}");
+        let last = last_frame(&drawn);
+        assert!(!last.contains("queued 1 task"), "closed: {last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
+        assert!(last.contains("> [ ] nightly"), "unticked: {last}");
     }
 
     /// Under the clean queued popup one arrow moves the routine list's
@@ -26422,7 +26481,10 @@ mod tests {
         write_pending(&repo, "cable", &task_text("cable", "group: two\n", BODY));
         let options = last_frame(&screen(&repo, listed(&repo), " \ro")).to_string();
         assert!(!options.contains("queued 1 task"), "{options}");
-        assert!(options.contains("> "), "the menu is up: {options}");
+        assert!(
+            options.contains("save as routine"),
+            "the menu is up: {options}"
+        );
     }
 
     /// Hosted, a tab's digit and `q` under the clean queued popup reach the
@@ -26541,37 +26603,13 @@ mod tests {
     /// was cut, and the popup never closed without `enter`.
     #[test]
     fn an_idle_screen_closes_the_queued_popup_on_time() {
-        struct Idle {
-            waits: std::cell::RefCell<Vec<std::time::Duration>>,
-        }
-        impl std::io::Read for Idle {
-            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Ok(0)
-            }
-        }
-        impl PollableRead for Idle {
-            // Quiet for two waits, each slept out in full, then a byte that
-            // reads as the end of the input and ends the screen.
-            fn byte_pending(&self, timeout: std::time::Duration) -> bool {
-                let mut waits = self.waits.borrow_mut();
-                waits.push(timeout);
-                if waits.len() > 2 {
-                    return true;
-                }
-                std::thread::sleep(timeout);
-                false
-            }
-        }
-
         let (repo, _root_guard) = fixture("screen-queued-closes-idle");
         let mut state = ScreenState::new();
         state
             .waiting
             .push_back(outcome("later", "a notice held back"));
         state.mode = queued_panel(&["wire".to_string()], false, &[], None, None);
-        let mut input = Idle {
-            waits: Default::default(),
-        };
+        let mut input = Idle::new("", 2);
         let mut out = Vec::new();
         run_screen_from(
             &repo,

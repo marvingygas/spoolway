@@ -54,8 +54,9 @@ task_doc .spoolway/routines/maintenance/weekly/prune.md prune "$BODY" "group: ma
 # `j` moves the cursor off `maintenance` (alphabetically first) onto
 # `nightly`; `space` ticks it; `enter` queues both its documents as one batch
 # — starting a dispatcher is the dispatch tab's `enter`, not this one's; the
-# trailing `n` is noise the popup saying what was queued ignores, and the
-# pipe running dry ends the screen, the same way `trials.sh` does.
+# trailing `n` is noise: the popup saying what was queued reads no key, and
+# the routines pane beneath it ignores `n`. The pipe running dry ends the
+# screen, the same way `trials.sh` does.
 on_screen '3j \rn' /dev/null
 
 works "the first task reaches the queue under a minted id" \
@@ -84,8 +85,9 @@ has "unminted, unmodified" "id: audit-deps" \
 # The whole of `maintenance`, with the cursor already on it (it sorts
 # first) once `3` reaches the routines tab: `space` ticks it and `enter`
 # queues it, which takes in `prune` from its nested `weekly/` too — there is
-# no `weekly` row to tick on its own. The trailing `n` is noise it ignores,
-# and the pipe running dry ends the screen.
+# no `weekly` row to tick on its own. The trailing `n` is noise the
+# routines pane beneath the popup ignores, and the pipe running dry ends the
+# screen.
 on_screen '3 \rn' /dev/null
 
 works "a nested task queues with its top-level routine" \
