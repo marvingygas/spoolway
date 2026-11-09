@@ -409,10 +409,12 @@ has "under the strip" "$STRIP" "$LAST"
 works "nothing was queued" test ! -e "$SPOOLWAY_PROJECT_HOME/queue/bad-stage.md"
 
 # A clean submission lands on the queued popup, which ends by saying whether a
-# dispatcher will pick the work up. The dispatcher started above has stopped,
-# so nothing holds its lock and the popup asks for one to be started. The
-# refused group is cleared first so the new one is the only group written
-# since `cart`, and the one the cursor opens on.
+# dispatcher will pick the work up. It has no key row: it closes itself after
+# 2 seconds, and the keys run out long before that, so the last frame holds
+# it. The dispatcher started above has stopped, so nothing holds its lock and
+# the popup asks for one to be started. The refused group is cleared first so
+# the new one is the only group written since `cart`, and the one the cursor
+# opens on.
 rm -f "$SPOOLWAY_PROJECT_HOME/pending/bad-stage.md"
 pending_doc billing-export "$BODY" "group: billing"
 QUEUED="$LIVE/queued.txt"
@@ -424,7 +426,7 @@ has "the queued popup is drawn over the tab" "╭─ queued " "$LAST"
 has "naming the task it queued" "billing-export" "$LAST"
 has "saying no dispatcher will pick it up yet" "start the dispatcher to begin working" "$LAST"
 lacks "never that one is running" "dispatcher is running" "$LAST"
-has "answered by enter" "[enter] confirm" "$LAST"
+lacks "with no key row, since it closes itself" "[enter] confirm" "$LAST"
 works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
 
 # A failed task hook is named once, when a dispatcher is asked for, and never

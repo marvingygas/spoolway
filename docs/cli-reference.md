@@ -292,7 +292,13 @@ cart-totals starts from task/gh-412-checkout, which doesn't exist. set starts_fr
 ```
 
 Below the list, a line says whether a dispatcher will pick the work up: `dispatcher is running`
-or `start the dispatcher to begin working`. `enter` closes the popup back to the screen.
+or `start the dispatcher to begin working`.
+
+When every task of the selection was queued, the popup has no key row and closes on its own after
+2 seconds. While it is up, every key works on the screen beneath it, as if the popup were not
+there. A key that opens a popup, a menu, a picker or the filter closes it at once. A popup that
+lists tasks left out, or says nothing was queued, ends on `[enter] confirm`, and only `enter`
+closes it back to the screen.
 
 With `[issue_tracking]` configured, `enter` first checks the hook's declared tool
 requirements and runs its `# spoolway-login:` command. A requirement this machine does not meet,
@@ -334,7 +340,8 @@ tracking` popup shows one line, `progress: ` followed by a 44-cell bar. A `█` 
 call and a `░` a cell still to fill. The bar starts empty and fills by one call's share each time
 a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
 not in it. The `queued` popup then opens on `hook executed successfully`, followed by
-`queued <n> tasks`, every queued id and the dispatcher line. When every group was ticked, the hook is never called and the popup has no success line.
+`queued <n> tasks`, every queued id and the dispatcher line. Like any clean `queued` popup, it
+closes on its own after 2 seconds, and keys reach the screen beneath it. When every group was ticked, the hook is never called and the popup has no success line.
 Queueing a routine from the routines tab asks the same question and shows the same popups. A
 trial never asks and opens no ticket. See
 [`open`](configuration.md#open--a-fifth-event-run-by-queue-add-itself).
