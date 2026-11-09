@@ -1896,6 +1896,42 @@ mod tests {
         crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
     }
 
+    /// Hosted, a popup over the dispatch tab leaves everything behind it dim
+    /// — the strip, the board's box and its key line — and its own box in
+    /// the colours `overlay` paints it: the board's own options menu and a
+    /// popup the tab opens alike. Closed again, the next frame is the one
+    /// drawn before it opened, in the board's own colours.
+    #[test]
+    fn a_popup_over_the_dispatch_tab_dims_everything_behind_it() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-dim-behind");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let _hosting = Hosting::open(Tab::Dispatch);
+        let mut board = crate::status::Board::hosted();
+        let mut tab = DispatchTab::default();
+        let mut rows = |board: &mut crate::status::Board, tab: &DispatchTab| {
+            board_frame_rows(&repo, &pipelines, board, tab)
+                .expect("the board's own frame must build")
+        };
+        let before = rows(&mut board, &tab);
+
+        board.on_key(&repo, &pipelines, Key::Char('o')).unwrap();
+        let menu = board.open_panel().expect("the options menu is open");
+        crate::screen::assert_dimmed_behind(&rows(&mut board, &tab), &menu);
+        board.on_key(&repo, &pipelines, Key::Esc).unwrap();
+        assert!(board.at_rest());
+        assert_eq!(rows(&mut board, &tab), before);
+
+        tab.popup = Some(Popup::Ended(super::super::dispatcher::popup(
+            true,
+            "unattended.max_cost_usd reached",
+        )));
+        let panel = tab.popup.as_ref().unwrap().panel();
+        crate::screen::assert_dimmed_behind(&rows(&mut board, &tab), &panel);
+        tab.popup = None;
+        assert_eq!(rows(&mut board, &tab), before);
+    }
+
     /// The dispatch tab's key line names `enter` only while `enter` would
     /// reach [`DispatchTab::enter`]. A popup that reads keys — `Ended`
     /// idle, `Stop` over a running child — takes `enter` first, so the pair

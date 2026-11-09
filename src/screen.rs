@@ -1358,6 +1358,82 @@ pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Ve
         .collect()
 }
 
+/// Each visible character of `row` with the colour codes in force on it,
+/// from the last reset on.
+#[cfg(test)]
+fn colours(row: &str) -> Vec<(char, String)> {
+    let mut colour = String::new();
+    cells(row)
+        .0
+        .into_iter()
+        .map(|(codes, ch)| {
+            for code in codes {
+                if code == crate::status::RESET {
+                    colour.clear();
+                } else if code.starts_with("\x1b[") {
+                    colour.push_str(&code);
+                }
+            }
+            (ch, colour.clone())
+        })
+        .collect()
+}
+
+/// Checks a whole tab's `screen` — strip, frame and key line — drawn with
+/// `panel` open over it: every cell of the panel's box in exactly the colour
+/// [`paint`] gives it and none of them dim, and every other visible
+/// character on the screen dim and nothing else. Panics, naming the row and
+/// the character, on the first cell that is not.
+///
+/// The box is found by its top row's text, and every row of it must read
+/// as the panel's own row in the same columns. `screen` must have visible
+/// text both above and below the box, so a screen that lost its strip or
+/// its key line is not passed as dimmed.
+#[cfg(test)]
+pub(crate) fn assert_dimmed_behind(screen: &[String], panel: &[String]) {
+    use crate::status::{DIM, strip_ansi};
+    let shown = screen.join("\n");
+    let plain: Vec<String> = screen.iter().map(|row| strip_ansi(row)).collect();
+    let (y, x) = plain
+        .iter()
+        .enumerate()
+        .find_map(|(y, row)| row.find(&panel[0]).map(|at| (y, row[..at].chars().count())))
+        .unwrap_or_else(|| panic!("the popup's top row is on screen: {shown}"));
+    let width = panel[0].chars().count();
+    let boxed = y..y + panel.len();
+    let mut dimmed = (0, 0);
+    for (r, row) in screen.iter().enumerate() {
+        let drawn = colours(row);
+        let paints = boxed.contains(&r).then(|| {
+            let text: String = plain[r].chars().skip(x).take(width).collect();
+            assert_eq!(text, panel[r - y], "row {r} of the box: {shown}");
+            paint(panel, r - y)
+        });
+        for (k, (ch, colour)) in drawn.iter().enumerate() {
+            match &paints {
+                Some(paints) if (x..x + width).contains(&k) => {
+                    let want = paints[k - x].unwrap_or("");
+                    assert_eq!(colour, want, "row {r}, {ch:?} at {k} in the box: {row:?}");
+                    assert!(!colour.contains(DIM), "row {r}, {ch:?} at {k}: {row:?}");
+                }
+                _ if *ch == ' ' => {}
+                _ => {
+                    assert_eq!(colour, DIM, "row {r}, {ch:?} at {k} behind: {row:?}");
+                    if r < y {
+                        dimmed.0 += 1;
+                    } else if r >= boxed.end {
+                        dimmed.1 += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        dimmed.0 > 0 && dimmed.1 > 0,
+        "dim text above and below the box: {shown}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1409,26 +1485,6 @@ mod tests {
         overlay(&mut frame, &["XY".to_string(), "ZZ".to_string()]);
         assert_eq!(frame[1], "│abcXYfgh│");
         assert_eq!(frame[2], "│ab");
-    }
-
-    /// Each visible character of `row` with the colour codes in force on
-    /// it, from the last reset on.
-    fn colours(row: &str) -> Vec<(char, String)> {
-        let mut colour = String::new();
-        cells(row)
-            .0
-            .into_iter()
-            .map(|(codes, ch)| {
-                for code in codes {
-                    if code == crate::status::RESET {
-                        colour.clear();
-                    } else if code.starts_with("\x1b[") {
-                        colour.push_str(&code);
-                    }
-                }
-                (ch, colour.clone())
-            })
-            .collect()
     }
 
     /// `panel` laid over a plain frame of dots three columns wider on

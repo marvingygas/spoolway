@@ -23013,6 +23013,39 @@ mod tests {
         })
     }
 
+    /// Hosted, a popup laid over the queue tab leaves everything behind it
+    /// dim — the strip, both panes and the key line — and its own box in
+    /// the colours `overlay` paints it. With no popup the tab draws in its
+    /// own colours, exactly as it is built.
+    #[test]
+    fn hosted_a_popup_over_the_queue_tab_dims_everything_behind_it() {
+        use crate::screen::shell::{Hosting, Tab};
+        let _hosting = Hosting::open(Tab::Queue);
+        let layout = layout_for(100, 24);
+        let frame = two_pane_frame(
+            &["> [ ] audits".to_string()],
+            &["  wire".to_string()],
+            "groups",
+            "audits",
+            layout,
+        );
+        let footer = crate::screen::key_hint(&[("space", "select"), ("q", "quit")]);
+        let panel = crate::screen::ask(
+            "gate wire at",
+            &[],
+            &["implement".to_string(), "review".to_string()],
+            0,
+        );
+
+        let drawn = compose(frame.clone(), Some(&panel), footer.clone());
+        crate::screen::assert_dimmed_behind(&drawn, &panel);
+
+        let mut own = crate::screen::shell::strip();
+        own.extend(frame.clone());
+        own.extend(crate::screen::key_rows(&footer));
+        assert_eq!(compose(frame, None, footer), own);
+    }
+
     /// The height bound the plan proves against: `release`'s seventeen steps
     /// on a 24-row terminal. Moving the cursor down through every one of
     /// them, each frame draws the cursor's own row, both of the popup's

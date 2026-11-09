@@ -745,6 +745,13 @@ impl Board {
         popup.is_some() || self.mode.panel().is_some()
     }
 
+    /// The board's own menu or panel, as [`Board::with_popup`] lays it over
+    /// the frame — for a test that needs to find it on screen.
+    #[cfg(test)]
+    pub(crate) fn open_panel(&self) -> Option<Vec<String>> {
+        self.mode.panel()
+    }
+
     /// `frame`, with `popup` drawn over it wherever the board has no panel
     /// of its own open, and everything around it dim — see
     /// [`Board::hosted_frame`] and [`crate::screen::dim`].

@@ -1639,6 +1639,28 @@ mod tests {
         assert_eq!(lines(&state).len(), 12 - 1, "{:#?}", lines(&state));
     }
 
+    // Hosted, the set popup leaves everything behind it dim — the strip, the
+    // box of keys and the key line — and its own box in the colours
+    // `overlay` paints it. Closed with `esc`, the next frame is the one drawn
+    // before it opened, in the tab's own colours.
+    #[test]
+    fn hosted_a_popup_dims_everything_behind_it() {
+        let (repo, _guard) = project("dim-behind");
+        let _hosting = shell::Hosting::open(shell::Tab::Overrides);
+        let _terminal = crate::screen::test_terminal((80, 30));
+        let mut state = State::new(&repo);
+        cursor_on(&mut state, "dispatch.visible_lanes");
+        let before = frame(&state);
+
+        type_keys(&repo, &mut state, "\r");
+        let popup = popup(&state, None).unwrap();
+        crate::screen::assert_dimmed_behind(&frame(&state), &popup);
+
+        type_keys(&repo, &mut state, "\x1b");
+        assert!(matches!(state.mode, Mode::Browsing));
+        assert_eq!(frame(&state), before);
+    }
+
     // The set popup over a box of dimmed keys: once the escape codes are
     // taken out, every row's right border sits in the frame's last column,
     // and each popup row is drawn whole with no dim left open before it.

@@ -9925,6 +9925,30 @@ mod screen_tests {
         assert!(!wider[0].contains("USD"), "{}", wider[0]);
     }
 
+    /// Hosted, the filter panel laid over the eval tab leaves everything
+    /// behind it dim — the strip, the table and the key line — and its own
+    /// box in the colours `overlay` paints it. Closed again, the next frame
+    /// is the one drawn before it opened, in the tab's own colours.
+    #[test]
+    fn hosted_the_filter_panel_dims_everything_behind_it() {
+        use crate::screen::shell::{Hosting, Tab};
+        let _hosting = Hosting::open(Tab::Eval);
+        let few = loaded(vec![tests_entry("a", "implement")]);
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new(&no_args());
+        let before = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+
+        let draft = Draft::new(state.table, state.filters.clone());
+        let panel = filter_panel(&few, &draft);
+        state.mode = Mode::Filter(draft);
+        let drawn = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+        crate::screen::assert_dimmed_behind(&drawn, &panel);
+
+        state.mode = Mode::Browsing;
+        let after = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+        assert_eq!(after, before);
+    }
+
     /// A table far taller than the terminal — 270 tasks on a 20-row one —
     /// keeps its `total` line as the frame's last body line, under the
     /// scroll indicator, and its header as the first, wherever the cursor
