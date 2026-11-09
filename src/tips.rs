@@ -5,7 +5,10 @@
 //! sentence. After a bar, a line may name what it explains: a key on a tab's
 //! key line, a config setting, a pipeline or step key, or a task key. The
 //! board draws only the text before the bar, and the tests here read the part
-//! after it to hold the list complete as spoolway grows.
+//! after it to hold the list complete as spoolway grows. A [`Deck`] deals
+//! the tips in shuffled order, one every [`SHOWN_FOR`].
+
+use std::time::{Duration, Instant};
 
 /// The list, embedded so the binary needs nothing on disk to show a tip.
 const LIST: &str = include_str!("../assets/tips.txt");
@@ -53,9 +56,146 @@ fn parse(list: &str) -> Vec<Tip<'_>> {
 
 /// Every tip's text in file order, with comment lines, blank lines and
 /// everything from the bar on removed.
-#[allow(dead_code)]
 pub fn texts() -> Vec<&'static str> {
     parse(LIST).into_iter().map(|tip| tip.text).collect()
+}
+
+/// How long one tip stays on the board before the next one takes its row:
+/// long enough to notice a tip and read it.
+pub const SHOWN_FOR: Duration = Duration::from_secs(30);
+
+/// The tips in the order the board shows them, and which one is up.
+///
+/// Dealt from a shuffled deck rather than picked at random each time, since
+/// a fresh pick can show the same tip twice within minutes. Every tip shows
+/// once before any shows again, and then the deck is shuffled again.
+///
+/// Held by the board for as long as it is open, so the clock and the place
+/// in the deck carry from one frame to the next. A deck made on every frame
+/// would either never move past its first tip or move on every redraw.
+pub struct Deck {
+    /// Every tip's text, in file order.
+    texts: Vec<&'static str>,
+    /// Indexes into `texts`, in the order they are shown.
+    order: Vec<usize>,
+    /// Where in `order` the tip on screen sits.
+    at: usize,
+    /// When the tip on screen first showed. `None` until the first frame
+    /// asks for one, so a deck made long before its board draws still gives
+    /// its first tip the full time.
+    since: Option<Instant>,
+    /// The state of the generator each shuffle draws from. `None` keeps the
+    /// deck in file order for good, so a test always draws a known tip.
+    random: Option<u64>,
+}
+
+impl Deck {
+    /// The deck a board opens with: shuffled in a build people run, and in
+    /// file order under `cargo test`, where whole frames are compared and a
+    /// random tip in each would make no two runs agree.
+    pub fn for_board() -> Deck {
+        #[cfg(test)]
+        return Deck::in_order(texts());
+        #[cfg(not(test))]
+        Deck::shuffled(texts(), seed())
+    }
+
+    /// `texts` in the order given, and kept in it every time round.
+    pub fn in_order(texts: Vec<&'static str>) -> Deck {
+        Deck::dealt(texts, None)
+    }
+
+    /// `texts` shuffled from `seed`, and shuffled again from the same
+    /// generator each time the last tip has shown.
+    pub fn shuffled(texts: Vec<&'static str>, seed: u64) -> Deck {
+        Deck::dealt(texts, Some(seed))
+    }
+
+    fn dealt(texts: Vec<&'static str>, random: Option<u64>) -> Deck {
+        let mut deck = Deck {
+            order: (0..texts.len()).collect(),
+            texts,
+            at: 0,
+            since: None,
+            random,
+        };
+        deck.shuffle();
+        deck
+    }
+
+    /// The tip to draw at `now`: the one on screen until it has been up for
+    /// [`SHOWN_FOR`], then the next one in the deck. `None` only for a deck
+    /// with no tips at all.
+    ///
+    /// Moves at most one tip per call. A board that went undrawn for minutes,
+    /// on another tab, shows the next tip when it comes back rather than
+    /// skipping the ones it would have shown meanwhile.
+    pub fn current(&mut self, now: Instant) -> Option<&'static str> {
+        if self.order.is_empty() {
+            return None;
+        }
+        match self.since {
+            None => self.since = Some(now),
+            Some(since) if now.saturating_duration_since(since) >= SHOWN_FOR => {
+                self.next();
+                self.since = Some(now);
+            }
+            Some(_) => {}
+        }
+        Some(self.texts[self.order[self.at]])
+    }
+
+    /// Move to the next tip, shuffling the deck again past its last one.
+    fn next(&mut self) {
+        self.at += 1;
+        if self.at < self.order.len() {
+            return;
+        }
+        let last = self.order[self.order.len() - 1];
+        self.at = 0;
+        self.shuffle();
+        // A new shuffle may open on the tip that just closed the old one,
+        // which would leave the same tip up for twice as long, as if the row
+        // had stopped changing. It trades places with the deck's last tip.
+        if self.order.len() > 1 && self.order[0] == last {
+            let end = self.order.len() - 1;
+            self.order.swap(0, end);
+        }
+    }
+
+    /// Shuffle `order` in place, a Fisher-Yates shuffle over the deck's own
+    /// generator. Does nothing to a deck kept in file order.
+    fn shuffle(&mut self) {
+        let Some(state) = self.random.as_mut() else {
+            return;
+        };
+        for i in (1..self.order.len()).rev() {
+            let j = (splitmix(state) % (i as u64 + 1)) as usize;
+            self.order.swap(i, j);
+        }
+    }
+}
+
+/// The next number from a SplitMix64 generator at `state`. The deck needs
+/// only an order no person can predict, not one an attacker cannot, and this
+/// is enough for that without taking on a dependency.
+fn splitmix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// A seed that differs from one opening of the board to the next. The
+/// standard library keys each new hasher at random, so hashing nothing still
+/// gives a fresh number every run.
+#[cfg(not(test))]
+fn seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
 }
 
 #[cfg(test)]
@@ -326,5 +466,95 @@ mod tests {
         assert_eq!(about, [None, Some("key * q"), None]);
         let lines: Vec<_> = tips.iter().map(|tip| tip.line).collect();
         assert_eq!(lines, [3, 4, 6]);
+    }
+
+    /// Every tip `deck` shows over `rounds` passes through it, read off the
+    /// clock stepped [`SHOWN_FOR`] at a time.
+    fn shown(deck: &mut Deck, rounds: usize) -> Vec<&'static str> {
+        let start = Instant::now();
+        (0..deck.order.len() * rounds)
+            .map(|step| deck.current(start + SHOWN_FOR * step as u32).unwrap())
+            .collect()
+    }
+
+    /// One tip stays up for 30 seconds by the clock it is given, and the
+    /// next one takes its place at 30.
+    #[test]
+    fn a_tip_stays_up_for_30_seconds() {
+        let mut deck = Deck::in_order(vec!["one", "two", "three"]);
+        let start = Instant::now();
+        assert_eq!(deck.current(start), Some("one"));
+        assert_eq!(deck.current(start + Duration::from_secs(29)), Some("one"));
+        assert_eq!(deck.current(start + SHOWN_FOR), Some("two"));
+        assert_eq!(
+            deck.current(start + SHOWN_FOR + Duration::from_secs(29)),
+            Some("two")
+        );
+        assert_eq!(deck.current(start + SHOWN_FOR * 2), Some("three"));
+    }
+
+    /// A board left undrawn for minutes shows the next tip when it comes
+    /// back, not one several places further on.
+    #[test]
+    fn a_long_gap_moves_one_tip() {
+        let mut deck = Deck::in_order(vec!["one", "two", "three"]);
+        let start = Instant::now();
+        deck.current(start);
+        assert_eq!(deck.current(start + SHOWN_FOR * 10), Some("two"));
+    }
+
+    /// The shipped list, shuffled: each round shows every tip once, in an
+    /// order that is not the file's, and the next round is shuffled again
+    /// rather than repeating the first.
+    #[test]
+    fn a_shuffled_deck_shows_every_tip_once_a_round() {
+        let all = texts();
+        let mut deck = Deck::shuffled(all.clone(), 7);
+        let shown = shown(&mut deck, 2);
+        let (first, second) = shown.split_at(all.len());
+        for round in [first, second] {
+            let mut sorted = round.to_vec();
+            sorted.sort_unstable();
+            let mut expected = all.clone();
+            expected.sort_unstable();
+            assert_eq!(sorted, expected, "a round missed a tip or showed one twice");
+        }
+        assert_ne!(first, all.as_slice(), "the first round is in file order");
+        assert_ne!(first, second, "the second round was not shuffled again");
+    }
+
+    /// Two boards opened apart deal two different orders.
+    #[test]
+    fn two_seeds_deal_two_orders() {
+        let first = shown(&mut Deck::shuffled(texts(), 1), 1);
+        let second = shown(&mut Deck::shuffled(texts(), 2), 1);
+        assert_ne!(first, second);
+    }
+
+    /// The tip that closes one round never opens the next, whatever the
+    /// shuffle deals, so no tip stays up for a minute.
+    #[test]
+    fn a_new_round_never_opens_on_the_tip_that_closed_the_last() {
+        for seed in 0..200 {
+            let mut deck = Deck::shuffled(vec!["one", "two", "three"], seed);
+            let shown = shown(&mut deck, 20);
+            for pair in shown.windows(2) {
+                assert_ne!(pair[0], pair[1], "seed {seed}: {shown:?}");
+            }
+        }
+    }
+
+    /// A deck with no tips, or with one, never panics and never moves off
+    /// the one it has.
+    #[test]
+    fn a_deck_of_none_or_one_tip() {
+        let start = Instant::now();
+        let mut empty = Deck::shuffled(Vec::new(), 3);
+        assert_eq!(empty.current(start), None);
+        assert_eq!(empty.current(start + SHOWN_FOR), None);
+        let mut one = Deck::shuffled(vec!["only"], 3);
+        assert_eq!(one.current(start), Some("only"));
+        assert_eq!(one.current(start + SHOWN_FOR), Some("only"));
+        assert_eq!(one.current(start + SHOWN_FOR * 2), Some("only"));
     }
 }
