@@ -330,6 +330,11 @@ wait_for_said() {
 # command line, so an escape or a quote in them means only what `printf` makes
 # of it. Any `VAR=value` after `out` is set for the screen alone.
 #
+# The pty is set to 100 columns, the width the screen falls back to with no
+# terminal at all. Left alone it takes the size of whatever terminal runs the
+# suite, and in one narrower than 88 columns the tab strip narrows its gap or
+# breaks onto a second row, which the suites matching it do not expect.
+#
 # Two popups the screen can open on are kept out of the way, since either
 # would take every key sent: the release check is skipped, and the project is
 # brought up to date with `spoolway sync` first. A fixture is never synced
@@ -343,7 +348,7 @@ on_screen() {
   local keys=$1 out=$2; shift 2
   _screen_ready
   env "$@" SPOOLWAY_SKIP_VERSION_CHECK=1 E2E_KEYS="2$keys" E2E_BIN="$SPOOLWAY" \
-    script -qec 'printf "$E2E_KEYS" | "$E2E_BIN"' "$out" >/dev/null 2>&1
+    script -qec 'stty cols 100; printf "$E2E_KEYS" | "$E2E_BIN"' "$out" >/dev/null 2>&1
 }
 
 _screen_ready() {

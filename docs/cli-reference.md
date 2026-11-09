@@ -80,6 +80,13 @@ digit in brackets: `[1] DISPATCH`, `[2] QUEUE`. The open tab's label is drawn at
 brightness and every other label is dimmed. One blank row sits above the strip and one
 below it.
 
+The labels sit eight columns apart when they all fit on one row at that gap. Otherwise the
+gap is four columns, on every row. When one row still does not fit at four columns, the strip
+breaks between two labels, never inside one. The labels then split as evenly as possible
+across the fewest rows that fit, in tab order, and earlier rows take the extra label. The
+widest row is centred, and every other row starts in the same column as it. A label wider
+than the tab is cut at its right edge. Every extra strip row comes off each tab's body.
+
 | Key | What it does |
 |---|---|
 | `1`–`5` | Open that tab, when no popup or sub-mode of the tab's own is open. The open tab's own digit does nothing. A home-mode project has no overrides tab, so its eval is `4` |
@@ -106,7 +113,7 @@ and the word, and says what to write instead. Fix the word at its source. Add it
 test's allowed list only when it falls under one of the cases above.
 
 Every tab keeps column 0 and the last column empty, and leaves two blank rows under its key
-line. The tab strip stays centred, and every popup stays centred on its tab. A key line wider
+line. The tab strip's widest row is centred, and every popup stays centred on its tab. A key line wider
 than the tab breaks between two keys, and each broken row starts one column in. Every row it
 adds comes off the tab's body.
 
