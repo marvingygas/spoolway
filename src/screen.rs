@@ -1380,6 +1380,204 @@ mod tests {
         assert_eq!(frame[1], "│abcXYfgh│");
         assert_eq!(frame[2], "│ab");
     }
+
+    /// Each visible character of `row` with the colour codes in force on
+    /// it, from the last reset on.
+    fn colours(row: &str) -> Vec<(char, String)> {
+        let mut colour = String::new();
+        cells(row)
+            .0
+            .into_iter()
+            .map(|(codes, ch)| {
+                for code in codes {
+                    if code == crate::status::RESET {
+                        colour.clear();
+                    } else if code.starts_with("\x1b[") {
+                        colour.push_str(&code);
+                    }
+                }
+                (ch, colour.clone())
+            })
+            .collect()
+    }
+
+    /// `panel` laid over a plain frame of dots three columns wider on
+    /// either side, and the column and row its top left corner landed on.
+    fn laid(panel: &[String]) -> (Vec<String>, usize, usize) {
+        let width = panel[0].chars().count() + 6;
+        let mut frame = vec![".".repeat(width); panel.len() + 4];
+        overlay(&mut frame, panel);
+        (frame, 3, 2)
+    }
+
+    /// The colour of each character of `panel`'s `i`th row as [`laid`]
+    /// drew it.
+    fn row_colours(panel: &[String], i: usize) -> Vec<(char, String)> {
+        let (frame, x, y) = laid(panel);
+        let width = panel[i].chars().count();
+        colours(&frame[y + i])[x..x + width].to_vec()
+    }
+
+    /// Every popup that asks, laid over a tab, draws its border and title
+    /// in cyan, its `[enter]` pair green, its `[esc]` pair red and its body
+    /// in the terminal's own colour, while the builders still hand over
+    /// rows with no codes in them. With its codes taken out, the frame
+    /// reads exactly as a character-for-character replace would write it.
+    #[test]
+    fn every_popup_laid_over_a_tab_is_painted_cyan_green_and_red() {
+        use crate::status::{CYAN, GREEN, RED};
+        let popups = [
+            crate::status::asking_panels(),
+            crate::commands::dispatch_asking_panels(),
+            crate::commands::queue_asking_panels(),
+            crate::commands::jobs_asking_panels(),
+            vec![
+                ("options", options("wire", &["open task", "gate"], 0)),
+                ("options, nothing to do", options("wire", &[], 0)),
+                ("notice", Notice::new("queued", "queued 1 task").panel(40)),
+            ],
+        ]
+        .concat();
+        for (name, panel) in popups {
+            assert!(
+                panel.iter().all(|line| !line.contains('\x1b')),
+                "{name}: the builder stays plain: {panel:?}"
+            );
+            let (frame, x, y) = laid(&panel);
+            let mut replaced = vec![".".repeat(frame[0].chars().count()); frame.len()];
+            for (i, line) in panel.iter().enumerate() {
+                let mut row: Vec<char> = replaced[y + i].chars().collect();
+                row.splice(x..x + line.chars().count(), line.chars());
+                replaced[y + i] = row.into_iter().collect();
+            }
+            let stripped: Vec<String> = frame.iter().map(|l| shell::plain(l)).collect();
+            assert_eq!(stripped, replaced, "{name}: the text is unchanged");
+
+            let last = panel.len() - 1;
+            for i in 0..=last {
+                let drawn = row_colours(&panel, i);
+                let text: String = drawn.iter().map(|(c, _)| c).collect();
+                let pair = |pair: &str| {
+                    text.find(pair).map(|at| {
+                        let at = text[..at].chars().count();
+                        at..at + pair.chars().count()
+                    })
+                };
+                let enter = pair("[enter] confirm");
+                let esc = pair("[esc] close");
+                for (k, (ch, colour)) in drawn.iter().enumerate() {
+                    let want = if i == 0 || i == last || k == 0 || k == drawn.len() - 1 {
+                        CYAN
+                    } else if enter.as_ref().is_some_and(|r| r.contains(&k)) {
+                        GREEN
+                    } else if esc.as_ref().is_some_and(|r| r.contains(&k)) {
+                        RED
+                    } else {
+                        ""
+                    };
+                    assert_eq!(colour, want, "{name}: row {i}, {ch:?} at {k}: {frame:?}");
+                }
+                if i + 1 == last && name != "notice" {
+                    assert!(esc.is_some(), "{name}: an esc pair on {text:?}");
+                }
+                if i + 1 == last && name != "options, nothing to do" {
+                    assert!(enter.is_some(), "{name}: an enter pair on {text:?}");
+                }
+            }
+        }
+    }
+
+    /// The colour follows the key alone, whatever the word after it, and a
+    /// pair runs to the next `[` however narrow the gap: a key row narrowed
+    /// to fit a small frame joins its pairs with two spaces. Any other key,
+    /// the gap between two pairs and a body row that names `[enter]` stay
+    /// plain.
+    #[test]
+    fn only_enter_and_esc_pairs_on_the_key_row_are_painted() {
+        use crate::status::{GREEN, RED};
+        let panel = super::panel(
+            "save as a routine",
+            &["[enter] here is body text".to_string()],
+            "[enter] save  [f] search  [esc] back",
+        );
+        let key_row = panel.len() - 2;
+        let drawn = row_colours(&panel, key_row);
+        let inner: String = drawn[1..drawn.len() - 1].iter().map(|(c, _)| c).collect();
+        let painted: Vec<&str> = drawn[1..drawn.len() - 1]
+            .iter()
+            .map(|(_, colour)| colour.as_str())
+            .collect();
+        let at = |s: &str| inner.find(s).unwrap();
+        let span = |s: &str| at(s)..at(s) + s.len();
+        for (k, colour) in painted.iter().enumerate() {
+            let want = if span("[enter] save").contains(&k) {
+                GREEN
+            } else if span("[esc] back").contains(&k) {
+                RED
+            } else {
+                ""
+            };
+            assert_eq!(*colour, want, "{k} in {inner:?}");
+        }
+        let body = row_colours(&panel, 1);
+        assert!(
+            body[1..body.len() - 1].iter().all(|(_, c)| c.is_empty()),
+            "a body row is never a key row: {body:?}"
+        );
+
+        // A last row that does not open on a key is a body row too.
+        let panel = boxed("t", &["press [enter] to go".to_string()]);
+        let row = row_colours(&panel, 1);
+        assert!(
+            row[1..row.len() - 1].iter().all(|(_, c)| c.is_empty()),
+            "{row:?}"
+        );
+    }
+
+    /// The popup's colour is closed on its right border, before the row's
+    /// own colour opens again, so the text beyond the box keeps the row's
+    /// dim and carries no cyan. A row that ends under the popup closes it
+    /// too.
+    #[test]
+    fn a_popups_colour_stops_at_its_right_border() {
+        let (dim, reset, cyan) = (
+            crate::status::DIM,
+            crate::status::RESET,
+            crate::status::CYAN,
+        );
+        let panel = boxed("t", &["x".to_string()]);
+        let mut frame = vec![
+            "─".repeat(16),
+            format!("│{dim}{}{reset}│", "a".repeat(14)),
+            format!("│{}│", "b".repeat(14)),
+            "│ccccc".to_string(),
+        ];
+        overlay(&mut frame, &panel);
+        let width = panel[0].chars().count();
+        let x = (16 - width) / 2;
+        let row = colours(&frame[1]);
+        assert_eq!(row[x], (TOP_LEFT, cyan.to_string()), "{:?}", frame[1]);
+        assert!(
+            row[x + width..row.len() - 1]
+                .iter()
+                .all(|(c, colour)| *c == 'a' && colour == dim),
+            "{:?}",
+            frame[1]
+        );
+        let row = colours(&frame[2]);
+        assert_eq!(
+            row[x + width - 1],
+            ('│', cyan.to_string()),
+            "{:?}",
+            frame[2]
+        );
+        assert!(
+            row[x + width..].iter().all(|(_, colour)| colour.is_empty()),
+            "{:?}",
+            frame[2]
+        );
+        assert!(frame[3].ends_with(reset), "{:?}", frame[3]);
+    }
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
     /// Words that keep a capital in TUI text, each under the one category
