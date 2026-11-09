@@ -1651,9 +1651,15 @@ mod tests {
             let plain: Vec<char> = shell::plain(&row).chars().collect();
             assert_eq!(plain.len(), 80, "{row:?}");
             assert!(matches!(plain[79], '│' | '╮' | '╯'), "{row:?}");
-            let Some(at) = popup.iter().find_map(|line| row.find(line.as_str())) else {
+            if !popup
+                .iter()
+                .any(|line| plain.iter().collect::<String>().contains(line.as_str()))
+            {
                 continue;
-            };
+            }
+            // `overlay` paints the popup's left border, so the popup opens
+            // where the first cyan does.
+            let at = row.find(crate::status::CYAN).unwrap();
             popup_rows += 1;
             // The dim before the popup row, if any, is closed before it.
             let before = &row[..at];

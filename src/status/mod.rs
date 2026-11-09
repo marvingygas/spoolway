@@ -45,7 +45,7 @@ use view::{
     restart_confirm_panel, resume_picker_panel, skip_hook_confirm_panel, spool_frame,
     table_laid_out, table_window, ticker, tint_available, unqueue_confirm_panel,
 };
-pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
+pub(crate) use view::{BOLD, CYAN, DIM, GREEN, GUTTER, RED, RESET, strip_ansi};
 
 /// The redraw rate every screen's own wait polls stdin at — the queue
 /// screen and the dispatcher board, whose wait slices its whole

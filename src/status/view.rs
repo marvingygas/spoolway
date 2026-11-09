@@ -113,7 +113,15 @@ pub(crate) const BOLD: &str = "\x1b[1m";
 
 pub(crate) const DIM: &str = "\x1b[2m";
 
-const GREEN: &str = "\x1b[32m";
+pub(crate) const GREEN: &str = "\x1b[32m";
+
+// Drawn only on a pop-up, never on the board: the cyan of its border and
+// title, and the red of its `[esc]` keys, which `screen::overlay` paints as
+// it lays the pop-up over a tab. No board state is either colour, so a
+// pop-up never reads as part of the rows behind it.
+pub(crate) const CYAN: &str = "\x1b[36m";
+
+pub(crate) const RED: &str = "\x1b[31m";
 
 pub(super) const AMBER: &str = "\x1b[33m";
 
@@ -2857,10 +2865,6 @@ mod tests {
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
     use crate::status::testutil::*;
     use crate::status::{Row, State, done_rows, rows};
-
-    /// What no state on this board may draw in — see
-    /// [`blocked_is_orange_prompt_is_amber_and_no_other_state_changed_colour`].
-    const RED: &str = "\x1b[31m";
 
     /// `Blocked` reads apart from every other stop: orange, its own colour
     /// — a block is a task waiting on a person, the same kind of stop

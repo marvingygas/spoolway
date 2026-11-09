@@ -17887,14 +17887,15 @@ mod tests {
         let (repo, _root_guard) = fixture("screen-options-draws");
         write_pending(&repo, "wire", &task_text("wire", "group: cart\n", BODY));
 
-        let last = last_frame(&screen(&repo, listed(&repo), "\x1b[Co")).to_string();
+        let last =
+            crate::screen::shell::plain(last_frame(&screen(&repo, listed(&repo), "\x1b[Co")));
         assert!(last.contains(&format!("{TOP_LEFT}─ wire ")), "{last}");
         assert!(last.contains("│  > open task  "), "{last}");
         assert!(last.contains("│    gate  "), "{last}");
         assert!(last.contains("[enter] confirm   [esc] close"), "{last}");
         assert!(last.contains("[o] options   [f] search"), "{last}");
 
-        let last = last_frame(&screen(&repo, listed(&repo), "o")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&screen(&repo, listed(&repo), "o")));
         assert!(last.contains(&format!("{TOP_LEFT}─ cart ")), "{last}");
         assert!(last.contains("│  > trial  "), "{last}");
         assert!(last.contains("│    save as routine  "), "{last}");
@@ -19235,11 +19236,16 @@ mod tests {
         let (repo, _root_guard) = fixture("screen-delete-group-popup");
         seed_cart_and_checkout(&repo);
 
-        let menu = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B")).to_string();
+        let menu =
+            crate::screen::shell::plain(last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B")));
         assert!(menu.contains("│    save as routine  "), "{menu}");
         assert!(menu.contains("│  > delete  "), "{menu}");
 
-        let last = last_frame(&screen(&repo, listed(&repo), "o\x1b[B\x1b[B\r")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&screen(
+            &repo,
+            listed(&repo),
+            "o\x1b[B\x1b[B\r",
+        )));
         assert!(
             last.contains(&format!("{TOP_LEFT}─ delete group cart ")),
             "{last}"
@@ -19876,7 +19882,7 @@ mod tests {
         assert_eq!(menu.items, [RowOption::Open]);
         assert!(routine_options(&repo, &pipelines, &[], &jobs, &nav).is_none());
 
-        let last = last_frame(&routines_screen(&repo, "o")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "o")));
         assert!(
             last.contains(&format!("{TOP_LEFT}─ maintenance ")),
             "{last}"
@@ -19884,7 +19890,7 @@ mod tests {
         assert!(last.contains("│  > edit schedule  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
         assert!(last.contains("[o] options"), "{last}");
-        let last = last_frame(&routines_screen(&repo, "\x1b[Co")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "\x1b[Co")));
         assert!(last.contains(&format!("{TOP_LEFT}─ prune ")), "{last}");
         assert!(last.contains("│  > open task  "), "{last}");
         assert!(last.contains("[o] options"), "{last}");
@@ -22591,6 +22597,12 @@ mod tests {
                 0,
             ),
         );
+        // Read as a person sees it: `overlay` paints the panel's border and
+        // keys, and a colour code takes no column.
+        let frame: Vec<String> = frame
+            .iter()
+            .map(|line| crate::screen::shell::plain(line))
+            .collect();
 
         assert_eq!(frame.len(), before, "the frame must not grow");
         assert_eq!(
@@ -23027,6 +23039,12 @@ mod tests {
                 Some(&panel),
                 "keys".to_string(),
             );
+            // Read as a person sees it: `overlay` paints the popup's border
+            // and keys, and a colour code takes no column.
+            let frame: Vec<String> = frame
+                .iter()
+                .map(|line| crate::screen::shell::plain(line))
+                .collect();
             let drawn = frame.join("\n");
 
             assert_eq!(
@@ -23096,6 +23114,12 @@ mod tests {
                 Some(&panel),
                 "keys".to_string(),
             );
+            // Read as a person sees it: `overlay` paints the popup's border
+            // and keys, and a colour code takes no column.
+            let frame: Vec<String> = frame
+                .iter()
+                .map(|line| crate::screen::shell::plain(line))
+                .collect();
             let drawn = frame.join("\n");
             assert_eq!(
                 frame.len(),
@@ -23164,6 +23188,12 @@ mod tests {
             .unwrap();
             let mut frame = two_pane_frame(&[], &[], "groups", "audits", layout);
             overlay(&mut frame, &panel);
+            // Read as a person sees it: `overlay` paints the popup's border
+            // and keys, and a colour code takes no column.
+            let frame: Vec<String> = frame
+                .iter()
+                .map(|line| crate::screen::shell::plain(line))
+                .collect();
             let drawn = frame.join("\n");
 
             assert!(drawn.contains(&format!("←  {name}  ")), "{drawn}");
@@ -24287,7 +24317,7 @@ mod tests {
         assert!(!drawn.contains("start a dispatcher"), "{drawn}");
         // With issue tracking off nothing is asked: the popup says what was
         // queued, and `enter` closes it.
-        let frame = last_frame(&drawn);
+        let frame = crate::screen::shell::plain(last_frame(&drawn));
         assert!(frame.contains(&format!("{TOP_LEFT}─ queued ")), "{frame}");
         assert!(frame.contains("queued 1 task"), "{frame}");
         assert!(
@@ -25435,7 +25465,7 @@ mod tests {
         write_job(&repo, Scope::User, "weekly-prune", "maintenance");
 
         let drawn = routines_screen(&repo, &format!("jo{DOWN_TO_LAST}\r"));
-        let last = last_frame(&drawn);
+        let last = crate::screen::shell::plain(last_frame(&drawn));
 
         assert!(last.contains("─ delete this routine "), "{last}");
         assert!(last.contains("nightly · 2 tasks"), "{last}");
@@ -25588,7 +25618,7 @@ mod tests {
         let (repo, _root_guard) = fixture("routine-new-job-open");
         seed_two_routines(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "jo\r")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "jo\r")));
 
         assert!(last.contains("─ when does nightly run "), "{last}");
         assert_eq!(
@@ -25603,7 +25633,8 @@ mod tests {
         );
         assert!(job_names(&repo).is_empty());
 
-        let last = last_frame(&routines_screen(&repo, "jo\r0 3 * * *")).to_string();
+        let last =
+            crate::screen::shell::plain(last_frame(&routines_screen(&repo, "jo\r0 3 * * *")));
         assert_eq!(
             last.matches("[enter] accept   [esc] cancel").count(),
             2,
@@ -25767,7 +25798,7 @@ mod tests {
         seed_two_routines(&repo);
         write_job(&repo, Scope::Project, "nightly-audit", "nightly");
 
-        let last = last_frame(&routines_screen(&repo, "jo")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "jo")));
         assert!(last.contains(&format!("{TOP_LEFT}─ nightly ")), "{last}");
         let items = [
             "│  > edit schedule  ",
@@ -25787,7 +25818,7 @@ mod tests {
         let mut spec = crate::jobs::load(&repo).unwrap()[0].spec.clone();
         spec.enabled = false;
         crate::jobs::write(&repo, Scope::Project, "nightly-audit", &spec).unwrap();
-        let last = last_frame(&routines_screen(&repo, "jo")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "jo")));
         assert!(last.contains("│    activate job  "), "{last}");
         assert!(!last.contains("deactivate job"), "{last}");
     }
@@ -25819,7 +25850,7 @@ mod tests {
             ]
         );
 
-        let last = last_frame(&routines_screen(&repo, "jo")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "jo")));
         assert!(last.contains("│  > activate job nightly-a  "), "{last}");
         assert!(last.contains("│    deactivate job nightly-b  "), "{last}");
         assert!(last.contains("│    delete routine  "), "{last}");
@@ -26604,7 +26635,7 @@ mod tests {
         let (repo, _root_guard) = fixture("routines-orphan-menu");
         seed_orphans(&repo);
 
-        let last = last_frame(&routines_screen(&repo, "jjo")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&routines_screen(&repo, "jjo")));
         assert!(
             last.contains(&format!("{TOP_LEFT}─ nightly-old ")),
             "{last}"
@@ -29653,9 +29684,12 @@ group_description: search
             /// The rows of the popup titled `title` in `frame`, each cut out
             /// of its box and trimmed of the two-space indent [`boxed`]
             /// draws, from the blank row under the title to the key row.
+            /// Read with its codes taken out: `overlay` paints the box's
+            /// border and keys.
             fn popup_rows(frame: &str, title: &str) -> Vec<String> {
                 frame
                     .lines()
+                    .map(crate::screen::shell::plain)
                     .skip_while(|line| !line.contains(&format!("{TOP_LEFT}─ {title} ")))
                     .skip(1)
                     .take_while(|line| !line.contains(BOTTOM_LEFT))
@@ -30447,7 +30481,7 @@ group_description: audit
         #[test]
         fn the_screen_draws_the_gate_in_a_popup_over_the_tab() {
             let (repo, drawn, _root_guard) = submit_over_the_gate("tool-gate-popup", "");
-            let frame = last_frame(&drawn);
+            let frame = crate::screen::shell::plain(last_frame(&drawn));
             assert!(
                 frame.contains(&format!("{TOP_LEFT}─ issue tracking ")),
                 "{frame}"

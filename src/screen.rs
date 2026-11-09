@@ -1070,10 +1070,15 @@ pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
 ///
 /// Columns are the ones a reader sees: an escape code in a row takes none,
 /// so a panel lands in the same place over a coloured row as over a plain
-/// one. A row with no codes is written exactly as a character-for-character
-/// replace would write it. See [`overlay_row`] for the colour around a panel.
-/// The panel itself is still written one character to a column, so it
-/// carries no codes of its own — see [`keys`].
+/// one. See [`overlay_row`] for the colour around a panel.
+///
+/// The panel itself carries no codes of its own — see [`keys`] — and is
+/// written one character to a column. A boxed panel is painted here as it
+/// is laid down, in the colours [`paint`] gives each character: so every
+/// popup on every tab is coloured alike, and the builders, their text
+/// tests and the prompts printed straight to a terminal all stay plain.
+/// Over a row with no codes, a panel [`paint`] leaves plain is written
+/// exactly as a character-for-character replace would write it.
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
     let Some(width) = frame
         .first()
@@ -1089,8 +1094,71 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
         let Some(row) = frame.get_mut(y + i) else {
             break;
         };
-        *row = overlay_row(row, line, x);
+        *row = overlay_row(row, line, &paint(panel, i), x);
     }
+}
+
+/// The colour each character of `panel`'s `i`th row is drawn in, `None`
+/// for the terminal's own: [`crate::status::CYAN`] on the box's border and
+/// its title, [`crate::status::GREEN`] on each `[enter]` pair of its key
+/// row and [`crate::status::RED`] on each `[esc]` pair.
+///
+/// A panel that is not a box — one whose first row does not open on
+/// [`corner::TOP_LEFT`] — is left plain: there is no border to find.
+///
+/// Only the last row inside the box is read as the key row, and only when
+/// it starts on a `[`, so a body row that names `[enter]` is never painted.
+/// A pair runs from its `[` to the next `[` or the end of the row, whatever
+/// the gap between them: a row narrowed to fit a small frame joins its
+/// pairs with two spaces rather than [`crate::status::GUTTER`]'s three. The
+/// spaces after a pair stay plain, so the gap between two pairs is never
+/// drawn in either's colour. The colour follows the key alone: `[enter]
+/// save` is as green as `[enter] confirm`, and any other key is plain.
+fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
+    use crate::status::{CYAN, GREEN, RED};
+    let line: Vec<char> = panel[i].chars().collect();
+    let mut paint = vec![None; line.len()];
+    let boxed = panel[0].starts_with(corner::TOP_LEFT);
+    let last = panel.len() - 1;
+    if !boxed || line.is_empty() {
+        return paint;
+    }
+    if i == 0 || i == last {
+        paint.fill(Some(CYAN));
+        return paint;
+    }
+    let inner = match (line.first(), line.last()) {
+        (Some('│'), Some('│')) if line.len() >= 2 => {
+            paint[0] = Some(CYAN);
+            paint[line.len() - 1] = Some(CYAN);
+            1..line.len() - 1
+        }
+        _ => 0..line.len(),
+    };
+    let text = &line[inner.clone()];
+    let starts_on_key = text.iter().find(|c| **c != ' ') == Some(&'[');
+    if i + 1 != last || !starts_on_key {
+        return paint;
+    }
+    let opens: Vec<usize> = (0..text.len()).filter(|&k| text[k] == '[').collect();
+    for (n, &open) in opens.iter().enumerate() {
+        let mut close = opens.get(n + 1).copied().unwrap_or(text.len());
+        while close > open && text[close - 1] == ' ' {
+            close -= 1;
+        }
+        let pair: String = text[open..close].iter().collect();
+        let colour = if pair.starts_with("[enter]") {
+            GREEN
+        } else if pair.starts_with("[esc]") {
+            RED
+        } else {
+            continue;
+        };
+        for k in open..close {
+            paint[inner.start + k] = Some(colour);
+        }
+    }
+    paint
 }
 
 /// `row` with `line` written over it from visible column `x`, stopping at
@@ -1102,7 +1170,14 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
 /// side keeps it. The codes of the characters the panel covers are written
 /// after it, in order, rather than dropped: one may close a colour or a
 /// hyperlink that the rest of the row must not carry on into.
-fn overlay_row(row: &str, line: &str, x: usize) -> String {
+///
+/// Each of the panel's characters is drawn in its colour in `paint` — see
+/// [`paint`] — opened where that colour starts and closed with a reset
+/// where it ends. A colour still open on the panel's last character, its
+/// right border, is closed before the row's own colour opens again, so
+/// none of the panel's colour runs on into the text beyond it.
+fn overlay_row(row: &str, line: &str, paint: &[Option<&str>], x: usize) -> String {
+    let reset = crate::status::RESET;
     let (cells, tail) = cells(row);
     let over: Vec<char> = line.chars().collect();
     let end = x + over.len();
@@ -1110,13 +1185,18 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
     let mut colour = String::new();
     let mut at_start = String::new();
     let mut hidden = String::new();
+    // The panel's own colour last opened, until it is reset.
+    let mut painted: Option<&str> = None;
     let mut out = String::new();
     for (j, (codes, ch)) in cells.iter().enumerate() {
         if j == x && !colour.is_empty() {
             at_start = colour.clone();
-            out.push_str(crate::status::RESET);
+            out.push_str(reset);
         }
         if j == end {
+            if painted.take().is_some() {
+                out.push_str(reset);
+            }
             out.push_str(&at_start);
             out.push_str(&hidden);
         }
@@ -1129,6 +1209,14 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
         }
         if (x..end).contains(&j) {
             hidden.extend(codes.iter().map(String::as_str));
+            let want = paint.get(j - x).copied().flatten();
+            if want != painted {
+                if painted.is_some() {
+                    out.push_str(reset);
+                }
+                out.extend(want);
+                painted = want;
+            }
             out.push(over[j - x]);
             continue;
         }
@@ -1138,6 +1226,9 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
     // A row that ends under the panel, or right where it ends, never
     // reached `end` above.
     if cells.len() <= end {
+        if painted.is_some() {
+            out.push_str(reset);
+        }
         out.push_str(&hidden);
     }
     out.extend(tail.iter().map(String::as_str));

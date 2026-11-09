@@ -9288,8 +9288,10 @@ mod screen_tests {
     }
 
     /// Whether `frame` carries the loading popup, exactly as the mockup
-    /// draws it.
+    /// draws it, read with the codes `overlay` paints its border in taken
+    /// out.
     fn shows_loading(frame: &str) -> bool {
+        let frame = &crate::screen::shell::plain(frame);
         let loading = [
             format!("{TOP_LEFT}─ eval ─────{TOP_RIGHT}"),
             "│  loading…  │".to_string(),
@@ -9964,7 +9966,7 @@ mod screen_tests {
         state.cursor = 0;
         state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
         let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20));
-        let text = frame.join("\n");
+        let text = crate::screen::shell::plain(&frame.join("\n"));
         assert!(text.contains("[enter] apply   [esc] back"), "{text}");
         assert_eq!(
             frame.iter().filter(|l| l.contains(BOTTOM_LEFT)).count(),
@@ -10593,7 +10595,7 @@ mod screen_tests {
     #[test]
     fn a_short_table_still_fits_the_taller_overlay_panels_whole() {
         let (repo, _root_guard) = fixture_with_one_run("screen-short-table");
-        let last = last_frame(&screen(&repo, "fq")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&screen(&repo, "fq")));
         assert!(last.contains("[enter] apply   [esc] back"), "{last}");
         assert!(last.contains(&format!("{BOTTOM_LEFT}───")), "{last}");
     }
@@ -10752,7 +10754,7 @@ mod screen_tests {
     fn a_short_table_still_fits_the_calendars_whole_height_key_line_included() {
         let (repo, _root_guard) = fixture_with_one_run("screen-short-table-calendar");
         let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(5)));
-        let last = last_frame(&text);
+        let last = crate::screen::shell::plain(last_frame(&text));
         assert!(last.contains(&format!("{TOP_LEFT}─ since ─")), "{last}");
         assert!(last.contains("[enter] pick   [esc] back"), "{last}");
     }
@@ -11562,6 +11564,9 @@ mod screen_tests {
             .rev()
             .find(|f| f.contains(&format!("{TOP_LEFT}─ sort ascending ")))
             .expect("`a` opened the popup");
+        // Read as a person sees it: `overlay` paints the popup's border and
+        // keys, so a code sits between a border and the row inside it.
+        let popup = crate::screen::shell::plain(popup);
         let listed: Vec<usize> = [
             "│    default order",
             "│    PIPELINE",
@@ -12749,7 +12754,7 @@ mod screen_tests {
         assert!(header_of(last).contains(" ▼IN/TASK"), "{last}");
 
         let text = screen(&repo, &format!("d{to_in}\rtdq"));
-        let popup = last_frame(&text);
+        let popup = crate::screen::shell::plain(last_frame(&text));
         assert!(
             popup.contains("│  > IN/TASK"),
             "opens on the carried column: {popup}"
