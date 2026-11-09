@@ -2029,8 +2029,10 @@ impl Mux for Herdr {
     /// carries herdr's whole JSON envelope, and [`herdr_refusal`] carries only
     /// the sentence inside it.
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
-        let got = self.focus_call(&pane_get_argv(pane_id))?;
-        let PaneGetResult { pane } = parse_envelope(&["pane", "get", pane_id], &got)?;
+        let lookup = pane_get_argv(pane_id);
+        let got = self.focus_call(&lookup)?;
+        let lookup: Vec<&str> = lookup.iter().map(String::as_str).collect();
+        let PaneGetResult { pane } = parse_envelope(&lookup, &got)?;
         self.focus_call(&workspace_focus_argv(&pane.workspace_id))?;
         self.focus_call(&tab_focus_argv(&pane.tab_id))?;
         self.focus_call(&pane_zoom_argv(pane_id))?;
