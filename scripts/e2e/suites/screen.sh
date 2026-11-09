@@ -36,8 +36,8 @@
 #
 # covers: dispatch.tips — set to false, the full board draws no tip row and keeps its table
 #
-# Every other check here is a screen gesture, which the coverage map, that only
-# enumerates `config.toml` keys and pipeline step keys, does not list.
+# Every other check here is a screen gesture. The coverage map lists only
+# `config.toml` keys and pipeline step keys, so it has no row for those.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh

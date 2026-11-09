@@ -23,7 +23,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 
-use crate::config::Config;
 use crate::graph::Graph;
 use crate::pipeline::{Outcome, Pipelines};
 use crate::repo::Repo;
@@ -645,18 +644,8 @@ impl Board {
     /// The tip the dispatch tab's last row shows, or `None` while
     /// `dispatch.tips` is off. Off, the deck is not asked either, so its
     /// clock does not run while nothing is drawn from it.
-    ///
-    /// The setting is read from disk on every call, not taken from
-    /// `repo.config`, which the screen loads once at start. The overrides tab
-    /// writes its layer under a screen that stays open, and this is the one
-    /// key the screen process reads for itself: every other key goes to the
-    /// dispatcher, which loads its own config. A config that does not load
-    /// leaves the value the screen started with.
     fn current_tip(&mut self, repo: &Repo) -> Option<&'static str> {
-        let on = Config::load(&repo.root)
-            .map(|config| config.dispatch.tips)
-            .unwrap_or(repo.config.dispatch.tips);
-        if !on {
+        if !repo.config.dispatch.tips {
             return None;
         }
         self.tips.current(Instant::now())
@@ -9478,15 +9467,12 @@ mod tests {
 
     /// With `dispatch.tips = false` the hosted dispatch tab draws the frame
     /// it drew without any tip row — no blank row where the tip was, and
-    /// RECENT keeps its own — on the busy board and the empty one. The same
-    /// board draws a tip row first and loses it once the file says `false`,
-    /// with no new board opened, as a screen stays open while the overrides
-    /// tab writes the setting. Fails before the setting: the board dealt a
-    /// tip whatever the config said, and before the file was read per frame
-    /// it kept the value the screen started with.
+    /// RECENT keeps its own — on the busy board and the empty one, while the
+    /// same board with tips on does draw one. Fails before the setting: the
+    /// board dealt a tip whatever the config said.
     #[test]
-    fn the_dispatch_tab_draws_no_tip_row_once_tips_are_turned_off() {
-        let (repo, _root_guard) = fixture("board-tips-off");
+    fn the_dispatch_tab_draws_no_tip_row_with_tips_off() {
+        let (mut repo, _root_guard) = fixture("board-tips-off");
         let pipelines = Pipelines::builtin();
         let _terminal = crate::screen::test_terminal((100, 30));
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
@@ -9506,16 +9492,15 @@ mod tests {
                 },
             ),
         ];
-        let config = Config::path_in(&repo.root);
         for (board_name, snapshot) in boards {
             let snapshot = Arc::new(snapshot);
             let mut board = Board::for_test();
-            std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-            std::fs::write(&config, "[dispatch]\ntips = true\n").unwrap();
+            repo.config.dispatch.tips = true;
             let with = strip(&board.paint_from(&repo, &pipelines, true, None, true, &snapshot));
             assert!(with.contains("tip  "), "{board_name}:\n{with}");
 
-            std::fs::write(&config, "[dispatch]\ntips = false\n").unwrap();
+            repo.config.dispatch.tips = false;
+            let mut board = Board::for_test();
             let off = board.paint_from(&repo, &pipelines, true, None, true, &snapshot);
             let name = board.greeting_name(&repo);
             let without = paint(
