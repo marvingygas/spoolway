@@ -1237,8 +1237,168 @@ pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Ve
         .collect()
 }
 
+/// Words that keep a capital in TUI text, each under the one category
+/// the rule allows. All-caps words need no entry: [`capital_violation`]
+/// lets them through whole.
 #[cfg(test)]
-pub(crate) mod tests {
+const ALLOWED_CAPITALS: &[(&str, &str)] = &[
+    // Month names and their short forms.
+    ("January", "month"),
+    ("February", "month"),
+    ("March", "month"),
+    ("April", "month"),
+    ("May", "month"),
+    ("June", "month"),
+    ("July", "month"),
+    ("August", "month"),
+    ("September", "month"),
+    ("October", "month"),
+    ("November", "month"),
+    ("December", "month"),
+    ("Jan", "month"),
+    ("Feb", "month"),
+    ("Mar", "month"),
+    ("Apr", "month"),
+    ("Jun", "month"),
+    ("Jul", "month"),
+    ("Aug", "month"),
+    ("Sep", "month"),
+    ("Oct", "month"),
+    ("Nov", "month"),
+    ("Dec", "month"),
+    // Weekday names and their short forms.
+    ("Monday", "weekday"),
+    ("Tuesday", "weekday"),
+    ("Wednesday", "weekday"),
+    ("Thursday", "weekday"),
+    ("Friday", "weekday"),
+    ("Saturday", "weekday"),
+    ("Sunday", "weekday"),
+    ("Mon", "weekday"),
+    ("Tue", "weekday"),
+    ("Wed", "weekday"),
+    ("Thu", "weekday"),
+    ("Fri", "weekday"),
+    ("Sat", "weekday"),
+    ("Sun", "weekday"),
+    ("Mo", "weekday"),
+    ("Tu", "weekday"),
+    // "We" is left out of these two-letter forms: it opens English
+    // sentences, so allowing it would let "We could not ..." through.
+    ("Th", "weekday"),
+    ("Fr", "weekday"),
+    ("Sa", "weekday"),
+    ("Su", "weekday"),
+    // Proper nouns.
+    ("Windows", "proper noun"),
+    ("Unix", "proper noun"),
+    ("Jira", "proper noun"),
+    // The placeholder a key is written with where a number goes, as in
+    // `above_<N>k_tokens`. It is a lone capital, so no other rule lets
+    // it through.
+    ("N", "placeholder"),
+];
+
+/// The greeting, whole: its first word is no capital to allow anywhere
+/// else, so it is taken out of a line before the line is read.
+#[cfg(test)]
+const ALLOWED_PHRASES: &[(&str, &str)] = &[
+    ("Good morning", "greeting"),
+    ("Good afternoon", "greeting"),
+    ("Good evening", "greeting"),
+    ("Working late", "greeting"),
+];
+
+/// The first word of `line` that starts with a capital outside the
+/// allowed cases: its start column and the word, or `None`.
+///
+/// A word is a run of letters and digits, so `Press` in `(Press o)` is
+/// found, and a word with no lowercase letter, such as `ULID`, is read
+/// whole and let through.
+#[cfg(test)]
+pub(crate) fn capital_violation(line: &str) -> Option<(usize, String)> {
+    // Blanked rather than cut, so a column the report marks is still the
+    // column in the line.
+    let mut line = line.to_string();
+    // The fixtures live under the machine's temporary directory, a value
+    // the screens draw but do not write: macOS runners keep it under
+    // `/Users/runner/work/_temp`. A column may cut it short at either
+    // end, so any piece of it with a `/` in it counts, as long as it runs
+    // to the end of the directory or to where the line stops spelling a
+    // path.
+    let temp = crate::scratch::temp_root().to_string_lossy().into_owned();
+    let mut at = 0;
+    while at < line.len() {
+        let mut matched = 0;
+        for (i, c) in line[at..].char_indices() {
+            if !temp.contains(&line[at..at + i + c.len_utf8()]) {
+                break;
+            }
+            matched = i + c.len_utf8();
+        }
+        let piece = &line[at..at + matched];
+        let whole_end = temp.ends_with(piece);
+        let cut_short = line[at + matched..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '/');
+        if piece.contains('/') && piece.len() > 2 && (whole_end || cut_short) {
+            let blank = " ".repeat(piece.chars().count());
+            line.replace_range(at..at + matched, &blank);
+            at += matched;
+        } else {
+            at += line[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    for (phrase, _) in ALLOWED_PHRASES {
+        while let Some(at) = line.find(phrase) {
+            let mut end = at + phrase.len();
+            // `Good morning, Marvin.`: the name after the greeting is git's
+            // `user.name`, a value read from the machine.
+            if line[end..].starts_with(", ") {
+                let name = &line[end + 2..];
+                end += 2 + name.find(['.', ' ', '│']).unwrap_or(name.len());
+            }
+            line.replace_range(at..end, &" ".repeat(line[at..end].chars().count()));
+        }
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    let mut after_shouting = false;
+    while i < chars.len() {
+        if !chars[i].is_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && chars[i].is_alphanumeric() {
+            i += 1;
+        }
+        let word: String = chars[start..i].iter().collect();
+        let first = word.chars().next().unwrap();
+        // Every run of letters is a word wherever it sits, so `Cargo` in
+        // `src/Cargo.toml` counts as much as one after a space.
+        if !first.is_uppercase() {
+            after_shouting = false;
+            continue;
+        }
+        let letters = word.chars().filter(|c| c.is_alphabetic()).count();
+        let shouting = !word.chars().any(char::is_lowercase)
+            // A lone capital is a word of an all-caps heading only when
+            // the word before it is one too, as the `R` in `CACHE R`.
+            // Anywhere else it starts a sentence, such as `A job`.
+            && (letters > 1 || after_shouting);
+        after_shouting = shouting;
+        if shouting || ALLOWED_CAPITALS.iter().any(|(allowed, _)| *allowed == word) {
+            continue;
+        }
+        return Some((start, word));
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
     use super::*;
 
     /// A colour open where a panel starts is closed before it and opened
@@ -1290,163 +1450,6 @@ pub(crate) mod tests {
         assert_eq!(frame[2], "│ab");
     }
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
-
-    /// Words that keep a capital in TUI text, each under the one category
-    /// the rule allows. All-caps words need no entry: [`capital_violation`]
-    /// lets them through whole.
-    const ALLOWED_CAPITALS: &[(&str, &str)] = &[
-        // Month names and their short forms.
-        ("January", "month"),
-        ("February", "month"),
-        ("March", "month"),
-        ("April", "month"),
-        ("May", "month"),
-        ("June", "month"),
-        ("July", "month"),
-        ("August", "month"),
-        ("September", "month"),
-        ("October", "month"),
-        ("November", "month"),
-        ("December", "month"),
-        ("Jan", "month"),
-        ("Feb", "month"),
-        ("Mar", "month"),
-        ("Apr", "month"),
-        ("Jun", "month"),
-        ("Jul", "month"),
-        ("Aug", "month"),
-        ("Sep", "month"),
-        ("Oct", "month"),
-        ("Nov", "month"),
-        ("Dec", "month"),
-        // Weekday names and their short forms.
-        ("Monday", "weekday"),
-        ("Tuesday", "weekday"),
-        ("Wednesday", "weekday"),
-        ("Thursday", "weekday"),
-        ("Friday", "weekday"),
-        ("Saturday", "weekday"),
-        ("Sunday", "weekday"),
-        ("Mon", "weekday"),
-        ("Tue", "weekday"),
-        ("Wed", "weekday"),
-        ("Thu", "weekday"),
-        ("Fri", "weekday"),
-        ("Sat", "weekday"),
-        ("Sun", "weekday"),
-        ("Mo", "weekday"),
-        ("Tu", "weekday"),
-        // "We" is left out of these two-letter forms: it opens English
-        // sentences, so allowing it would let "We could not ..." through.
-        ("Th", "weekday"),
-        ("Fr", "weekday"),
-        ("Sa", "weekday"),
-        ("Su", "weekday"),
-        // Proper nouns.
-        ("Windows", "proper noun"),
-        ("Unix", "proper noun"),
-        ("Jira", "proper noun"),
-        // The placeholder a key is written with where a number goes, as in
-        // `above_<N>k_tokens`. It is a lone capital, so no other rule lets
-        // it through.
-        ("N", "placeholder"),
-    ];
-
-    /// The greeting, whole: its first word is no capital to allow anywhere
-    /// else, so it is taken out of a line before the line is read.
-    const ALLOWED_PHRASES: &[(&str, &str)] = &[
-        ("Good morning", "greeting"),
-        ("Good afternoon", "greeting"),
-        ("Good evening", "greeting"),
-        ("Working late", "greeting"),
-    ];
-
-    /// The first word of `line` that starts with a capital outside the
-    /// allowed cases: its start column and the word, or `None`.
-    ///
-    /// A word is a run of letters and digits, so `Press` in `(Press o)` is
-    /// found, and a word with no lowercase letter, such as `ULID`, is read
-    /// whole and let through.
-    pub(crate) fn capital_violation(line: &str) -> Option<(usize, String)> {
-        // Blanked rather than cut, so a column the report marks is still the
-        // column in the line.
-        let mut line = line.to_string();
-        // The fixtures live under the machine's temporary directory, a value
-        // the screens draw but do not write: macOS runners keep it under
-        // `/Users/runner/work/_temp`. A column may cut it short at either
-        // end, so any piece of it with a `/` in it counts, as long as it runs
-        // to the end of the directory or to where the line stops spelling a
-        // path.
-        let temp = crate::scratch::temp_root().to_string_lossy().into_owned();
-        let mut at = 0;
-        while at < line.len() {
-            let mut matched = 0;
-            for (i, c) in line[at..].char_indices() {
-                if !temp.contains(&line[at..at + i + c.len_utf8()]) {
-                    break;
-                }
-                matched = i + c.len_utf8();
-            }
-            let piece = &line[at..at + matched];
-            let whole_end = temp.ends_with(piece);
-            let cut_short = line[at + matched..]
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric() && c != '/');
-            if piece.contains('/') && piece.len() > 2 && (whole_end || cut_short) {
-                let blank = " ".repeat(piece.chars().count());
-                line.replace_range(at..at + matched, &blank);
-                at += matched;
-            } else {
-                at += line[at..].chars().next().map_or(1, char::len_utf8);
-            }
-        }
-        for (phrase, _) in ALLOWED_PHRASES {
-            while let Some(at) = line.find(phrase) {
-                let mut end = at + phrase.len();
-                // `Good morning, Marvin.`: the name after the greeting is git's
-                // `user.name`, a value read from the machine.
-                if line[end..].starts_with(", ") {
-                    let name = &line[end + 2..];
-                    end += 2 + name.find(['.', ' ', '│']).unwrap_or(name.len());
-                }
-                line.replace_range(at..end, &" ".repeat(line[at..end].chars().count()));
-            }
-        }
-        let chars: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        let mut after_shouting = false;
-        while i < chars.len() {
-            if !chars[i].is_alphanumeric() {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < chars.len() && chars[i].is_alphanumeric() {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let first = word.chars().next().unwrap();
-            // Every run of letters is a word wherever it sits, so `Cargo` in
-            // `src/Cargo.toml` counts as much as one after a space.
-            if !first.is_uppercase() {
-                after_shouting = false;
-                continue;
-            }
-            let letters = word.chars().filter(|c| c.is_alphabetic()).count();
-            let shouting = !word.chars().any(char::is_lowercase)
-                // A lone capital is a word of an all-caps heading only when
-                // the word before it is one too, as the `R` in `CACHE R`.
-                // Anywhere else it starts a sentence, such as `A job`.
-                && (letters > 1 || after_shouting);
-            after_shouting = shouting;
-            if shouting || ALLOWED_CAPITALS.iter().any(|(allowed, _)| *allowed == word) {
-                continue;
-            }
-            return Some((start, word));
-        }
-        None
-    }
 
     /// Every capital in `screens` that the rule does not allow, as the
     /// message a failing test prints: the screen, the line, the word marked

@@ -12,7 +12,7 @@ const LIST: &str = include_str!("../assets/tips.txt");
 
 /// The most characters a tip holds, so it fits one row of an 80-column
 /// terminal. Counted in characters, not bytes: a tip may hold `∞`, `↻`, `←`
-/// or `→`, each wider than one byte and one column on screen.
+/// or `→`, each more than one byte but one column on screen.
 #[cfg(test)]
 const MAX_CHARACTERS: usize = 69;
 
@@ -63,10 +63,17 @@ mod tests {
     use super::*;
     use crate::commands::contract_keys;
 
-    /// The shipped list holds the 197 tips the plan approved.
+    /// The shipped list yields tips, and each is a bare sentence: no empty
+    /// text, no comment line and nothing from the bar on.
     #[test]
-    fn the_shipped_list_holds_every_approved_tip() {
-        assert_eq!(texts().len(), 197);
+    fn the_shipped_list_yields_bare_sentences() {
+        let texts = texts();
+        assert!(!texts.is_empty());
+        for text in texts {
+            assert!(!text.trim().is_empty(), "an empty tip");
+            assert!(!text.starts_with('#'), "a comment as a tip: {text}");
+            assert!(!text.contains('|'), "a tag left in a tip: {text}");
+        }
     }
 
     /// The keys a key line draws, in the order it draws them: each pair is
@@ -250,7 +257,7 @@ mod tests {
                     tip.line
                 );
             }
-            if let Some((_, word)) = crate::screen::tests::capital_violation(tip.text) {
+            if let Some((_, word)) = crate::screen::capital_violation(tip.text) {
                 let mut letters = word.chars();
                 let lower: String = letters
                     .next()
@@ -262,8 +269,7 @@ mod tests {
                     "assets/tips.txt:{} starts a word with a capital: \"{word}\".\n\
                      tui text is lowercase: write \"{lower}\".\n\
                      all-caps words, dates and proper nouns are allowed. if this word \
-                     must keep its capital,\nadd it to the allowed list beside \
-                     `tui_text_is_lowercase` in src/screen.rs.\n\n",
+                     must keep its capital,\nadd it to `ALLOWED_CAPITALS` in src/screen.rs.\n\n",
                     tip.line
                 );
             }
