@@ -14495,11 +14495,11 @@ mod tests {
         }
     }
 
-    /// A confirm panel is drawn in plain text over a frame the table beneath
-    /// it colours throughout — the state dot, the dimmed footer, the key
-    /// hint. An overlay that counted an escape byte as a column exactly
-    /// like a visible one wrote panel text at the wrong column for it,
-    /// slicing a `DIM`/`RESET` pair in two and leaving what survived of the
+    /// A confirm panel is built in plain text, and painted only as it is
+    /// laid over a frame the table beneath it colours throughout — the
+    /// state dot, the dimmed footer, the key hint. An overlay that counted
+    /// an escape byte as a column exactly like a visible one wrote panel
+    /// text at the wrong column for it, slicing a `DIM`/`RESET` pair in two and leaving what survived of the
     /// code sitting in the frame as stray text — this pins that every
     /// escape sequence in the raw, unstripped frame is still whole, an
     /// `ESC[` opened and a bare `m` closing it with nothing but digits and

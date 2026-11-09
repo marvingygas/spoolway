@@ -110,6 +110,13 @@ line. The tab strip stays centred, and every popup stays centred on its tab. A k
 than the tab breaks between two keys, and each broken row starts one column in. Every row it
 adds comes off the tab's body.
 
+Every popup drawn over a tab has its border and title in cyan. On its key row, every `[enter]`
+key and the word after it are green, and every `[esc]` key and its word are red. The colour
+follows the key, not the word, so `[enter] save` is as green as `[enter] confirm`. Other keys,
+such as `[f] search`, and the popup's body keep the terminal's own colour. The key line under
+each tab is not a popup and stays dim. Prompts printed straight to a terminal, such as
+`spoolway sync`'s, have no colour.
+
 The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box

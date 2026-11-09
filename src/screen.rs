@@ -704,8 +704,10 @@ pub(crate) fn hint(row: &str) -> String {
 /// Plain because [`overlay`] lays a panel over a frame one character at a
 /// time: a colour code there would be counted as columns it does not take,
 /// and the panel's right border would land short of where the box says.
-/// Shared with `key_hint` so a key named in a popup and the same key named
-/// on the row under the frame read exactly alike.
+/// `overlay` paints a popup's `[enter]` and `[esc]` pairs as it lays the
+/// row down instead — see [`paint`]. Shared with `key_hint` so a key named
+/// in a popup and the same key named on the row under the frame read word
+/// for word alike.
 pub(crate) fn keys(pairs: &[(&str, &str)]) -> String {
     let mut line = String::new();
     for (i, (key, label)) in pairs.iter().enumerate() {
@@ -1112,8 +1114,9 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
 /// the gap between them: a row narrowed to fit a small frame joins its
 /// pairs with two spaces rather than [`crate::status::GUTTER`]'s three. The
 /// spaces after a pair stay plain, so the gap between two pairs is never
-/// drawn in either's colour. The colour follows the key alone: `[enter]
-/// save` is as green as `[enter] confirm`, and any other key is plain.
+/// drawn in either's colour. The colour follows the key alone, so
+/// `[enter] save` is as green as `[enter] confirm`, and any other key is
+/// plain.
 fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
     use crate::status::{CYAN, GREEN, RED};
     let line: Vec<char> = panel[i].chars().collect();
@@ -1133,6 +1136,8 @@ fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
             paint[line.len() - 1] = Some(CYAN);
             1..line.len() - 1
         }
+        // A row laid out by hand with no side borders of its own is read
+        // whole, rather than losing a character at either end.
         _ => 0..line.len(),
     };
     let text = &line[inner.clone()];
