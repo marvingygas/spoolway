@@ -566,7 +566,8 @@ pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
 /// the lit one is on another row, and for any line that is not a strip row,
 /// so a test can hand it every row of a frame.
 ///
-/// A strip row opens on the strip's bold and holds nothing but labels, the
+/// A strip row opens on the strip's bold, after the frame writer's indent
+/// when the row came from a real frame, and holds nothing but labels, the
 /// last of them perhaps cut at the area's edge, which is read as the tab
 /// whose name it starts. `None` too for a row with no bold: that is a strip
 /// row whose codes were already taken out, and every label in it would pass
@@ -578,7 +579,10 @@ pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
         0 => word.starts_with('['),
         _ => word.chars().all(|c| c.is_ascii_uppercase()),
     });
-    if !line.starts_with(crate::status::BOLD) || words.is_empty() || !labels_only {
+    let bold = line
+        .trim_start_matches(' ')
+        .starts_with(crate::status::BOLD);
+    if !bold || words.is_empty() || !labels_only {
         return None;
     }
     line.match_indices("] ").find_map(|(at, _)| {
@@ -1671,6 +1675,24 @@ mod tests {
         let plain_frame: Vec<String> = frame(Tab::Eval, 58).iter().map(|l| plain(l)).collect();
         assert_eq!(shown(&plain_frame), "none tab");
         assert_eq!(shown(&frame(Tab::Eval, 58)[1..]), "none tab");
+    }
+
+    // The same through real host frames, which the frame writer opens with
+    // its one-column indent ahead of the strip's bold: at 60 columns the
+    // overrides and eval labels sit on the strip's second row, and each walk
+    // still names the tab it reached rather than its fallback.
+    #[test]
+    fn a_walk_names_the_tab_a_narrow_host_frame_shows() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-walk-narrow-strip");
+        let _terminal = crate::screen::test_terminal((60, 30));
+        let frames = drive_coloured_frames(&repo, "45");
+        // Only the tab is read: the eval tab's own loading box counts as a
+        // popup over it, which is the eval tab's, not the strip's.
+        let tabs: Vec<String> = crate::screen::walk_screens("none", &frames)
+            .into_iter()
+            .map(|(name, _)| name.split(',').next().unwrap().to_string())
+            .collect();
+        assert_eq!(tabs, ["queue tab", "overrides tab", "eval tab"]);
     }
 
     /// The strip drawn as [`strip_lines`] draws it at a width wide enough
