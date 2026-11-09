@@ -101,6 +101,7 @@ impl Deck {
     }
 
     /// `texts` in the order given, and kept in it every time round.
+    #[cfg(test)]
     pub fn in_order(texts: Vec<&'static str>) -> Deck {
         Deck::dealt(texts, None)
     }

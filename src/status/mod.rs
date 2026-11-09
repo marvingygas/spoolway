@@ -43,7 +43,7 @@ use view::{
     clamp_rows, config_notice, first_name, footer, greeting, greeting_screen, group_totals,
     jobs_ledger, pane_height, pane_width, pause_answers, pause_confirm_panel,
     restart_confirm_panel, resume_picker_panel, skip_hook_confirm_panel, spool_frame,
-    table_laid_out, table_window, ticker, tint_available, unqueue_confirm_panel,
+    table_laid_out, table_window, ticker, tint_available, tip_row, unqueue_confirm_panel,
 };
 pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
 
@@ -434,6 +434,11 @@ pub struct Board {
     /// no name to give. Read once per board and kept, so a changed name
     /// shows the next time the board opens. See [`git_first_name`].
     name: Option<Option<String>>,
+    /// The tips the dispatch tab's last row deals from, shuffled when the
+    /// board opens. Kept here rather than made per frame, so the tip on
+    /// screen and its 30-second clock carry from one redraw to the next —
+    /// see [`crate::tips::Deck`].
+    tips: crate::tips::Deck,
     /// [`Reader`]'s own memory, kept here instead for a board whose tests
     /// call [`Board::frame`] directly: one synchronous [`build`] per call,
     /// with nothing asynchronous to own a thread of its own.
@@ -452,6 +457,7 @@ impl Board {
             current: None,
             reader: None,
             name: None,
+            tips: crate::tips::Deck::for_board(),
             #[cfg(test)]
             memory: Memory::new(),
         }
@@ -611,6 +617,7 @@ impl Board {
     ) -> String {
         self.apply(snapshot);
         let name = self.greeting_name(repo);
+        let tip = self.tips.current(Instant::now());
         let frame = paint(
             repo,
             pipelines,
@@ -620,6 +627,7 @@ impl Board {
             self.cursor.as_deref(),
             &self.recent,
             name.as_deref(),
+            tip,
         );
         self.with_popup(frame, popup)
     }
@@ -671,6 +679,7 @@ impl Board {
         let snapshot = Arc::new(build(repo, pipelines, holder, &mut self.memory)?);
         self.apply(&snapshot);
         let name = self.greeting_name(repo);
+        let tip = self.tips.current(Instant::now());
         let frame = paint(
             repo,
             pipelines,
@@ -680,6 +689,7 @@ impl Board {
             self.cursor.as_deref(),
             &self.recent,
             name.as_deref(),
+            tip,
         );
         Ok(self.with_popup(frame, popup))
     }
@@ -4697,7 +4707,9 @@ fn build_now(repo: &Repo, pipelines: &Pipelines, memory: &mut Memory) -> Option<
 /// see [`Board::apply`]. `recent` is the board's own ticker, copied off the
 /// snapshot once when the board folded it in. `takes_enter` is whether
 /// `enter` would reach the tab and start or stop dispatching — see
-/// [`Board::takes_enter`] — and the key line names it only then.
+/// [`Board::takes_enter`] — and the key line names it only then. `tip` is
+/// the one the board's deck has up, drawn on the box's last row inside the
+/// dispatch tab and nowhere else — see [`last_row`].
 #[allow(clippy::too_many_arguments)]
 fn paint(
     repo: &Repo,
@@ -4708,6 +4720,7 @@ fn paint(
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
+    tip: Option<&str>,
 ) -> String {
     paint_at(
         repo,
@@ -4718,8 +4731,21 @@ fn paint(
         cursor,
         recent,
         name,
+        tip,
         pane_height(),
     )
+}
+
+/// The row under the blank row that ends the board: the `config changed:`
+/// line while a reload has something to load — see [`config_notice`] — and
+/// otherwise, inside the dispatch tab, `tip`. The notice wins because it is
+/// the one of the two that asks for a key press. Off the dispatch tab no tip
+/// is drawn, so a board printed on its own ends as it always has.
+fn last_row(waiting: &Waiting, tip: Option<&str>, hosted: bool) -> Option<String> {
+    match config_notice(waiting) {
+        Some(notice) => Some(format!(" {notice}")),
+        None => tip.filter(|_| hosted).map(tip_row),
+    }
 }
 
 /// [`paint`], against a pane `height` rows tall rather than the terminal's
@@ -4736,6 +4762,7 @@ fn paint_at(
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
+    tip: Option<&str>,
     height: Option<usize>,
 ) -> String {
     let phase = Phase::Watching {
@@ -4796,6 +4823,7 @@ fn paint_at(
             takes_enter,
             &snapshot.waiting,
             name,
+            tip,
             jobs,
             spool_frame(snapshot.holder.is_some()),
         );
@@ -4858,10 +4886,12 @@ fn paint_at(
     ) {
         tail.push_str(&format!(" {line}\n"));
     }
-    // The `config changed:` line, while a reload has something to load: the
-    // box's last row inside the dispatch tab, and the row above the key line
-    // anywhere else, under the blank row either way.
-    let notice = config_notice(&snapshot.waiting);
+    // The `config changed:` line, while a reload has something to load, or
+    // else inside the dispatch tab the tip: the box's last row inside the
+    // dispatch tab, and the row above the key line anywhere else, under the
+    // blank row either way — see [`last_row`].
+    let hosted = crate::screen::shell::hosted().is_some();
+    let last = last_row(&snapshot.waiting, tip, hosted);
     // The key hint, last of all. Every row action but resume sits behind
     // `[o] options`, drawn whenever the board has a row: the menu itself
     // lists what that row can do. `[r] resume` is drawn only while the
@@ -4904,12 +4934,13 @@ fn paint_at(
 
     // The rows the table's body and RECENT share: everything under the
     // column header but the parse warnings, the footer, and the blank row,
-    // the notice and the key line pushed below. One more is held back for
+    // the last row and the key line pushed below. One more is held back for
     // the reason `clamp_rows` gives. Hosted, the count comes out the same:
     // `boxed` gives the body two rows fewer than `height`, the key line goes
-    // under the box, and the blank row and the notice sit inside the box.
-    // The notice's row comes out of these, so a board with it up is no
-    // taller than one without, and the tab strip stays on screen.
+    // under the box, and the blank row and the last row sit inside the box.
+    // The last row comes out of these, whether it holds the notice or the
+    // tip, so a board with it is no taller than one without, and the tab
+    // strip stays on screen.
     let header_rows = frame.lines().count() + 1;
     let body_rows = table.lines().count() - 1;
     let rows = height.map(|height| {
@@ -4919,7 +4950,7 @@ fn paint_at(
             .saturating_sub(problems.lines().count())
             .saturating_sub(tail.lines().count())
             .saturating_sub(2)
-            .saturating_sub(usize::from(notice.is_some()))
+            .saturating_sub(usize::from(last.is_some()))
     });
     // Only RECENT gives up rows to the table, and only the table scrolls:
     // the lockup, the slots and the jobs keep theirs. Only a pane too short
@@ -4949,16 +4980,16 @@ fn paint_at(
     // Inside bare `spoolway`'s dispatch tab the board draws in an untitled box
     // the way the other three tabs draw theirs, with the key
     // line under the box rather than inside it. The blank row above the key
-    // line stays inside, as the box's last row — or, with the notice up, as
-    // the row above it, the notice taking the last row.
+    // line stays inside, as the row above the box's last row, which holds
+    // the notice or the tip. Only with neither — no tip to draw at all — is
+    // the blank row the box's last.
     //
     // `boxed` pads a short body with blank rows under it, which would leave
-    // the notice under a short table rather than on the box's last row. So
-    // with the notice up the body above the blank row is cut or padded here
-    // to the `height - 2` rows `boxed` gives, less the blank row and the
-    // notice, and `boxed` has nothing left to pad.
-    let hosted = crate::screen::shell::hosted().is_some();
-    if let (true, Some(_), Some(height)) = (hosted, &notice, height) {
+    // the last row under a short table rather than on the box's last row. So
+    // with one to draw the body above the blank row is cut or padded here to
+    // the `height - 2` rows `boxed` gives, less the blank row and the last
+    // row, and `boxed` has nothing left to pad.
+    if let (true, Some(_), Some(height)) = (hosted, &last, height) {
         let room = height.saturating_sub(4);
         frame = frame
             .lines()
@@ -4968,8 +4999,8 @@ fn paint_at(
             .collect();
     }
     frame.push('\n');
-    if let Some(notice) = &notice {
-        frame.push_str(&format!(" {notice}\n"));
+    if let Some(last) = &last {
+        frame.push_str(&format!("{last}\n"));
     }
     if hosted {
         return boxed(&frame, &keys, pane, height);
@@ -5048,11 +5079,12 @@ fn enter_hint(phase: Phase, takes_enter: bool) -> Option<(&'static str, &'static
 /// see [`view::jobs_ledger`]. The caller passes none when no dispatcher holds
 /// the lock, and none is what a project with no enabled job has anyway.
 ///
-/// While a reload has something to load, the busy board's `config changed:`
-/// line is drawn by the same rule, under a blank row: the box's last row
-/// inside the dispatch tab, the row above the key line anywhere else — see
-/// [`config_notice`]. Its two rows come out of the greeting's, so the frame
-/// is no taller with it up.
+/// The busy board's last row is drawn by the same rule, under a blank row:
+/// the `config changed:` line while a reload has something to load, and
+/// otherwise, inside the dispatch tab, `tip` — see [`last_row`]. It is the
+/// box's last row inside the dispatch tab and the row above the key line
+/// anywhere else. Its two rows come out of the greeting's, so the frame is
+/// no taller with it.
 ///
 /// Everything else the busy board draws is left off, so an idle board reads
 /// as idle at a glance: the rule, the slots lines and the parse warning.
@@ -5076,6 +5108,7 @@ fn paint_empty(
     takes_enter: bool,
     waiting: &Waiting,
     name: Option<&str>,
+    tip: Option<&str>,
     jobs: &[crate::jobs::ActiveJob],
     lockup_frame: usize,
 ) -> String {
@@ -5103,17 +5136,17 @@ fn paint_empty(
     // the body `height - 2` rows, the header one of them. On its own the
     // frame also spends the top margin above, the key line, and the row
     // `clamp_rows` holds back so the cursor never scrolls the pane. The
-    // notice, when up, spends two more: its own and the blank row above it,
-    // pushed here rather than left to the greeting's bottom padding, which a
-    // short pane leaves at none.
-    let notice = config_notice(waiting);
-    let notice_rows = match notice {
+    // last row, the notice or the tip, spends two more: its own and the
+    // blank row above it, pushed here rather than left to the greeting's
+    // bottom padding, which a short pane leaves at none.
+    let last = last_row(waiting, tip, hosted);
+    let last_rows = match last {
         Some(_) => 2,
         None => 0,
     };
     let region = height.map(|height| match hosted {
-        true => height.saturating_sub(3 + notice_rows),
-        false => height.saturating_sub(4 + notice_rows),
+        true => height.saturating_sub(3 + last_rows),
+        false => height.saturating_sub(4 + last_rows),
     });
     let hour = chrono::Timelike::hour(&chrono::Local::now());
     // No profile names to line "jobs" up with here, so the ledger takes
@@ -5126,8 +5159,8 @@ fn paint_empty(
         &ledger,
         lockup_frame,
     ));
-    if let Some(notice) = &notice {
-        frame.push_str(&format!("\n {notice}\n"));
+    if let Some(last) = &last {
+        frame.push_str(&format!("\n{last}\n"));
     }
     if hosted {
         return boxed(&frame, &keys, pane, height);
@@ -8543,6 +8576,7 @@ mod tests {
             None,
             &VecDeque::new(),
             None,
+            None,
             Some(60),
         ));
         (snapshot, frame)
@@ -8849,6 +8883,7 @@ mod tests {
             None,
             &VecDeque::new(),
             None,
+            None,
         ));
         assert!(!frame.contains("broken.md"), "{frame}");
         assert!(!frame.contains("default"), "{frame}");
@@ -8889,6 +8924,7 @@ mod tests {
                 None,
                 &recent,
                 Some("Marvin"),
+                None,
             ));
             assert!(frame.contains(header), "{frame}");
             assert!(frame.contains(enter), "{frame}");
@@ -8937,6 +8973,7 @@ mod tests {
             Some("cart-empty-state"),
             &VecDeque::new(),
             None,
+            None,
             Some(60),
         ));
         let empty = |holder: Option<u32>| {
@@ -8952,6 +8989,7 @@ mod tests {
                 },
                 None,
                 &VecDeque::new(),
+                None,
                 None,
             ))
         };
@@ -8991,6 +9029,7 @@ mod tests {
                 snapshot,
                 None,
                 &VecDeque::new(),
+                None,
                 None,
                 Some(60),
             ))
@@ -9278,6 +9317,7 @@ mod tests {
                     None,
                     &VecDeque::new(),
                     None,
+                    None,
                 ))
             };
             let boards: [(&str, &dyn Fn(Waiting) -> Snapshot); 3] =
@@ -9321,6 +9361,179 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Inside the dispatch tab the busy board, a short one and the empty one
+    /// all end on the tip, under a blank row, as the box's last row, its
+    /// label and sentence in grey teal. The frame keeps the row count it had
+    /// without the tip, so the tab strip stays on screen. While a reload has
+    /// something to load the notice takes the row and no tip is drawn, the
+    /// frame the same height again. A board printed on its own draws no tip.
+    /// Fails before the change: no board drew the tip at all.
+    #[test]
+    fn the_dispatch_tab_ends_on_the_tip_unless_the_notice_is_up() {
+        let (repo, _root_guard) = fixture("board-tip-row");
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((100, 30));
+        let tip = "a tip drawn for the test.";
+        let busy = |waiting: Waiting| Snapshot {
+            holder: Some(4242),
+            waiting,
+            ..full_board()
+        };
+        let short = |waiting: Waiting| {
+            let mut snapshot = busy(waiting);
+            snapshot.rows.truncate(1);
+            snapshot
+        };
+        let empty = |waiting: Waiting| Snapshot {
+            holder: Some(4242),
+            waiting,
+            ..Snapshot::empty()
+        };
+        let changed = || Waiting {
+            pipelines: vec!["t.yml".to_string()],
+            keys: Vec::new(),
+        };
+        let draw = |snapshot: &Snapshot, tip: Option<&str>| {
+            paint(
+                &repo,
+                &pipelines,
+                true,
+                true,
+                snapshot,
+                None,
+                &VecDeque::new(),
+                None,
+                tip,
+            )
+        };
+        let boards: [(&str, &dyn Fn(Waiting) -> Snapshot); 3] =
+            [("busy", &busy), ("short", &short), ("empty", &empty)];
+        for (board, snapshot) in boards {
+            let alone = strip(&draw(&snapshot(Waiting::default()), Some(tip)));
+            assert!(!alone.contains("tip  "), "{board}, on its own:\n{alone}");
+
+            let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+            let without = strip(&draw(&snapshot(Waiting::default()), None));
+            let raw = draw(&snapshot(Waiting::default()), Some(tip));
+            assert!(
+                raw.contains(&format!("\x1b[38;5;109mtip  {tip}{RESET}")),
+                "{board}:\n{raw}"
+            );
+            let with = strip(&raw);
+            assert_eq!(
+                with.lines().count(),
+                without.lines().count(),
+                "{board}:\n{without}\n{with}"
+            );
+            let rows: Vec<&str> = with.lines().collect();
+            let bottom = rows.iter().position(|row| row.starts_with('╰')).unwrap();
+            assert!(
+                rows[bottom - 1].starts_with(&format!("│ tip  {tip} ")),
+                "{board}:\n{with}"
+            );
+            assert_eq!(
+                rows[bottom - 2].trim_matches(|c| c == '│' || c == ' '),
+                "",
+                "{board}:\n{with}"
+            );
+
+            let notice = strip(&draw(&snapshot(changed()), Some(tip)));
+            assert!(!notice.contains("tip  "), "{board}:\n{notice}");
+            assert_eq!(
+                notice.lines().count(),
+                with.lines().count(),
+                "{board}:\n{with}\n{notice}"
+            );
+            let rows: Vec<&str> = notice.lines().collect();
+            let bottom = rows.iter().position(|row| row.starts_with('╰')).unwrap();
+            assert!(
+                rows[bottom - 1].starts_with("│ config changed: pipelines updated "),
+                "{board}:\n{notice}"
+            );
+        }
+    }
+
+    /// In a pane too short for the whole table, the tip's row comes out of
+    /// the rows the table shares with RECENT: the table window shows one row
+    /// fewer, the slots lines and the key line keep their places, and the
+    /// frame is no taller, so the tab strip above it stays on screen. Fails
+    /// before the change: no tip row was drawn, so the window kept its rows.
+    #[test]
+    fn the_tip_row_comes_out_of_the_tables_rows_in_a_short_pane() {
+        let (repo, _root_guard) = fixture("board-tip-short-pane");
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((100, 26));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let snapshot = Snapshot {
+            holder: Some(4242),
+            ..full_board()
+        };
+        let draw = |tip: Option<&str>| {
+            strip(&paint(
+                &repo,
+                &pipelines,
+                true,
+                true,
+                &snapshot,
+                Some("cart-empty-state"),
+                &arrivals(3),
+                None,
+                tip,
+            ))
+        };
+        let without = draw(None);
+        let with = draw(Some("a tip drawn for the test."));
+        assert_eq!(
+            with.lines().count(),
+            without.lines().count(),
+            "{without}\n{with}"
+        );
+        // The rule under the table and RECENT, drawn one row higher.
+        let rule = |frame: &str| {
+            frame
+                .lines()
+                .position(|row| row.starts_with("│ ────"))
+                .unwrap_or_else(|| panic!("{frame}"))
+        };
+        assert_eq!(rule(&with), rule(&without) - 1, "{without}\n{with}");
+        assert!(with.contains("tasks below"), "{with}");
+        assert!(with.contains("│ tip  a tip drawn for the test."), "{with}");
+        assert!(
+            with.lines().last().unwrap().contains("[o] options"),
+            "{with}"
+        );
+    }
+
+    /// A hosted board draws the tip its deck has up, and keeps drawing it
+    /// frame after frame until 30 seconds on the deck's clock have passed,
+    /// when the next tip takes the row. Fails before the change: the board
+    /// had no deck and drew no tip.
+    #[test]
+    fn a_hosted_board_moves_to_the_next_tip_after_30_seconds() {
+        let (repo, _root_guard) = fixture("board-tip-clock");
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((120, 30));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let mut board = Board::for_test();
+        let tips = crate::tips::texts();
+        let phase = Phase::Watching {
+            holder: None,
+            dispatching: false,
+        };
+        let tip_row = |board: &mut Board| {
+            let frame = strip(&board.frame(&repo, &pipelines, phase).unwrap());
+            let rows: Vec<&str> = frame.lines().collect();
+            let bottom = rows.iter().position(|row| row.starts_with('╰')).unwrap();
+            rows[bottom - 1]
+                .trim_matches(|c| c == '│' || c == ' ')
+                .to_string()
+        };
+        assert_eq!(tip_row(&mut board), format!("tip  {}", tips[0]));
+        assert_eq!(tip_row(&mut board), format!("tip  {}", tips[0]));
+        board.tips.current(Instant::now() + crate::tips::SHOWN_FOR);
+        assert_eq!(tip_row(&mut board), format!("tip  {}", tips[1]));
     }
 
     /// The `[u] update config` pair is drawn out of the dim on the busy
@@ -10309,6 +10522,7 @@ mod tests {
                 watching,
                 true,
                 &Waiting::default(),
+                None,
                 None,
                 &[],
                 frame,
@@ -19239,6 +19453,7 @@ mod tests {
             Some(cursor),
             &arrivals(3),
             None,
+            None,
             Some(height),
         );
         strip(&frame).lines().map(str::to_string).collect()
@@ -19498,6 +19713,7 @@ mod tests {
             &snapshot,
             Some("alpha"),
             &arrivals(3),
+            None,
             None,
             Some(30),
         ));
