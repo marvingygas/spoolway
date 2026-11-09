@@ -208,6 +208,24 @@ if poll_until 10 zoomed "$SECOND_PANE"; then
 else
   bad "picking focus zooms the running lane's pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
 fi
+# `pane zoom` maximizes the pane inside its own tab and leaves the person's
+# view where it was, so `focus` first switches to the pane's workspace, then to
+# its tab, and only then zooms. `calls.log` keeps the calls in the order they came.
+SECOND_TAB=$(awk -F'\t' -v p="$SECOND_PANE" '$1 == p {print $2; exit}' "$HSTATE/panes")
+SECOND_WS=$(awk -F'\t' -v p="$SECOND_PANE" '$1 == p {print $3; exit}' "$HSTATE/panes")
+focus_calls_in_order() {
+  local want n=0 line
+  want=("workspace focus $SECOND_WS" "tab focus $SECOND_TAB" "pane zoom $SECOND_PANE --on")
+  while IFS= read -r line; do
+    [ "$line" = "${want[$n]:-}" ] && n=$((n + 1))
+  done <"$HSTATE/calls.log"
+  [ "$n" = 3 ]
+}
+if focus_calls_in_order; then
+  ok "picking focus switches to the pane's workspace, then its tab, then zooms it"
+else
+  bad "picking focus switches to the pane's workspace, then its tab, then zooms it: $(cat "$HSTATE/calls.log")"
+fi
 if ! zoomed "$FIRST_PANE"; then ok "and not the kept lane's"
 else bad "and not the kept lane's ($FIRST_PANE)"; fi
 if poll_while 10 board_shows "> focus"; then ok "and closes the menu"

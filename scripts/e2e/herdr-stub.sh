@@ -55,6 +55,7 @@
 #                  name is `-` once `agent rename --clear` has taken it
 #   typed/<n>      one file per `pane run`, holding exactly what was typed
 #   typed.index    pane_id \t bytes \t typed/<n>, one line per `pane run`
+#   calls.log      every call, as its argv on one line, in the order it came
 #   zoomed.index   pane_id, one line per `pane zoom ... --on` that landed
 #   zoom.refused   pane_id, one line per pane a suite wants `pane zoom` to
 #                  refuse with `pane_not_found`; see that verb
@@ -66,7 +67,7 @@ set -uo pipefail
 STATE=${HERDR_STUB_STATE:?HERDR_STUB_STATE must name where this double keeps its state}
 mkdir -p "$STATE" "$STATE/typed"
 : >>"$STATE/workspaces"; : >>"$STATE/tabs"; : >>"$STATE/panes"; : >>"$STATE/typed.index"
-: >>"$STATE/agents"; : >>"$STATE/zoomed.index"
+: >>"$STATE/agents"; : >>"$STATE/zoomed.index"; : >>"$STATE/calls.log"
 
 # The environment a pane's shell starts with — a stand-in for the herdr
 # server's own, and deliberately nothing like the dispatcher's. Overridable so
@@ -194,6 +195,7 @@ make_workspace() {
 DOMAIN=${1:-}; shift || true
 VERB=${1:-}; shift || true
 parse_flags "$@"
+printf '%s %s %s\n' "$DOMAIN" "$VERB" "$*" >>"$STATE/calls.log"
 
 case "$DOMAIN $VERB" in
 
