@@ -1315,9 +1315,13 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 }
 
 /// What a test that reads a screen's text calls the screen `lines` draw: the
-/// tab the strip draws lit, or `fallback` when there is no strip, and the
-/// title of a popup drawn over it, if there is one. A popup's top border
-/// sits inside the tab's own `│` border, which a pane's title never does.
+/// tab the strip draws lit, or `fallback` when no tab is lit, and the title
+/// of a popup drawn over it, if there is one. A popup's top border sits
+/// inside the tab's own `│` border, which a pane's title never does.
+///
+/// No tab is lit when there is no strip, and when the strip is dimmed whole
+/// behind a popup — see [`dim`]. [`walk_screens`] passes the tab the walk
+/// last showed lit as `fallback` for the second.
 ///
 /// `lines` keep their codes: the lit tab differs from the rest only by the
 /// dim in front of every other label, which plain text has lost.
@@ -1346,13 +1350,23 @@ pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
 /// out. Named by content because a walk's earlier frames are not the screen
 /// its keys were written to reach, and a name written beside the keys would
 /// be wrong for them.
+///
+/// A frame whose strip lights no tab is named by the tab the walk last
+/// showed lit, and by `fallback` before any: a strip is dimmed whole behind
+/// a popup, and a popup always opens over a frame of its own tab drawn
+/// before it. Named by `fallback` alone, a popup on the overrides tab
+/// would be reported on whichever tab the walk was told to fall back to.
 #[cfg(test)]
 pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut last_lit: Option<String> = None;
     frames
         .iter()
         .map(|frame| {
             let lines: Vec<String> = frame.lines().map(str::to_string).collect();
-            let name = shown_screen(&lines, fallback);
+            if let Some(tab) = lines.iter().take(3).find_map(|line| shell::lit_tab(line)) {
+                last_lit = Some(tab.to_lowercase());
+            }
+            let name = shown_screen(&lines, last_lit.as_deref().unwrap_or(fallback));
             (name, lines.iter().map(|line| shell::plain(line)).collect())
         })
         .collect()
@@ -2008,6 +2022,39 @@ mod tests {
         let bare =
             lines(" ╭─ [eval]   directories   trials ── by pipeline ─╮\n │  ╭─ filters ─╮ │");
         assert_eq!(shown_screen(&bare, "eval"), "eval tab, popup \"filters\"");
+    }
+
+    /// A walk names a popup frame, whose strip is dimmed whole, by the tab
+    /// the frame before it showed lit rather than by the walk's fallback.
+    #[test]
+    fn a_walk_names_a_popup_frame_by_the_tab_lit_before_it() {
+        let faded = |label: &str| format!("\x1b[2m{label}\x1b[22m\x1b[1m");
+        let strip = format!(
+            "\x1b[1m  {}\x1b[0m",
+            [
+                faded("[1] DISPATCH"),
+                faded("[2] QUEUE"),
+                faded("[3] ROUTINES"),
+                "[4] OVERRIDES".to_string(),
+                faded("[5] EVAL"),
+            ]
+            .join("        ")
+        );
+        let tab = format!("\n{strip}\n\n ╭─ [config] ──────────────╮\n │ dispatch.lanes │\n");
+        let mut popup: Vec<String> =
+            format!("\n{strip}\n\n ╭─ [config] ──────────────╮\n │   ╭─ set lanes ─╮   │\n")
+                .lines()
+                .map(str::to_string)
+                .collect();
+        dim(&mut popup);
+        let names: Vec<String> = walk_screens("queue", &[tab, popup.join("\n")])
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            ["overrides tab", "overrides tab, popup \"set lanes\""]
+        );
     }
 
     /// Each case the rule allows passes, and the capitals next to them do

@@ -738,25 +738,20 @@ impl Board {
         })
     }
 
-    /// Whether a frame drawn now with `popup` has a panel over it — the
-    /// board's own, or `popup` — so the dispatch tab draws its strip dim
-    /// along with the frame [`Board::with_popup`] dims under the panel.
-    pub(crate) fn draws_panel(&self, popup: Option<&[String]>) -> bool {
-        popup.is_some() || self.mode.panel().is_some()
+    /// The panel a frame drawn now with `popup` has over it: the board's own
+    /// menu or panel while one is open, `popup` otherwise. The one rule
+    /// [`Board::with_popup`] lays a panel down by, and the one the dispatch
+    /// tab dims its strip by, so the strip is never dim over a bright board
+    /// or bright over a dim one.
+    pub(crate) fn panel_over(&self, popup: Option<&[String]>) -> Option<Vec<String>> {
+        self.mode.panel().or_else(|| popup.map(<[String]>::to_vec))
     }
 
-    /// The board's own menu or panel, as [`Board::with_popup`] lays it over
-    /// the frame — for a test that needs to find it on screen.
-    #[cfg(test)]
-    pub(crate) fn open_panel(&self) -> Option<Vec<String>> {
-        self.mode.panel()
-    }
-
-    /// `frame`, with `popup` drawn over it wherever the board has no panel
-    /// of its own open, and everything around it dim — see
-    /// [`Board::hosted_frame`] and [`crate::screen::dim`].
+    /// `frame`, with [`Board::panel_over`] drawn over it and everything
+    /// around it dim — see [`Board::hosted_frame`] and
+    /// [`crate::screen::dim`].
     fn with_popup(&self, frame: String, popup: Option<&[String]>) -> String {
-        match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
+        match self.panel_over(popup) {
             Some(panel) => {
                 // `overlay` lines a panel up by the columns a reader sees,
                 // but the rows under it are padded below through `pad_to`

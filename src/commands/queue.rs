@@ -10648,8 +10648,8 @@ fn beneath(groups: &[Group], panes: &Panes, state: &ScreenState, footer: &str) -
 }
 
 /// `frame` with `popup` laid over it and `footer` under it, under the strip
-/// when bare `spoolway` hosts this screen as its queue, routines or jobs tab
-/// — see `crate::screen::shell::strip`.
+/// when bare `spoolway` hosts this screen as its queue or routines tab — see
+/// `crate::screen::shell::strip`.
 ///
 /// With a popup open, the strip, the frame and the key line are all drawn
 /// dim behind it — see [`crate::screen::dim`].

@@ -1363,11 +1363,12 @@ fn board_frame_rows(
     Some(rows)
 }
 
-/// [`strip`], drawn dim while a panel is open on the board below it, as the
-/// board dims its own rows under one — see [`crate::screen::dim`].
+/// [`strip`], drawn dim while a panel is open on the board below it — see
+/// [`crate::status::Board::panel_over`], the same rule the board dims its
+/// own rows by, and [`crate::screen::dim`].
 fn strip_over(board: &crate::status::Board, popup: Option<&[String]>) -> Vec<String> {
     let mut rows = strip();
-    if board.draws_panel(popup) {
+    if board.panel_over(popup).is_some() {
         crate::screen::dim(&mut rows);
     }
     rows
@@ -1923,7 +1924,7 @@ mod tests {
         let before = rows(&mut board, &tab);
 
         board.on_key(&repo, &pipelines, Key::Char('o')).unwrap();
-        let menu = board.open_panel().expect("the options menu is open");
+        let menu = board.panel_over(None).expect("the options menu is open");
         crate::screen::assert_dimmed_behind(&rows(&mut board, &tab), &menu);
         board.on_key(&repo, &pipelines, Key::Esc).unwrap();
         assert!(board.at_rest());
