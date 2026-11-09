@@ -371,7 +371,7 @@ draws_since() {
 # there.
 _since_says() {
   local mark=$1 want=$2
-  grep -qF -- "$want" < <(tail -n "+$((mark + 1))" "$BOARD_LOG")
+  grep -qF -- "$want" < <(tail -n "+$((mark + 1))" "$BOARD_LOG" | _strip_ansi)
 }
 draws_since_waited() {
   local what=$1 want=$2 mark=$3 secs=${4:-20}
