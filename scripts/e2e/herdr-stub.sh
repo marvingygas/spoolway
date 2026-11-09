@@ -489,6 +489,29 @@ case "$DOMAIN $VERB" in
     echo '{"result":{}}'
     ;;
 
+  "pane get")
+    # Answers where a pane sits, as `Herdr::focus_pane` reads it before it
+    # switches anything. An id this double does not hold is refused with
+    # `pane_not_found`, as herdr does.
+    pane=${POS[0]:?}
+    [ -n "$(field "$pane" 1 "$STATE/panes")" ] || fail pane_not_found "pane $pane not found"
+    printf '{"result":{"type":"pane_info","pane":{"pane_id":%s,"tab_id":%s,"workspace_id":%s}}}\n' \
+      "$(jstr "$pane")" "$(jstr "$(field "$pane" 2 "$STATE/panes")")" \
+      "$(jstr "$(field "$pane" 3 "$STATE/panes")")"
+    ;;
+
+  "workspace focus")
+    ws=${POS[0]:?}
+    [ -n "$(field "$ws" 1 "$STATE/workspaces")" ] || fail workspace_not_found "workspace $ws not found"
+    echo '{"result":{}}'
+    ;;
+
+  "tab focus")
+    tab=${POS[0]:?}
+    [ -n "$(field "$tab" 1 "$STATE/tabs")" ] || fail tab_not_found "tab $tab not found"
+    echo '{"result":{}}'
+    ;;
+
   "pane zoom")
     pane=${POS[0]:?}
     # Only `--on` is modelled: nothing here unzooms. The pane must be one
