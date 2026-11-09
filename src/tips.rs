@@ -64,6 +64,72 @@ mod tests {
         assert_eq!(texts().len(), 197);
     }
 
+    /// The items of `wanted` that no tip in `tips` explains, as the message a
+    /// failing test prints: each item, then the line to add for it. Empty
+    /// when every item has a tip.
+    fn gaps(wanted: &[String], tips: &[Tip]) -> String {
+        let named: std::collections::HashSet<&str> =
+            tips.iter().filter_map(|tip| tip.about).collect();
+        let covered = |item: &str| {
+            // A `key * q` tag explains `q` on every tab.
+            let every_tab = item
+                .strip_prefix("key ")
+                .and_then(|rest| rest.split_once(' '))
+                .map(|(_, key)| format!("key * {key}"));
+            named.contains(item) || every_tab.is_some_and(|tag| named.contains(tag.as_str()))
+        };
+        let missing: Vec<&String> = wanted.iter().filter(|item| !covered(item)).collect();
+        if missing.is_empty() {
+            return String::new();
+        }
+        let split = |item: &str| {
+            let (kind, rest) = item.split_once(' ').unwrap_or((item, ""));
+            (kind.to_string(), rest.to_string())
+        };
+        let width = missing.iter().map(|item| split(item).0.len()).max().unwrap_or(0);
+        let mut report = format!("assets/tips.txt has no tip for {} items:\n", missing.len());
+        for item in &missing {
+            let (kind, rest) = split(item);
+            report += &format!("  {kind:width$}  {rest}\n");
+        }
+        report += "add one line for each: the tip, then a bar, then the item.\n";
+        for item in &missing {
+            report += &format!(
+                "  <one sentence, lowercase, at most {MAX_CHARACTERS} characters> | {item}\n"
+            );
+        }
+        report
+    }
+
+    /// An item no tip names is reported with the line that would cover it,
+    /// and one a tip names is not. A `key * q` tip covers `q` on every tab.
+    #[test]
+    fn an_item_without_a_tip_is_named_with_the_line_to_add() {
+        let list = "q quits. | key * q\nenter starts. | key dispatch enter\n";
+        let wanted: Vec<String> = [
+            "key dispatch q",
+            "key queue q",
+            "key dispatch enter",
+            "key queue x",
+            "config dispatch.example",
+        ]
+        .map(String::from)
+        .to_vec();
+        let report = gaps(&wanted, &parse(list));
+        assert!(report.contains("has no tip for 2 items:"), "{report}");
+        assert!(report.contains("  key     queue x\n"), "{report}");
+        assert!(report.contains("  config  dispatch.example\n"), "{report}");
+        assert!(
+            report.contains(
+                "  <one sentence, lowercase, at most 69 characters> | key queue x\n"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("queue q"), "{report}");
+        assert!(!report.contains("dispatch enter"), "{report}");
+        assert!(!report.contains("dispatch q"), "{report}");
+    }
+
     /// What is wrong with each tip in `tips`, as the message a failing test
     /// prints: the line, what is wrong and the fix. Empty when none is.
     fn complaints(tips: &[Tip]) -> String {
