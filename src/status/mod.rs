@@ -738,8 +738,16 @@ impl Board {
         })
     }
 
+    /// Whether a frame drawn now with `popup` has a panel over it — the
+    /// board's own, or `popup` — so the dispatch tab draws its strip dim
+    /// along with the frame [`Board::with_popup`] dims under the panel.
+    pub(crate) fn draws_panel(&self, popup: Option<&[String]>) -> bool {
+        popup.is_some() || self.mode.panel().is_some()
+    }
+
     /// `frame`, with `popup` drawn over it wherever the board has no panel
-    /// of its own open — see [`Board::hosted_frame`].
+    /// of its own open, and everything around it dim — see
+    /// [`Board::hosted_frame`] and [`crate::screen::dim`].
     fn with_popup(&self, frame: String, popup: Option<&[String]>) -> String {
         match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
             Some(panel) => {
@@ -750,10 +758,11 @@ impl Board {
                 // board's rows carry colour throughout — the state dot, the
                 // dimmed footer, the key hint — so a coloured row would pad
                 // short of a plain one, with too few columns for the panel
-                // to land on. A panel carries no colour of its own, so the
-                // frame under one loses its for the frame this draws —
-                // [`strip_ansi`] — and gets it back the moment the panel
-                // closes and the next frame is read fresh.
+                // to land on. So the frame under a panel loses its colour
+                // for the frame this draws — [`strip_ansi`] — and is drawn
+                // dim instead once it is padded, with the panel the only
+                // bright thing on it. It gets its colour back the moment the
+                // panel closes and the next frame is read fresh.
                 //
                 // Also opens on a blank spacer line, and has other blank
                 // rows through the ticker and the rule below it — a row
@@ -769,7 +778,7 @@ impl Board {
                 // never on the key line: padded to one width with the box,
                 // a key line wider than the terminal would widen every row
                 // of the box past the terminal's last column along with it.
-                let keys = match crate::screen::shell::hosted() {
+                let mut keys = match crate::screen::shell::hosted() {
                     Some(_) => {
                         let bottom = stripped
                             .iter()
@@ -797,7 +806,13 @@ impl Board {
                 while lines.len() < panel.len() + 2 {
                     lines.push(" ".repeat(width));
                 }
+                // Dimmed after `pad_to`, which would count the codes as
+                // columns, and before `overlay`, which closes the dim where
+                // the panel starts. The key line is dimmed where it stands
+                // and never padded, so it is no wider than it was.
+                crate::screen::dim(&mut lines);
                 crate::screen::overlay(&mut lines, &panel);
+                crate::screen::dim(&mut keys);
                 lines.extend(keys);
                 lines.join("\n")
             }

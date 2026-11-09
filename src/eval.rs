@@ -5166,7 +5166,7 @@ fn eval_frame_rows_at(
     let width = frame_width(content.max(border));
     // Wrapped before the body is measured, because each row it wraps onto
     // past its first comes off the body's.
-    let keys = crate::screen::key_rows(&footer(
+    let mut keys = crate::screen::key_rows(&footer(
         state.table,
         state.filters.figures,
         &state.mode,
@@ -5261,7 +5261,12 @@ fn eval_frame_rows_at(
     }
     frame.push(frame_bottom(width));
 
+    // Everything behind a panel is drawn dim — the strip, the table and the
+    // key line — see `crate::screen::dim`.
     if let Some(overlay_lines) = &overlay_panel {
+        for rows in [&mut rows_out, &mut frame, &mut keys] {
+            crate::screen::dim(rows);
+        }
         overlay(&mut frame, overlay_lines);
     }
 
@@ -9965,8 +9970,12 @@ mod screen_tests {
 
         state.cursor = 0;
         state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
-        let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20));
-        let text = crate::screen::shell::plain(&frame.join("\n"));
+        // Read as a person sees it: the table behind the panel is dimmed.
+        let frame: Vec<String> = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20))
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect();
+        let text = frame.join("\n");
         assert!(text.contains("[enter] apply   [esc] back"), "{text}");
         assert_eq!(
             frame.iter().filter(|l| l.contains(BOTTOM_LEFT)).count(),

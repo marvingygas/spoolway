@@ -226,13 +226,6 @@ pub(crate) fn strip() -> Vec<String> {
     }
 }
 
-/// `frame` with the strip on top of it — see [`strip`].
-pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
-    let mut lines = strip();
-    lines.extend(frame);
-    lines
-}
-
 /// The strip itself, `width` columns wide: `tabs` centred, each label
 /// after its digit in brackets — `[1] DISPATCH` — the mark the key line gives
 /// a key, since the digit is the key that opens it. The open tab is drawn at
@@ -1362,9 +1355,19 @@ fn board_frame_rows(
             tab.takes_enter(),
         )
         .ok()?;
-    let mut rows = strip();
+    let mut rows = strip_over(board, popup.as_deref());
     rows.extend(frame.lines().map(str::to_string));
     Some(rows)
+}
+
+/// [`strip`], drawn dim while a panel is open on the board below it, as the
+/// board dims its own rows under one — see [`crate::screen::dim`].
+fn strip_over(board: &crate::status::Board, popup: Option<&[String]>) -> Vec<String> {
+    let mut rows = strip();
+    if board.draws_panel(popup) {
+        crate::screen::dim(&mut rows);
+    }
+    rows
 }
 
 /// [`draw_board`], drawn from the board's last reading instead of waiting
@@ -1388,7 +1391,7 @@ fn draw_board_from_memory(
         popup.as_deref(),
         tab.takes_enter(),
     );
-    let mut rows = strip();
+    let mut rows = strip_over(board, popup.as_deref());
     rows.extend(frame.lines().map(str::to_string));
     writer.write_frame(&rows, pane_size, out);
 }

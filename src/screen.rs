@@ -1166,6 +1166,31 @@ fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
     paint
 }
 
+/// `rows` redrawn dim, for whatever a tab draws behind an open popup: its
+/// tab strip, its frame and its key line, so the popup is the only bright
+/// thing on screen.
+///
+/// Each row's own codes are taken out first and the row is then dimmed
+/// whole, from [`crate::status::DIM`] to a [`crate::status::RESET`] after
+/// its last character. Left in, a reset the tab wrote partway along a row —
+/// after a coloured state dot, or a dimmed key — would end the dim there
+/// and draw the rest of the row bright. A row with nothing but spaces on it
+/// is left with no codes at all, since there is nothing on it to dim.
+///
+/// Dim a frame before [`overlay`] lays the popup on it, never after:
+/// [`overlay_row`] closes the dim where the box starts and opens it again
+/// where the box ends, which keeps it off the popup's own colours.
+pub(crate) fn dim(rows: &mut [String]) {
+    use crate::status::{DIM, RESET};
+    for row in rows {
+        let plain = crate::status::strip_ansi(row);
+        *row = match plain.trim().is_empty() {
+            true => plain,
+            false => format!("{DIM}{plain}{RESET}"),
+        };
+    }
+}
+
 /// `row` with `line` written over it from visible column `x`, stopping at
 /// the row's last character as [`overlay`] always has.
 ///

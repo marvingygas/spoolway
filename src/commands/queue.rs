@@ -10629,7 +10629,8 @@ fn routines_beneath(mode: &Mode) -> Option<&RoutineNav> {
 }
 
 /// A frame: the pending screen, or the routines pane, with whatever popup
-/// the mode has open laid over it and the key line under it.
+/// the mode has open laid over it, the key line under it and the strip, when
+/// hosted, above it — see [`compose`].
 fn render(groups: &[Group], panes: &Panes, state: &ScreenState) -> Vec<String> {
     let footer = screen_footer(groups, panes, state);
     let frame = beneath(groups, panes, state, &footer);
@@ -10646,15 +10647,26 @@ fn beneath(groups: &[Group], panes: &Panes, state: &ScreenState, footer: &str) -
     }
 }
 
-/// `frame` with `popup` laid over it and `footer` under it.
+/// `frame` with `popup` laid over it and `footer` under it, under the strip
+/// when bare `spoolway` hosts this screen as its queue, routines or jobs tab
+/// — see `crate::screen::shell::strip`.
+///
+/// With a popup open, the strip, the frame and the key line are all drawn
+/// dim behind it — see [`crate::screen::dim`].
 fn compose(mut frame: Vec<String>, popup: Option<&[String]>, footer: String) -> Vec<String> {
+    let mut strip = crate::screen::shell::strip();
+    // In as many rows as `layout` took off the panes for it.
+    let mut keys = crate::screen::key_rows(&footer);
     if let Some(popup) = popup {
         stretch(&mut frame, popup.len() + 4);
+        for rows in [&mut strip, &mut frame, &mut keys] {
+            crate::screen::dim(rows);
+        }
         overlay(&mut frame, popup);
     }
-    // In as many rows as `layout` took off the panes for it.
-    frame.extend(crate::screen::key_rows(&footer));
-    frame
+    strip.extend(frame);
+    strip.extend(keys);
+    strip
 }
 
 /// Lengthen a [`two_pane_frame`] to at least `lines` lines, borders
@@ -10812,9 +10824,6 @@ fn draw(
     writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl std::io::Write,
 ) {
-    // Under the strip when bare `spoolway` hosts this screen as its queue
-    // tab, and exactly as before everywhere else — see
-    // `crate::screen::shell::under_strip`.
     paint(render(groups, panes, state), writer, out);
 }
 
@@ -10826,7 +10835,6 @@ fn paint(
     writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl std::io::Write,
 ) {
-    let frame = crate::screen::shell::under_strip(frame);
     writer.write_frame(&frame, crate::screen::pane_size(), out);
 }
 
@@ -22560,7 +22568,7 @@ mod tests {
             routines_dir: &routines_dir,
             pipelines: &pipelines,
         };
-        let frame = crate::screen::shell::under_strip(render(&groups, &panes, &state));
+        let frame = render(&groups, &panes, &state);
         // Wide enough that no row here reaches the pane's own edge, the same
         // as a real terminal this screen ever draws to — see
         // `commands::queue`'s own `PANE_CHROME_COLUMNS`.

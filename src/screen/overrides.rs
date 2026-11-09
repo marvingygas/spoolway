@@ -672,7 +672,7 @@ const WORKSPACE_TEXT: usize = 54;
 fn frame(state: &State) -> Vec<String> {
     let area = super::drawing_area();
     let width = area.map_or(FALLBACK_WIDTH, |(width, _)| width);
-    let footer = super::key_rows(&footer(state));
+    let mut footer = super::key_rows(&footer(state));
     let rows = area.map(|(_, height)| {
         height
             .saturating_sub(FRAME_CHROME + shell::strip_rows() + footer.len().saturating_sub(1))
@@ -708,10 +708,15 @@ fn frame(state: &State) -> Vec<String> {
         "─".repeat(inner),
         super::corner::BOTTOM_RIGHT
     ));
+    let mut out = shell::strip();
+    // Everything behind a popup is drawn dim — the strip, the box and the
+    // key line — see `super::dim`.
     if let Some(popup) = popup {
+        for rows in [&mut out, &mut frame, &mut footer] {
+            super::dim(rows);
+        }
         super::overlay(&mut frame, &popup);
     }
-    let mut out = shell::strip();
     out.extend(frame);
     out.extend(footer);
     out
