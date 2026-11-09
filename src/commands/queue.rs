@@ -4822,7 +4822,7 @@ enum Mode {
     /// What a screen submit queued — [`queued_panel`]'s popup, opening on
     /// `hook executed successfully` when the hook ran — or the routines
     /// tab's [`still_queued_panel`]. `enter` closes it, the same as
-    /// [`Mode::Outcome`].
+    /// [`Mode::Outcome`], unless it is the clean popup below.
     ///
     /// `routines` is the routines pane the submit came from, when it did:
     /// the routines tab has no pending screen to fall back to, so that pane
@@ -5874,8 +5874,9 @@ impl TicketLog for PopupHook<'_> {
 /// then the count queued over every task it queued. Then the tasks it left
 /// out, `not_queued`, when there are any — see [`not_queued_lines`]. It
 /// ends on `dispatcher` — [`dispatcher_line`] — a blank row below the list,
-/// and then the [`crate::screen::confirm`] row. `routines` is the routines
-/// pane the batch was queued from, or `None` over the pending screen.
+/// and then, unless the batch is clean, the [`crate::screen::confirm`] row.
+/// `routines` is the routines pane the batch was queued from, or `None` over
+/// the pending screen.
 ///
 /// A clean batch, every task queued and none left out, has nothing to read
 /// twice: its popup has no key row, ending on the blank row under the
