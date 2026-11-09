@@ -92,6 +92,11 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Show a task's steps as panes in one tab, or give each step its own tab.",
     },
     Reference {
+        key: "dispatch.tips",
+        values: "true, false",
+        sentence: "Show a tip on the dispatch tab's last row, changing every 30 seconds.",
+    },
+    Reference {
         key: "unattended.enabled",
         values: "true, false",
         sentence: "Run without a person: a blocked task goes to an agent (the unblocker) \
@@ -1472,6 +1477,24 @@ mod tests {
                 .contains("autofocus_panes = false")
         );
         assert!(set(&config, "dispatch.autofocus_panes", "sometimes").is_err());
+    }
+
+    /// `tips` is a bool, on by default and written even while it is `true`,
+    /// and refuses anything else.
+    #[test]
+    fn tips_is_readable_and_writable_at_its_default() {
+        let config = Config::default();
+        assert_eq!(get(&config, "dispatch.tips").unwrap(), "true");
+        assert!(config.render().unwrap().contains("tips = true"));
+
+        let off = set(&config, "dispatch.tips", "false").unwrap();
+        assert!(!off.dispatch.tips);
+        assert_eq!(get(&off, "dispatch.tips").unwrap(), "false");
+        assert!(off.render().unwrap().contains("tips = false"));
+
+        let back = set(&off, "dispatch.tips", "true").unwrap();
+        assert!(back.dispatch.tips);
+        assert!(set(&config, "dispatch.tips", "sometimes").is_err());
     }
 
     /// `hide_commands` is a bool, written even while it is `false`.

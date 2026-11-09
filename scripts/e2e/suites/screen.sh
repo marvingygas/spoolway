@@ -31,7 +31,7 @@
 # local branch with no checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. The dispatch tab's box ends on a tip row, on the empty
-# board and the full one alike. Off a terminal, bare `spoolway` still prints
+# board and the full one alike, and `dispatch.tips = false` draws none. Off a terminal, bare `spoolway` still prints
 # the grouped help.
 #
 # No `covers:` tag — the coverage map only enumerates `config.toml` keys and
@@ -548,6 +548,18 @@ has "its cursor's row is drawn" "▸ " "$LAST"
 has "its last table row counts the tasks out of view" "tasks below" "$LAST"
 has "the key line is still drawn under it" "[o] options" "$LAST"
 ends_on_a_tip "full" "$LAST"
+
+# `dispatch.tips = false` takes the row away. It is put back straight after, so
+# the checks below draw the board they always did.
+must "tips are turned off" "$SPOOLWAY" config set dispatch.tips false
+NOTIPS="$LIVE/no-tips.txt"
+works "the full board is drawn again" \
+  script -qec "stty rows 30 cols 120; printf '' | '$SPOOLWAY'" "$NOTIPS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$NOTIPS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
+has "with tips off it is still the full board" "tasks below" "$LAST"
+lacks "with tips off no tip row is drawn" "│ tip  " "$LAST"
+must "tips are turned back on" "$SPOOLWAY" config set dispatch.tips true
 
 # The margin, read off a real pty rather than a test terminal: at 120 columns
 # no row of the full board touches column 0 or column 119. Each row ends in the

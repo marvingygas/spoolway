@@ -387,6 +387,7 @@ visible_lanes = 3
 hide_commands = false
 autofocus_panes = false
 lane_layout = "panes"
+tips = true
 ```
 
 | Key | Default | What it controls |
@@ -399,6 +400,7 @@ lane_layout = "panes"
 | `hide_commands` | `false` | Whether a command step runs detached with no pane, so it never takes a place in its task's tab. Its output still goes to the same log file. Off, a command opens a pane that stays open after the command exits, so a failed gate's output stays on screen. The pane counts toward `visible_lanes` and closes oldest first, like a finished agent lane. Set to `true` to run commands with no pane. A pane whose command is still running is never closed by the limit. A step's `hide:` key overrides this setting for that step. See [Background and headless](pipelines.md#background-and-headless). |
 | `autofocus_panes` | `false` | Whether the dispatcher may bring a lane's pane to the front on its own. Off, a held pane is still kept open and the notification still fires, but your focus stays where it was. On, a pane comes forward in three cases: a task paused at a gate, a task waiting for you on `blocked` or `hook_failed`, and a lane that was stopped and given up on. Set to `true` to have panes come forward. |
 | `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |
+| `tips` | `true` | Whether the dispatch tab ends on a tip row, with one tip at a time that changes every 30 seconds. Set to `false` to draw the tab as it was before tips: no tip row, and RECENT keeps its row. Other tabs never show a tip. |
 
 A fresh `config.toml` holds every one of these keys with its value, and `spoolway sync` adds any that
 an older file lacks and names each one it adds in its report. `all` is written as `visible_lanes = "all"`.

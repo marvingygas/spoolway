@@ -617,7 +617,7 @@ impl Board {
     ) -> String {
         self.apply(snapshot);
         let name = self.greeting_name(repo);
-        let tip = self.tips.current(Instant::now());
+        let tip = self.current_tip(repo);
         let frame = paint(
             repo,
             pipelines,
@@ -639,6 +639,16 @@ impl Board {
     /// the tab only with the board at rest.
     fn takes_enter(&self, tab_takes_enter: bool) -> bool {
         self.at_rest() && tab_takes_enter
+    }
+
+    /// The tip the dispatch tab's last row shows, or `None` while
+    /// `dispatch.tips` is off. Off, the deck is not asked either, so its
+    /// clock does not run while nothing is drawn from it.
+    fn current_tip(&mut self, repo: &Repo) -> Option<&'static str> {
+        if !repo.config.dispatch.tips {
+            return None;
+        }
+        self.tips.current(Instant::now())
     }
 
     /// [`Board::name`], read off git on the first call and kept after.
@@ -679,7 +689,7 @@ impl Board {
         let snapshot = Arc::new(build(repo, pipelines, holder, &mut self.memory)?);
         self.apply(&snapshot);
         let name = self.greeting_name(repo);
-        let tip = self.tips.current(Instant::now());
+        let tip = self.current_tip(repo);
         let frame = paint(
             repo,
             pipelines,
@@ -9452,6 +9462,60 @@ mod tests {
                 rows[bottom - 1].starts_with("│ config changed: pipelines updated "),
                 "{board}:\n{notice}"
             );
+        }
+    }
+
+    /// With `dispatch.tips = false` the hosted dispatch tab draws the frame
+    /// it drew without any tip row — no blank row where the tip was, and
+    /// RECENT keeps its own — on the busy board and the empty one, while the
+    /// same board with tips on does draw one. Fails before the setting: the
+    /// board dealt a tip whatever the config said.
+    #[test]
+    fn the_dispatch_tab_draws_no_tip_row_with_tips_off() {
+        let (mut repo, _root_guard) = fixture("board-tips-off");
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((100, 30));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let boards = [
+            (
+                "busy",
+                Snapshot {
+                    holder: Some(4242),
+                    ..full_board()
+                },
+            ),
+            (
+                "empty",
+                Snapshot {
+                    holder: Some(4242),
+                    ..Snapshot::empty()
+                },
+            ),
+        ];
+        for (board_name, snapshot) in boards {
+            let snapshot = Arc::new(snapshot);
+            let mut board = Board::for_test();
+            repo.config.dispatch.tips = true;
+            let with = strip(&board.paint_from(&repo, &pipelines, true, None, true, &snapshot));
+            assert!(with.contains("tip  "), "{board_name}:\n{with}");
+
+            repo.config.dispatch.tips = false;
+            let mut board = Board::for_test();
+            let off = board.paint_from(&repo, &pipelines, true, None, true, &snapshot);
+            let name = board.greeting_name(&repo);
+            let without = paint(
+                &repo,
+                &pipelines,
+                true,
+                board.takes_enter(true),
+                &snapshot,
+                board.cursor.as_deref(),
+                &board.recent,
+                name.as_deref(),
+                None,
+            );
+            assert_eq!(off, without, "{board_name}");
+            assert!(!strip(&off).contains("tip  "), "{board_name}");
         }
     }
 
