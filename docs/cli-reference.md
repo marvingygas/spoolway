@@ -119,7 +119,7 @@ each tab is not a popup and stays dim. Prompts printed straight to a terminal, s
 
 While a popup is open, the screen behind it is drawn dim on every tab. That covers the tab
 strip, the tab's frame and its key line, so the popup is the only bright thing on screen. The
-dim stops at the popup's border. When the popup closes, the tab draws in its own colours again.
+whole strip is dim, including the open tab's label. The dim stops at the popup's border. When the popup closes, the tab draws in its own colours again.
 
 The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
 
