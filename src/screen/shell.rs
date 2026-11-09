@@ -262,10 +262,18 @@ fn strip_labels(tabs: &[Tab]) -> Vec<String> {
         .collect()
 }
 
+/// One row of the strip: the tabs on it as a range of indexes, and the
+/// columns its labels and the gaps between them fill.
+struct StripRow {
+    tabs: Range<usize>,
+    width: usize,
+}
+
 /// How `tabs` break into rows `width` columns wide: the gap between labels,
-/// and the tabs on each row as a range of indexes, in tab order. The one
-/// place the strip's row count is decided, read by [`strip_lines`] to draw
-/// it and by [`strip_rows`] to take it off every tab's height.
+/// and each row's tabs, in tab order, with the columns that row fills. The
+/// one place the strip's rows are decided and measured, read by
+/// [`strip_lines`] to draw, centre and cut them and by [`strip_rows`] to take
+/// them off every tab's height.
 ///
 /// Every label on one row at [`LABEL_GAP`] when that fits, and otherwise
 /// [`NARROW_GAP`] on every row. Past one row the labels split as evenly as
@@ -273,33 +281,36 @@ fn strip_labels(tabs: &[Tab]) -> Vec<String> {
 /// fewest rows whose widest one fits. A label never breaks across two rows:
 /// where even one label to a row is too wide, that is the layout, and the
 /// label too wide for the area is cut by [`strip_lines`].
-fn strip_layout(tabs: &[Tab], width: usize) -> (&'static str, Vec<Range<usize>>) {
+fn strip_layout(tabs: &[Tab], width: usize) -> (&'static str, Vec<StripRow>) {
     let widths: Vec<usize> = strip_labels(tabs)
         .iter()
         .map(|label| label.chars().count())
         .collect();
-    let span = |row: &Range<usize>, gap: &str| {
-        widths[row.clone()].iter().sum::<usize>() + gap.len() * row.len().saturating_sub(1)
-    };
-    let split = |count: usize| -> Vec<Range<usize>> {
+    let split = |count: usize, gap: &str| -> Vec<StripRow> {
         let (each, extra) = (tabs.len() / count, tabs.len() % count);
         let mut start = 0;
         (0..count)
             .map(|row| {
                 let end = start + each + usize::from(row < extra);
-                let range = start..end;
+                let row = StripRow {
+                    tabs: start..end,
+                    width: widths[start..end].iter().sum::<usize>()
+                        + gap.len() * (end - start).saturating_sub(1),
+                };
                 start = end;
-                range
+                row
             })
             .collect()
     };
-    if span(&(0..tabs.len()), LABEL_GAP) <= width {
-        return (LABEL_GAP, split(1));
+    let fits = |rows: &Vec<StripRow>| rows.iter().all(|row| row.width <= width);
+    let one_row = split(1, LABEL_GAP);
+    if fits(&one_row) {
+        return (LABEL_GAP, one_row);
     }
     let rows = (1..tabs.len())
-        .map(split)
-        .find(|rows| rows.iter().all(|row| span(row, NARROW_GAP) <= width))
-        .unwrap_or_else(|| split(tabs.len().max(1)));
+        .map(|count| split(count, NARROW_GAP))
+        .find(fits)
+        .unwrap_or_else(|| split(tabs.len().max(1), NARROW_GAP));
     (NARROW_GAP, rows)
 }
 
@@ -331,27 +342,20 @@ fn strip_lines(open: Tab, tabs: &[Tab], width: usize) -> Vec<String> {
 
     let labels = strip_labels(tabs);
     let (gap, rows) = strip_layout(tabs, width);
-    let span = |row: &Range<usize>| {
-        labels[row.clone()]
-            .iter()
-            .map(|label| label.chars().count())
-            .sum::<usize>()
-            + gap.len() * row.len().saturating_sub(1)
-    };
-    let widest = rows.iter().map(span).max().unwrap_or(0);
+    let widest = rows.iter().map(|row| row.width).max().unwrap_or(0);
     let start = width.saturating_sub(widest) / 2;
     rows.iter()
         .map(|row| {
-            let drawn: Vec<String> = tabs[row.clone()]
+            let drawn: Vec<String> = tabs[row.tabs.clone()]
                 .iter()
-                .zip(&labels[row.clone()])
+                .zip(&labels[row.tabs.clone()])
                 .map(|(tab, label)| match *tab == open {
                     true => label.clone(),
                     false => format!("{DIM}{label}{NORMAL_INTENSITY}{BOLD}"),
                 })
                 .collect();
             let line = format!("{BOLD}{}{}{RESET}", " ".repeat(start), drawn.join(gap));
-            match start + span(row) > width {
+            match start + row.width > width {
                 true => super::pad_visible(&line, width),
                 false => line,
             }
@@ -556,22 +560,38 @@ pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
     frames
 }
 
-/// The label of the tab `line` draws lit, when `line` is the strip: the one
-/// label with no dim code in front of it — see [`strip_lines`]. `None` for
-/// any other line, so a test can hand it every row of a frame.
+/// The label of the tab `line` draws lit, when `line` is one row of the
+/// strip: the one label on it with no dim code in front of it — see
+/// [`strip_lines`]. `None` for a strip row whose labels are all dimmed, since
+/// the lit one is on another row, and for any line that is not a strip row,
+/// so a test can hand it every row of a frame.
 ///
-/// `None` too for a strip with no dim code at all: that is a strip whose
-/// codes were already taken out, and every label in it would pass for lit,
-/// so the first, `DISPATCH`, would name every frame it heads.
+/// A strip row opens on the strip's bold and holds nothing but labels, the
+/// last of them perhaps cut at the area's edge, which is read as the tab
+/// whose name it starts. `None` too for a row with no bold: that is a strip
+/// row whose codes were already taken out, and every label in it would pass
+/// for lit, so the first would name every frame it heads.
 #[cfg(test)]
 pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
-    if !plain(line).contains("[1] DISPATCH") || !line.contains(crate::status::DIM) {
+    let words: Vec<String> = plain(line).split_whitespace().map(str::to_string).collect();
+    let labels_only = words.iter().enumerate().all(|(at, word)| match at % 2 {
+        0 => word.starts_with('['),
+        _ => word.chars().all(|c| c.is_ascii_uppercase()),
+    });
+    if !line.starts_with(crate::status::BOLD) || words.is_empty() || !labels_only {
         return None;
     }
-    TABS.into_iter().map(Tab::label).find(|label| {
-        line.find(&format!("] {label}"))
-            .and_then(|at| line[..at].rfind('['))
-            .is_some_and(|open| !line[..open].ends_with(crate::status::DIM))
+    line.match_indices("] ").find_map(|(at, _)| {
+        let open = line[..at].rfind('[')?;
+        let name: String = line[at + 2..]
+            .chars()
+            .take_while(char::is_ascii_uppercase)
+            .collect();
+        let label = TABS
+            .into_iter()
+            .map(Tab::label)
+            .find(|label| !name.is_empty() && label.starts_with(&name))?;
+        (!line[..open].ends_with(crate::status::DIM)).then_some(label)
     })
 }
 
@@ -1627,6 +1647,30 @@ mod tests {
         assert_eq!(lit_tab(&line), Some("OVERRIDES"));
         assert_eq!(lit_tab(&plain(&line)), None);
         assert_eq!(lit_tab("│   dispatch   │"), None);
+    }
+
+    // The open tab is named from whichever strip row holds it: the second
+    // row of a 58-column strip, and a lone label cut at a 10-column area's
+    // edge. A frame whose strip lost its codes names no tab, and neither
+    // does a frame with no blank row on top, which has no strip.
+    #[test]
+    fn a_test_names_the_open_tab_on_any_row_of_the_strip() {
+        let frame = |open: Tab, width: usize| -> Vec<String> {
+            let mut lines = vec![String::new()];
+            lines.extend(strip_lines(open, &TABS, width));
+            lines.push(String::new());
+            lines.push(" ╭─ body ─╮".to_string());
+            lines
+        };
+        let shown = |lines: &[String]| crate::screen::shown_screen(lines, "none");
+        assert_eq!(shown(&frame(Tab::Eval, 58)), "eval tab");
+        assert_eq!(shown(&frame(Tab::Overrides, 58)), "overrides tab");
+        assert_eq!(shown(&frame(Tab::Dispatch, 58)), "dispatch tab");
+        assert_eq!(shown(&frame(Tab::Overrides, 10)), "overrides tab");
+        assert_eq!(shown(&frame(Tab::Eval, 10)), "eval tab");
+        let plain_frame: Vec<String> = frame(Tab::Eval, 58).iter().map(|l| plain(l)).collect();
+        assert_eq!(shown(&plain_frame), "none tab");
+        assert_eq!(shown(&frame(Tab::Eval, 58)[1..]), "none tab");
     }
 
     /// The strip drawn as [`strip_lines`] draws it at a width wide enough
