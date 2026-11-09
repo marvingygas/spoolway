@@ -1,6 +1,6 @@
 ---
 domain: dispatcher
-covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/browser.rs", "src/lock.rs", "src/status/**", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs", "src/reload.rs", "src/cut.rs"]
+covers: ["src/dispatch.rs", "src/mux.rs", "src/lane_alias.rs", "src/headless.rs", "src/editor.rs", "src/browser.rs", "src/lock.rs", "src/status/**", "src/tips.rs", "assets/tips.txt", "src/problem_log.rs", "src/prompt.rs", "src/teardown.rs", "src/archive_index.rs", "src/runfiles.rs", "src/claim.rs", "src/pipeline_snapshot.rs", "src/reload.rs", "src/cut.rs"]
 ---
 
 # The dispatcher
@@ -999,6 +999,26 @@ The line names no file or key. Press `u` to load them; see
 [Editing a pipeline while it runs](#editing-a-pipeline-while-it-runs). A prompt edit adds no kind,
 because each lane reads its `PROMPT.md` when it starts. With nothing to load, neither board draws
 the line, and `[u] update config` is off the key line.
+
+### The tip list
+
+`assets/tips.txt` holds one tip per line, and it is compiled into the binary. Lines that start with `#` and blank lines are not tips.
+
+A tip may end with a bar and a tag that names what it explains. The text before the bar is the tip.
+
+```
+o on a task opens its menu: open, pause, focus, restart, unqueue. | key dispatch o
+```
+
+| Tag | Names |
+|---|---|
+| `key <tab> <key>` | A key on that tab's key line. `key * q` covers `q` on every tab. |
+| `config <setting>` | A setting that `spoolway config contract` lists. |
+| `pipeline <key>` | A key that `spoolway pipeline contract` lists. |
+| `step <key>` | A step key that `spoolway pipeline contract` lists. |
+| `task <key>` | A required or optional key that `spoolway task contract` lists. |
+
+Two tests hold the list to the code. One fails, and names the line to add, when a key, setting or contract key has no tagged tip. The other fails when a tip is longer than 69 characters or breaks the lowercase rule in [the CLI reference](cli-reference.md). A tip may hold `∞`, `↻`, `←` and `→`, and each counts as one character.
 
 ## The overrides tab
 
