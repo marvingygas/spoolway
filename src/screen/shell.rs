@@ -35,8 +35,8 @@
 //! the dispatch tab's "before dispatching" popup and overrides gate instead.
 //!
 //! Which tab is open lives in a thread-local rather than being threaded
-//! through every screen's own `render`: the strip, the three rows it takes
-//! off the height, and the margin `crate::screen::drawing_area` keeps around
+//! through every screen's own `render`: the strip, the rows it takes off
+//! the height, and the margin `crate::screen::drawing_area` keeps around
 //! every tab are read deep inside each screen's own layout code —
 //! `commands::queue::layout`, `eval::frame_rows`, the board's own
 //! `pane_height` — and a screen drawn with no shell around it, from its CLI
@@ -47,6 +47,7 @@
 
 use std::cell::Cell;
 use std::io::Write;
+use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -154,12 +155,13 @@ pub(crate) fn hosted() -> Option<Tab> {
 }
 
 /// The rows the strip takes off the top of the terminal: one blank row above
-/// it, the strip itself and one blank row under it, as the mockup draws —
-/// always [`strip`]'s own length. Zero with no shell around the screen, so a
-/// screen drawn by its own CLI command keeps every row it had.
+/// it, the strip's own rows and one blank row under it, as the mockup draws —
+/// always [`strip`]'s own length, since both count the strip's rows with
+/// [`strip_layout`] at the same width. Zero with no shell around the screen,
+/// so a screen drawn by its own CLI command keeps every row it had.
 pub(crate) fn strip_rows() -> usize {
-    match hosted() {
-        Some(_) => 3,
+    match HOSTED.with(Cell::get) {
+        Some((_, tabs)) => strip_layout(tabs, strip_width()).1.len() + 2,
         None => 0,
     }
 }
@@ -204,26 +206,43 @@ pub(crate) fn quit_hint() -> &'static [(&'static str, &'static str)] {
 /// area of the 100-column terminal every mockup of this screen is drawn to.
 const FALLBACK_WIDTH: usize = 100 - 2 * super::MARGIN;
 
-/// The gap between two neighbouring labels on the strip.
+/// The gap between two neighbouring labels on the strip while every label
+/// fits on one row at this width.
 const LABEL_GAP: &str = "        ";
+
+/// The gap between two neighbouring labels once one row at [`LABEL_GAP`] is
+/// wider than the drawing area: on every row, so the strip never mixes the
+/// two, and nothing between them, so it is always one of two widths.
+const NARROW_GAP: &str = "    ";
 
 /// The strip with one blank row above it and one under it, for a screen to
 /// put above its own frame — or nothing at all with no shell hosting one. The
-/// row above keeps the strip off the terminal's top edge.
+/// row above keeps the strip off the terminal's top edge, and the strip's
+/// own rows sit together with no blank row between them.
 ///
-/// Three rows, the count [`strip_rows`] takes off every tab's height: a line
-/// added or dropped here without it pushes each tab's frame past the
-/// terminal's last row, or leaves a row unused under it.
+/// As many rows as [`strip_rows`] takes off every tab's height, since both
+/// read the strip's rows from [`strip_layout`]: a line added or dropped here
+/// without it pushes each tab's frame past the terminal's last row, or
+/// leaves a row unused under it.
 pub(crate) fn strip() -> Vec<String> {
     match HOSTED.with(Cell::get) {
         Some((open, tabs)) => {
-            let width = super::drawing_area()
-                .map(|(width, _)| width)
-                .unwrap_or(FALLBACK_WIDTH);
-            vec![String::new(), strip_line(open, tabs, width), String::new()]
+            let mut rows = vec![String::new()];
+            rows.extend(strip_lines(open, tabs, strip_width()));
+            rows.push(String::new());
+            rows
         }
         None => Vec::new(),
     }
+}
+
+/// The width the strip is laid out against: the drawing area's, or
+/// [`FALLBACK_WIDTH`] with no terminal to measure. Read by [`strip`] and
+/// [`strip_rows`] alike, so the two count rows at the same width.
+fn strip_width() -> usize {
+    super::drawing_area()
+        .map(|(width, _)| width)
+        .unwrap_or(FALLBACK_WIDTH)
 }
 
 /// `frame` with the strip on top of it — see [`strip`].
@@ -233,12 +252,70 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// The strip itself, `width` columns wide: `tabs` centred, each label
-/// after its digit in brackets — `[1] DISPATCH` — the mark the key line gives
-/// a key, since the digit is the key that opens it. The open tab is drawn at
-/// normal brightness and every other label is dimmed. The whole line is
-/// bold, the weight the wordmark is drawn in, and reset on the same line so
-/// the bold never runs into the row under it. Nothing is coloured.
+/// Each tab's label: its digit in brackets, then its name — `[1] DISPATCH` —
+/// the mark the key line gives a key, since the digit is the key that opens
+/// it.
+fn strip_labels(tabs: &[Tab]) -> Vec<String> {
+    tabs.iter()
+        .enumerate()
+        .map(|(at, tab)| format!("[{}] {}", at + 1, tab.label()))
+        .collect()
+}
+
+/// How `tabs` break into rows `width` columns wide: the gap between labels,
+/// and the tabs on each row as a range of indexes, in tab order. The one
+/// place the strip's row count is decided, read by [`strip_lines`] to draw
+/// it and by [`strip_rows`] to take it off every tab's height.
+///
+/// Every label on one row at [`LABEL_GAP`] when that fits, and otherwise
+/// [`NARROW_GAP`] on every row. Past one row the labels split as evenly as
+/// the row count allows, earlier rows taking the extra label, over the
+/// fewest rows whose widest one fits. A label never breaks across two rows:
+/// where even one label to a row is too wide, that is the layout, and the
+/// label too wide for the area is cut by [`strip_lines`].
+fn strip_layout(tabs: &[Tab], width: usize) -> (&'static str, Vec<Range<usize>>) {
+    let widths: Vec<usize> = strip_labels(tabs)
+        .iter()
+        .map(|label| label.chars().count())
+        .collect();
+    let span = |row: &Range<usize>, gap: &str| {
+        widths[row.clone()].iter().sum::<usize>() + gap.len() * row.len().saturating_sub(1)
+    };
+    let split = |count: usize| -> Vec<Range<usize>> {
+        let (each, extra) = (tabs.len() / count, tabs.len() % count);
+        let mut start = 0;
+        (0..count)
+            .map(|row| {
+                let end = start + each + usize::from(row < extra);
+                let range = start..end;
+                start = end;
+                range
+            })
+            .collect()
+    };
+    if span(&(0..tabs.len()), LABEL_GAP) <= width {
+        return (LABEL_GAP, split(1));
+    }
+    let rows = (1..tabs.len())
+        .map(split)
+        .find(|rows| rows.iter().all(|row| span(row, NARROW_GAP) <= width))
+        .unwrap_or_else(|| split(tabs.len().max(1)));
+    (NARROW_GAP, rows)
+}
+
+/// The strip's own rows, `width` columns wide, laid out by [`strip_layout`].
+/// The open tab is drawn at normal brightness and every other label is
+/// dimmed. Every row is bold, the weight the wordmark is drawn in, and reset
+/// on the same row so the bold never runs into the row under it. Nothing is
+/// coloured.
+///
+/// The widest row is centred and every other row starts in the same column
+/// as it, so the labels line up on one left edge. A row wider than the area
+/// — only ever one label too wide on a row of its own — starts in the
+/// area's first column and is cut at its last, with a reset in place of the
+/// one the cut took, as every other row on the screen is cut — see
+/// [`crate::screen::pad_visible`]. Left to the terminal it would wrap onto
+/// a row no tab took off its height.
 ///
 /// A dimmed label ends on [`NORMAL_INTENSITY`] with the bold written again
 /// straight after it. Most terminals clear bold along with dim, on a reset
@@ -246,38 +323,44 @@ pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
 /// first dimmed one without the strip's bold.
 ///
 /// `width` is the drawing area's, not the terminal's: the frame writer's
-/// one-column indent moves the line in by the margin, which keeps it centred
-/// on the terminal as the margin keeps every tab's frame. A terminal too
-/// narrow for the labels starts them in the area's first column. The codes
+/// one-column indent moves each row in by the margin, which keeps the strip
+/// centred on the terminal as the margin keeps every tab's frame. The codes
 /// take no column, so they are left out of every width measured here.
-fn strip_line(open: Tab, tabs: &[Tab], width: usize) -> String {
+fn strip_lines(open: Tab, tabs: &[Tab], width: usize) -> Vec<String> {
     use crate::status::{BOLD, DIM, RESET};
 
-    let labels: Vec<String> = tabs
-        .iter()
-        .enumerate()
-        .map(|(at, tab)| format!("[{}] {}", at + 1, tab.label()))
-        .collect();
-    let span = labels.iter().map(|l| l.chars().count()).sum::<usize>()
-        + LABEL_GAP.len() * (labels.len() - 1);
-    let start = width.saturating_sub(span) / 2;
-    let drawn: Vec<String> = tabs
-        .iter()
-        .zip(&labels)
-        .map(|(tab, label)| match *tab == open {
-            true => label.clone(),
-            false => format!("{DIM}{label}{NORMAL_INTENSITY}{BOLD}"),
+    let labels = strip_labels(tabs);
+    let (gap, rows) = strip_layout(tabs, width);
+    let span = |row: &Range<usize>| {
+        labels[row.clone()]
+            .iter()
+            .map(|label| label.chars().count())
+            .sum::<usize>()
+            + gap.len() * row.len().saturating_sub(1)
+    };
+    let widest = rows.iter().map(span).max().unwrap_or(0);
+    let start = width.saturating_sub(widest) / 2;
+    rows.iter()
+        .map(|row| {
+            let drawn: Vec<String> = tabs[row.clone()]
+                .iter()
+                .zip(&labels[row.clone()])
+                .map(|(tab, label)| match *tab == open {
+                    true => label.clone(),
+                    false => format!("{DIM}{label}{NORMAL_INTENSITY}{BOLD}"),
+                })
+                .collect();
+            let line = format!("{BOLD}{}{}{RESET}", " ".repeat(start), drawn.join(gap));
+            match start + span(row) > width {
+                true => super::pad_visible(&line, width),
+                false => line,
+            }
         })
-        .collect();
-    format!(
-        "{BOLD}{}{}{RESET}",
-        " ".repeat(start),
-        drawn.join(LABEL_GAP)
-    )
+        .collect()
 }
 
 /// SGR 22, which ends dim. It ends bold too, so the strip writes its bold
-/// again straight after it — see [`strip_line`].
+/// again straight after it — see [`strip_lines`].
 const NORMAL_INTENSITY: &str = "\x1b[22m";
 
 /// Open the screen: bare `spoolway` in a terminal.
@@ -474,7 +557,7 @@ pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
 }
 
 /// The label of the tab `line` draws lit, when `line` is the strip: the one
-/// label with no dim code in front of it — see [`strip_line`]. `None` for
+/// label with no dim code in front of it — see [`strip_lines`]. `None` for
 /// any other line, so a test can hand it every row of a frame.
 ///
 /// `None` too for a strip with no dim code at all: that is a strip whose
@@ -1546,15 +1629,151 @@ mod tests {
         assert_eq!(lit_tab("│   dispatch   │"), None);
     }
 
-    // A terminal too narrow for the labels starts them in the drawing
-    // area's first column rather than underflowing the centring.
+    /// The strip drawn as [`strip_lines`] draws it at a width wide enough
+    /// for one row, for a test that reads that one row.
+    fn strip_line(open: Tab, tabs: &[Tab], width: usize) -> String {
+        let rows = strip_lines(open, tabs, width);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        rows.into_iter().next().unwrap()
+    }
+
+    // An 86-column drawing area is the narrowest that holds every label on
+    // one row at the eight-column gap, drawn as it is at 106. One column
+    // less narrows the gap to four, never to anything between.
     #[test]
-    fn a_narrow_terminal_starts_the_strip_in_the_first_column() {
-        for tabs in [&TABS[..], &HOME_TABS[..]] {
-            let line = plain(&strip_line(Tab::Queue, tabs, 20));
-            assert!(line.starts_with("[1] DISPATCH"), "{line:?}");
-            assert!(line.ends_with("EVAL"), "{line:?}");
+    fn the_gap_stays_eight_columns_while_one_row_still_fits_at_it() {
+        assert_eq!(
+            plain(&strip_line(Tab::Queue, &TABS, 86)),
+            "[1] DISPATCH        [2] QUEUE        [3] ROUTINES        \
+             [4] OVERRIDES        [5] EVAL"
+        );
+        assert_eq!(
+            plain(&strip_line(Tab::Queue, &TABS, 85)),
+            "       [1] DISPATCH    [2] QUEUE    [3] ROUTINES    \
+             [4] OVERRIDES    [5] EVAL"
+        );
+    }
+
+    // An 80-column terminal's 78-column area: one row at a four-column gap,
+    // centred, where an eight-column gap once wrapped `[5] EVAL` in two.
+    #[test]
+    fn an_eighty_column_terminal_draws_one_row_at_a_four_column_gap() {
+        assert_eq!(
+            plain(&strip_line(Tab::Queue, &TABS, 78)),
+            "    [1] DISPATCH    [2] QUEUE    [3] ROUTINES    \
+             [4] OVERRIDES    [5] EVAL"
+        );
+    }
+
+    // A 60-column terminal's 58-column area: three labels then two, the
+    // widest row centred and the second starting in the same column.
+    #[test]
+    fn a_sixty_column_terminal_draws_three_labels_over_two() {
+        let rows: Vec<String> = strip_lines(Tab::Queue, &TABS, 58)
+            .iter()
+            .map(|row| plain(row))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "        [1] DISPATCH    [2] QUEUE    [3] ROUTINES",
+                "        [4] OVERRIDES    [5] EVAL",
+            ]
+        );
+    }
+
+    // The labels split as evenly as the fewest fitting rows allow, in tab
+    // order, earlier rows taking the extra label: four home-mode tabs go two
+    // and two, five repo-mode tabs two, two and one once two rows no longer
+    // fit, and one label to a row once two side by side do not.
+    #[test]
+    fn the_labels_split_evenly_with_earlier_rows_taking_the_extra_one() {
+        let rows = |tabs: &[Tab], width| -> Vec<String> {
+            strip_lines(Tab::Queue, tabs, width)
+                .iter()
+                .map(|row| plain(row).trim_end().to_string())
+                .collect()
+        };
+        assert_eq!(
+            rows(&HOME_TABS, 52),
+            ["[1] DISPATCH    [2] QUEUE", "[3] ROUTINES    [4] EVAL",]
+                .map(|row| format!("{}{row}", " ".repeat(13)))
+        );
+        assert_eq!(
+            rows(&TABS, 30),
+            [
+                "[1] DISPATCH    [2] QUEUE",
+                "[3] ROUTINES    [4] OVERRIDES",
+                "[5] EVAL",
+            ]
+        );
+        assert_eq!(
+            rows(&TABS, 20),
+            [
+                "[1] DISPATCH",
+                "[2] QUEUE",
+                "[3] ROUTINES",
+                "[4] OVERRIDES",
+                "[5] EVAL",
+            ]
+            .map(|row| format!("   {row}"))
+        );
+    }
+
+    // A label wider than the area, on a row of its own, starts in the
+    // area's first column and is cut at its last. Every row opens bold and
+    // ends on a reset, so no dim or bold reaches the row under it — the cut
+    // row too, whose own reset the cut took.
+    #[test]
+    fn a_label_wider_than_the_area_is_cut_and_every_row_closes_its_codes() {
+        use crate::status::{BOLD, RESET};
+        for open in [Tab::Overrides, Tab::Queue] {
+            let rows = strip_lines(open, &TABS, 10);
+            assert_eq!(
+                rows.iter().map(|row| plain(row)).collect::<Vec<_>>(),
+                [
+                    "[1] DISPAT",
+                    "[2] QUEUE",
+                    "[3] ROUTIN",
+                    "[4] OVERRI",
+                    "[5] EVAL",
+                ]
+            );
+            for row in &rows {
+                assert!(row.starts_with(BOLD), "{row:?}");
+                assert!(row.ends_with(RESET), "{row:?}");
+            }
         }
+        for row in strip_lines(Tab::Queue, &TABS, 58) {
+            assert!(row.starts_with(BOLD), "{row:?}");
+            assert!(row.ends_with(RESET), "{row:?}");
+        }
+    }
+
+    // `strip_rows` counts what `strip` draws at every width the terminal
+    // can take, in both modes: a blank row above, the strip's own rows and
+    // a blank row under them, and never a blank row between its own rows.
+    #[test]
+    fn strip_rows_is_the_length_of_the_strip_at_every_width() {
+        for tab in [Tab::Queue, Tab::Eval] {
+            let _hosting = Hosting::open(tab);
+            for width in 3..=120 {
+                let _terminal = crate::screen::test_terminal((width, 30));
+                let strip = strip();
+                assert_eq!(strip_rows(), strip.len(), "{width} columns");
+                assert_eq!(strip[0], "", "{width} columns");
+                assert_eq!(strip[strip.len() - 1], "", "{width} columns");
+                assert!(
+                    strip[1..strip.len() - 1]
+                        .iter()
+                        .all(|row| !plain(row).trim().is_empty()),
+                    "{width} columns: {strip:?}"
+                );
+            }
+        }
+        let _hosting = Hosting::open(Tab::Queue);
+        let _terminal = crate::screen::test_terminal((60, 30));
+        assert_eq!(strip_rows(), 4);
     }
 
     // Each digit opens the tab the strip numbers with it, and a digit with
@@ -1841,6 +2060,49 @@ mod tests {
                     .is_some_and(|line| line.contains("[1] DISPATCH")),
                 "{name}: the strip is still on its own row:\n{shown}"
             );
+        }
+    }
+
+    /// Every tab in a 71-column terminal, the widest where the strip takes
+    /// two rows: both sit together under the blank top row with one blank
+    /// row under them, and each tab takes the second off its body, so its
+    /// key line still ends above the last two blank rows rather than one row
+    /// lower. Not narrower: the eval tab's frame keeps a width of its own
+    /// below which every row wraps, strip or no strip.
+    #[test]
+    fn every_tab_takes_a_two_row_strip_off_its_body() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-host-two-row-strip");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let (width, height) = (71, 30);
+        let _terminal = crate::screen::test_terminal((width, height));
+        let frames = drive_host_raw_frames(&repo, "12345");
+        assert_eq!(frames.len(), 6, "{frames:?}");
+
+        for frame in &frames {
+            let mut parser = crate::screen::frame_writer::test_parser((width, height));
+            parser.process(&crate::screen::frame_writer::as_terminal_would_receive(
+                frame.as_bytes(),
+            ));
+            let shown = parser.screen().contents();
+            // `contents` leaves off the blank rows at the foot, so a row
+            // past its last line reads as the blank row it is on screen.
+            let rows: Vec<&str> = shown.split('\n').collect();
+            let row = |at: usize| rows.get(at).map_or("", |row| row.trim_end());
+            assert_eq!(row(0), "", "{shown}");
+            assert_eq!(
+                row(1),
+                "               [1] DISPATCH    [2] QUEUE    [3] ROUTINES",
+                "{shown}"
+            );
+            assert_eq!(
+                row(2),
+                "               [4] OVERRIDES    [5] EVAL",
+                "{shown}"
+            );
+            assert_eq!(row(3), "", "{shown}");
+            assert!(row(height - 3).contains("[q] quit"), "{shown}");
+            assert_eq!(row(height - 2), "", "{shown}");
+            assert_eq!(row(height - 1), "", "{shown}");
         }
     }
 
