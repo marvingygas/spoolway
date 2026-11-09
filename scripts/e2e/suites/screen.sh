@@ -31,11 +31,13 @@
 # local branch with no checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
 # keeps its key line. The dispatch tab's box ends on a tip row, on the empty
-# board and the full one alike, and `dispatch.tips = false` draws none. Off a terminal, bare `spoolway` still prints
-# the grouped help.
+# board and the full one alike, and `dispatch.tips = false` draws none. Off a
+# terminal, bare `spoolway` still prints the grouped help.
 #
-# No `covers:` tag — the coverage map only enumerates `config.toml` keys and
-# pipeline step keys, and a screen gesture is neither.
+# covers: dispatch.tips — set to false, the full board draws no tip row and keeps its table
+#
+# Every other check here is a screen gesture, which the coverage map, that only
+# enumerates `config.toml` keys and pipeline step keys, does not list.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -549,16 +551,17 @@ has "its last table row counts the tasks out of view" "tasks below" "$LAST"
 has "the key line is still drawn under it" "[o] options" "$LAST"
 ends_on_a_tip "full" "$LAST"
 
-# `dispatch.tips = false` takes the row away. It is put back straight after, so
-# the checks below draw the board they always did.
+# `dispatch.tips = false` takes the row away. The frame goes to a file of its
+# own, so the margin check below still measures the board with its tip row, and
+# the setting is put back straight after.
 must "tips are turned off" "$SPOOLWAY" config set dispatch.tips false
 NOTIPS="$LIVE/no-tips.txt"
 works "the full board is drawn again" \
   script -qec "stty rows 30 cols 120; printf '' | '$SPOOLWAY'" "$NOTIPS"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$NOTIPS" |
-  sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
-has "with tips off it is still the full board" "tasks below" "$LAST"
-lacks "with tips off no tip row is drawn" "│ tip  " "$LAST"
+  sed 's/\x1b\[[0-9;]*m//g' >"$NOTIPS.plain"
+has "with tips off it is still the full board" "tasks below" "$NOTIPS.plain"
+lacks "with tips off no tip row is drawn" "│ tip  " "$NOTIPS.plain"
 must "tips are turned back on" "$SPOOLWAY" config set dispatch.tips true
 
 # The margin, read off a real pty rather than a test terminal: at 120 columns
