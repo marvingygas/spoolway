@@ -1238,7 +1238,7 @@ pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Ve
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A colour open where a panel starts is closed before it and opened
@@ -1346,6 +1346,10 @@ mod tests {
         ("Windows", "proper noun"),
         ("Unix", "proper noun"),
         ("Jira", "proper noun"),
+        // The placeholder a key is written with where a number goes, as in
+        // `above_<N>k_tokens`. It is a lone capital, so no other rule lets
+        // it through.
+        ("N", "placeholder"),
     ];
 
     /// The greeting, whole: its first word is no capital to allow anywhere
@@ -1363,7 +1367,7 @@ mod tests {
     /// A word is a run of letters and digits, so `Press` in `(Press o)` is
     /// found, and a word with no lowercase letter, such as `ULID`, is read
     /// whole and let through.
-    fn capital_violation(line: &str) -> Option<(usize, String)> {
+    pub(crate) fn capital_violation(line: &str) -> Option<(usize, String)> {
         // Blanked rather than cut, so a column the report marks is still the
         // column in the line.
         let mut line = line.to_string();
