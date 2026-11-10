@@ -7,7 +7,8 @@
 #
 # What is asserted is the order of the frames it drew: the first is the dispatch
 # tab's board under a strip numbering every tab, the arrows leave it there and
-# `2` reaches the queue tab. On the
+# `2` reaches the queue tab. In a narrow pty the strip breaks between two
+# labels onto a second row. On the
 # board `enter` starts a dispatcher and, with no step running and nothing queued, stops it at once
 # with no popup. With a task queued it asks first. `u` there asks the running
 # dispatcher to reload, and the popup it opens closes itself once loaded.
@@ -69,9 +70,17 @@ pending_doc cart-totals "$BODY" "group: cart"
 # pty is what makes stdout a terminal; stdin is the `printf` pipe, so the
 # screen reads `2` and then runs out of keys, which ends it. The typescript
 # `script` writes is everything the screen drew.
+#
+# Every run whose eight-column strip is matched below sets the pty to 88
+# columns or more first, 100 where nothing else asks for a size. Left alone
+# it takes the size of whatever terminal runs the suite, and in one narrower
+# than 88 columns the strip narrows its gap or breaks onto a second row, so
+# `$STRIP` and `lit` would no longer match. With no terminal around the
+# suite at all the pty has no rows, and the screen falls back to the same
+# 100 columns it draws at here.
 DRAWN="$LIVE/drawn.txt"
 works "bare spoolway opens and ends when its keys run out" \
-  script -qec "printf '2' | '$SPOOLWAY'" "$DRAWN"
+  script -qec "stty cols 100; printf '2' | '$SPOOLWAY'" "$DRAWN"
 
 # The real `TermGuard` the screen holds across its whole life enters the
 # alternate screen and turns wheel-as-arrows off before drawing a thing, and
@@ -143,6 +152,28 @@ lacks "which is no longer the dispatch tab" "dispatcher" "$LAST"
 has "with nothing selected the key line names space and o" \
   "[space] select   [o] options   [f] search   [h] show done tasks" "$LAST"
 lacks "and no enter, which would queue nothing" "[enter] queue" "$LAST"
+
+# A 60-column pty leaves the strip 58 columns, too few for every label on
+# one row even at the narrower four-column gap. The strip breaks between two
+# labels, never inside one: three labels over two, the widest row centred
+# and the second starting in the same column. Every escape code and the `\r`
+# a tty adds are taken out, so each row reads as the columns it fills, the
+# frame writer's one-column indent included.
+NARROW="$LIVE/narrow.txt"
+works "bare spoolway in a 60-column pty ends when its keys run out" \
+  script -qec "stty rows 30 cols 60; printf '' | '$SPOOLWAY'" "$NARROW"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$NARROW" |
+  sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\x1b[78]//g' -e 's/\r$//' |
+  grep -A1 -F "[1] DISPATCH" >"$LAST"
+NARROW_STRIP="         [1] DISPATCH    [2] QUEUE    [3] ROUTINES
+         [4] OVERRIDES    [5] EVAL"
+if [ "$(cat "$LAST")" = "$NARROW_STRIP" ]; then
+  ok "a narrow strip draws three labels over two, on one left edge"
+else
+  bad "a narrow strip draws three labels over two, on one left edge"
+  sed 's/^/        |/' "$LAST"
+fi
+
 SPACE="$LIVE/space.txt"
 works "2 then space ends when its keys run out" \
   script -qec "printf '2 ' | '$SPOOLWAY'" "$SPACE"
@@ -370,7 +401,7 @@ else bad "an open screen holds spoolway.pid"; fi
 
 SECOND="$LIVE/second.txt"
 works "a second bare spoolway in the same project ends on its own" \
-  script -qec "printf '' | '$SPOOLWAY'" "$SECOND"
+  script -qec "stty cols 100; printf '' | '$SPOOLWAY'" "$SECOND"
 sed 's/\x1b\[[0-9;]*m//g' "$SECOND" >"$SECOND.plain"
 has "and says the one line" "dispatcher already running" "$SECOND.plain"
 lacks "without drawing a screen" "$STRIP" "$SECOND.plain"
@@ -384,7 +415,7 @@ then ok "the screen lets go of spoolway.pid when it quits"
 else bad "the screen lets go of spoolway.pid when it quits"; fi
 AFTER="$LIVE/after.txt"
 works "a screen opened after it opens as usual" \
-  script -qec "printf '' | '$SPOOLWAY'" "$AFTER"
+  script -qec "stty cols 100; printf '' | '$SPOOLWAY'" "$AFTER"
 sed 's/\x1b\[[0-9;]*m//g' "$AFTER" >"$AFTER.plain"
 lacks "not refused" "dispatcher already running" "$AFTER.plain"
 has "drawing the strip" "$STRIP" "$AFTER.plain"
@@ -398,7 +429,7 @@ has "drawing the strip" "$STRIP" "$AFTER.plain"
 pending_doc bad-stage "$BODY" "group: refused" "stage: taken"
 REFUSED="$LIVE/refused.txt"
 works "a refused submission on the queue tab ends when its keys run out" \
-  script -qec "printf '2 \\r' | '$SPOOLWAY'" "$REFUSED"
+  script -qec "stty cols 100; printf '2 \\r' | '$SPOOLWAY'" "$REFUSED"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$REFUSED" |
   sed 's/\x1b\[[0-9;]*m//g' >"$LAST"
 has "the refusal is drawn in a popup" "╭─ submission refused " "$LAST"
@@ -473,7 +504,7 @@ rm -f "$TRACKING/billing-export · started.exit" "$TRACKING/billing-export · st
 # or queued.
 ALL_TABS="$LIVE/all-tabs.txt"
 works "cycling every tab does not crash the screen" \
-  script -qec "printf '23454321' | '$SPOOLWAY'" "$ALL_TABS"
+  script -qec "stty cols 100; printf '23454321' | '$SPOOLWAY'" "$ALL_TABS"
 if grep -aqF $'\x1b[2J' "$ALL_TABS"; then
   bad "no frame drawn while cycling every tab still erases the whole screen"
   tail -30 "$ALL_TABS" | cat -v
@@ -500,7 +531,7 @@ mkdir -p .spoolway/routines/nightly
 task_doc .spoolway/routines/nightly/audit-deps.md audit-deps "$BODY" "group: nightly"
 ROUTINES="$LIVE/routines.txt"
 works "3 from the opening tab ends when its keys run out" \
-  script -qec "printf '3' | '$SPOOLWAY'" "$ROUTINES"
+  script -qec "stty cols 100; printf '3' | '$SPOOLWAY'" "$ROUTINES"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$ROUTINES" >"$LAST.raw"
 sed 's/\x1b\[[0-9;]*m//g' "$LAST.raw" >"$LAST"
 has "3 reaches the routines tab" "$(lit '[3] ROUTINES')" "$LAST.raw"

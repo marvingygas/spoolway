@@ -1198,13 +1198,23 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 /// title of a popup drawn over it, if there is one. A popup's top border
 /// sits inside the tab's own `│` border, which a pane's title never does.
 ///
+/// The strip's rows are every row between the blank one at the top and the
+/// next blank one, however many rows a narrow terminal breaks it onto, and
+/// the lit label can sit on any of them. A frame that does not open on a
+/// blank row has no strip.
+///
 /// `lines` keep their codes: the lit tab differs from the rest only by the
 /// dim in front of every other label, which plain text has lost.
 #[cfg(test)]
 pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
-    let tab = lines
+    let blank = |line: &String| shell::plain(line).trim().is_empty();
+    let strip = match lines.first() {
+        Some(first) if blank(first) => &lines[1..],
+        _ => &[],
+    };
+    let tab = strip
         .iter()
-        .take(3)
+        .take_while(|line| !blank(line))
         .find_map(|line| shell::lit_tab(line))
         .map_or(fallback.to_string(), str::to_lowercase);
     let lines: Vec<String> = lines.iter().map(|line| shell::plain(line)).collect();

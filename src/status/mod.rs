@@ -37,7 +37,7 @@ pub use view::{banner, plain_table};
 // Re-exported, not just imported: `screen::key_hint` reads the same dim and
 // gutter the board paints its own key line with, rather than spelling either
 // out a second time — see `screen::key_hint` — and bare `spoolway`'s tab strip
-// the same bold the wordmark is drawn in — see `screen::shell::strip_line`.
+// the same bold the wordmark is drawn in — see `screen::shell::strip_lines`.
 use view::{
     AMBER, Cause, Move, RecentEvent, Reported, Style, board_header, board_masthead, boxed,
     clamp_rows, config_notice, first_name, footer, greeting, greeting_screen, group_totals,
