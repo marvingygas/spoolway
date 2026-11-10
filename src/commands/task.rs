@@ -559,11 +559,18 @@ pub fn task_contract(
     }
 
     let tasks = super::queue::gather_tasks(&args.from)?;
-    let tasks = super::queue::validate_batch(repo, pipelines, args.base.as_deref(), &tasks)?;
+    let mut asks = super::queue::OriginAsks::default();
+    let tasks = super::queue::validate_batch_with(
+        repo,
+        pipelines,
+        args.base.as_deref(),
+        &tasks,
+        &mut asks,
+    )?;
     // `queue add` refuses a task whose start branch is missing right after
     // validating; the check has to run here too, or this says "no problems"
     // about a file `queue add` would turn away.
-    super::queue::refuse_missing_start(repo, &tasks)?;
+    super::queue::refuse_missing_start(repo, &tasks, &mut asks)?;
     print_check_report(&tasks, pipelines)
 }
 

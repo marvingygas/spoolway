@@ -670,8 +670,10 @@ fn queue_add_dry_run(
 ) -> Result<()> {
     // A typo in a group name is refused by a dry run too: it is the run a
     // person checks a command line with before they trust it.
-    let tasks = validate_batch_untracking(repo, pipelines, base, submitted, no_tracking)?;
-    refuse_missing_start(repo, &tasks)?;
+    let mut asks = OriginAsks::default();
+    let tasks =
+        validate_batch_untracking(repo, pipelines, base, submitted, no_tracking, &mut asks)?;
+    refuse_missing_start(repo, &tasks, &mut asks)?;
     println!("dry run — nothing written");
     println!("  project: {}", repo.root.display());
     println!("  home:    {}", repo.home.display());
@@ -1499,7 +1501,20 @@ pub(crate) fn validate_batch(
     base: Option<&str>,
     submitted: &[(String, String)],
 ) -> Result<Vec<Task>> {
-    validate_batch_untracking(repo, pipelines, base, submitted, &[])
+    validate_batch_with(repo, pipelines, base, submitted, &mut OriginAsks::default())
+}
+
+/// [`validate_batch`] with the answers of `origin` kept in `asks`, so the
+/// caller can hand the same ones to [`refuse_missing_start`] and the whole
+/// submission asks `origin` once.
+pub(crate) fn validate_batch_with(
+    repo: &Repo,
+    pipelines: &Pipelines,
+    base: Option<&str>,
+    submitted: &[(String, String)],
+    asks: &mut OriginAsks,
+) -> Result<Vec<Task>> {
+    validate_batch_untracking(repo, pipelines, base, submitted, &[], asks)
 }
 
 /// [`validate_batch`] for `queue add --no-tracking`: `no_tracking` is the
@@ -1513,8 +1528,9 @@ fn validate_batch_untracking(
     base: Option<&str>,
     submitted: &[(String, String)],
     no_tracking: &[String],
+    asks: &mut OriginAsks,
 ) -> Result<Vec<Task>> {
-    let tasks = validate_batch_undescribed(repo, pipelines, base, submitted, no_tracking)?;
+    let tasks = validate_batch_undescribed(repo, pipelines, base, submitted, no_tracking, asks)?;
     require_group_description(repo, &tasks)?;
     Ok(tasks)
 }
@@ -1528,21 +1544,39 @@ fn validate_batch_untracking(
 /// [`require_group_description`] themselves once [`untrack_groups`] has
 /// stamped the ticked groups. Checked first, it would refuse a group the
 /// person is about to untrack before the checklist could be drawn.
+///
+/// `origin` is asked once, before the first task is checked, about every
+/// branch any task's checks will need: see [`origin_candidates`].
 fn validate_batch_undescribed(
     repo: &Repo,
     pipelines: &Pipelines,
     base: Option<&str>,
     submitted: &[(String, String)],
     no_tracking: &[String],
+    asks: &mut OriginAsks,
 ) -> Result<Vec<Task>> {
     if submitted.is_empty() {
         bail!("`--from` named nothing to queue");
     }
 
+    // Every task is parsed before the first is checked, so the one question
+    // to `origin` can name all their branches. A task that fails to parse
+    // is refused when its turn comes, as before: the error waits in
+    // `parsed` and no earlier task's refusal is overtaken by it.
+    let parsed: Vec<Result<Task>> = submitted
+        .iter()
+        .map(|(name, raw)| parse_submission(name, raw, base))
+        .collect();
+    asks.ask_all(
+        repo,
+        parsed
+            .iter()
+            .flatten()
+            .flat_map(|task| origin_candidates(repo, task)),
+    );
     let mut tasks = Vec::new();
-    let mut asks = OriginAsks::default();
-    for (name, raw) in submitted {
-        let mut task = parse_submission(name, raw, base)?;
+    for ((name, _), parsed) in submitted.iter().zip(parsed) {
+        let mut task = parsed?;
         // Whatever base a task ends up with — a task's own, or the
         // submission's `--base` — has to be a branch this repository really
         // has, checked here rather than only when a task's value
@@ -1554,7 +1588,7 @@ fn validate_batch_undescribed(
             .base
             .as_deref()
             .expect("parse_submission always resolves a base or refuses the task");
-        check_task_base(repo, name, resolved)?;
+        check_task_base_with(repo, name, resolved, asks)?;
 
         let pipeline_name = task
             .front
@@ -1593,7 +1627,7 @@ fn validate_batch_undescribed(
         // own worktree and branch, and telling a person to remove those would
         // be advice to destroy live work.
         if let Some(refusal) =
-            leftover_refusal(repo, &task.front.id, &task_branch(&task), Some(&mut asks))
+            leftover_refusal(repo, &task.front.id, &task_branch(&task), Some(&mut *asks))
         {
             bail!("{refusal}");
         }
@@ -2033,41 +2067,118 @@ fn leftover_refusal(
 }
 
 /// What one submission has learnt from `origin`: per branch whether it is
-/// there, and whether `origin` has failed to answer at all.
+/// there or the question went unanswered, and whether `origin` has failed to
+/// answer at all.
 ///
-/// Each question is bounded by [`Repo::remote_branch_answer`], but a batch
-/// holds several tasks. An `origin` that hangs would cost the full limit at
-/// every one of them, tens of seconds with nothing printed. So the first
-/// non-answer is remembered and every later question is declined without
-/// asking: the wait stays at one limit however many tasks there are.
+/// A submission names its branches up front and puts them to `origin` in one
+/// `git ls-remote` — see [`OriginAsks::ask_all`] — so a batch waits one
+/// [`Repo::remote_branch_answer`] limit however many tasks it holds. A branch
+/// nobody named is asked about on its own, unless `origin` has already failed
+/// to answer: that first non-answer is remembered and every later question is
+/// declined without asking, so an `origin` that hangs still costs one limit.
 ///
 /// It lives for one check of one submission and is never kept beyond it. A
 /// person refused on the board deletes the branch the refusal named and
 /// submits again, and that second submission must ask `origin` afresh.
 #[derive(Default)]
-struct OriginAsks {
+pub(crate) struct OriginAsks {
     silent: bool,
-    branches: BTreeMap<String, bool>,
+    branches: BTreeMap<String, Option<bool>>,
 }
 
 impl OriginAsks {
+    /// Puts every branch of `wanted` not answered yet to `origin` in one
+    /// `git ls-remote`. A failure answers all of them alike with `None`, the
+    /// same non-answer each check would have got from asking alone.
+    fn ask_all(&mut self, repo: &Repo, wanted: impl IntoIterator<Item = String>) {
+        if self.silent {
+            return;
+        }
+        let wanted: BTreeSet<String> = wanted
+            .into_iter()
+            .filter(|branch| !self.branches.contains_key(branch))
+            .collect();
+        let wanted: Vec<String> = wanted.into_iter().collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let has = repo.remote_branches_answer(&wanted);
+        self.silent = has.is_none();
+        for branch in wanted {
+            let answer = has.as_ref().map(|has| has.contains(&branch));
+            self.branches.insert(branch, answer);
+        }
+    }
+
     /// Whether `origin` has `branch`, or `None` when it could not be asked.
     fn has_branch(&mut self, repo: &Repo, branch: &str) -> Option<bool> {
+        if let Some(&answer) = self.branches.get(branch) {
+            return answer;
+        }
         if self.silent {
             return None;
         }
-        if let Some(&has) = self.branches.get(branch) {
-            return Some(has);
-        }
         let answer = repo.remote_branch_answer(branch);
-        match answer {
-            Some(has) => {
-                self.branches.insert(branch.to_string(), has);
-            }
-            None => self.silent = true,
-        }
+        self.silent = answer.is_none();
+        self.branches.insert(branch.to_string(), answer);
         answer
     }
+
+    /// What this submission has learnt, in the shape
+    /// [`crate::dispatch::branch_known`] keeps its own. The submission fills
+    /// a cache of its own from it; the dispatcher's is never touched.
+    fn remote_cache(&self) -> crate::dispatch::RemoteCache {
+        self.branches
+            .iter()
+            .map(|(branch, answer)| (branch.clone(), *answer))
+            .collect()
+    }
+}
+
+/// The branches `origin` may be asked about for `task`, across the leftover
+/// check, the base check and the start-branch check: only those the local
+/// checkout does not already answer, since each check asks `origin` only
+/// after its local reads come up empty.
+///
+/// A superset is harmless, since an answer nobody reads costs nothing, while
+/// a branch left out is asked about on its own later. So this does not stop
+/// where a check would refuse.
+fn origin_candidates(repo: &Repo, task: &Task) -> Vec<String> {
+    let mut wanted = Vec::new();
+    if let Some(base) = task.front.base.as_deref()
+        && matches!(check_task_base_locally(repo, task.id(), base), Ok(false))
+    {
+        wanted.push(base.to_string());
+    }
+    let branch = task_branch(task);
+    if !has_local_leftover(repo, &branch) {
+        wanted.push(branch);
+    }
+    wanted.extend(start_branch_to_check(repo, task).filter(|start| !known_locally(repo, start)));
+    wanted
+}
+
+/// Whether `branch` has a worktree or a local branch left behind, which
+/// [`leftover_refusal`] reports without asking `origin`.
+fn has_local_leftover(repo: &Repo, branch: &str) -> bool {
+    repo.worktree_root()
+        .join(crate::mux::branch_slug(branch))
+        .exists()
+        || ref_exists(repo, branch)
+}
+
+/// Whether `branch` is a local branch or a remote-tracking ref of `origin`:
+/// what [`crate::dispatch::branch_known`] reads before it asks `origin`.
+fn known_locally(repo: &Repo, branch: &str) -> bool {
+    ["refs/heads", "refs/remotes/origin"].iter().any(|prefix| {
+        repo.git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{prefix}/{branch}"),
+        ])
+        .is_ok()
+    })
 }
 
 /// How long [`open_pull_request`] waits for `gh`, the same as the question
@@ -2260,10 +2371,16 @@ fn ref_exists(repo: &Repo, branch: &str) -> bool {
 /// reaches `rev-parse` and `check-ref-format` here would otherwise be read
 /// as a flag, the same reason `branch:` is refused outright.
 pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
+    check_task_base_with(repo, name, base, &mut OriginAsks::default())
+}
+
+/// [`check_task_base`] reading what `origin` has from `asks`, so a batch's
+/// bases are not each asked about on their own.
+fn check_task_base_with(repo: &Repo, name: &str, base: &str, asks: &mut OriginAsks) -> Result<()> {
     if check_task_base_locally(repo, name, base)? {
         return Ok(());
     }
-    match repo.remote_branch_answer(base) {
+    match asks.has_branch(repo, base) {
         Some(true) => Ok(()),
         Some(false) => Err(anyhow::Error::msg(format!(
             "{name}: `base: {base}` names a branch this repository does not have locally or on \
@@ -2350,6 +2467,13 @@ fn missing_start_branch(
     task: &Task,
     remote_cache: &mut crate::dispatch::RemoteCache,
 ) -> Option<String> {
+    let start = start_branch_to_check(repo, task)?;
+    (crate::dispatch::branch_known(repo, &start, remote_cache) == Some(false)).then_some(start)
+}
+
+/// The branch [`missing_start_branch`] looks for, or `None` when `task` has
+/// nothing to check yet.
+fn start_branch_to_check(repo: &Repo, task: &Task) -> Option<String> {
     let base = task.front.base.as_deref()?;
     match (&task.front.starts_from, task.front.depends_on.first()) {
         (Some(own), _) if own.trim().is_empty() => return None,
@@ -2364,18 +2488,27 @@ fn missing_start_branch(
         }
         (None, None) => return None,
     }
-    let start = crate::dispatch::start_branch(repo, task, base).ok()?;
-    (crate::dispatch::branch_known(repo, &start, remote_cache) == Some(false)).then_some(start)
+    crate::dispatch::start_branch(repo, task, base).ok()
 }
 
 /// Every task in `tasks` that queueing leaves out: each whose start branch
 /// does not exist — see [`missing_start_branch`] — and every task in the
 /// batch that depends on one of those, directly or through another left out.
 /// In batch order, so a chain reads top to bottom.
-pub(crate) fn not_queued(repo: &Repo, tasks: &[Task]) -> Vec<NotQueued> {
-    // One ask of `origin` per branch for the whole batch, a failed one
-    // included, the way a dispatcher pass shares its own.
-    let mut remote_cache = crate::dispatch::RemoteCache::new();
+///
+/// `asks` holds what the submission's validation already learnt from
+/// `origin`. Any start branch it did not name is put to `origin` here in one
+/// call, and the whole batch's answers fill a cache of this check's own, a
+/// failed ask included, so the dispatcher's cache is never involved.
+pub(crate) fn not_queued(repo: &Repo, tasks: &[Task], asks: &mut OriginAsks) -> Vec<NotQueued> {
+    asks.ask_all(
+        repo,
+        tasks
+            .iter()
+            .filter_map(|task| start_branch_to_check(repo, task))
+            .filter(|start| !known_locally(repo, start)),
+    );
+    let mut remote_cache = asks.remote_cache();
     let mut out: Vec<NotQueued> = tasks
         .iter()
         .filter_map(|task| {
@@ -2471,8 +2604,12 @@ fn missing_start_sentences(not_queued: &[NotQueued]) -> Vec<String> {
 /// `queue add`'s refusal of a whole batch over any task whose start branch
 /// does not exist. A command has no summary to list the rest in, so it
 /// queues none of it, the way every other refusal of `queue add` does.
-pub(crate) fn refuse_missing_start(repo: &Repo, tasks: &[Task]) -> Result<()> {
-    let sentences = missing_start_sentences(&not_queued(repo, tasks));
+pub(crate) fn refuse_missing_start(
+    repo: &Repo,
+    tasks: &[Task],
+    asks: &mut OriginAsks,
+) -> Result<()> {
+    let sentences = missing_start_sentences(&not_queued(repo, tasks, asks));
     if !sentences.is_empty() {
         bail!("{}\n\nnothing was queued.", sentences.join("\n"));
     }
@@ -2515,8 +2652,10 @@ fn queue_add_tasks(
     // group named wrongly is refused while nothing has been opened, and a
     // named group's tasks are already `tracking: off` by the time
     // `open_tickets` looks, so it passes them by.
-    let mut tasks = validate_batch_untracking(repo, pipelines, base, submitted, no_tracking)?;
-    refuse_missing_start(repo, &tasks)?;
+    let mut asks = OriginAsks::default();
+    let mut tasks =
+        validate_batch_untracking(repo, pipelines, base, submitted, no_tracking, &mut asks)?;
+    refuse_missing_start(repo, &tasks, &mut asks)?;
     // `esc` from an interactive run — a real terminal on both ends of
     // `queue add --from` — is not a refusal: it means the same thing it
     // means on the queue screen, "go back", so it is caught here rather
@@ -2856,11 +2995,21 @@ fn open_and_prefix_waiting(
     // it instead of opening a second one.
     //
     // `origin` is asked only about a branch the prefix has just renamed,
-    // since `validate_batch` already asked about every `task/<id>`. The asks
-    // here start afresh, so a renamed branch can cost a second limit on an
-    // `origin` that did not answer there. The silence is not carried across
-    // the issue hook, which the board may wait on for a person's answer.
+    // since `validate_batch` already asked about every `task/<id>`, and one
+    // `git ls-remote` names all of them. The asks here start afresh, so the
+    // renamed branches can cost a second limit on an `origin` that did not
+    // answer there. The silence is not carried across the issue hook, which
+    // the board may wait on for a person's answer.
     let mut asks = OriginAsks::default();
+    asks.ask_all(
+        repo,
+        tasks
+            .iter()
+            .map(|task| (task.id(), task_branch(task)))
+            .filter(|(id, branch)| *branch != crate::task::default_branch(id))
+            .map(|(_, branch)| branch)
+            .filter(|branch| !has_local_leftover(repo, branch)),
+    );
     for task in tasks.iter() {
         let branch = task_branch(task);
         let renamed = branch != crate::task::default_branch(task.id());
@@ -11496,16 +11645,18 @@ fn begin_submission(
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let tasks = selected_tasks(groups, state);
-    let pending = match validate_batch_undescribed(repo, pipelines, Some(base), &tasks, &[]) {
-        Ok(pending) => pending,
-        Err(err) => return outcome("submission refused", format!("{err:#}")),
-    };
+    let mut asks = OriginAsks::default();
+    let pending =
+        match validate_batch_undescribed(repo, pipelines, Some(base), &tasks, &[], &mut asks) {
+            Ok(pending) => pending,
+            Err(err) => return outcome("submission refused", format!("{err:#}")),
+        };
     // Unlike `queue add`, the screen queues the rest of the batch: the
     // queued summary lists what it left out and why.
     // `validate_batch_undescribed` parses one task per entry of `tasks`, in
     // order, so the two are filtered together and stay index-aligned for
     // `open_and_prefix`.
-    let not_queued = not_queued(repo, &pending);
+    let not_queued = not_queued(repo, &pending, &mut asks);
     let mut pending = pending;
     carry_group_descriptions(&mut pending, &not_queued);
     let (tasks, pending): (Vec<_>, Vec<_>) = tasks
@@ -13395,10 +13546,12 @@ fn finish_routine_mode(
     redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let ((tasks, names), task_files) = batch;
-    let mut tasks = match validate_batch_undescribed(repo, pipelines, Some(base), tasks, &[]) {
-        Ok(tasks) => tasks,
-        Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
-    };
+    let mut asks = OriginAsks::default();
+    let mut tasks =
+        match validate_batch_undescribed(repo, pipelines, Some(base), tasks, &[], &mut asks) {
+            Ok(tasks) => tasks,
+            Err(err) => return outcome_over(Some(nav), "queue refused", format!("{err:#}")),
+        };
     stamp_routines(&mut tasks, names);
     let then = Resume::Routines(nav.clone());
     if let Some(gate) = tool_gate(repo, &tracking, &tasks, then.clone()) {
@@ -14004,6 +14157,122 @@ mod tests {
             OriginAsks::default().has_branch(&repo, "task/b"),
             Some(true),
             "the next submission asks again"
+        );
+    }
+
+    /// Gives `origin` of `repo` a bare repository whose transport appends a
+    /// line to the returned file on every call, so a test can count them. It
+    /// is the transport git runs for `ls-remote` too, which an `exit 1`
+    /// stands in for an `origin` that cannot be asked.
+    fn counting_origin(repo: &Repo, answers: bool) -> std::path::PathBuf {
+        let origin = repo.root.join("origin.git");
+        let calls = repo.root.join("origin-calls");
+        let script = repo.root.join("count-upload-pack");
+        let run = |args: &[&str]| crate::repo::run(&repo.root, "git", args).unwrap();
+        run(&["init", "-q", "--bare", &origin.display().to_string()]);
+        run(&["remote", "add", "origin", &origin.display().to_string()]);
+        run(&["push", "-q", "origin", "plan/demo"]);
+        run(&["push", "-q", "origin", "plan/demo:only-origin"]);
+        run(&["push", "-q", "origin", "plan/demo:task/start-here"]);
+        // The push left remote-tracking refs behind, which would answer the
+        // start-branch check locally.
+        run(&["update-ref", "-d", "refs/remotes/origin/task/start-here"]);
+        let run_upload_pack = match answers {
+            true => "exec git-upload-pack \"$@\"",
+            false => "exit 1",
+        };
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho call >> '{}'\n{run_upload_pack}\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        run(&[
+            "config",
+            "remote.origin.uploadpack",
+            &script.display().to_string(),
+        ]);
+        calls
+    }
+
+    fn origin_calls(calls: &std::path::Path) -> usize {
+        std::fs::read_to_string(calls).map_or(0, |log| log.lines().count())
+    }
+
+    /// A batch whose base only `origin` has, whose first task starts from a
+    /// branch only `origin` has, and whose tasks each need their own
+    /// leftover check, puts one `git ls-remote` to `origin` through the
+    /// whole of validation and the start-branch check.
+    #[test]
+    fn a_batch_asks_origin_once_for_every_check() {
+        let (repo, _root_guard) = fixture("batch-origin-once");
+        let calls = counting_origin(&repo, true);
+        let submitted: Vec<(String, String)> = [
+            ("a", "group: ga\nstarts_from: task/start-here\n"),
+            ("b", "group: gb\n"),
+            ("c", "group: gc\n"),
+        ]
+        .iter()
+        .map(|(id, extra)| (format!("{id}.md"), task_text(id, extra, BODY)))
+        .collect();
+        let mut asks = OriginAsks::default();
+
+        let tasks = validate_batch_with(
+            &repo,
+            &Pipelines::builtin(),
+            Some("only-origin"),
+            &submitted,
+            &mut asks,
+        )
+        .unwrap();
+        refuse_missing_start(&repo, &tasks, &mut asks).unwrap();
+
+        assert_eq!(origin_calls(&calls), 1, "one ls-remote for the whole batch");
+    }
+
+    /// An `origin` that cannot be asked fails the one call for every check
+    /// at once: the batch still queues, as a non-answer always let it, and
+    /// the wait is one question however many tasks there are.
+    #[test]
+    fn a_batch_waits_one_question_on_an_origin_that_cannot_be_asked() {
+        let (repo, _root_guard) = fixture("batch-origin-silent");
+        let calls = counting_origin(&repo, false);
+        let submitted: Vec<(String, String)> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                (
+                    format!("{id}.md"),
+                    task_text(
+                        id,
+                        &format!("group: g{id}\nstarts_from: task/start-here\n"),
+                        BODY,
+                    ),
+                )
+            })
+            .collect();
+        let mut asks = OriginAsks::default();
+
+        let tasks = validate_batch_with(
+            &repo,
+            &Pipelines::builtin(),
+            Some("plan/demo"),
+            &submitted,
+            &mut asks,
+        )
+        .unwrap();
+        refuse_missing_start(&repo, &tasks, &mut asks).unwrap();
+
+        assert_eq!(origin_calls(&calls), 1);
+        let err = check_task_base_with(&repo, "a", "only-origin", &mut asks).unwrap_err();
+        assert!(err.downcast_ref::<OriginUnreachable>().is_some(), "{err:#}");
+        assert_eq!(
+            origin_calls(&calls),
+            1,
+            "the silence is shared by the base check"
         );
     }
 
@@ -21034,7 +21303,7 @@ mod tests {
             Some("plan/demo"),
         )
         .unwrap();
-        assert_eq!(not_queued(&repo, &[task]), []);
+        assert_eq!(not_queued(&repo, &[task], &mut OriginAsks::default()), []);
     }
 
     /// `queue add` refuses the whole batch over a dependent whose done
@@ -21414,7 +21683,7 @@ mod tests {
             ),
         ];
         assert_eq!(
-            not_queued(&repo, &batch),
+            not_queued(&repo, &batch, &mut OriginAsks::default()),
             [NotQueued {
                 id: "own-gone".to_string(),
                 why: NotQueuedWhy::MissingStart("task/nowhere".to_string()),
@@ -21457,7 +21726,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(not_queued(&repo, &[next]), []);
+        assert_eq!(not_queued(&repo, &[next], &mut OriginAsks::default()), []);
     }
 
     /// A dependent is left out with what it depends on, however far down
@@ -21477,7 +21746,7 @@ mod tests {
             parse("apart", ""),
         ];
         assert_eq!(
-            not_queued(&repo, &batch),
+            not_queued(&repo, &batch, &mut OriginAsks::default()),
             [
                 NotQueued {
                     id: "third".to_string(),
@@ -31186,6 +31455,7 @@ group_description: audit
                     task_text("solo", "group: solo\n", BODY),
                 )],
                 &[],
+                &mut OriginAsks::default(),
             )
             .unwrap();
 
