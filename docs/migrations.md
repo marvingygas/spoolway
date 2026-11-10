@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.18.1 to 0.19.0 | `sync` adds `dispatch.tips` and `issue_tracking.ask_to_deactivate`; `pipeline check` fails a prompt that tells its lane to run a command spoolway refuses in a lane; a home-mode lane is refused the setup commands a repo-mode lane is; `queue add`, the queue screen and routines refuse a task whose `task/<id>` branch `origin` still has; the clean `queued` popup closes on its own and passes keys to the screen beneath; popups are coloured and dim the screen behind them; the dispatch tab ends on a tip row; the strip narrows its gap and wraps between labels; keys typed under the loading spool are thrown away; a task on a missing pipeline reads `held`. | Run `spoolway sync` and commit what it writes, rewrite prompts that name a refused command, run setup commands from your own checkout, drop or rename a leftover `task/<id>` branch on `origin`, and update pty scripts that close the clean `queued` popup with `enter`, match raw popup or board text, read the dispatch tab's last rows, match the strip on a narrow pty, type ahead of slow work, or match `unknown` for a task on a missing pipeline. |
 | 0.17.0 to 0.18.0 | `spoolway queue unqueue <task>` unqueues any stopped task and every task after it, prints what it deleted and moved, and refuses only a running task; `--force` and `--all` are removed; bare `spoolway` opens a tab with its digit, and `←`/`→` no longer switch tabs; the strip numbers every tab and dims all but the open one; `←`/`→` move between sections and panes and `tab` does nothing; `space` on a routine's details ticks the routine, and no key queues one routine task alone; the shipped `create-pr` prompt leads a pull request title with the task's issue; `init` on a tracked checkout at a terminal offers `workspace only` first; the focused pane's title is bracketed; key lines name a key only while it acts; the step picker keeps the section names and hides `not set` steps behind `h`. | Run `spoolway sync` and commit what it writes, run `spoolway sync --replace .spoolway/prompts/create-pr/PROMPT.md`, run `spoolway init --setup repo` to restore missing files, replace `unqueue <task> --force` with `queue pause <task>` then `queue unqueue <task>`, replace `unqueue --all` with one `queue unqueue <task>` for each task, update scripts that read its output, and update pty scripts that press `←` or `→` to switch tabs, press `tab` to change section or pane, match the strip or a `[tab]` pair, press `space` on a routine's task to queue it alone, match plain pane titles or whole key lines, or select `not set` steps in the step picker. |
 | 0.16.0 to 0.17.0 | The overrides pipeline section lists every step key but `id` under three headers and its cursor starts on `description`; the step picker lists every pipeline's steps and its pipeline rows draw no counts; every empty eval table reads `no data.`. | Run `spoolway sync` and commit what it writes, and update pty scripts that walk the overrides pipeline section or its step picker, or match the eval screen's empty-table lines. |
 | 0.15.0 to 0.16.0 | The dispatcher no longer brings a pane to the front unless `dispatch.autofocus_panes` is on; `override promote` keeps the entry in the layer; bare `spoolway` opens on the dispatch tab and the strip gains `OVERRIDES`; the STATE cell is the state word alone; one-answer popups have no answer row and find is search; the problem log follows `housekeeping.retention_days`; a failed command step's status line names a kept copy of its log; the eval tab's title names its sections. | Run `spoolway sync` and commit what it writes, set `autofocus_panes = true` to keep panes coming forward, drop each promoted override once its branch merges, and update scripts that drive the opening tab, one-answer popups, search or the eval title, read STATE ages, match the promote line or read the failed log path. |
@@ -58,6 +59,80 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.18.1 to 0.19.0
+
+Run `spoolway sync` in each project and commit what it writes. It adds `dispatch.tips = true` and
+`issue_tracking.ask_to_deactivate = true` to `config.toml`, with their lines in the settings
+reference, and `spoolway doctor` reports the file as behind until it runs. Both defaults keep a
+project as it was, apart from the new tip row. Then rewrite any prompt the first item below
+names, update the scripts that queue tasks or drive bare `spoolway` on a pty, and restart the
+dispatcher.
+
+- `spoolway pipeline check` fails a prompt that tells its lane to run a command spoolway refuses
+  in a lane. The finding names the prompt, the step and the command. A prompt that names such a
+  command only to forbid it fails too, so describe the action in words instead, such as "do not
+  restart the step". See [Prompts](prompts.md#writing-your-own).
+
+  | A prompt that names | Fails on |
+  |---|---|
+  | `spoolway queue add` with `--from` | Every step. Bare `spoolway queue add` passes. |
+  | `spoolway lane` with `-m` or `--message` | Every step. |
+  | `spoolway restart` | Every step. |
+  | `spoolway resume` | Every step except `blocked`. |
+  | `spoolway resume --skip-hook` | Every step. |
+  | `spoolway resume --stage` | `blocked`. On any other step it fails as `spoolway resume`. |
+  | `spoolway config set`, `spoolway config override` | Every step. |
+  | `spoolway override promote`, `spoolway override drop`, `spoolway pipeline promote` | Every step. |
+  | `spoolway pipeline override`, `copy` or `rename`; `spoolway prompt override` or `copy` | Every step. |
+
+- A lane in home mode is refused `spoolway config set`, `spoolway config override --set`,
+  `spoolway pipeline copy` and `spoolway override drop`. 0.18.1 refused them only in a repo-mode
+  lane, so a home-mode lane could change the config every clone shares and delete the private
+  override layer. A repo-mode lane whose branch has no `.spoolway/`, and so borrows the main
+  checkout, is refused the same commands. Run them from your own checkout. See
+  [Configuration](configuration.md).
+- `spoolway queue add`, the queue screen and routines refuse a task whose `task/<id>` branch
+  `origin` still has. 0.18.1 queued it, ran the whole task and failed at its push. The refusal
+  names `origin/task/<id>` and the open pull request opened from it, when `gh` lists one. Drop the
+  branch with `git push origin --delete task/<id>`, which also closes that pull request, or keep
+  its commits under another name with the `git fetch` and `git push` pair the refusal prints. Then
+  queue the task again. An `origin` that does not answer within 10 seconds refuses nothing. See
+  [`spoolway queue add`](cli-reference.md#spoolway-queue-add).
+
+- The clean `queued` popup, shown when every task of a selection queued, has no key row and
+  closes on its own after 2 seconds. While it is up, every key acts on the screen beneath it, and
+  a key that opens a popup, a menu, a picker or the filter closes it at once. A pty script that
+  pressed `enter` to close it waits for it to close instead, because that `enter` now lands on the
+  screen beneath. A script that matched `[enter] confirm` on it no longer finds that pair. The
+  popup that lists tasks left out and both `not queued` popups are unchanged, and still close only
+  on `enter`.
+- Every popup is drawn in colour, and the screen behind an open popup is drawn dim. A popup's
+  border and title are grey teal, 256-colour 109. Its `[enter]` pairs are light mint, 256-colour
+  151, and its `[esc]` pairs dusty pink, 256-colour 181. The dim covers the tab strip, the tab's
+  frame and its key line. A popup's key pairs therefore arrive as separate coloured runs, and the
+  text behind it carries dim codes. A pty script that matched popup or board text in raw output
+  strips the colour codes before it matches.
+- The dispatch tab's box ends on a tip row, ` tip: <label> · <tip>`, under one blank row. The tip
+  changes every 30 seconds, and RECENT has one row fewer. The `config changed:` line takes the row
+  while a reload has something to load. A pty script that read the box's last rows expects the tip
+  row, or sets `dispatch.tips = false` so the board is drawn as in 0.18.1. An open `spoolway`
+  screen reads the setting when it starts. See [The tip row](dispatcher.md#the-tip-row).
+- The tab strip puts eight columns between labels only when they all fit on one row at that gap.
+  Otherwise it puts four columns on every row, and when one row still does not fit it breaks
+  between labels onto more rows. Every extra strip row comes off each tab's body. 0.18.1 always
+  used eight columns and split a label at the pane's edge. A pty script narrower than the strip
+  at an eight-column gap matches the closer spacing and the extra rows, or widens its pty.
+- The loading spool shows when a key's work runs longer than 200 ms, and on a tab switch until
+  the next tab draws. Once it has shown, every key typed while the work ran is thrown away, so a
+  second `enter` does not land on the screen that follows. A pty script that typed ahead of slow
+  work waits for the next screen before it types. See [`spoolway`](cli-reference.md#spoolway).
+- A task that names a pipeline that does not exist reads `held` on the board and in `spoolway
+  queue list`, where it read `unknown`. A task with no `pipeline:` still reads `unknown`. The
+  dispatcher starts and runs every other task, where 0.18.1 refused the whole start. NEXT reads
+  ``<name> is gone: set `pipeline:` in the task file (board: open task) to one that exists, then
+  resume it. Branch and commits kept``, and a task that is not stopped ends ``it then carries on
+  by itself``. A script that matched `unknown` or the old line matches the new ones.
 
 ## 0.17.0 to 0.18.0
 
