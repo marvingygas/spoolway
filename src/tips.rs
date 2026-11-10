@@ -4,7 +4,8 @@
 //! so the board needs nothing on disk to draw one. Each line is a plain
 //! sentence. A line in brackets, such as `[queue]`, starts a section, and
 //! every tip below it belongs to that section. The rules for what earns a
-//! tip are written at the top of the file, for the person editing it.
+//! tip are written at the top of the file, for the person editing it. A
+//! [`Deck`] deals the tips in shuffled order, one every [`SHOWN_FOR`].
 
 use std::time::{Duration, Instant};
 
