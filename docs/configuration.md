@@ -489,6 +489,7 @@ every other list-valued key. `spoolway sync` keeps whatever a project has put th
 hook = ""
 project_key = ""
 key_in_names = true
+ask_to_deactivate = true
 ```
 
 One script in `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`) connects
@@ -499,6 +500,7 @@ spoolway to an issue tracker. No pipeline file names a tracker.
 | `hook` | blank | A bare file name inside `.spoolway/hooks/` (a home-mode workspace's own `config/hooks/`), such as `github.sh`. Blank runs no hook. A path is refused. |
 | `project_key` | blank | Handed to the script as `SPOOLWAY_PROJECT_KEY`, unparsed. `owner/repo` on GitHub, a project key on Jira. |
 | `key_in_names` | `true` | Prefix the `group:`, the branch (`task/<slug>-<id>`) and the worktree directory with the slug the `open` hook returns. A group already carrying the slug gains it exactly once. A group whose every task in the batch sets `tracking: off` gets no prefix. With no hook configured, or a blank `hook`, there is no slug to prefix with, so this changes nothing either way. |
+| `ask_to_deactivate` | `true` | Ask on the queue screen which groups to leave untracked before any ticket opens. `false` skips the question on the pending screen and the routines tab, and `enter` opens every group's tickets with no question. `tracking: off` and `queue add --no-tracking` still leave a group untracked. See the checklist below. |
 
 A project whose `config.toml` already spells out `key_in_names = false` keeps that value; the
 new default only applies where the key is absent. Delete the line, or set it to `true`, to pick
@@ -657,6 +659,11 @@ names get no `key_in_names` prefix. `spoolway queue add --no-tracking <group>` g
 answer from the command line. Queueing a routine asks the same question. A trial never
 asks and opens no ticket. See [`spoolway queue`](cli-reference.md#spoolway-queue) and
 [`tracking`](tasks.md#the-frontmatter-is-spoolways).
+
+With `ask_to_deactivate = false`, the question is skipped on both the pending screen and the
+routines tab. `enter` then opens every group's tickets with no question, so the screen has no
+way left to keep a group off the tracker. Set `tracking: off` on its tasks, or queue it with
+`spoolway queue add --no-tracking <group>`, to leave it untracked.
 
 The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
 

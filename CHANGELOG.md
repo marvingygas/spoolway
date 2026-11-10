@@ -21,6 +21,11 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## Unreleased
+
+### Changed
+- `issue_tracking.ask_to_deactivate` switches off the queue screen's question about which groups to leave untracked. It defaults to `true`, so every project keeps the question until it says otherwise. Set to `false`, `enter` on the pending screen or the routines tab opens every group's tickets with no question; `tracking: off` and `queue add --no-tracking` still leave a group untracked. (#1514)
+
 ## 0.18.1
 
 ### Highlights
