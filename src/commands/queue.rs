@@ -4813,9 +4813,10 @@ enum Mode {
     /// [`IssueChecklist`]. A ticket on a public tracker is seen by other
     /// people and hard to take back, so nothing reaches the hook until a
     /// person confirms here, unless the project switched the question off
-    /// with `issue_tracking.ask_to_deactivate`. `enter` runs `then` again, opening the
-    /// tickets of every group left unticked and queuing the ticked ones
-    /// with `tracking: off`, and `esc` goes back having queued nothing.
+    /// with `issue_tracking.ask_to_deactivate`. `enter` runs `then` again,
+    /// opening the tickets of every group left unticked and queuing the
+    /// ticked ones with `tracking: off`, and `esc` goes back having queued
+    /// nothing.
     IssueQuestion {
         checklist: IssueChecklist,
         then: Resume,
