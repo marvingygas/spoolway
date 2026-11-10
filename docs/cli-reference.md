@@ -130,8 +130,12 @@ strip, the tab's frame and its key line, so the popup is the only bright thing o
 whole strip is dim, including the open tab's label. The dim stops at the popup's border. When the popup closes, the tab draws in its own colours again.
 
 The loading spool shows that the screen is busy. It is the spoolway mark alone, six columns by
-three rows, in cyan, with no box and no text. It shows when `enter` on the queue tab or the
-routines tab has been working for 200 ms. It sits on a blank patch eight columns by five rows in
+three rows, in cyan, with no box and no text. It shows when work has been running for 200 ms.
+That work is `enter` on the queue tab or the routines tab, `enter` and the stop answers on the
+dispatch tab, the board's `o`, `r` and `k`, every answer in their menus and confirms, and a switch
+to another tab. Moving the cursor and `esc` never show it. `u` on the dispatch tab shows its
+`updating` pop-up and no spool. On a tab switch, the spool stays over the tab being left until the
+next tab draws its first frame. It sits on a blank patch eight columns by five rows in
 the middle of the tab, and the rest of the tab is drawn dim behind it. It switches between the
 mark's two frames every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work
 ends sooner. Work that ends within 200 ms draws nothing. A pane too small for the patch draws no
