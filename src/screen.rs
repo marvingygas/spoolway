@@ -1514,10 +1514,6 @@ const ALLOWED_CAPITALS: &[(&str, &str)] = &[
     ("Windows", "proper noun"),
     ("Unix", "proper noun"),
     ("Jira", "proper noun"),
-    // The placeholder a key is written with where a number goes, as in
-    // `above_<N>k_tokens`. It is a lone capital, so no other rule lets
-    // it through.
-    ("N", "placeholder"),
 ];
 
 /// The greeting, whole: its first word is no capital to allow anywhere

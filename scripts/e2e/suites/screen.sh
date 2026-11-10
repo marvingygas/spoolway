@@ -31,8 +31,9 @@
 # section deletes one config key from it, then promotes one pipeline onto a
 # local branch with no checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
-# keeps its key line. The dispatch tab's box ends on a tip row, on the empty
-# board and the full one alike, and `dispatch.tips = false` draws none. Off a
+# keeps its key line. The dispatch tab's box ends on a tip row, `tip:`, a
+# section label and a `·` before the tip, on the empty board and the full one
+# alike, and `dispatch.tips = false` draws none. Off a
 # terminal, bare `spoolway` still prints the grouped help.
 #
 # covers: dispatch.tips — set to false, the full board draws no tip row and keeps its table
@@ -153,9 +154,9 @@ box_last_row() {
 }
 # `$1` names the board, `$2` the frame it was drawn to.
 ends_on_a_tip() {
-  local row
+  local row tip='^ *│ tip: [a-z][a-z0-9 -]* · [^ ]'
   row=$(box_last_row "$2")
-  if [[ "$row" =~ ^\ *│\ tip\ \ [^\ ] ]]; then ok "the $1 board's box ends on a tip"
+  if [[ "$row" =~ $tip ]]; then ok "the $1 board's box ends on a tip"
   else bad "the $1 board's box ends on a tip (its last row: '$row')"; fi
 }
 ends_on_a_tip "empty" "$FIRST"
@@ -598,7 +599,7 @@ works "the full board is drawn again" \
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$NOTIPS" |
   sed 's/\x1b\[[0-9;]*m//g' >"$NOTIPS.plain"
 has "with tips off it is still the full board" "tasks below" "$NOTIPS.plain"
-lacks "with tips off no tip row is drawn" "│ tip  " "$NOTIPS.plain"
+lacks "with tips off no tip row is drawn" "│ tip: " "$NOTIPS.plain"
 must "tips are turned back on" "$SPOOLWAY" config set dispatch.tips true
 
 # The margin, read off a real pty rather than a test terminal: at 120 columns

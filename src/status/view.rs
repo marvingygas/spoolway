@@ -1243,10 +1243,18 @@ pub(super) fn config_notice(waiting: &Waiting) -> Option<String> {
 /// stands apart without pulling the eye from the table.
 const TEAL: &str = "\x1b[38;5;109m";
 
-/// The dispatch tab's tip row for `tip`, label and sentence alike in
-/// [`TEAL`], with the one-column margin every row of the board keeps.
-pub(super) fn tip_row(tip: &str) -> String {
-    format!(" {TEAL}tip  {tip}{RESET}")
+/// The dispatch tab's tip row for `tip`, as `tip: queue · <the tip>`, with
+/// the one-column margin every row of the board keeps. `tip:` and the
+/// sentence are [`TEAL`]; the section label and its separator are [`DIM`],
+/// so the tip stays the thing the eye reads. The teal is reset before the
+/// dim, since dim on top of teal would draw a darker teal rather than the
+/// board's grey. A tip with no section draws no label and no separator.
+pub(super) fn tip_row(tip: crate::tips::Tip<'_>) -> String {
+    let label = match tip.section {
+        Some(label) => format!("{RESET}{DIM}{label}{}{RESET}{TEAL}", crate::tips::SEPARATOR),
+        None => String::new(),
+    };
+    format!(" {TEAL}tip: {label}{}{RESET}", tip.text)
 }
 
 /// The name a footer line gives the pool behind `[models]` row `key`: the
