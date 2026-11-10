@@ -355,12 +355,12 @@ group's tasks the batch queues. Nothing starts ticked.
 | `esc` | Returns to the queue screen with nothing queued. |
 
 When no group has a task without a `ticket:`, no popup opens. With
-`issue_tracking.ask_to_deactivate = false`, no popup opens either, on the queue screen or the
-routines tab: `enter` opens every group's tickets with no question. `tracking: off` and
-`spoolway queue add --no-tracking` still leave a group untracked. See
+`issue_tracking.ask_to_deactivate = false`, the checklist never opens either, on the queue
+screen or the routines tab: `enter` opens every group's tickets with no question.
+`tracking: off` and `spoolway queue add --no-tracking` still leave a group untracked. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
-While the hook runs, an `issue tracking` popup shows one line, `progress: ` followed by a 44-cell bar. A `█` marks a finished
-call and a `░` a cell still to fill. The bar starts empty and fills by one call's share each time
+While the hook runs, an `issue tracking` popup shows one line, `progress: ` followed by a
+44-cell bar. A `█` marks a finished call and a `░` a cell still to fill. The bar starts empty and fills by one call's share each time
 a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
 not in it. The `queued` popup then opens on `hook executed successfully`, followed by
 `queued <n> tasks`, every queued id and the dispatcher line. Like any clean `queued` popup, it
