@@ -295,7 +295,7 @@ impl State {
     /// way [`handle_key`] routes it: `w`, which hands the folder to another
     /// program, and every `enter` that writes or deletes in the layer or
     /// hands a file to an editor. Moves, `f`, typing into a field or a
-    /// search, and `enter` that only opens a popup or closes one read
+    /// search, and an `enter` that can only open or close a popup read
     /// nothing, so they never show it and never lose a key typed after them.
     fn works(&self, key: Key) -> bool {
         if key == Key::Char('w') && self.takes_w() {
