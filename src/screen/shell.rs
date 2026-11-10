@@ -170,7 +170,9 @@ pub(crate) fn strip_rows() -> usize {
 /// What `key` means to the shell, read by a tab's screen only while nothing
 /// of its own is open — a popup, a filter, a picker — or for a key the open
 /// sub-mode reads nothing of its own on, so every key a sub-mode reads keeps
-/// its meaning there. `None` with no shell around the screen at all — a
+/// its meaning there. A popup that reads no key, such as the queue and
+/// routines tabs' clean `queued` popup, leaves it read as if it were not
+/// up. `None` with no shell around the screen at all — a
 /// standalone `run_screen` driven directly by a test has no other tab to
 /// go to, and `q` there keeps whatever meaning it already had.
 ///

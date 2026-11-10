@@ -1163,8 +1163,9 @@ pending_doc screen-two "$BODY" "group: screen-batch" \
   "depends_on: [screen-one]"
 
 # space selects the highlighted group, enter submits it and draws the
-# `queued` popup over the tab, which only `enter` closes — so the `esc` after
-# it is taken by the popup. The screen ends on its own the moment the
+# `queued` popup over the tab. The batch is clean, so the popup reads no key
+# and the `esc` after it reaches the queue screen beneath, where it only
+# moves focus to the groups pane. The screen ends on its own the moment the
 # pipe runs dry — see `on_screen` in `lib.sh` on why the keys arrive on a
 # pipe while the screen draws to a pty.
 on_screen ' \r\x1b' /dev/null

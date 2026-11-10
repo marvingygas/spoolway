@@ -4820,15 +4820,22 @@ enum Mode {
         then: Resume,
     },
     /// What a screen submit queued — [`queued_panel`]'s popup, opening on
-    /// `hook executed successfully` when the hook ran. `enter` closes it, the
-    /// same as [`Mode::Outcome`].
+    /// `hook executed successfully` when the hook ran — or the routines
+    /// tab's [`still_queued_panel`]. `enter` closes it, the same as
+    /// [`Mode::Outcome`], unless it is the clean popup below.
     ///
     /// `routines` is the routines pane the submit came from, when it did:
     /// the routines tab has no pending screen to fall back to, so that pane
     /// stays drawn under the popup and closing it goes back there.
+    ///
+    /// `closes_itself` marks the clean popup, every task of the batch queued.
+    /// It never stays in the mode: before the next frame [`settle_queued`]
+    /// moves it onto [`ScreenState::clean_queued`] and puts the screen
+    /// beneath back, so every key reaches that screen.
     Queued {
         panel: Vec<String>,
         routines: Option<RoutineNav>,
+        closes_itself: bool,
     },
     /// The routines tab's own screen: the left pane swapped for the routines
     /// under `.spoolway/routines/`, one row each — see [`RoutineNav`] for
@@ -5867,8 +5874,15 @@ impl TicketLog for PopupHook<'_> {
 /// then the count queued over every task it queued. Then the tasks it left
 /// out, `not_queued`, when there are any — see [`not_queued_lines`]. It
 /// ends on `dispatcher` — [`dispatcher_line`] — a blank row below the list,
-/// and then the [`crate::screen::confirm`] row. `routines` is the routines
-/// pane the batch was queued from, or `None` over the pending screen.
+/// and then, unless the batch is clean, the [`crate::screen::confirm`] row.
+/// `routines` is the routines pane the batch was queued from, or `None` over
+/// the pending screen.
+///
+/// A clean batch, every task queued and none left out, has nothing to read
+/// twice: its popup has no key row, ending on the blank row under the
+/// dispatcher line, and closes itself after [`QUEUED_SHOWN`] — see
+/// [`settle_queued`]. A popup that names left-out tasks keeps its key row
+/// and waits for `enter`, since it says what to set before queueing again.
 ///
 /// `hook_ran` says only that the open hook was called and every call exited
 /// cleanly — a failing call refuses the batch before this is ever drawn. It
@@ -5905,9 +5919,18 @@ fn queued_panel(
     } else {
         "queued"
     };
+    let closes_itself = !names.is_empty() && not_queued.is_empty();
+    let panel = if closes_itself {
+        let mut body = issue_body(lines);
+        body.push(String::new());
+        crate::screen::boxed(title, &body)
+    } else {
+        panel(title, &issue_body(lines), &confirm())
+    };
     Mode::Queued {
-        panel: panel(title, &issue_body(lines), &confirm()),
+        panel,
         routines,
+        closes_itself,
     }
 }
 
@@ -5986,10 +6009,11 @@ fn dispatcher_line(repo: &Repo) -> Option<&'static str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenExit {
     Quit,
-    /// A tab's digit or `q` on a tab's home screen with no popup open, inside
-    /// bare `spoolway`'s queue or routines tab — see
-    /// [`crate::screen::shell::leave_on`]. Never reached outside those tabs,
-    /// where nothing is hosting the screen to hand a key back to.
+    /// A tab's digit or `q` on a tab's home screen, inside bare `spoolway`'s
+    /// queue or routines tab, with no popup open but the clean `queued`
+    /// popup, which reads no key — see [`crate::screen::shell::leave_on`].
+    /// Never reached outside those tabs, where nothing is hosting the screen
+    /// to hand a key back to.
     Leave(crate::screen::shell::Leave),
 }
 
@@ -6218,6 +6242,10 @@ pub(crate) struct ScreenState {
     /// one before it closes — the queue tab's opening message, the one
     /// notice bare `spoolway` opens with.
     waiting: std::collections::VecDeque<Mode>,
+    /// The clean `queued` popup, drawn over plain browsing or the routines
+    /// pane while the mode stays that screen, so it reads no key of its own
+    /// — see [`settle_queued`].
+    clean_queued: Option<CleanQueued>,
     /// The unparseable pending files this screen has already said something
     /// about. `None` on a tab that does not name them — the routines tab,
     /// which does not draw the pending groups they would be missing from.
@@ -6263,6 +6291,7 @@ impl ScreenState {
             gates: Default::default(),
             board_branch: None,
             waiting: Default::default(),
+            clean_queued: None,
             named: None,
             jobs: Ok(Vec::new()),
         }
@@ -6272,6 +6301,84 @@ impl ScreenState {
     /// waiting, or `closed` with none.
     fn after_popup(&mut self, closed: Mode) -> Mode {
         self.waiting.pop_front().unwrap_or(closed)
+    }
+}
+
+/// How long the clean `queued` popup stays up once first drawn: long enough
+/// to read which tasks went, short enough that nobody has to close it.
+const QUEUED_SHOWN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The clean `queued` popup while it is up: its rows, and when it closes,
+/// `None` until the frame that first draws it.
+struct CleanQueued {
+    panel: Vec<String>,
+    closes_at: Option<std::time::Instant>,
+}
+
+/// Bring the clean `queued` popup up to date, just before a frame is drawn.
+///
+/// A clean [`Mode::Queued`] a submit just left in the mode moves onto
+/// [`ScreenState::clean_queued`], and the mode goes back to the screen
+/// beneath. Every key then reaches that screen once, as if no popup were
+/// up, and the digits and `q` reach bare `spoolway`'s shell.
+///
+/// The popup is dropped at once when the mode is no longer plain browsing or
+/// the routines pane: a key opened a popup, menu, picker or the filter, or a
+/// reader notice opened. Drawn over either, it would hide it. Otherwise it
+/// closes [`QUEUED_SHOWN`] after the frame that first drew it, through
+/// [`ScreenState::after_popup`], so a popup waiting behind it opens then, as
+/// after `enter` on any other popup.
+fn settle_queued(state: &mut ScreenState) {
+    if matches!(
+        state.mode,
+        Mode::Queued {
+            closes_itself: true,
+            ..
+        }
+    ) && let Mode::Queued {
+        panel, routines, ..
+    } = std::mem::replace(&mut state.mode, Mode::Browsing)
+    {
+        state.mode = match routines {
+            Some(nav) => Mode::Routines(nav),
+            None => Mode::Browsing,
+        };
+        state.clean_queued = Some(CleanQueued {
+            panel,
+            closes_at: None,
+        });
+    }
+    if !matches!(state.mode, Mode::Browsing | Mode::Routines(_)) {
+        state.clean_queued = None;
+    }
+    let Some(shown) = state.clean_queued.as_mut() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    match shown.closes_at {
+        None => shown.closes_at = Some(now + QUEUED_SHOWN),
+        Some(at) if now >= at => {
+            state.clean_queued = None;
+            let beneath = std::mem::replace(&mut state.mode, Mode::Browsing);
+            state.mode = state.after_popup(beneath);
+        }
+        Some(_) => {}
+    }
+}
+
+/// How long the screen waits for a key before it looks again: one
+/// [`crate::status::POLL`], cut short at the clean `queued` popup's deadline
+/// so the popup closes on time rather than up to a slice late.
+fn key_wait(state: &ScreenState) -> std::time::Duration {
+    let deadline = state
+        .clean_queued
+        .as_ref()
+        .and_then(|shown| shown.closes_at);
+    match deadline {
+        Some(at) => {
+            crate::status::POLL.min(at.saturating_duration_since(std::time::Instant::now()))
+        }
+        None => crate::status::POLL,
     }
 }
 
@@ -6633,6 +6740,7 @@ fn run_screen_from(
         // own.
         refresh_from_reader(&reader, &mut known_reading, &mut groups, &mut state);
         reload_jobs(repo, &routines, &mut state);
+        settle_queued(&mut state);
         let panes = Panes {
             repo,
             routines: &routines,
@@ -6662,8 +6770,10 @@ fn run_screen_from(
         // Inside bare `spoolway`, a tab's digit and `q` belong to the shell on
         // each tab's own home screen — browsing on the queue tab, the
         // routines pane on the routines tab — the two modes with no popup
-        // or sub-mode open. Every other mode keeps them: a popup over
-        // either tab, the trial picker, the filter's `q` typed
+        // or sub-mode open. The clean `queued` popup is the one popup drawn
+        // over them: `settle_queued` keeps it off the mode, so the digits
+        // and `q` reach the shell under it too. Every other mode keeps them:
+        // a popup over either tab, the trial picker, the filter's `q` typed
         // into its query.
         if matches!(state.mode, Mode::Browsing | Mode::Routines(_))
             && let Some(leave) = crate::screen::shell::leave_on(key)
@@ -6727,7 +6837,9 @@ fn run_screen_from(
             // cannot slip past a message not yet read. The message was
             // already drawn on the frame that preceded this key — holding it
             // in `state` rather than writing it straight to `out` is what let
-            // it survive that draw at all.
+            // it survive that draw at all. The clean `queued` popup never
+            // reaches here: `settle_queued` took it out of the mode before
+            // the frame this key answers.
             Mode::Outcome { routines, .. } | Mode::Queued { routines, .. } => {
                 if key == Key::Enter {
                     let closed = match routines {
@@ -7198,10 +7310,11 @@ fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
 /// The same wait `commands::dispatch`'s own board takes over its pass
 /// interval: [`PollableRead::byte_pending`] stands in for a sleep, so a slice
 /// with nothing typed into it costs the loop nothing beyond what a plain
-/// `thread::sleep(POLL)` would have. Every in-memory reader used in tests
+/// `thread::sleep(POLL)` would have. The in-memory reader most tests use
 /// reports a byte pending unconditionally (see [`PollableRead`]), so this
-/// falls straight through to `read_key` there — the idle tick's own wake
-/// below only ever runs against a real, currently idle terminal. A cooked
+/// falls straight through to `read_key` there. The idle tick's own wake
+/// below runs against a real, currently idle terminal, or a test reader
+/// that reports nothing pending on purpose to drive it. A cooked
 /// stdin — no raw mode, no `poll` — reports the opposite without waiting,
 /// and is read straight away instead: blocking on the line the terminal
 /// will deliver is the whole of what this loop is for, where spinning on
@@ -7234,7 +7347,7 @@ fn wait_for_key(
             Mode::EditDependsOn(pick) => pick.list.wake(),
             _ => None,
         };
-        if !cfg!(unix) || input.wait_pending(crate::status::POLL, wake.as_deref()) {
+        if !cfg!(unix) || input.wait_pending(key_wait(state), wake.as_deref()) {
             return read_key(input);
         }
         match &mut state.mode {
@@ -7244,6 +7357,7 @@ fn wait_for_key(
         }
         refresh_from_reader(reader, known, groups, state);
         reload_jobs(panes.repo, panes.routines, state);
+        settle_queued(state);
         draw(groups, panes, state, writer, out);
     }
 }
@@ -10782,7 +10896,12 @@ fn popup(
             let items: Vec<&str> = labels.iter().map(String::as_str).collect();
             Some(crate::screen::options(&menu.title, &items, menu.cursor))
         }
-        Mode::Browsing | Mode::Filter | Mode::Routines(_) => None,
+        // `settle_queued` keeps the clean `queued` popup only over these
+        // two, so it is never drawn over another popup.
+        Mode::Browsing | Mode::Routines(_) => {
+            state.clean_queued.as_ref().map(|shown| shown.panel.clone())
+        }
+        Mode::Filter => None,
     }
 }
 
@@ -13329,6 +13448,7 @@ fn still_queued_panel(live: &[LiveCopy], nav: &RoutineNav) -> Mode {
             &crate::screen::keys(&[("enter", "close")]),
         ),
         routines: Some(nav.clone()),
+        closes_itself: false,
     }
 }
 
@@ -24403,11 +24523,11 @@ mod tests {
         assert!(!frame.contains("dispatcher is running"), "{frame}");
     }
 
-    /// The queued popup as the plan's mockup draws it: the task list, a
-    /// blank row, the dispatcher line, a blank row, `[enter] confirm` — in
-    /// the 60 columns [`issue_body`] holds it to.
+    /// The clean queued popup: the task list, a blank row, the dispatcher
+    /// line and a blank row, with no key row under it, since it closes
+    /// itself — in the 60 columns [`issue_body`] holds it to.
     #[test]
-    fn the_queued_popup_ends_on_the_dispatcher_line_over_confirm() {
+    fn the_clean_queued_popup_ends_on_the_dispatcher_line_with_no_key_row() {
         let ids: Vec<String> = [
             "hook-failure-pauses",
             "hook-started-and-check",
@@ -24416,15 +24536,21 @@ mod tests {
         ]
         .map(str::to_string)
         .to_vec();
-        let Mode::Queued { panel, .. } = queued_panel(
+        let Mode::Queued {
+            panel,
+            closes_itself,
+            ..
+        } = queued_panel(
             &ids,
             false,
             &[],
             Some("start the dispatcher to begin working"),
             None,
-        ) else {
+        )
+        else {
             panic!("a landed batch is Mode::Queued");
         };
+        assert!(closes_itself);
         assert_eq!(
             panel,
             [
@@ -24438,7 +24564,6 @@ mod tests {
                 "│                                                          │",
                 "│  start the dispatcher to begin working                   │",
                 "│                                                          │",
-                "│  [enter] confirm                                         │",
                 format!("{BOTTOM_LEFT}──────────────────────────────────────────────────────────{BOTTOM_RIGHT}").as_str(),
             ]
         );
@@ -24467,15 +24592,21 @@ mod tests {
                 why: NotQueuedWhy::DependsOn("archive-index-readers".to_string()),
             },
         ];
-        let Mode::Queued { panel, .. } = queued_panel(
+        let Mode::Queued {
+            panel,
+            closes_itself,
+            ..
+        } = queued_panel(
             &ids,
             false,
             &not_queued,
             Some("dispatcher is running"),
             None,
-        ) else {
+        )
+        else {
             panic!("a landed batch is Mode::Queued");
         };
+        assert!(!closes_itself, "what it left out waits for enter");
         assert!(
             panel[0].starts_with(&format!("{TOP_LEFT}─ queued ")),
             "{panel:#?}"
@@ -24521,9 +24652,18 @@ mod tests {
             id: "wire".to_string(),
             why: NotQueuedWhy::MissingStart("task/gone".to_string()),
         }];
-        let Mode::Queued { panel, .. } = queued_panel(&[], false, &not_queued, None, None) else {
+        let Mode::Queued {
+            panel,
+            closes_itself,
+            ..
+        } = queued_panel(&[], false, &not_queued, None, None)
+        else {
             panic!("a batch that left everything out is still Mode::Queued");
         };
+        assert!(
+            !closes_itself,
+            "a batch that queued nothing waits for enter"
+        );
         let all = panel.join("\n");
         assert!(
             panel[0].starts_with(&format!("{TOP_LEFT}─ not queued ")),
@@ -24531,18 +24671,24 @@ mod tests {
         );
         assert!(!all.contains("queued 0"), "{all}");
         assert!(all.contains("wire starts from task/gone"), "{all}");
+        assert!(all.contains("[enter] confirm"), "{all}");
     }
 
     /// A batch the hook ran for keeps the `queued` title and the full task
     /// list, with one line on top saying the hook ran, and no ticket rows.
+    /// Clean, it has no key row and closes itself.
     #[test]
     fn a_batch_the_hook_ran_for_says_so_above_the_queued_list() {
         let ids = vec!["cart-01".to_string(), "search-01".to_string()];
-        let Mode::Queued { panel, .. } =
-            queued_panel(&ids, true, &[], Some("dispatcher is running"), None)
+        let Mode::Queued {
+            panel,
+            closes_itself,
+            ..
+        } = queued_panel(&ids, true, &[], Some("dispatcher is running"), None)
         else {
             panic!("a landed batch is Mode::Queued");
         };
+        assert!(closes_itself);
         let body: Vec<&str> = panel
             .iter()
             .map(|line| line.trim_matches(['│', ' ']))
@@ -24563,7 +24709,6 @@ mod tests {
                 "",
                 "dispatcher is running",
                 "",
-                "[enter] confirm",
             ],
             "{panel:?}"
         );
@@ -24612,7 +24757,7 @@ mod tests {
         let flat = panel.join("\n");
         assert!(!flat.contains("dispatcher is running"), "{flat}");
         assert!(!flat.contains("start the dispatcher"), "{flat}");
-        assert!(flat.contains("[enter] confirm"), "{flat}");
+        assert!(!flat.contains("[enter] confirm"), "{flat}");
     }
 
     /// Nothing in the pending directory is not an error — the screen opens
@@ -26290,18 +26435,54 @@ mod tests {
         assert!(!last.contains("[r] routines"), "{last}");
     }
 
-    /// Closing the popup a queued routine opens goes back to the routine
-    /// list, not the pending screen, with nothing left ticked to queue the
-    /// same routine twice.
+    /// A reader that hands over `keys` first, then reports nothing pending
+    /// for `quiet` waits, sleeping each one out in full, and then a byte
+    /// that reads as the end of the input and ends the screen. Every quiet
+    /// wait's length is recorded, so a test can see how long the screen
+    /// asked to wait.
+    struct Idle {
+        keys: std::io::Cursor<Vec<u8>>,
+        quiet: usize,
+        waits: std::cell::RefCell<Vec<std::time::Duration>>,
+    }
+
+    impl Idle {
+        fn new(keys: &str, quiet: usize) -> Idle {
+            Idle {
+                keys: std::io::Cursor::new(keys.as_bytes().to_vec()),
+                quiet,
+                waits: Default::default(),
+            }
+        }
+    }
+
+    impl std::io::Read for Idle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.keys.read(buf)
+        }
+    }
+
+    impl PollableRead for Idle {
+        fn byte_pending(&self, timeout: std::time::Duration) -> bool {
+            if self.keys.position() < self.keys.get_ref().len() as u64 {
+                return true;
+            }
+            let mut waits = self.waits.borrow_mut();
+            if waits.len() == self.quiet {
+                return true;
+            }
+            waits.push(timeout);
+            std::thread::sleep(timeout);
+            false
+        }
+    }
+
+    /// The popup a queued routine opens is drawn over the routine list, not
+    /// the pending screen, with nothing left ticked under it to queue the
+    /// same routine twice. When its time is up it closes back onto that
+    /// list.
     #[test]
-    fn closing_the_queued_popup_goes_back_to_the_routine_list_unticked() {
-        // Two fixtures, not one: a group is one chain now, and re-queuing
-        // the same routine into a repo that already holds an open run of it
-        // would be a second root in `nightly` — see
-        // `a_group_with_two_roots_is_refused`. Each `routines_screen` call
-        // below replays its own keys from a bare screen, so a shared repo
-        // between them would be queuing the routine twice into one group,
-        // which is not what either half of this test is about.
+    fn the_queued_popup_sits_over_the_routine_list_unticked_and_closes_onto_it() {
         let (repo, _root_guard) = fixture("routines-queued-close");
         write_routine(
             &repo,
@@ -26310,26 +26491,246 @@ mod tests {
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
 
-        let under = last_frame(&routines_screen(&repo, " \r")).to_string();
+        let drawn = routines_screen(&repo, " \r");
+        let under = last_frame(&drawn);
         assert!(under.contains("queued 1 task"), "{under}");
         assert!(under.contains("─ [routines] ─"), "over the list: {under}");
+        assert!(under.contains("> [ ] nightly"), "{under}");
+        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(
+            !["─ groups", "─ [groups]"].iter().any(|t| under.contains(t)),
+            "{under}"
+        );
 
-        let (repo, _root_guard) = fixture("routines-queued-close-2");
+        // The same submit again, in a fresh project since the routine is
+        // already in the first one's queue, then left idle until the popup
+        // closes itself onto the list the submit handed it.
+        let (repo, _root_guard) = fixture("routines-queued-close-idle");
         write_routine(
             &repo,
             "nightly",
             "audit-deps",
             &task_text("audit-deps", "group: nightly\n", BODY),
         );
-        let drawn = routines_screen(&repo, " \r\r");
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let mut state = ScreenState::new();
+        state.mode = Mode::Routines(RoutineNav::new());
+        let mut input = Idle::new(" \r", 2);
+        let mut out = Vec::new();
+        run_screen_from(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            (Vec::new(), routines),
+            state,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(drawn.contains("queued 1 task"), "drawn first: {drawn}");
         let last = last_frame(&drawn);
-        assert!(last.contains("> [ ] nightly"), "{last}");
-        assert!(!last.contains("queued 1 task"), "{last}");
-        // Either title the queue tab draws, whichever of its panes has focus.
+        assert!(!last.contains("queued 1 task"), "closed: {last}");
+        assert!(last.contains("─ [routines] ─"), "{last}");
+        assert!(last.contains("> [ ] nightly"), "unticked: {last}");
+    }
+
+    /// Under the clean queued popup one arrow moves the routine list's
+    /// cursor one row, read once by the list and not by the popup, and the
+    /// popup stays up. Before the popup let keys through, the arrow was
+    /// swallowed and the cursor stayed on `alpha`.
+    #[test]
+    fn one_arrow_under_the_queued_popup_moves_the_routine_cursor_once() {
+        let (repo, _root_guard) = fixture("routines-queued-arrow");
+        for name in ["alpha", "beta", "gamma", "delta"] {
+            let id = format!("{name}-task");
+            let front = format!("group: {name}\n");
+            write_routine(&repo, name, &id, &task_text(&id, &front, BODY));
+        }
+
+        let drawn = routines_screen(&repo, " \r\x1b[B");
+        let last = last_frame(&drawn);
+        assert!(last.contains("queued 1 task"), "still up: {last}");
+        assert!(last.contains("│ > [ ] b"), "one row down: {last}");
+        assert!(!last.contains("> [ ] alpha"), "{last}");
+        assert!(!last.contains("> [ ] g"), "two rows down: {last}");
+    }
+
+    /// A key that opens something over the queue tab closes the clean queued
+    /// popup at once: the filter on `f`, the options menu on `o`. Before
+    /// the change both keys were swallowed and the popup stayed.
+    #[test]
+    fn a_key_opening_the_filter_or_a_menu_closes_the_queued_popup() {
+        let (repo, _root_guard) = fixture("screen-queued-closes-on-filter");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        write_pending(&repo, "cable", &task_text("cable", "group: two\n", BODY));
+
+        let under = last_frame(&screen(&repo, listed(&repo), " \r")).to_string();
+        assert!(under.contains("queued 1 task"), "{under}");
+        assert!(!under.contains("[enter] confirm"), "{under}");
+
+        let (repo, _root_guard) = fixture("screen-queued-closes-on-filter-2");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        write_pending(&repo, "cable", &task_text("cable", "group: two\n", BODY));
+        let filter = last_frame(&screen(&repo, listed(&repo), " \rf")).to_string();
+        assert!(!filter.contains("queued 1 task"), "{filter}");
+        assert!(filter.contains(&key_hint(SEARCH_KEYS)), "{filter}");
+
+        let (repo, _root_guard) = fixture("screen-queued-closes-on-options");
+        write_pending(&repo, "wire", &task_text("wire", "group: one\n", BODY));
+        write_pending(&repo, "cable", &task_text("cable", "group: two\n", BODY));
+        let options = last_frame(&screen(&repo, listed(&repo), " \ro")).to_string();
+        assert!(!options.contains("queued 1 task"), "{options}");
         assert!(
-            !["─ groups", "─ [groups]"].iter().any(|t| last.contains(t)),
-            "{last}"
+            options.contains("save as routine"),
+            "the menu is up: {options}"
         );
+    }
+
+    /// Hosted, a tab's digit and `q` under the clean queued popup reach the
+    /// shell, on the queue tab and on the routines tab, as they would with
+    /// no popup up. Before the change the popup swallowed them and the input
+    /// ran out on the tab.
+    #[test]
+    fn hosted_a_digit_and_q_under_the_queued_popup_leave_the_tab() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
+        let (repo, _root_guard) = fixture("screen-hosted-queued-leave");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let _hosting = Hosting::open(Tab::Queue);
+        let (exit, _) = screen_exit(&repo, listed(&repo), " \r1");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Dispatch)));
+
+        let (repo, _root_guard) = fixture("screen-hosted-queued-quit");
+        write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let (exit, _) = screen_exit(&repo, listed(&repo), " \rq");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Quit));
+        drop(_hosting);
+
+        let _hosting = Hosting::open(Tab::Routines);
+        let (repo, _root_guard) = fixture("screen-hosted-queued-routines");
+        write_routine(
+            &repo,
+            "nightly",
+            "audit-deps",
+            &task_text("audit-deps", "group: nightly\n", BODY),
+        );
+        let (exit, _) = routines_exit(&repo, " \r2");
+        assert_eq!(exit, ScreenExit::Leave(Leave::Open(Tab::Queue)));
+    }
+
+    /// The clean queued popup moves off the mode at once, so keys reach the
+    /// screen beneath; its deadline is stamped on the first frame; and when
+    /// that passes, the popup waiting behind it opens, as after `enter`.
+    #[test]
+    fn the_queued_popup_closes_on_its_deadline_and_opens_what_waits() {
+        let mut state = ScreenState::new();
+        state
+            .waiting
+            .push_back(outcome("later", "a notice held back"));
+        state.mode = queued_panel(&["wire".to_string()], false, &[], None, None);
+
+        let before = std::time::Instant::now();
+        settle_queued(&mut state);
+        assert!(matches!(state.mode, Mode::Browsing), "{:?}", state.mode);
+        let at = state
+            .clean_queued
+            .as_ref()
+            .and_then(|shown| shown.closes_at)
+            .expect("stamped on the first frame");
+        assert!(at >= before + QUEUED_SHOWN, "{at:?}");
+
+        settle_queued(&mut state);
+        assert!(state.clean_queued.is_some(), "it stays up for its time");
+        assert_eq!(state.waiting.len(), 1);
+
+        if let Some(shown) = state.clean_queued.as_mut() {
+            shown.closes_at = Some(std::time::Instant::now());
+        }
+        settle_queued(&mut state);
+        assert!(state.clean_queued.is_none());
+        let Mode::Outcome { notice, .. } = &state.mode else {
+            panic!("what waited opens: {:?}", state.mode);
+        };
+        assert!(notice.panel(60)[0].contains("later"), "{notice:?}");
+    }
+
+    /// A popup opened over the screen beneath — a reader notice here —
+    /// drops the clean queued popup at once rather than being drawn under
+    /// it, and leaves what waits behind it still waiting.
+    #[test]
+    fn a_popup_opened_beneath_drops_the_queued_popup_at_once() {
+        let mut state = ScreenState::new();
+        state
+            .waiting
+            .push_back(outcome("later", "a notice held back"));
+        state.mode = queued_panel(&["wire".to_string()], false, &[], None, None);
+        settle_queued(&mut state);
+        assert!(state.clean_queued.is_some());
+
+        state.mode = plans_notice("plans/ is unreadable");
+        settle_queued(&mut state);
+        assert!(state.clean_queued.is_none());
+        assert!(matches!(state.mode, Mode::Outcome { .. }));
+        assert_eq!(state.waiting.len(), 1, "nothing was taken off the queue");
+    }
+
+    /// The wait for a key is cut short at the clean queued popup's deadline,
+    /// so it closes then and not up to a whole poll slice later; with no
+    /// such popup up, the wait is the usual slice.
+    #[test]
+    fn the_key_wait_ends_at_the_queued_popups_deadline() {
+        let mut state = ScreenState::new();
+        assert_eq!(key_wait(&state), crate::status::POLL);
+
+        let soon = std::time::Duration::from_millis(300);
+        state.clean_queued = Some(CleanQueued {
+            panel: Vec::new(),
+            closes_at: Some(std::time::Instant::now() + soon),
+        });
+        assert!(key_wait(&state) <= soon, "{:?}", key_wait(&state));
+
+        state.clean_queued = Some(CleanQueued {
+            panel: Vec::new(),
+            closes_at: Some(std::time::Instant::now()),
+        });
+        assert_eq!(key_wait(&state), std::time::Duration::ZERO);
+    }
+
+    /// Driven through the screen's own wait with nothing typed, the clean
+    /// queued popup closes [`QUEUED_SHOWN`] after its first frame: the
+    /// second wait is cut short of a whole slice, and the frame after it
+    /// shows the notice that waited behind it. Before the change no wait
+    /// was cut, and the popup never closed without `enter`.
+    #[test]
+    fn an_idle_screen_closes_the_queued_popup_on_time() {
+        let (repo, _root_guard) = fixture("screen-queued-closes-idle");
+        let mut state = ScreenState::new();
+        state
+            .waiting
+            .push_back(outcome("later", "a notice held back"));
+        state.mode = queued_panel(&["wire".to_string()], false, &[], None, None);
+        let mut input = Idle::new("", 2);
+        let mut out = Vec::new();
+        run_screen_from(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            (Vec::new(), Vec::new()),
+            state,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+
+        let waits = input.waits.borrow();
+        assert_eq!(waits[0], crate::status::POLL, "{waits:?}");
+        assert!(waits[1] < crate::status::POLL, "cut short: {waits:?}");
+        let drawn = String::from_utf8(out).unwrap();
+        let last = last_frame(&drawn);
+        assert!(!last.contains("queued 1 task"), "{last}");
+        assert!(last.contains("─ later "), "{last}");
     }
 
     /// Two routine files sharing a task id are one routine, so the pane
@@ -27344,13 +27745,19 @@ mod tests {
             routine: "release-spoolway".to_string(),
             step: "ship".to_string(),
         }];
-        let Mode::Queued { panel, routines } = still_queued_panel(&live, &RoutineNav::new()) else {
+        let Mode::Queued {
+            panel,
+            routines,
+            closes_itself,
+        } = still_queued_panel(&live, &RoutineNav::new())
+        else {
             panic!("the refusal is the not queued popup");
         };
         assert!(
             routines.is_some(),
             "closing it goes back to the routines pane"
         );
+        assert!(!closes_itself, "a refusal waits for enter");
         assert!(
             panel[0].starts_with(&format!("{TOP_LEFT}─ not queued ")),
             "{panel:#?}"
@@ -30096,7 +30503,6 @@ depends_on: [search-old]
                         "",
                         "start the dispatcher to begin working",
                         "",
-                        "[enter] confirm",
                     ],
                     "{frame}"
                 );
@@ -30118,7 +30524,7 @@ depends_on: [search-old]
             /// `enter` runs the hook and queues. While it runs, the popup
             /// counts the calls and says nothing else; once it is done it
             /// says the hook ran above the usual `queued` popup, with no
-            /// ticket row, taking `enter` to close.
+            /// ticket row and no key row, since it closes itself.
             #[test]
             fn enter_runs_the_hook_counting_tasks_and_queues() {
                 let (repo, _root_guard) = cart("issue-question-enter");
@@ -30154,7 +30560,6 @@ depends_on: [search-old]
                         "",
                         "start the dispatcher to begin working",
                         "",
-                        "[enter] confirm",
                     ],
                     "{frame}"
                 );
