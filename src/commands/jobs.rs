@@ -559,6 +559,13 @@ impl NewJobWalk {
         }
     }
 
+    /// Whether `key` is the one that saves the job: `enter` on the pipeline
+    /// popup. The routines tab turns the loading spool for it alone, since
+    /// every other key of the walk is typing or a move and writes nothing.
+    pub(super) fn saves_on(&self, key: Key) -> bool {
+        key == Key::Enter && matches!(self, NewJobWalk::PickPipeline { .. })
+    }
+
     /// The popup the walk has open.
     pub(super) fn panel(&self, pipelines: &Pipelines) -> Vec<String> {
         match self {

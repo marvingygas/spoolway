@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """The lockup as half-block art, for the dispatcher board.
 
-Emits the `LOCKUP` constant that `src/status.rs` draws in its masthead. Run it
-and paste; the Rust side has a test that this file and the committed constant
-still agree, so the art is generated and never transcribed by hand.
+Emits the `LOCKUP` constant that `src/status/view.rs` draws in its masthead,
+and ahead of it the `SPOOL` constant that `src/screen/spool.rs` turns over a
+tab while a key's work runs: the mark alone, six columns by three rows. Run it
+and paste; the Rust side has a test for each that this file and the committed
+constant still agree, so the art is generated and never transcribed by hand.
 
 Why half-blocks and not sextants: a sextant divides the cell 2x3, which makes
 each sub-pixel a third taller than it is wide, so the design has to be stretched
@@ -101,10 +103,34 @@ def rust_const(frames):
     return f"const LOCKUP: [[&str; {rows}]; {len(frames)}] = [\n{body}\n];"
 
 
+def spool(frame=mark.GRID):
+    """The mark alone, with no word beside it, as half-block rows.
+
+    Padded back out to the mark's full width, unlike `as_blocks`' lines: the
+    loading spool is laid on a blank patch, and a row cut short would leave
+    the patch's columns past it to whatever the Rust side pads with.
+    """
+    return [line.ljust(mark.WIDTH) for line in as_blocks(mark.bits(frame))]
+
+
+def rust_spool_const(frames):
+    """The `SPOOL` constant, one array of rows per frame of the mark."""
+    frame_bodies = []
+    for lines in frames:
+        body = "\n".join(f'        "{line}",' for line in lines)
+        frame_bodies.append(f"    [\n{body}\n    ],")
+    body = "\n".join(frame_bodies)
+    return f"const SPOOL: [[&str; {len(frames[0])}]; {len(frames)}] = [\n{body}\n];"
+
+
 if __name__ == "__main__":
     for rows in (4, 5, 6, 7, 8):
         lines = as_blocks(compose(rows))
         print(f"--- {rows} rows ({rows * 2} pixels tall) ---")
         print("\n".join(lines))
+    print()
+    # Printed ahead of `LOCKUP`, never after: the board's own test reads every
+    # quoted line after the last `const LOCKUP` as the lockup's art.
+    print(rust_spool_const([spool(mark.GRID), spool(mark.GRID_B)]))
     print()
     print(rust_const([as_blocks(compose(frame=mark.GRID)), as_blocks(compose(frame=mark.GRID_B))]))

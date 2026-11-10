@@ -128,6 +128,31 @@ While a popup is open, the screen behind it is drawn dim on every tab. That cove
 strip, the tab's frame and its key line, so the popup is the only bright thing on screen. The
 whole strip is dim, including the open tab's label. The dim stops at the popup's border. When the popup closes, the tab draws in its own colours again.
 
+The loading spool shows that the screen is busy. It is the spoolway mark alone, six columns by
+three rows, in cyan, with no box and no text. It shows when work has been running for 200 ms.
+The work that can show it is:
+
+| Tab | Keys |
+|---|---|
+| Dispatch | `enter` and the stop answers, and the board's `o`, `r` and `k` with every answer in their menus and confirms |
+| Queue and routines | `enter`, every item in the options menu, every save in a picker, the second stage of a trial, save as routine, every delete confirm, the routines tab's `o`, and the new-job save |
+| Overrides | `w`, saving a set value, delete, copying a prompt, saving a pipeline value, and every action in the layer menu: edit, promote, delete and set |
+| Eval | `e` |
+| Any tab | A switch to another tab |
+
+Moving the cursor, `esc`, `f`, typing in a field, filter or search, and moves inside a picker
+never show it. The eval tab's `r` and filter show their `loading…` box and no spool. `u` on the
+dispatch tab shows its `updating` pop-up and no spool. The issue question's `enter` shows its
+progress bar and no spool. A picker that lists branches first, such as edit lands in, draws only
+after the spool has gone. On a tab switch, the spool stays over the tab being left until the
+next tab draws its first frame. It sits on a blank patch eight columns by five rows in
+the middle of the tab, and the rest of the tab is drawn dim behind it. It switches between the
+mark's two frames every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work
+ends sooner. Work that ends within 200 ms draws nothing. A pane too small for the patch draws no
+spool. When the spool has shown, every key typed while the work ran is thrown away when the work
+ends, so a second `enter` does not land on the screen that follows. When it never showed, typed
+keys are kept.
+
 The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
 
 Each tab draws its own screen, under the strip. The dispatch tab draws the board inside a box

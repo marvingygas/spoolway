@@ -13,7 +13,8 @@
 //! is what bare `spoolway` opens: the same screens, one per tab, under one
 //! strip, one terminal guard and one quit — and [`dispatcher`] is the
 //! `spoolway dispatch` child its dispatch tab starts and stops. [`picker`] is
-//! the searchable list any of them opens a popup over.
+//! the searchable list any of them opens a popup over, and [`spool`] the
+//! loading spool turned over a tab while a key's work runs.
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
@@ -21,6 +22,7 @@ pub(crate) mod overrides;
 pub(crate) mod pane;
 pub(crate) mod picker;
 pub(crate) mod shell;
+pub(crate) mod spool;
 
 /// One key a screen reads, decoded from however many bytes it took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1088,6 +1090,22 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
     else {
         return;
     };
+    overlay_painted(frame, panel, width, paint);
+}
+
+/// [`overlay`], centred across `width` columns rather than the frame's first
+/// row, with each row of `panel` drawn in the colours `paint_row` gives it
+/// rather than in [`paint`]'s. For a panel that is not a box, so [`paint`]
+/// would leave it plain, but still has colours of its own: the loading spool
+/// in [`spool`] is the one. It is laid over a whole written frame, whose
+/// first row is the blank one above the tab strip, so it cannot measure the
+/// tab from that row the way [`overlay`] does.
+pub(crate) fn overlay_painted(
+    frame: &mut [String],
+    panel: &[String],
+    width: usize,
+    paint_row: impl Fn(&[String], usize) -> Vec<Option<&'static str>>,
+) {
     let panel_width = panel.first().map_or(0, |line| line.chars().count());
     let x = width.saturating_sub(panel_width) / 2;
     let y = (frame.len().saturating_sub(panel.len()) / 2).max(1);
@@ -1096,7 +1114,7 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
         let Some(row) = frame.get_mut(y + i) else {
             break;
         };
-        *row = overlay_row(row, line, &paint(panel, i), x);
+        *row = overlay_row(row, line, &paint_row(panel, i), x);
     }
 }
 

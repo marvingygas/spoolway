@@ -77,15 +77,16 @@ these files, so regenerating the logo means committing both copies together or t
 ```sh
 python3 mark.py                # the mark alone, to the terminal and mark-preview.png
 python3 generate_lockups.py    # the shipped pair -> lockup-a-mark-left{,-invert}.png
-python3 generate_board.py      # the dispatcher's art -> paste into src/status.rs
+python3 generate_board.py      # the board's and the spool's art -> paste into src/status/view.rs and src/screen/spool.rs
 ```
 
 To change frame A, edit `GRID`'s six strings in `mark.py` and run the other two — `GRID_B` moves
 only if the second frame needs the same change. All three need Pillow. `generate_board.py` prints
-the lockup as half-block characters at five heights for each frame, then the two-frame `LOCKUP`
-constant for `src/status.rs` at the height the board actually uses. Paste it; `status.rs` has a
-test that runs this script and fails if the two have drifted, which is what stops the board's art
-from becoming a hand transcription again.
+the lockup as half-block characters at five heights for each frame. It then prints two constants.
+`SPOOL` is the mark alone, one array of rows per frame, for `src/screen/spool.rs`. `LOCKUP` is the
+two-frame lockup at the height the board actually uses, for `src/status/view.rs`. Paste each
+constant into its file. Each file has a test that runs this script and fails if the two have
+drifted, which is what stops the art from becoming a hand transcription again.
 
 `generate.py` still holds the grid helpers, `SCALE`, and ten discarded mark drafts from the
 exploration that produced the old reel. `generate_wordmarks.py` holds the pixel font the lockup

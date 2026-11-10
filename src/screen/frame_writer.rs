@@ -87,6 +87,13 @@ impl FrameWriter {
         self.last = None;
     }
 
+    /// The last frame written, and the pane size it was written for —
+    /// `None` before the first write and after [`Self::forget`]. What the
+    /// loading spool in [`crate::screen::spool`] is drawn over.
+    pub(crate) fn last(&self) -> Option<&(Vec<String>, (usize, usize))> {
+        self.last.as_ref()
+    }
+
     /// Paint `rows` at `pane_size` (columns, rows) to `out`, unless both
     /// `rows` and `pane_size` equal the last frame this writer painted, in
     /// which case nothing is written at all.

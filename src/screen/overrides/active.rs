@@ -390,6 +390,21 @@ impl ActiveSection {
         matches!(self.view, View::List)
     }
 
+    /// Whether `key` does work the tab turns the loading spool for: `enter`
+    /// on the menu, which can hand a file to an editor or list the branches
+    /// with git before the picker opens; on the picker, which looks up where
+    /// the branch is checked out; and on a confirm popup or a value field
+    /// that holds something, which write the layer or promote. A move in
+    /// the menu or the picker, and every key over the list, reads nothing.
+    pub(super) fn works(&self, key: Key) -> bool {
+        key == Key::Enter
+            && match &self.view {
+                View::Menu(_) | View::Pick(_) | View::Promote(_) | View::Confirm(_) => true,
+                View::Set { value, .. } => !value.trim().is_empty(),
+                View::List | View::Notice(_) => false,
+            }
+    }
+
     /// What the open branch picker's fetch signals once it has answered,
     /// for the tab to wait on beside its keys.
     pub(super) fn wake(&self) -> Option<std::sync::Arc<crate::screen::Wake>> {

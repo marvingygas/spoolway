@@ -6462,8 +6462,13 @@ pub(crate) struct ScreenState {
     /// Both job stores as the routines pane last read them, for the job
     /// config drawn above a routine's tasks. Re-read by [`reload_jobs`]
     /// while that pane is drawn, popups over it included, so a job edited
-    /// elsewhere or just saved shows without a key.
+    /// elsewhere or just saved shows without a key, or by [`read_jobs_for`]
+    /// under the loading spool of a key that hands that pane back.
     jobs: LoadedJobs,
+    /// Whether [`ScreenState::jobs`] was read under the loading spool of the
+    /// key just handled — see [`read_jobs_for`] — so the next
+    /// [`reload_jobs`] draws from it rather than read the stores again.
+    jobs_read: bool,
 }
 
 /// Both job stores merged, or why they would not load. A store that will not
@@ -6503,6 +6508,7 @@ impl ScreenState {
             clean_queued: None,
             named: None,
             jobs: Ok(Vec::new()),
+            jobs_read: false,
         }
     }
 
@@ -6773,7 +6779,7 @@ pub(crate) fn queue_tab(
     cwd: &std::path::Path,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
@@ -6837,7 +6843,7 @@ pub(crate) fn routines_tab(
     cwd: &std::path::Path,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
@@ -6872,7 +6878,7 @@ fn run_screen(
     groups: Vec<Group>,
     routines: Vec<RoutineFolder>,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<ScreenExit> {
     run_screen_from(
         repo,
@@ -6902,7 +6908,7 @@ fn run_screen_from(
     mut state: ScreenState,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<ScreenExit> {
     let (mut groups, mut routines) = lists;
     let routines_dir = repo.routines_dir();
@@ -7031,7 +7037,11 @@ fn run_screen_from(
                 Key::Enter if trial.stage == TrialStage::ChooseSkips => {
                     let trial = trial.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_trial(repo, pipelines, &base, &groups, &trial);
+                    // Under the loading spool: minting the arms' ids asks
+                    // git, and the batch is written before anything draws.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        begin_trial(repo, pipelines, &base, &groups, &trial)
+                    });
                 }
                 _ => {
                     let trial = trial.clone();
@@ -7068,14 +7078,20 @@ fn run_screen_from(
                         base: &base,
                         routines: &routines,
                     };
-                    state.mode = resume(
-                        &at,
-                        &then,
-                        Tracking::Off,
-                        &mut groups,
-                        &mut state,
-                        &mut |_| {},
-                    );
+                    // Under the loading spool, as the `enter` that opened
+                    // the gate was: this runs the same checks and writes.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        let mode = resume(
+                            &at,
+                            &then,
+                            Tracking::Off,
+                            &mut groups,
+                            &mut state,
+                            &mut |_| {},
+                        );
+                        read_jobs_for(repo, &mode, &mut state);
+                        mode
+                    });
                     // `resume` may have just landed a submission straight
                     // onto `groups` — see `refresh_from_reader`'s own doc
                     // comment for why a reading already in flight at this
@@ -7134,7 +7150,11 @@ fn run_screen_from(
                 Key::Esc => state.mode = Mode::Browsing,
                 Key::Enter if !name.trim().is_empty() => {
                     let (group, name) = (group.clone(), name.clone());
-                    state.mode = save_routine(repo, &groups, &group, &name);
+                    // Under the loading spool: the group's files are copied
+                    // into a routine folder before anything draws.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        save_routine(repo, &groups, &group, &name)
+                    });
                 }
                 Key::Backspace | Key::Char('\u{8}') => {
                     let (group, mut name) = (group.clone(), name.clone());
@@ -7173,25 +7193,37 @@ fn run_screen_from(
                 {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_queue(
-                        repo,
-                        pipelines,
-                        &base,
-                        &routines,
-                        &nav,
-                        Tracking::Ask,
-                        &mut |_| {},
-                    );
+                    // Under the loading spool: checking and writing a batch
+                    // can take seconds, and nothing else draws meanwhile.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        let mode = begin_routine_queue(
+                            repo,
+                            pipelines,
+                            &base,
+                            &routines,
+                            &nav,
+                            Tracking::Ask,
+                            &mut |_| {},
+                        );
+                        read_jobs_for(repo, &mode, &mut state);
+                        mode
+                    });
                 }
                 // `o`: the menu for whichever row the focused pane
                 // highlights — see `routine_options`. Read here rather than
                 // in `handle_routine_key`, which is never handed the
                 // pipelines and the routines directory edit schedule is
-                // checked against.
+                // checked against. Under the loading spool, which reads both
+                // job stores: the menu is built from that read, and the pane
+                // under it draws from it rather than read them again with
+                // nothing on screen moving — see `read_jobs_for`.
                 Key::Char('o') => {
-                    if let Some(menu) =
-                        routine_options(repo, pipelines, &routines, &state.jobs, nav)
-                    {
+                    let nav = nav.clone();
+                    let menu = crate::screen::spool::under_spool(writer, out, input, || {
+                        read_jobs_for(repo, &Mode::Routines(nav.clone()), &mut state);
+                        routine_options(repo, pipelines, &routines, &state.jobs, &nav)
+                    });
+                    if let Some(menu) = menu {
                         state.mode = Mode::Options(menu);
                     }
                 }
@@ -7207,39 +7239,50 @@ fn run_screen_from(
                 job,
                 folders,
                 cursor,
-            } => match key {
-                Key::Esc => state.mode = Mode::Routines(nav.clone()),
-                Key::Enter => {
-                    let picked = folders.get(*cursor).map(|(_, folder)| folder.clone());
-                    if let Some(folder) = picked {
-                        let (nav, job) = (nav.clone(), job.clone());
-                        state.mode = match find_job(repo, &job) {
-                            Ok(found) => {
-                                match super::jobs::NewJobWalk::repoint(
-                                    &found,
-                                    &folder,
-                                    &routines_dir,
-                                ) {
-                                    Some(walk) => Mode::NewJob { nav, walk },
-                                    None => Mode::Routines(nav),
-                                }
-                            }
-                            Err(text) => job_not_changed(&nav, text),
-                        };
+            } => {
+                match key {
+                    Key::Esc => state.mode = Mode::Routines(nav.clone()),
+                    Key::Enter => {
+                        let picked = folders.get(*cursor).map(|(_, folder)| folder.clone());
+                        if let Some(folder) = picked {
+                            let (nav, job) = (nav.clone(), job.clone());
+                            // Under the loading spool: `find_job` reads both job
+                            // stores again before the schedule popup can draw,
+                            // and so does the pane under it — see
+                            // `read_jobs_for`.
+                            state.mode =
+                                crate::screen::spool::under_spool(writer, out, input, || {
+                                    let mode = match find_job(repo, &job) {
+                                        Ok(found) => {
+                                            match super::jobs::NewJobWalk::repoint(
+                                                &found,
+                                                &folder,
+                                                &routines_dir,
+                                            ) {
+                                                Some(walk) => Mode::NewJob { nav, walk },
+                                                None => Mode::Routines(nav),
+                                            }
+                                        }
+                                        Err(text) => job_not_changed(&nav, text),
+                                    };
+                                    read_jobs_for(repo, &mode, &mut state);
+                                    mode
+                                });
+                        }
+                        // No routine to pick: the popup says so and stays open
+                        // until `esc`.
                     }
-                    // No routine to pick: the popup says so and stays open
-                    // until `esc`.
-                }
-                _ => {
-                    let cursor = crate::screen::move_cursor(*cursor, folders.len(), key);
-                    if let Mode::PickRoutine { cursor: at, .. } = &mut state.mode {
-                        *at = cursor;
+                    _ => {
+                        let cursor = crate::screen::move_cursor(*cursor, folders.len(), key);
+                        if let Mode::PickRoutine { cursor: at, .. } = &mut state.mode {
+                            *at = cursor;
+                        }
                     }
                 }
-            },
+            }
             Mode::NewJob { nav, walk } => {
-                let nav = nav.clone();
-                state.mode = match walk.key(repo, pipelines, key) {
+                let (nav, walk) = (nav.clone(), walk.clone());
+                let after = |step| match step {
                     WalkStep::Walking(walk) => Mode::NewJob { nav, walk },
                     WalkStep::Cancelled => Mode::Routines(nav),
                     WalkStep::Saved(draft) => Mode::JobSaved {
@@ -7249,6 +7292,17 @@ fn run_screen_from(
                     // A refused save, a name already taken among them,
                     // in a popup titled `not saved`.
                     WalkStep::Refused(message) => outcome_over(Some(&nav), "not saved", message),
+                };
+                // Only the key that saves goes under the loading spool, with
+                // the stores read again for the pane under `job saved`: every
+                // other key of the walk is typing or a move.
+                state.mode = match walk.saves_on(key) {
+                    true => crate::screen::spool::under_spool(writer, out, input, || {
+                        let mode = after(walk.key(repo, pipelines, key));
+                        read_jobs_for(repo, &mode, &mut state);
+                        mode
+                    }),
+                    false => after(walk.key(repo, pipelines, key)),
                 };
             }
             Mode::JobSaved { nav, .. } => {
@@ -7260,8 +7314,15 @@ fn run_screen_from(
             Mode::DeleteRoutine { nav, target } => match key {
                 Key::Enter => {
                     let (nav, target) = (nav.clone(), target.clone());
-                    let result = delete_routine(repo, &target);
-                    state.mode = after_routine_delete(repo, &mut routines, nav, result);
+                    // Under the loading spool: the folder is removed, and the
+                    // routines and the job stores read again, before
+                    // anything draws.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        let result = delete_routine(repo, &target);
+                        let mode = after_routine_delete(repo, &mut routines, nav, result);
+                        read_jobs_for(repo, &mode, &mut state);
+                        mode
+                    });
                 }
                 Key::Esc => state.mode = Mode::Routines(nav.clone()),
                 // Every other key leaves the popup open, so a stray
@@ -7270,8 +7331,13 @@ fn run_screen_from(
             },
             Mode::DeletePending { target, set, .. } => match key {
                 Key::Enter => {
-                    let outcome = delete_pending(repo, target, set);
-                    state.mode = after_pending_delete(repo, &mut groups, &mut state, outcome);
+                    let (target, set) = (target.clone(), set.clone());
+                    // Under the loading spool: the files go and the groups
+                    // are read again before anything draws.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        let outcome = delete_pending(repo, &target, &set);
+                        after_pending_delete(repo, &mut groups, &mut state, outcome)
+                    });
                     // `groups` was just read again with the deleted files
                     // gone; a reading already in flight could still carry
                     // them back — see `refresh_from_reader`.
@@ -7285,8 +7351,11 @@ fn run_screen_from(
             Mode::DeletePlan { page, .. } => match key {
                 Key::Enter => {
                     let page = page.clone();
-                    let outcome = delete_plan(repo, &page);
-                    state.mode = after_plan_delete(repo, &mut groups, &mut state, &page, outcome);
+                    // Under the loading spool, as a pending delete is.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        let outcome = delete_plan(repo, &page);
+                        after_plan_delete(repo, &mut groups, &mut state, &page, outcome)
+                    });
                     // A reading already in flight could still carry the
                     // removed page back, as after a pending delete.
                     known_reading = known_reading.max(reader.started_count());
@@ -7316,9 +7385,13 @@ fn run_screen_from(
                         Mode::EditPipeline(Box::new(PipelinePick { menu, list: *list }))
                     }
                     crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    // Only the pick goes under the loading spool: it writes
+                    // the task and reads the groups again, where a move
+                    // inside the picker reads nothing.
                     crate::screen::picker::Picked::Chosen(name) => {
-                        let mode =
-                            set_pipeline(repo, pipelines, &mut groups, &mut state, &menu, &name);
+                        let mode = crate::screen::spool::under_spool(writer, out, input, || {
+                            set_pipeline(repo, pipelines, &mut groups, &mut state, &menu, &name)
+                        });
                         // `set_pipeline` may have read `groups` again or
                         // patched them; a reading already in flight could
                         // still carry the old pipeline back — see
@@ -7340,8 +7413,11 @@ fn run_screen_from(
                         Mode::EditLandsIn(Box::new(LandsInPick { menu, list: *list }))
                     }
                     crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    // Under the loading spool, as `set_pipeline` is.
                     crate::screen::picker::Picked::Chosen(branch) => {
-                        let mode = set_lands_in(repo, &mut groups, &mut state, &menu, &branch);
+                        let mode = crate::screen::spool::under_spool(writer, out, input, || {
+                            set_lands_in(repo, &mut groups, &mut state, &menu, &branch)
+                        });
                         // As after `set_pipeline`: a reading already in
                         // flight could still carry the old `base:` back.
                         known_reading = known_reading.max(reader.started_count());
@@ -7361,9 +7437,11 @@ fn run_screen_from(
                         Mode::EditDependsOn(Box::new(DependsOnPick { menu, list: *list }))
                     }
                     crate::screen::picker::Picked::Closed => Mode::Options(menu),
+                    // Under the loading spool, as `set_pipeline` is.
                     crate::screen::picker::Picked::Chosen(target) => {
-                        let mode =
-                            set_depends_on(repo, &mut groups, &mut state, &menu, target.as_ref());
+                        let mode = crate::screen::spool::under_spool(writer, out, input, || {
+                            set_depends_on(repo, &mut groups, &mut state, &menu, target.as_ref())
+                        });
                         // As after `set_pipeline`: a reading already in
                         // flight could still carry the old fields back.
                         known_reading = known_reading.max(reader.started_count());
@@ -7381,7 +7459,18 @@ fn run_screen_from(
                             pipelines,
                             routines_dir: &routines_dir,
                         };
-                        state.mode = picked.run(&groups, &routines, &state, &menu, item);
+                        // Under the loading spool: an item can write a job,
+                        // read every task for the gate, hand a file to an
+                        // editor, or list the branches with git before its
+                        // picker opens. On the routines tab the job stores
+                        // are read inside it too — see `read_jobs_for`. The
+                        // spool is down again before a picker draws, so it
+                        // never covers the picker's own waiting row.
+                        state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                            let mode = picked.run(&groups, &routines, &state, &menu, item);
+                            read_jobs_for(repo, &mode, &mut state);
+                            mode
+                        });
                     }
                     // An empty menu offers nothing to confirm; it stays
                     // open until `esc`, as its key row says.
@@ -7394,7 +7483,8 @@ fn run_screen_from(
             },
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
-                // through — nothing is drawn in between but the
+                // through — nothing is drawn in between but the loading
+                // spool, while the work runs past its delay, and the
                 // tool-requirements gate and the issue question, when each
                 // has something to ask. A refusal hands back
                 // `Mode::Outcome`; a clean write says what it queued in
@@ -7402,15 +7492,20 @@ fn run_screen_from(
                 // tab's `enter`, not this one's.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_submission(
-                        repo,
-                        pipelines,
-                        &base,
-                        &mut groups,
-                        &mut state,
-                        Tracking::Ask,
-                        &mut |_| {},
-                    );
+                    // A batch's checks and writes can take seconds, and
+                    // nothing else draws meanwhile.
+                    let mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        begin_submission(
+                            repo,
+                            pipelines,
+                            &base,
+                            &mut groups,
+                            &mut state,
+                            Tracking::Ask,
+                            &mut |_| {},
+                        )
+                    });
+                    state.mode = mode;
                     known_reading = known_reading.max(reader.started_count());
                 }
                 _ => handle_browse_key(&groups, &mut state, key),
@@ -7580,15 +7675,37 @@ fn wait_for_key(
 /// The list's cursor is then kept on a row: a job row goes when its job is
 /// deleted or moved onto a routine, and the cursor that sat on the last one
 /// moves up rather than off the end of the list.
+///
+/// A key that has just read them under its loading spool is not made to
+/// wait on a second read here, where nothing draws: on a slow disk that
+/// second read is the whole wait the spool was meant to cover.
 fn reload_jobs(repo: &Repo, routines: &[RoutineFolder], state: &mut ScreenState) {
+    // Taken before the check below, so a read for a mode with no pane can
+    // never stand in for a later pass's read.
+    let read = std::mem::take(&mut state.jobs_read);
     if routines_beneath(&state.mode).is_none() {
         return;
     }
-    state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+    if !read {
+        state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+    }
     let rows = routines.len() + orphan_jobs(repo, routines, &state.jobs).len();
     if let Mode::Routines(nav) = &mut state.mode {
         nav.folder_cursor = nav.folder_cursor.min(rows.saturating_sub(1));
     }
+}
+
+/// Read both job stores into `state` for `mode`, the screen a key under the
+/// loading spool is about to hand back, while the spool still turns: the
+/// read [`reload_jobs`] would otherwise make before that screen draws, with
+/// nothing on screen moving. Nothing is read for a mode with no routines
+/// pane under it, which draws no job.
+fn read_jobs_for(repo: &Repo, mode: &Mode, state: &mut ScreenState) {
+    if routines_beneath(mode).is_none() {
+        return;
+    }
+    state.jobs = crate::jobs::load(repo).map_err(|err| format!("{err:#}"));
+    state.jobs_read = true;
 }
 
 /// Swap `fresh` into `groups`, keeping `group_cursor` on whatever group it
@@ -18703,6 +18820,43 @@ mod tests {
         assert!(!last.contains("pipeline for wire"), "{last}");
     }
 
+    /// `enter` on the pipeline picker writes under the loading spool: held
+    /// back until the spool has drawn, the write still lands. The screen
+    /// opens on the picker, so the pick is the one key put under the spool.
+    /// Without the pick going under it, nothing is drawn and the hold is
+    /// never taken.
+    #[test]
+    fn enter_on_the_pipeline_picker_turns_the_spool_while_it_writes() {
+        use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
+
+        let (repo, _root_guard) = fixture("screen-edit-pipeline-spool");
+        let path = write_pending(&repo, "wire", &task_text("wire", "group: a\n", BODY));
+        let pipelines = Pipelines::builtin();
+        let groups = listed(&repo);
+        let mut state = on_pending_task(&groups, "wire");
+        state.mode = Mode::EditPipeline(edit_pipeline_on(&repo, &pipelines, &groups, &state));
+        let (mut out, seen) = watched();
+        hold_next_work(move || {
+            assert!(seen.recv_timeout(BACKSTOP).is_ok(), "no spool");
+        });
+
+        run_screen_from(
+            &repo,
+            &pipelines,
+            &repo.root,
+            (groups, Vec::new()),
+            state,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut keys("\r"),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(out.drew_spool());
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.lines().any(|l| l == "pipeline: bugfix"), "{after}");
+    }
+
     /// `esc` on the picker goes back to the options menu it was opened from.
     #[test]
     fn esc_on_the_pipeline_picker_reopens_the_options_menu() {
@@ -25929,6 +26083,66 @@ mod tests {
             .into_iter()
             .map(|job| job.name)
             .collect()
+    }
+
+    /// `o` on a routine reads the job stores under the loading spool and
+    /// builds its menu from that read: a job written while the spool turns,
+    /// after the pane last read the stores, is on the menu. Built from the
+    /// pane's own earlier read, the menu offers a new job instead.
+    #[test]
+    fn o_on_a_routine_reads_the_job_stores_under_the_spool() {
+        use crate::jobs::Scope;
+        use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
+
+        let (repo, _root_guard) = fixture("routine-options-spool");
+        seed_two_routines(&repo);
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let mut state = ScreenState::new();
+        state.mode = Mode::Routines(RoutineNav::new());
+        let (mut out, seen) = watched();
+        let store = repo.clone();
+        hold_next_work(move || {
+            assert!(seen.recv_timeout(BACKSTOP).is_ok(), "no spool");
+            write_job(&store, Scope::User, "whole", "maintenance");
+        });
+
+        run_screen_from(
+            &repo,
+            &Pipelines::builtin(),
+            &repo.root,
+            (Vec::new(), routines),
+            state,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut keys("o"),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(out.drew_spool());
+        let drawn = String::from_utf8_lossy(&out.bytes).into_owned();
+        let last = crate::screen::shell::plain(last_frame(&drawn));
+        assert!(last.contains("activate job"), "{last}");
+    }
+
+    /// Stores read under a key's spool are what the next pass draws, with
+    /// no second read before it; the pass after that reads them again. With
+    /// the second read left in, the job written in between shows at once.
+    #[test]
+    fn reload_jobs_draws_once_from_a_read_made_under_the_spool() {
+        use crate::jobs::Scope;
+
+        let (repo, _root_guard) = fixture("routine-jobs-read-once");
+        seed_two_routines(&repo);
+        let routines = super::super::routines::list_routines(&repo).unwrap();
+        let mut state = ScreenState::new();
+        state.mode = Mode::Routines(RoutineNav::new());
+        read_jobs_for(&repo, &Mode::Routines(RoutineNav::new()), &mut state);
+        write_job(&repo, Scope::User, "whole", "maintenance");
+
+        reload_jobs(&repo, &routines, &mut state);
+        assert!(state.jobs.as_ref().unwrap().is_empty());
+        reload_jobs(&repo, &routines, &mut state);
+        assert_eq!(state.jobs.as_ref().unwrap().len(), 1);
     }
 
     /// A job points into a routine when its path is the folder or anything
