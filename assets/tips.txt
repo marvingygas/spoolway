@@ -189,6 +189,7 @@ watch.dirs adds folders whose agent sessions count toward cost. | config watch.d
 issue_tracking.hook names the script that updates your tracker. | config issue_tracking.hook
 issue_tracking.project_key names your project, such as owner/repo. | config issue_tracking.project_key
 issue_tracking.key_in_names puts the issue key in branch names. | config issue_tracking.key_in_names
+issue_tracking.ask_to_deactivate false skips the issue question. | config issue_tracking.ask_to_deactivate
 agents.<profile>.kind picks the program: claude, codex or pi. | config agents.<profile>.kind
 agents.<profile>.concurrency caps how many of its lanes run at once. | config agents.<profile>.concurrency
 an agent's session_reuse_ctx reuses a chat only below this % full. | config agents.<profile>.session_reuse_ctx
