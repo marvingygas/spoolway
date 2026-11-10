@@ -6253,7 +6253,8 @@ pub(crate) struct ScreenState {
     /// Both job stores as the routines pane last read them, for the job
     /// config drawn above a routine's tasks. Re-read by [`reload_jobs`]
     /// while that pane is drawn, popups over it included, so a job edited
-    /// elsewhere or just saved shows without a key.
+    /// elsewhere or just saved shows without a key, or by [`read_jobs_for`]
+    /// under the loading spool of a key that hands that pane back.
     jobs: LoadedJobs,
     /// Whether [`ScreenState::jobs`] was read under the loading spool of the
     /// key just handled — see [`read_jobs_for`] — so the next
