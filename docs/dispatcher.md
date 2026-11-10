@@ -652,7 +652,7 @@ item:
 | `open task` | Every row, `done` ones included. | Open the task file in your editor. See [Editor](#editor). |
 | `open plan` | A row whose task sets `plan:` to a value that is not empty. | Open the plan page `plan:` names in your default browser. |
 | `pause` | Every row but a `paused` or `done` one, a `blocked` one included. | Pause the row. Asks first if it would interrupt a running agent turn or command. See [Pause panel](#pause-panel). |
-| `focus` | A row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. A blocked row an unblocker lane is working on counts as running. Otherwise, a `paused`, `blocked` or `hook_failed` row whose task still has a pane open: an agent lane, a kept one included, or a command step's pane. Never under the headless backend, never on a queued row, and never on a running row for a kept pane or a finished step. | Bring that pane in front of you, maximized, with `herdr pane zoom <pane> --on`. On a `paused`, `blocked` or `hook_failed` row with no step running, it is the task's open pane that started last. The pane stays zoomed until you unzoom it in herdr. |
+| `focus` | A row whose current step is running in a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step whose run is going in a pane. A blocked row an unblocker lane is working on counts as running. Otherwise, a `paused`, `blocked` or `hook_failed` row whose task still has a pane open: an agent lane, a kept one included, or a command step's pane. Never under the headless backend, never on a queued row, and never on a running row for a kept pane or a finished step. | Bring that pane in front of you, maximized. It looks the pane up with `herdr pane get <pane>`, then runs `herdr workspace focus <workspace>`, `herdr tab focus <tab>` and `herdr pane zoom <pane> --on`, in that order, so your view moves to the pane's workspace and tab first. On a `paused`, `blocked` or `hook_failed` row with no step running, it is the task's open pane that started last. The pane stays zoomed until you unzoom it in herdr. |
 | `restart` | A row `spoolway restart` accepts. | Open the restart panel. See [Restart panel](#restart-panel). |
 | `unqueue` | A `queued` row, and a `paused`, `blocked` or `hook_failed` row with no live agent lane, no unblocker lane at work and no worktree cut going. Never a running or `done` row. | Take the task, and every unstarted task that depends on it, out of the queue and write their tasks back to `~/.spoolway/<project>/pending/`. A task that has started is torn down first: its runs stop, its worktree is removed and its local `task/<id>` branch is deleted. A copy of a routine is deleted instead, when its routine file still exists. Asks first. The panel names the task and what happens to it. See [Unqueue panel](#unqueue-panel). |
 
@@ -684,15 +684,15 @@ any other Linux uses `xdg-open`. When the page is gone, or the platform's progra
 `PATH`, a popup titled `open plan` says what went wrong and what to do, and `enter` closes it.
 
 `focus` looks the pane up again when you press `enter`. When the lane or the run has ended since
-the menu opened, it does nothing. When herdr refuses the zoom, a popup titled `focus` shows
-herdr's error on an `o:` line and says the step's pane may have been closed. On a running row,
-a blocked row an unblocker lane is working on included, it adds that `restart` in this menu starts
-the step again in a new pane. On any other `paused`, `blocked` or `hook_failed` row it ends there,
+the menu opened, it does nothing. When herdr refuses `pane get`, `workspace focus`, `tab focus` or
+`pane zoom`, a popup titled `focus` shows the call and herdr's message on an `o:` line and says the
+step's pane may have been closed. On a running row, a blocked row an unblocker lane is working on
+included, it adds that `restart` in this menu starts the step again in a new pane. On any other `paused`, `blocked` or `hook_failed` row it ends there,
 with no restart or resume advice:
 
 ```
 ╭─ focus ─────────────────────────────────────────────╮
-│  o: herdr pane zoom w2:p3 --on: no pane w2:p3       │
+│  o: herdr pane get w2:p3: pane w2:p3 not found      │
 │                                                     │
 │  The step's pane may have been closed.              │
 │                                                     │
@@ -701,7 +701,7 @@ with no restart or resume advice:
 ```
 
 A command step's pane that you closed by hand leaves its record behind, so it can still be
-listed, and its zoom is refused this way. `enter` closes the popup.
+listed, and `focus` on it is refused this way. `enter` closes the popup.
 
 On the queue screen, a group lists `open plan` when any of its tasks sets `plan:`. Picking it opens every distinct page the group's tasks name, in task order. A task on that screen does not list it. A plan row lists it too, and opens its own page. The routines pane does not list it.
 

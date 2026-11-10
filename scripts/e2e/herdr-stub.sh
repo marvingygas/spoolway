@@ -55,6 +55,7 @@
 #                  name is `-` once `agent rename --clear` has taken it
 #   typed/<n>      one file per `pane run`, holding exactly what was typed
 #   typed.index    pane_id \t bytes \t typed/<n>, one line per `pane run`
+#   calls.log      every call, as its argv on one line, in the order it came
 #   zoomed.index   pane_id, one line per `pane zoom ... --on` that landed
 #   zoom.refused   pane_id, one line per pane a suite wants `pane zoom` to
 #                  refuse with `pane_not_found`; see that verb
@@ -66,7 +67,7 @@ set -uo pipefail
 STATE=${HERDR_STUB_STATE:?HERDR_STUB_STATE must name where this double keeps its state}
 mkdir -p "$STATE" "$STATE/typed"
 : >>"$STATE/workspaces"; : >>"$STATE/tabs"; : >>"$STATE/panes"; : >>"$STATE/typed.index"
-: >>"$STATE/agents"; : >>"$STATE/zoomed.index"
+: >>"$STATE/agents"; : >>"$STATE/zoomed.index"; : >>"$STATE/calls.log"
 
 # The environment a pane's shell starts with — a stand-in for the herdr
 # server's own, and deliberately nothing like the dispatcher's. Overridable so
@@ -194,6 +195,7 @@ make_workspace() {
 DOMAIN=${1:-}; shift || true
 VERB=${1:-}; shift || true
 parse_flags "$@"
+printf '%s %s %s\n' "$DOMAIN" "$VERB" "$*" >>"$STATE/calls.log"
 
 case "$DOMAIN $VERB" in
 
@@ -487,6 +489,29 @@ case "$DOMAIN $VERB" in
     echo '{"result":{}}'
     ;;
 
+  "pane get")
+    # Answers where a pane sits, as `Herdr::focus_pane` reads it before it
+    # switches anything. An id this double does not hold is refused with
+    # `pane_not_found`, as herdr does.
+    pane=${POS[0]:?}
+    [ -n "$(field "$pane" 1 "$STATE/panes")" ] || fail pane_not_found "pane $pane not found"
+    printf '{"result":{"type":"pane_info","pane":{"pane_id":%s,"tab_id":%s,"workspace_id":%s}}}\n' \
+      "$(jstr "$pane")" "$(jstr "$(field "$pane" 2 "$STATE/panes")")" \
+      "$(jstr "$(field "$pane" 3 "$STATE/panes")")"
+    ;;
+
+  "workspace focus")
+    ws=${POS[0]:?}
+    [ -n "$(field "$ws" 1 "$STATE/workspaces")" ] || fail workspace_not_found "workspace $ws not found"
+    echo '{"result":{}}'
+    ;;
+
+  "tab focus")
+    tab=${POS[0]:?}
+    [ -n "$(field "$tab" 1 "$STATE/tabs")" ] || fail tab_not_found "tab $tab not found"
+    echo '{"result":{}}'
+    ;;
+
   "pane zoom")
     pane=${POS[0]:?}
     # Only `--on` is modelled: nothing here unzooms. The pane must be one
@@ -494,8 +519,8 @@ case "$DOMAIN $VERB" in
     [ "${FLAG[on]+set}" = set ] || fail unsupported "this double only implements \`herdr pane zoom <pane> --on\`"
     [ -n "$(field "$pane" 1 "$STATE/panes")" ] || fail pane_not_found "no pane $pane"
     # A pane named in `zoom.refused` is refused the same way while it still
-    # stands. That is herdr closing a pane after `agent list` showed its
-    # agent and before the zoom reached it. Removing the pane's row cannot
+    # stands. That is herdr closing a pane after `pane get` found it and
+    # before the zoom reached it. Removing the pane's row cannot
     # stand in for that here, because `agent list` above reads the same row
     # and would stop listing the agent too.
     if grep -qxF -- "$pane" "$STATE/zoom.refused" 2>/dev/null; then

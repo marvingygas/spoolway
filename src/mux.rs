@@ -309,6 +309,8 @@ pub trait Mux: Sync {
     /// whatever runs in it: an agent's pane and a command step's pane alike,
     /// which is why this goes by pane id rather than through
     /// [`Mux::focus_lane`], whose herdr call needs a live agent in the pane.
+    /// On herdr that is four calls: look the pane up, switch to its
+    /// workspace, switch to its tab, then maximize it.
     ///
     /// The default refuses, the same way [`Mux::open_command`] does: a
     /// backend gets this only by implementing it, and headless has no pane to
@@ -1013,24 +1015,24 @@ impl Herdr {
         }
     }
 
+    /// One call of [`Mux::focus_pane`]'s sequence: its stdout when herdr
+    /// accepts it, and [`herdr_refusal`]'s wording of the refusal when not.
+    fn focus_call(&self, argv: &[String]) -> Result<String> {
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let output = spawn_and_wait(&self.cwd, "herdr", &argv, &mut || {})?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+        Err(herdr_refusal(
+            &argv,
+            output.status,
+            &String::from_utf8_lossy(&output.stderr),
+        ))
+    }
+
     fn call<T: for<'de> Deserialize<'de>>(&self, args: &[&str]) -> Result<T> {
         let raw = run(&self.cwd, "herdr", args)?;
-        let envelope: Envelope<T> = serde_json::from_str(&raw).with_context(|| {
-            format!(
-                "herdr {} returned output that is not the expected JSON envelope: {}",
-                args.join(" "),
-                raw.chars().take(200).collect::<String>()
-            )
-        })?;
-
-        match (envelope.result, envelope.error) {
-            (Some(result), _) => Ok(result),
-            (None, Some(error)) => bail!("herdr {}: {}", args.join(" "), error.message),
-            (None, None) => bail!(
-                "herdr {} returned neither a result nor an error",
-                args.join(" ")
-            ),
-        }
+        parse_envelope(args, &raw)
     }
 
     /// Type `text` into a pane and submit it — the one way spoolway reaches
@@ -1828,6 +1830,42 @@ struct PaneLocation {
     pane_id: String,
 }
 
+/// The result out of the JSON envelope `raw`, which herdr printed for the call
+/// `args`: its error's message when it carries one, and a description of what
+/// was wrong with the output otherwise. The one reading for [`Herdr::call`]
+/// and for [`Herdr::focus_pane`]'s `pane get`.
+fn parse_envelope<T: for<'de> Deserialize<'de>>(args: &[&str], raw: &str) -> Result<T> {
+    let envelope: Envelope<T> = serde_json::from_str(raw).with_context(|| {
+        format!(
+            "herdr {} returned output that is not the expected JSON envelope: {}",
+            args.join(" "),
+            raw.chars().take(200).collect::<String>()
+        )
+    })?;
+
+    match (envelope.result, envelope.error) {
+        (Some(result), _) => Ok(result),
+        (None, Some(error)) => bail!("herdr {}: {}", args.join(" "), error.message),
+        (None, None) => bail!(
+            "herdr {} returned neither a result nor an error",
+            args.join(" ")
+        ),
+    }
+}
+
+/// What `herdr pane get` answers: where the pane sits, which
+/// [`Herdr::focus_pane`] needs to switch the person's view there.
+#[derive(Debug, Deserialize)]
+struct PaneGetResult {
+    pane: PaneAddress,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaneAddress {
+    workspace_id: String,
+    tab_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentList {
     agents: Vec<RawAgent>,
@@ -1977,22 +2015,28 @@ impl Mux for Herdr {
         true
     }
 
-    /// Spawned here rather than through [`Herdr::call_ignoring_result`],
-    /// because a person reads this refusal, in the board's `focus` popup:
-    /// `repo::run`'s message carries herdr's whole JSON envelope, and
-    /// [`herdr_refusal`] carries only the sentence inside it.
+    /// Four calls, in this order: `pane get` to learn the pane's workspace
+    /// and tab, `workspace focus`, `tab focus`, then `pane zoom --on`.
+    /// `pane zoom` only maximizes the pane inside its own tab, so without the
+    /// two focus calls the person's view stays where it was. The lookup comes
+    /// first because it is the call that fails for a pane that has gone:
+    /// nothing has switched by then, so a refusal never leaves the person in
+    /// another workspace with the popup on the board they left.
+    ///
+    /// Each call goes through [`Herdr::focus_call`] rather than
+    /// [`Herdr::call`] or [`Herdr::call_ignoring_result`], because a person
+    /// reads each refusal, in the board's `focus` popup: `repo::run`'s message
+    /// carries herdr's whole JSON envelope, and [`herdr_refusal`] carries only
+    /// the sentence inside it.
     fn focus_pane(&self, pane_id: &str) -> Result<()> {
-        let argv = pane_zoom_argv(pane_id);
-        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let output = spawn_and_wait(&self.cwd, "herdr", &argv, &mut || {})?;
-        if output.status.success() {
-            return Ok(());
-        }
-        Err(herdr_refusal(
-            &argv,
-            output.status,
-            &String::from_utf8_lossy(&output.stderr),
-        ))
+        let lookup = pane_get_argv(pane_id);
+        let got = self.focus_call(&lookup)?;
+        let lookup: Vec<&str> = lookup.iter().map(String::as_str).collect();
+        let PaneGetResult { pane } = parse_envelope(&lookup, &got)?;
+        self.focus_call(&workspace_focus_argv(&pane.workspace_id))?;
+        self.focus_call(&tab_focus_argv(&pane.tab_id))?;
+        self.focus_call(&pane_zoom_argv(pane_id))?;
+        Ok(())
     }
 
     fn tabs_for_sweep(&self) -> Result<Vec<SweepTab>> {
@@ -2858,13 +2902,36 @@ fn tab_create_argv(workspace_id: &str, cwd: &str, label: &str) -> Vec<String> {
     ]
 }
 
-/// The call that brings a pane forward by id. herdr's `pane focus` only moves
-/// to a neighbour by direction, so it cannot do this; `pane zoom --on` takes
-/// any pane id, switches to that pane's workspace and tab, gives it focus and
-/// maximizes it.
+/// The call that looks a pane up by id, answering its workspace and tab.
+/// It is [`Herdr::focus_pane`]'s first call, and the one that refuses a pane
+/// that no longer exists.
 ///
 /// Pulled out on its own, like [`tab_create_argv`], so the shape of the call
 /// is checkable without a real herdr to send it to.
+fn pane_get_argv(pane_id: &str) -> Vec<String> {
+    vec!["pane".to_string(), "get".to_string(), pane_id.to_string()]
+}
+
+/// The call that switches the person's view to a workspace.
+fn workspace_focus_argv(workspace_id: &str) -> Vec<String> {
+    vec![
+        "workspace".to_string(),
+        "focus".to_string(),
+        workspace_id.to_string(),
+    ]
+}
+
+/// The call that switches the person's view to a tab, within the workspace
+/// already switched to.
+fn tab_focus_argv(tab_id: &str) -> Vec<String> {
+    vec!["tab".to_string(), "focus".to_string(), tab_id.to_string()]
+}
+
+/// The call that maximizes a pane by id, last in [`Herdr::focus_pane`]'s
+/// sequence. herdr's `pane focus` only moves to a neighbour by direction, so
+/// it cannot do this. `pane zoom --on` takes any pane id and maximizes it
+/// inside its own tab, but it does not switch to that pane's workspace or
+/// tab: the calls before it do.
 fn pane_zoom_argv(pane_id: &str) -> Vec<String> {
     vec![
         "pane".to_string(),
@@ -4510,13 +4577,29 @@ mod tests {
         assert!(!argv.iter().any(|arg| arg.contains("focus")));
     }
 
-    /// A pane is focused by id through `pane zoom --on`, the one herdr call
-    /// that takes any pane id and brings it forward.
+    /// A pane is focused by id through four calls: look it up, switch to its
+    /// workspace, switch to its tab, then maximize it. `pane zoom` alone
+    /// leaves the person's view where it was.
     #[test]
-    fn a_pane_is_focused_by_zooming_it_on() {
+    fn a_pane_is_focused_by_getting_it_then_switching_then_zooming() {
+        assert_eq!(pane_get_argv("w5S:p31"), ["pane", "get", "w5S:p31"]);
+        assert_eq!(workspace_focus_argv("w5S"), ["workspace", "focus", "w5S"]);
+        assert_eq!(tab_focus_argv("w5S:t2"), ["tab", "focus", "w5S:t2"]);
         assert_eq!(
             pane_zoom_argv("w5S:p31"),
             ["pane", "zoom", "w5S:p31", "--on"]
+        );
+    }
+
+    /// `pane get` answers the pane's workspace and tab under `pane`.
+    #[test]
+    fn pane_get_answers_the_workspace_and_tab() {
+        let raw = r#"{"result":{"type":"pane_info","pane":{"pane_id":"w5S:p31","workspace_id":"w5S","tab_id":"w5S:t2","focused":false}}}"#;
+        let got: Envelope<PaneGetResult> = serde_json::from_str(raw).unwrap();
+        let pane = got.result.unwrap().pane;
+        assert_eq!(
+            (pane.workspace_id.as_str(), pane.tab_id.as_str()),
+            ("w5S", "w5S:t2")
         );
     }
 
