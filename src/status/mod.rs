@@ -45,7 +45,7 @@ use view::{
     restart_confirm_panel, resume_picker_panel, skip_hook_confirm_panel, spool_frame,
     table_laid_out, table_window, ticker, tint_available, unqueue_confirm_panel,
 };
-pub(crate) use view::{BOLD, DIM, GUTTER, RESET, strip_ansi};
+pub(crate) use view::{BOLD, CYAN, DIM, GREEN, GUTTER, RED, RESET, strip_ansi};
 
 /// The redraw rate every screen's own wait polls stdin at — the queue
 /// screen and the dispatcher board, whose wait slices its whole
@@ -738,10 +738,20 @@ impl Board {
         })
     }
 
-    /// `frame`, with `popup` drawn over it wherever the board has no panel
-    /// of its own open — see [`Board::hosted_frame`].
+    /// The panel a frame drawn now with `popup` has over it: the board's own
+    /// menu or panel while one is open, `popup` otherwise. The one rule
+    /// [`Board::with_popup`] lays a panel down by, and the one the dispatch
+    /// tab dims its strip by, so the strip is never dim over a bright board
+    /// or bright over a dim one.
+    pub(crate) fn panel_over(&self, popup: Option<&[String]>) -> Option<Vec<String>> {
+        self.mode.panel().or_else(|| popup.map(<[String]>::to_vec))
+    }
+
+    /// `frame`, with [`Board::panel_over`] drawn over it and everything
+    /// around it dim — see [`Board::hosted_frame`] and
+    /// [`crate::screen::dim`].
     fn with_popup(&self, frame: String, popup: Option<&[String]>) -> String {
-        match self.mode.panel().or_else(|| popup.map(<[String]>::to_vec)) {
+        match self.panel_over(popup) {
             Some(panel) => {
                 // `overlay` lines a panel up by the columns a reader sees,
                 // but the rows under it are padded below through `pad_to`
@@ -750,10 +760,11 @@ impl Board {
                 // board's rows carry colour throughout — the state dot, the
                 // dimmed footer, the key hint — so a coloured row would pad
                 // short of a plain one, with too few columns for the panel
-                // to land on. A panel carries no colour of its own, so the
-                // frame under one loses its for the frame this draws —
-                // [`strip_ansi`] — and gets it back the moment the panel
-                // closes and the next frame is read fresh.
+                // to land on. So the frame under a panel loses its colour
+                // for the frame this draws — [`strip_ansi`] — and is drawn
+                // dim instead once it is padded, with the panel the only
+                // bright thing on it. It gets its colour back the moment the
+                // panel closes and the next frame is read fresh.
                 //
                 // Also opens on a blank spacer line, and has other blank
                 // rows through the ticker and the rule below it — a row
@@ -769,7 +780,7 @@ impl Board {
                 // never on the key line: padded to one width with the box,
                 // a key line wider than the terminal would widen every row
                 // of the box past the terminal's last column along with it.
-                let keys = match crate::screen::shell::hosted() {
+                let mut keys = match crate::screen::shell::hosted() {
                     Some(_) => {
                         let bottom = stripped
                             .iter()
@@ -797,7 +808,13 @@ impl Board {
                 while lines.len() < panel.len() + 2 {
                     lines.push(" ".repeat(width));
                 }
+                // Dimmed after `pad_to`, which would count the codes as
+                // columns, and before `overlay`, which closes the dim where
+                // the panel starts. The key line is dimmed where it stands
+                // and never padded, so it is no wider than it was.
+                crate::screen::dim(&mut lines);
                 crate::screen::overlay(&mut lines, &panel);
+                crate::screen::dim(&mut keys);
                 lines.extend(keys);
                 lines.join("\n")
             }
@@ -14495,11 +14512,11 @@ mod tests {
         }
     }
 
-    /// A confirm panel is drawn in plain text over a frame the table beneath
-    /// it colours throughout — the state dot, the dimmed footer, the key
-    /// hint. An overlay that counted an escape byte as a column exactly
-    /// like a visible one wrote panel text at the wrong column for it,
-    /// slicing a `DIM`/`RESET` pair in two and leaving what survived of the
+    /// A confirm panel is built in plain text, and painted only as it is
+    /// laid over a frame the table beneath it colours throughout — the
+    /// state dot, the dimmed footer, the key hint. An overlay that counted
+    /// an escape byte as a column exactly like a visible one wrote panel
+    /// text at the wrong column for it, slicing a `DIM`/`RESET` pair in two and leaving what survived of the
     /// code sitting in the frame as stray text — this pins that every
     /// escape sequence in the raw, unstripped frame is still whole, an
     /// `ESC[` opened and a bare `m` closing it with nothing but digits and

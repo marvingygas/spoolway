@@ -520,7 +520,11 @@ has "the walk actually reached the dispatch tab" "dispatcher stopped" "$ALL_TABS
 has "and the queue tab" "─ [groups]" "$ALL_TABS.plain"
 has "and the routines tab" "$(lit '[3] ROUTINES')" "$ALL_TABS"
 has "and the overrides tab" "$(lit '[4] OVERRIDES')" "$ALL_TABS"
-has "and the eval tab, 5 from overrides" "$(lit '[5] EVAL')" "$ALL_TABS"
+# The eval tab opens under its loading popup, and a popup dims the strip whole,
+# so no label is lit on that frame. A strip with no code between its labels
+# is the one drawn dim whole.
+has "and the eval tab, 5 from overrides, its strip dim under the loading popup" \
+  "$STRIP" "$ALL_TABS"
 lacks "with no JOBS label left on the strip" "JOBS" "$ALL_TABS.plain"
 has "and the eval tab" "╭─ [eval]   directories   trials " "$ALL_TABS.plain"
 

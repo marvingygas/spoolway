@@ -345,7 +345,7 @@ stops_drawing() {
 # after this mark says it.
 never_draws() {
   local what=$1 unwanted=$2 mark=$3
-  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then
+  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG" | _strip_ansi); then
     bad "$what (a panel opened: \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
   else ok "$what"; fi
@@ -357,7 +357,7 @@ never_draws() {
 # and three dispatchers ago.
 draws_since() {
   local what=$1 wanted=$2 mark=$3
-  if grep -qF -- "$wanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then ok "$what"
+  if grep -qF -- "$wanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG" | _strip_ansi); then ok "$what"
   else
     bad "$what (no frame since said \"$wanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
@@ -371,7 +371,7 @@ draws_since() {
 # there.
 _since_says() {
   local mark=$1 want=$2
-  grep -qF -- "$want" < <(tail -n "+$((mark + 1))" "$BOARD_LOG")
+  grep -qF -- "$want" < <(tail -n "+$((mark + 1))" "$BOARD_LOG" | _strip_ansi)
 }
 draws_since_waited() {
   local what=$1 want=$2 mark=$3 secs=${4:-20}
@@ -388,7 +388,7 @@ draws_since_waited() {
 # the panel helper's vaguer to fit them both.
 draws_since_not() {
   local what=$1 unwanted=$2 mark=$3
-  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG"); then
+  if grep -qF -- "$unwanted" < <(tail -n "+$((mark + 1))" "$BOARD_LOG" | _strip_ansi); then
     bad "$what (the board drew \"$unwanted\")"
     tail -30 "$BOARD_LOG" | sed 's/^/        /'
   else ok "$what"; fi

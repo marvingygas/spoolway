@@ -704,8 +704,10 @@ pub(crate) fn hint(row: &str) -> String {
 /// Plain because [`overlay`] lays a panel over a frame one character at a
 /// time: a colour code there would be counted as columns it does not take,
 /// and the panel's right border would land short of where the box says.
-/// Shared with `key_hint` so a key named in a popup and the same key named
-/// on the row under the frame read exactly alike.
+/// `overlay` paints a popup's `[enter]` and `[esc]` pairs as it lays the
+/// row down instead — see [`paint`]. Shared with `key_hint` so a key named
+/// in a popup and the same key named on the row under the frame read word
+/// for word alike.
 pub(crate) fn keys(pairs: &[(&str, &str)]) -> String {
     let mut line = String::new();
     for (i, (key, label)) in pairs.iter().enumerate() {
@@ -1070,10 +1072,15 @@ pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
 ///
 /// Columns are the ones a reader sees: an escape code in a row takes none,
 /// so a panel lands in the same place over a coloured row as over a plain
-/// one. A row with no codes is written exactly as a character-for-character
-/// replace would write it. See [`overlay_row`] for the colour around a panel.
-/// The panel itself is still written one character to a column, so it
-/// carries no codes of its own — see [`keys`].
+/// one. See [`overlay_row`] for the colour around a panel.
+///
+/// The panel itself carries no codes of its own — see [`keys`] — and is
+/// written one character to a column. A boxed panel is painted here as it
+/// is laid down, in the colours [`paint`] gives each character: so every
+/// popup on every tab is coloured alike, and the builders, their text
+/// tests and the prompts printed straight to a terminal all stay plain.
+/// Over a row with no codes, a panel [`paint`] leaves plain is written
+/// exactly as a character-for-character replace would write it.
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
     let Some(width) = frame
         .first()
@@ -1089,7 +1096,98 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
         let Some(row) = frame.get_mut(y + i) else {
             break;
         };
-        *row = overlay_row(row, line, x);
+        *row = overlay_row(row, line, &paint(panel, i), x);
+    }
+}
+
+/// The colour each character of `panel`'s `i`th row is drawn in, `None`
+/// for the terminal's own: [`crate::status::CYAN`] on the box's border and
+/// its title, [`crate::status::GREEN`] on each `[enter]` pair of its key
+/// row and [`crate::status::RED`] on each `[esc]` pair.
+///
+/// A panel that is not a box — one whose first row does not open on
+/// [`corner::TOP_LEFT`] — is left plain: there is no border to find.
+///
+/// Only the last row inside the box is read as the key row, and only when
+/// it starts on a `[`, so a body row that names `[enter]` is never painted.
+/// A pair runs from its `[` to the next `[` or the end of the row, whatever
+/// the gap between them: a row narrowed to fit a small frame joins its
+/// pairs with two spaces rather than [`crate::status::GUTTER`]'s three. The
+/// spaces after a pair stay plain, so the gap between two pairs is never
+/// drawn in either's colour. The colour follows the key alone, so
+/// `[enter] save` is as green as `[enter] confirm`, and any other key is
+/// plain.
+fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
+    use crate::status::{CYAN, GREEN, RED};
+    let line: Vec<char> = panel[i].chars().collect();
+    let mut paint = vec![None; line.len()];
+    let boxed = panel[0].starts_with(corner::TOP_LEFT);
+    let last = panel.len() - 1;
+    if !boxed || line.is_empty() {
+        return paint;
+    }
+    if i == 0 || i == last {
+        paint.fill(Some(CYAN));
+        return paint;
+    }
+    let inner = match (line.first(), line.last()) {
+        (Some('│'), Some('│')) if line.len() >= 2 => {
+            paint[0] = Some(CYAN);
+            paint[line.len() - 1] = Some(CYAN);
+            1..line.len() - 1
+        }
+        // A row laid out by hand with no side borders of its own is read
+        // whole, rather than losing a character at either end.
+        _ => 0..line.len(),
+    };
+    let text = &line[inner.clone()];
+    let starts_on_key = text.iter().find(|c| **c != ' ') == Some(&'[');
+    if i + 1 != last || !starts_on_key {
+        return paint;
+    }
+    let opens: Vec<usize> = (0..text.len()).filter(|&k| text[k] == '[').collect();
+    for (n, &open) in opens.iter().enumerate() {
+        let mut close = opens.get(n + 1).copied().unwrap_or(text.len());
+        while close > open && text[close - 1] == ' ' {
+            close -= 1;
+        }
+        let pair: String = text[open..close].iter().collect();
+        let colour = if pair.starts_with("[enter]") {
+            GREEN
+        } else if pair.starts_with("[esc]") {
+            RED
+        } else {
+            continue;
+        };
+        for k in open..close {
+            paint[inner.start + k] = Some(colour);
+        }
+    }
+    paint
+}
+
+/// `rows` redrawn dim, for whatever a tab draws behind an open popup: its
+/// tab strip, its frame and its key line, so the popup is the only bright
+/// thing on screen.
+///
+/// Each row's own codes are taken out first and the row is then dimmed
+/// whole, from [`crate::status::DIM`] to a [`crate::status::RESET`] after
+/// its last character. Left in, a reset the tab wrote partway along a row —
+/// after a coloured state dot, or a dimmed key — would end the dim there
+/// and draw the rest of the row bright. A row with nothing but spaces on it
+/// is left with no codes at all, since there is nothing on it to dim.
+///
+/// Dim a frame before [`overlay`] lays the popup on it, never after:
+/// [`overlay_row`] closes the dim where the box starts and opens it again
+/// where the box ends, which keeps it off the popup's own colours.
+pub(crate) fn dim(rows: &mut [String]) {
+    use crate::status::{DIM, RESET};
+    for row in rows {
+        let plain = crate::status::strip_ansi(row);
+        *row = match plain.trim().is_empty() {
+            true => plain,
+            false => format!("{DIM}{plain}{RESET}"),
+        };
     }
 }
 
@@ -1102,7 +1200,14 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
 /// side keeps it. The codes of the characters the panel covers are written
 /// after it, in order, rather than dropped: one may close a colour or a
 /// hyperlink that the rest of the row must not carry on into.
-fn overlay_row(row: &str, line: &str, x: usize) -> String {
+///
+/// Each of the panel's characters is drawn in its colour in `paint` — see
+/// [`paint`] — opened where that colour starts and closed with a reset
+/// where it ends. A colour still open on the panel's last character, its
+/// right border, is closed before the row's own colour opens again, so
+/// none of the panel's colour runs on into the text beyond it.
+fn overlay_row(row: &str, line: &str, paint: &[Option<&str>], x: usize) -> String {
+    let reset = crate::status::RESET;
     let (cells, tail) = cells(row);
     let over: Vec<char> = line.chars().collect();
     let end = x + over.len();
@@ -1110,13 +1215,18 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
     let mut colour = String::new();
     let mut at_start = String::new();
     let mut hidden = String::new();
+    // The panel's own colour last opened, until it is reset.
+    let mut painted: Option<&str> = None;
     let mut out = String::new();
     for (j, (codes, ch)) in cells.iter().enumerate() {
         if j == x && !colour.is_empty() {
             at_start = colour.clone();
-            out.push_str(crate::status::RESET);
+            out.push_str(reset);
         }
         if j == end {
+            if painted.take().is_some() {
+                out.push_str(reset);
+            }
             out.push_str(&at_start);
             out.push_str(&hidden);
         }
@@ -1129,6 +1239,14 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
         }
         if (x..end).contains(&j) {
             hidden.extend(codes.iter().map(String::as_str));
+            let want = paint.get(j - x).copied().flatten();
+            if want != painted {
+                if painted.is_some() {
+                    out.push_str(reset);
+                }
+                out.extend(want);
+                painted = want;
+            }
             out.push(over[j - x]);
             continue;
         }
@@ -1138,6 +1256,9 @@ fn overlay_row(row: &str, line: &str, x: usize) -> String {
     // A row that ends under the panel, or right where it ends, never
     // reached `end` above.
     if cells.len() <= end {
+        if painted.is_some() {
+            out.push_str(reset);
+        }
         out.push_str(&hidden);
     }
     out.extend(tail.iter().map(String::as_str));
@@ -1194,9 +1315,13 @@ pub(crate) fn plural(n: usize, noun: &str) -> String {
 }
 
 /// What a test that reads a screen's text calls the screen `lines` draw: the
-/// tab the strip draws lit, or `fallback` when there is no strip, and the
-/// title of a popup drawn over it, if there is one. A popup's top border
-/// sits inside the tab's own `│` border, which a pane's title never does.
+/// tab the strip draws lit, or `fallback` when no tab is lit, and the title
+/// of a popup drawn over it, if there is one. A popup's top border sits
+/// inside the tab's own `│` border, which a pane's title never does.
+///
+/// No tab is lit when there is no strip, and when the strip is dimmed whole
+/// behind a popup — see [`dim`]. [`walk_screens`] passes the tab the walk
+/// last showed lit as `fallback` for the second.
 ///
 /// The strip's rows are every row between the blank one at the top and the
 /// next blank one, however many rows a narrow terminal breaks it onto, and
@@ -1235,16 +1360,102 @@ pub(crate) fn shown_screen(lines: &[String], fallback: &str) -> String {
 /// out. Named by content because a walk's earlier frames are not the screen
 /// its keys were written to reach, and a name written beside the keys would
 /// be wrong for them.
+///
+/// A frame whose strip lights no tab is named by the tab the walk last
+/// showed lit, and by `fallback` before any: a strip is dimmed whole behind
+/// a popup, and a popup always opens over a frame of its own tab drawn
+/// before it. Named by `fallback` alone, a popup on the overrides tab
+/// would be reported on whichever tab the walk was told to fall back to.
 #[cfg(test)]
 pub(crate) fn walk_screens(fallback: &str, frames: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut last_lit: Option<String> = None;
     frames
         .iter()
         .map(|frame| {
             let lines: Vec<String> = frame.lines().map(str::to_string).collect();
-            let name = shown_screen(&lines, fallback);
+            if let Some(tab) = lines.iter().take(3).find_map(|line| shell::lit_tab(line)) {
+                last_lit = Some(tab.to_lowercase());
+            }
+            let name = shown_screen(&lines, last_lit.as_deref().unwrap_or(fallback));
             (name, lines.iter().map(|line| shell::plain(line)).collect())
         })
         .collect()
+}
+
+/// Each visible character of `row` with the colour codes in force on it,
+/// from the last reset on.
+#[cfg(test)]
+fn colours(row: &str) -> Vec<(char, String)> {
+    let mut colour = String::new();
+    cells(row)
+        .0
+        .into_iter()
+        .map(|(codes, ch)| {
+            for code in codes {
+                if code == crate::status::RESET {
+                    colour.clear();
+                } else if code.starts_with("\x1b[") {
+                    colour.push_str(&code);
+                }
+            }
+            (ch, colour.clone())
+        })
+        .collect()
+}
+
+/// Checks a whole tab's `screen` — strip, frame and key line — drawn with
+/// `panel` open over it: every cell of the panel's box in exactly the colour
+/// [`paint`] gives it and none of them dim, and every other visible
+/// character on the screen dim and nothing else. Panics, naming the row and
+/// the character, on the first cell that is not.
+///
+/// The box is found by its top row's text, and every row of it must read
+/// as the panel's own row in the same columns. `screen` must have visible
+/// text both above and below the box, so a screen that lost its strip or
+/// its key line is not passed as dimmed.
+#[cfg(test)]
+pub(crate) fn assert_dimmed_behind(screen: &[String], panel: &[String]) {
+    use crate::status::{DIM, strip_ansi};
+    let shown = screen.join("\n");
+    let plain: Vec<String> = screen.iter().map(|row| strip_ansi(row)).collect();
+    let (y, x) = plain
+        .iter()
+        .enumerate()
+        .find_map(|(y, row)| row.find(&panel[0]).map(|at| (y, row[..at].chars().count())))
+        .unwrap_or_else(|| panic!("the popup's top row is on screen: {shown}"));
+    let width = panel[0].chars().count();
+    let boxed = y..y + panel.len();
+    let mut dimmed = (0, 0);
+    for (r, row) in screen.iter().enumerate() {
+        let drawn = colours(row);
+        let paints = boxed.contains(&r).then(|| {
+            let text: String = plain[r].chars().skip(x).take(width).collect();
+            assert_eq!(text, panel[r - y], "row {r} of the box: {shown}");
+            paint(panel, r - y)
+        });
+        for (k, (ch, colour)) in drawn.iter().enumerate() {
+            match &paints {
+                Some(paints) if (x..x + width).contains(&k) => {
+                    let want = paints[k - x].unwrap_or("");
+                    assert_eq!(colour, want, "row {r}, {ch:?} at {k} in the box: {row:?}");
+                    assert!(!colour.contains(DIM), "row {r}, {ch:?} at {k}: {row:?}");
+                }
+                _ if *ch == ' ' => {}
+                _ => {
+                    assert_eq!(colour, DIM, "row {r}, {ch:?} at {k} behind: {row:?}");
+                    if r < y {
+                        dimmed.0 += 1;
+                    } else if r >= boxed.end {
+                        dimmed.1 += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        dimmed.0 > 0 && dimmed.1 > 0,
+        "dim text above and below the box: {shown}"
+    );
 }
 
 #[cfg(test)]
@@ -1298,6 +1509,184 @@ mod tests {
         overlay(&mut frame, &["XY".to_string(), "ZZ".to_string()]);
         assert_eq!(frame[1], "│abcXYfgh│");
         assert_eq!(frame[2], "│ab");
+    }
+
+    /// `panel` laid over a plain frame of dots three columns wider on
+    /// either side, and the column and row its top left corner landed on.
+    fn laid(panel: &[String]) -> (Vec<String>, usize, usize) {
+        let width = panel[0].chars().count() + 6;
+        let mut frame = vec![".".repeat(width); panel.len() + 4];
+        overlay(&mut frame, panel);
+        (frame, 3, 2)
+    }
+
+    /// The colour of each character of `panel`'s `i`th row as [`laid`]
+    /// drew it.
+    fn row_colours(panel: &[String], i: usize) -> Vec<(char, String)> {
+        let (frame, x, y) = laid(panel);
+        let width = panel[i].chars().count();
+        colours(&frame[y + i])[x..x + width].to_vec()
+    }
+
+    /// Every popup that asks, laid over a tab, draws its border and title
+    /// in cyan, its `[enter]` pair green, its `[esc]` pair red and its body
+    /// in the terminal's own colour, while the builders still hand over
+    /// rows with no codes in them. With its codes taken out, the frame
+    /// reads exactly as a character-for-character replace would write it.
+    #[test]
+    fn every_popup_laid_over_a_tab_is_painted_cyan_green_and_red() {
+        use crate::status::{CYAN, GREEN, RED};
+        let popups = [
+            crate::status::asking_panels(),
+            crate::commands::dispatch_asking_panels(),
+            crate::commands::queue_asking_panels(),
+            crate::commands::jobs_asking_panels(),
+            vec![
+                ("options", options("wire", &["open task", "gate"], 0)),
+                ("options, nothing to do", options("wire", &[], 0)),
+                ("notice", Notice::new("queued", "queued 1 task").panel(40)),
+            ],
+        ]
+        .concat();
+        for (name, panel) in popups {
+            assert!(
+                panel.iter().all(|line| !line.contains('\x1b')),
+                "{name}: the builder stays plain: {panel:?}"
+            );
+            let (frame, x, y) = laid(&panel);
+            let mut replaced = vec![".".repeat(frame[0].chars().count()); frame.len()];
+            for (i, line) in panel.iter().enumerate() {
+                let mut row: Vec<char> = replaced[y + i].chars().collect();
+                row.splice(x..x + line.chars().count(), line.chars());
+                replaced[y + i] = row.into_iter().collect();
+            }
+            let stripped: Vec<String> = frame.iter().map(|l| shell::plain(l)).collect();
+            assert_eq!(stripped, replaced, "{name}: the text is unchanged");
+
+            let last = panel.len() - 1;
+            for i in 0..=last {
+                let drawn = row_colours(&panel, i);
+                let text: String = drawn.iter().map(|(c, _)| c).collect();
+                let pair = |pair: &str| {
+                    text.find(pair).map(|at| {
+                        let at = text[..at].chars().count();
+                        at..at + pair.chars().count()
+                    })
+                };
+                let enter = pair("[enter] confirm");
+                let esc = pair("[esc] close");
+                for (k, (ch, colour)) in drawn.iter().enumerate() {
+                    let want = if i == 0 || i == last || k == 0 || k == drawn.len() - 1 {
+                        CYAN
+                    } else if enter.as_ref().is_some_and(|r| r.contains(&k)) {
+                        GREEN
+                    } else if esc.as_ref().is_some_and(|r| r.contains(&k)) {
+                        RED
+                    } else {
+                        ""
+                    };
+                    assert_eq!(colour, want, "{name}: row {i}, {ch:?} at {k}: {frame:?}");
+                }
+                if i + 1 == last && name != "notice" {
+                    assert!(esc.is_some(), "{name}: an esc pair on {text:?}");
+                }
+                if i + 1 == last && name != "options, nothing to do" {
+                    assert!(enter.is_some(), "{name}: an enter pair on {text:?}");
+                }
+            }
+        }
+    }
+
+    /// The colour follows the key alone, whatever the word after it, and a
+    /// pair runs to the next `[` however narrow the gap: a key row narrowed
+    /// to fit a small frame joins its pairs with two spaces. Any other key,
+    /// the gap between two pairs and a body row that names `[enter]` stay
+    /// plain.
+    #[test]
+    fn only_enter_and_esc_pairs_on_the_key_row_are_painted() {
+        use crate::status::{GREEN, RED};
+        let panel = super::panel(
+            "save as a routine",
+            &["[enter] here is body text".to_string()],
+            "[enter] save  [f] search  [esc] back",
+        );
+        let key_row = panel.len() - 2;
+        let drawn = row_colours(&panel, key_row);
+        let inner: String = drawn[1..drawn.len() - 1].iter().map(|(c, _)| c).collect();
+        let painted: Vec<&str> = drawn[1..drawn.len() - 1]
+            .iter()
+            .map(|(_, colour)| colour.as_str())
+            .collect();
+        let at = |s: &str| inner.find(s).unwrap();
+        let span = |s: &str| at(s)..at(s) + s.len();
+        for (k, colour) in painted.iter().enumerate() {
+            let want = if span("[enter] save").contains(&k) {
+                GREEN
+            } else if span("[esc] back").contains(&k) {
+                RED
+            } else {
+                ""
+            };
+            assert_eq!(*colour, want, "{k} in {inner:?}");
+        }
+        let body = row_colours(&panel, 1);
+        assert!(
+            body[1..body.len() - 1].iter().all(|(_, c)| c.is_empty()),
+            "a body row is never a key row: {body:?}"
+        );
+
+        // A last row that does not open on a key is a body row too.
+        let panel = boxed("t", &["press [enter] to go".to_string()]);
+        let row = row_colours(&panel, 1);
+        assert!(
+            row[1..row.len() - 1].iter().all(|(_, c)| c.is_empty()),
+            "{row:?}"
+        );
+    }
+
+    /// The popup's colour is closed on its right border, before the row's
+    /// own colour opens again, so the text beyond the box keeps the row's
+    /// dim and carries no cyan. A row that ends under the popup closes it
+    /// too.
+    #[test]
+    fn a_popups_colour_stops_at_its_right_border() {
+        let (dim, reset, cyan) = (
+            crate::status::DIM,
+            crate::status::RESET,
+            crate::status::CYAN,
+        );
+        let panel = boxed("t", &["x".to_string()]);
+        let mut frame = vec![
+            "─".repeat(16),
+            format!("│{dim}{}{reset}│", "a".repeat(14)),
+            format!("│{}│", "b".repeat(14)),
+            "│ccccc".to_string(),
+        ];
+        overlay(&mut frame, &panel);
+        let width = panel[0].chars().count();
+        let x = (16 - width) / 2;
+        let row = colours(&frame[1]);
+        assert_eq!(row[x], (TOP_LEFT, cyan.to_string()), "{:?}", frame[1]);
+        assert!(
+            row[x + width..row.len() - 1]
+                .iter()
+                .all(|(c, colour)| *c == 'a' && colour == dim),
+            "{:?}",
+            frame[1]
+        );
+        let row = colours(&frame[2]);
+        assert_eq!(
+            row[x + width - 1],
+            ('│', cyan.to_string()),
+            "{:?}",
+            frame[2]
+        );
+        assert!(
+            row[x + width..].iter().all(|(_, colour)| colour.is_empty()),
+            "{:?}",
+            frame[2]
+        );
+        assert!(frame[3].ends_with(reset), "{:?}", frame[3]);
     }
     use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
 
@@ -1643,6 +2032,39 @@ mod tests {
         let bare =
             lines(" ╭─ [eval]   directories   trials ── by pipeline ─╮\n │  ╭─ filters ─╮ │");
         assert_eq!(shown_screen(&bare, "eval"), "eval tab, popup \"filters\"");
+    }
+
+    /// A walk names a popup frame, whose strip is dimmed whole, by the tab
+    /// the frame before it showed lit rather than by the walk's fallback.
+    #[test]
+    fn a_walk_names_a_popup_frame_by_the_tab_lit_before_it() {
+        let faded = |label: &str| format!("\x1b[2m{label}\x1b[22m\x1b[1m");
+        let strip = format!(
+            "\x1b[1m  {}\x1b[0m",
+            [
+                faded("[1] DISPATCH"),
+                faded("[2] QUEUE"),
+                faded("[3] ROUTINES"),
+                "[4] OVERRIDES".to_string(),
+                faded("[5] EVAL"),
+            ]
+            .join("        ")
+        );
+        let tab = format!("\n{strip}\n\n ╭─ [config] ──────────────╮\n │ dispatch.lanes │\n");
+        let mut popup: Vec<String> =
+            format!("\n{strip}\n\n ╭─ [config] ──────────────╮\n │   ╭─ set lanes ─╮   │\n")
+                .lines()
+                .map(str::to_string)
+                .collect();
+        dim(&mut popup);
+        let names: Vec<String> = walk_screens("queue", &[tab, popup.join("\n")])
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            ["overrides tab", "overrides tab, popup \"set lanes\""]
+        );
     }
 
     /// Each case the rule allows passes, and the capitals next to them do

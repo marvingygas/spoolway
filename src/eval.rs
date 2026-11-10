@@ -5166,7 +5166,7 @@ fn eval_frame_rows_at(
     let width = frame_width(content.max(border));
     // Wrapped before the body is measured, because each row it wraps onto
     // past its first comes off the body's.
-    let keys = crate::screen::key_rows(&footer(
+    let mut keys = crate::screen::key_rows(&footer(
         state.table,
         state.filters.figures,
         &state.mode,
@@ -5261,7 +5261,12 @@ fn eval_frame_rows_at(
     }
     frame.push(frame_bottom(width));
 
+    // Everything behind a panel is drawn dim — the strip, the table and the
+    // key line — see `crate::screen::dim`.
     if let Some(overlay_lines) = &overlay_panel {
+        for rows in [&mut rows_out, &mut frame, &mut keys] {
+            crate::screen::dim(rows);
+        }
         overlay(&mut frame, overlay_lines);
     }
 
@@ -9288,8 +9293,10 @@ mod screen_tests {
     }
 
     /// Whether `frame` carries the loading popup, exactly as the mockup
-    /// draws it.
+    /// draws it, read with the codes `overlay` paints its border in taken
+    /// out.
     fn shows_loading(frame: &str) -> bool {
+        let frame = &crate::screen::shell::plain(frame);
         let loading = [
             format!("{TOP_LEFT}─ eval ─────{TOP_RIGHT}"),
             "│  loading…  │".to_string(),
@@ -9918,6 +9925,30 @@ mod screen_tests {
         assert!(!wider[0].contains("USD"), "{}", wider[0]);
     }
 
+    /// Hosted, the filter panel laid over the eval tab leaves everything
+    /// behind it dim — the strip, the table and the key line — and its own
+    /// box in the colours `overlay` paints it. Closed again, the next frame
+    /// is the one drawn before it opened, in the tab's own colours.
+    #[test]
+    fn hosted_the_filter_panel_dims_everything_behind_it() {
+        use crate::screen::shell::{Hosting, Tab};
+        let _hosting = Hosting::open(Tab::Eval);
+        let few = loaded(vec![tests_entry("a", "implement")]);
+        let pipelines = Pipelines::builtin();
+        let mut state = ScreenState::new(&no_args());
+        let before = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+
+        let draft = Draft::new(state.table, state.filters.clone());
+        let panel = filter_panel(&few, &draft);
+        state.mode = Mode::Filter(draft);
+        let drawn = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+        crate::screen::assert_dimmed_behind(&drawn, &panel);
+
+        state.mode = Mode::Browsing;
+        let after = eval_frame_rows_at(&pipelines, Some(&few), &state, Some(20));
+        assert_eq!(after, before);
+    }
+
     /// A table far taller than the terminal — 270 tasks on a 20-row one —
     /// keeps its `total` line as the frame's last body line, under the
     /// scroll indicator, and its header as the first, wherever the cursor
@@ -9963,7 +9994,11 @@ mod screen_tests {
 
         state.cursor = 0;
         state.mode = Mode::Filter(Draft::new(state.table, state.filters.clone()));
-        let frame = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20));
+        // Read as a person sees it: the table behind the panel is dimmed.
+        let frame: Vec<String> = eval_frame_rows_at(&pipelines, Some(&tall), &state, Some(20))
+            .iter()
+            .map(|l| crate::screen::shell::plain(l))
+            .collect();
         let text = frame.join("\n");
         assert!(text.contains("[enter] apply   [esc] back"), "{text}");
         assert_eq!(
@@ -10593,7 +10628,7 @@ mod screen_tests {
     #[test]
     fn a_short_table_still_fits_the_taller_overlay_panels_whole() {
         let (repo, _root_guard) = fixture_with_one_run("screen-short-table");
-        let last = last_frame(&screen(&repo, "fq")).to_string();
+        let last = crate::screen::shell::plain(last_frame(&screen(&repo, "fq")));
         assert!(last.contains("[enter] apply   [esc] back"), "{last}");
         assert!(last.contains(&format!("{BOTTOM_LEFT}───")), "{last}");
     }
@@ -10752,7 +10787,7 @@ mod screen_tests {
     fn a_short_table_still_fits_the_calendars_whole_height_key_line_included() {
         let (repo, _root_guard) = fixture_with_one_run("screen-short-table-calendar");
         let text = screen(&repo, &format!("f{}\rq", DOWN.repeat(5)));
-        let last = last_frame(&text);
+        let last = crate::screen::shell::plain(last_frame(&text));
         assert!(last.contains(&format!("{TOP_LEFT}─ since ─")), "{last}");
         assert!(last.contains("[enter] pick   [esc] back"), "{last}");
     }
@@ -11562,6 +11597,9 @@ mod screen_tests {
             .rev()
             .find(|f| f.contains(&format!("{TOP_LEFT}─ sort ascending ")))
             .expect("`a` opened the popup");
+        // Read as a person sees it: `overlay` paints the popup's border and
+        // keys, so a code sits between a border and the row inside it.
+        let popup = crate::screen::shell::plain(popup);
         let listed: Vec<usize> = [
             "│    default order",
             "│    PIPELINE",
@@ -12749,7 +12787,7 @@ mod screen_tests {
         assert!(header_of(last).contains(" ▼IN/TASK"), "{last}");
 
         let text = screen(&repo, &format!("d{to_in}\rtdq"));
-        let popup = last_frame(&text);
+        let popup = crate::screen::shell::plain(last_frame(&text));
         assert!(
             popup.contains("│  > IN/TASK"),
             "opens on the carried column: {popup}"

@@ -245,13 +245,6 @@ fn strip_width() -> usize {
         .unwrap_or(FALLBACK_WIDTH)
 }
 
-/// `frame` with the strip on top of it — see [`strip`].
-pub(crate) fn under_strip(frame: Vec<String>) -> Vec<String> {
-    let mut lines = strip();
-    lines.extend(frame);
-    lines
-}
-
 /// Each tab's label: its digit in brackets, then its name — `[1] DISPATCH` —
 /// the mark the key line gives a key, since the digit is the key that opens
 /// it.
@@ -572,6 +565,9 @@ pub(crate) fn drive_coloured_frames(repo: &Repo, input: &str) -> Vec<String> {
 /// whose name it starts. `None` too for a row with no bold: that is a strip
 /// row whose codes were already taken out, and every label in it would pass
 /// for lit, so the first would name every frame it heads.
+/// The same goes for a strip dimmed whole behind a popup — see
+/// [`crate::screen::dim`] — which opens on its dim where [`strip_lines`]
+/// opens on its bold.
 #[cfg(test)]
 pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
     let words: Vec<String> = plain(line).split_whitespace().map(str::to_string).collect();
@@ -1469,9 +1465,20 @@ fn board_frame_rows(
             tab.takes_enter(),
         )
         .ok()?;
-    let mut rows = strip();
+    let mut rows = strip_over(board, popup.as_deref());
     rows.extend(frame.lines().map(str::to_string));
     Some(rows)
+}
+
+/// [`strip`], drawn dim while a panel is open on the board below it — see
+/// [`crate::status::Board::panel_over`], the same rule the board dims its
+/// own rows by, and [`crate::screen::dim`].
+fn strip_over(board: &crate::status::Board, popup: Option<&[String]>) -> Vec<String> {
+    let mut rows = strip();
+    if board.panel_over(popup).is_some() {
+        crate::screen::dim(&mut rows);
+    }
+    rows
 }
 
 /// [`draw_board`], drawn from the board's last reading instead of waiting
@@ -1495,7 +1502,7 @@ fn draw_board_from_memory(
         popup.as_deref(),
         tab.takes_enter(),
     );
-    let mut rows = strip();
+    let mut rows = strip_over(board, popup.as_deref());
     rows.extend(frame.lines().map(str::to_string));
     writer.write_frame(&rows, pane_size, out);
 }
@@ -1644,12 +1651,16 @@ mod tests {
     }
 
     // The test helper that names a frame by its lit tab reads the codes, so
-    // a strip they were taken out of names no tab rather than the first.
+    // a strip they were taken out of, or one dimmed whole behind a popup,
+    // names no tab rather than the first.
     #[test]
     fn lit_tab_names_the_lit_label_and_no_tab_on_a_plain_strip() {
         let line = strip_line(Tab::Overrides, &TABS, 106);
         assert_eq!(lit_tab(&line), Some("OVERRIDES"));
         assert_eq!(lit_tab(&plain(&line)), None);
+        let mut dimmed = vec![line.clone()];
+        crate::screen::dim(&mut dimmed);
+        assert_eq!(lit_tab(&dimmed[0]), None);
         assert_eq!(lit_tab("│   dispatch   │"), None);
     }
 
@@ -1679,20 +1690,22 @@ mod tests {
 
     // The same through real host frames, which the frame writer opens with
     // its one-column indent ahead of the strip's bold: at 60 columns the
-    // overrides and eval labels sit on the strip's second row, and each walk
-    // still names the tab it reached rather than its fallback.
+    // overrides label sits on the strip's second row, and the walk still
+    // names the tab it reached rather than its fallback. The eval tab is
+    // left out: it opens under its own loading box, and a strip is dimmed
+    // whole behind a popup — see [`crate::screen::dim`] — so the frame that
+    // reaches it lights no tab. The test above reads the eval label at the
+    // end of a second row.
     #[test]
     fn a_walk_names_the_tab_a_narrow_host_frame_shows() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-walk-narrow-strip");
         let _terminal = crate::screen::test_terminal((60, 30));
-        let frames = drive_coloured_frames(&repo, "45");
-        // Only the tab is read: the eval tab's own loading box counts as a
-        // popup over it, which is the eval tab's, not the strip's.
+        let frames = drive_coloured_frames(&repo, "4");
         let tabs: Vec<String> = crate::screen::walk_screens("none", &frames)
             .into_iter()
-            .map(|(name, _)| name.split(',').next().unwrap().to_string())
+            .map(|(name, _)| name)
             .collect();
-        assert_eq!(tabs, ["queue tab", "overrides tab", "eval tab"]);
+        assert_eq!(tabs, ["queue tab", "overrides tab"]);
     }
 
     /// The strip drawn as [`strip_lines`] draws it at a width wide enough
@@ -2219,6 +2232,42 @@ mod tests {
         crate::screen::frame_writer::FrameWriter::new().write_frame(&frame, pane_size, &mut new);
 
         crate::screen::frame_writer::assert_same_picture(&old, &new, pane_size);
+    }
+
+    /// Hosted, a popup over the dispatch tab leaves everything behind it dim
+    /// — the strip, the board's box and its key line — and its own box in
+    /// the colours `overlay` paints it: the board's own options menu and a
+    /// popup the tab opens alike. Closed again, the next frame is the one
+    /// drawn before it opened, in the board's own colours.
+    #[test]
+    fn a_popup_over_the_dispatch_tab_dims_everything_behind_it() {
+        let (repo, _root_guard) = crate::status::testutil::fixture("shell-dim-behind");
+        crate::status::testutil::add(&repo, "wire", &[], None);
+        let pipelines = Pipelines::builtin();
+        let _hosting = Hosting::open(Tab::Dispatch);
+        let mut board = crate::status::Board::hosted();
+        let mut tab = DispatchTab::default();
+        let rows = |board: &mut crate::status::Board, tab: &DispatchTab| {
+            board_frame_rows(&repo, &pipelines, board, tab)
+                .expect("the board's own frame must build")
+        };
+        let before = rows(&mut board, &tab);
+
+        board.on_key(&repo, &pipelines, Key::Char('o')).unwrap();
+        let menu = board.panel_over(None).expect("the options menu is open");
+        crate::screen::assert_dimmed_behind(&rows(&mut board, &tab), &menu);
+        board.on_key(&repo, &pipelines, Key::Esc).unwrap();
+        assert!(board.at_rest());
+        assert_eq!(rows(&mut board, &tab), before);
+
+        tab.popup = Some(Popup::Ended(super::super::dispatcher::popup(
+            true,
+            "unattended.max_cost_usd reached",
+        )));
+        let panel = tab.popup.as_ref().unwrap().panel();
+        crate::screen::assert_dimmed_behind(&rows(&mut board, &tab), &panel);
+        tab.popup = None;
+        assert_eq!(rows(&mut board, &tab), before);
     }
 
     /// The dispatch tab's key line names `enter` only while `enter` would

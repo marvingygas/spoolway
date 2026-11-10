@@ -501,7 +501,9 @@ has "whose body says what enter does" \
   "enter queues it without issue tracking." "$GATE_ESC_OUT"
 lacks "with no answer row" \
   "> queue anyway, without issue tracking" "$GATE_ESC_OUT"
-has "under the shared key row" "[enter] confirm   [esc] close" "$GATE_ESC_OUT"
+# The key row is painted green and red, so its words sit between colour codes.
+sed 's/\x1b\[[0-9;]*m//g' "$GATE_ESC_OUT" >"$GATE_ESC_OUT.plain"
+has "under the shared key row" "[enter] confirm   [esc] close" "$GATE_ESC_OUT.plain"
 works "esc leaves the task in pending, unqueued" \
   test -f "$SPOOLWAY_PROJECT_HOME/pending/gate-esc.md"
 works "and nothing reached the queue" \
@@ -536,7 +538,8 @@ PATH="$LOWVER_BIN:$PATH" python3 "$PTY_DRIVER" \
   >"$GATE_FROM_OUT" 2>&1
 has "the gate's popup reaches the terminal over \`--from\` too" \
   "> queue anyway, without issue tracking" "$GATE_FROM_OUT"
-has "under the same shared key row" "[enter] confirm   [esc] close" "$GATE_FROM_OUT"
+sed 's/\x1b\[[0-9;]*m//g' "$GATE_FROM_OUT" >"$GATE_FROM_OUT.plain"
+has "under the same shared key row" "[enter] confirm   [esc] close" "$GATE_FROM_OUT.plain"
 lacks "and \`--from\` never enters the alternate screen either" \
   $'\033[?1049h' "$GATE_FROM_OUT"
 works "esc leaves that task in pending too, unqueued" \

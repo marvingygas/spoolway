@@ -300,7 +300,13 @@ poll_while() {
 # exists but has not been written to yet is not evidence of anything.
 wait_for_text() {
   local secs=$1 file=$2 want=$3
-  poll_until "$secs" grep -qF -- "$want" "$file"
+  poll_until "$secs" _file_has_plain "$file" "$want"
+}
+# Whether `file` says `want` once its colour codes are taken out. A pop-up's
+# key row is painted per key, so `[enter] confirm   [esc] close` is never
+# one run of bytes on the wire; read as text it is.
+_file_has_plain() {
+  grep -qF -- "$2" < <(sed -E $'s/\x1b\\[[0-9;]*m//g' "$1" 2>/dev/null)
 }
 
 # `says`, waited for. What the board reports about a lane is a reading taken
