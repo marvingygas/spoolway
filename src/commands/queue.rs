@@ -10578,35 +10578,6 @@ fn footer(state: &ScreenState, live: Live) -> String {
     }
 }
 
-/// The queue tab's and the routines tab's key lines, in that order, for each
-/// combination of keys that would act — the test that holds the board's tips
-/// complete reads the keys off them.
-#[cfg(test)]
-pub(crate) fn queue_resting_key_lines() -> (Vec<String>, Vec<String>) {
-    let lines = |tab, mode: Mode| {
-        let _hosting = crate::screen::shell::Hosting::open(tab);
-        let mut state = ScreenState::new();
-        state.mode = mode;
-        (0..8)
-            .map(|bits| {
-                let live = Live {
-                    select: bits & 1 != 0,
-                    queue: bits & 2 != 0,
-                    options: bits & 4 != 0,
-                };
-                crate::screen::shell::plain(&footer(&state, live))
-            })
-            .collect::<Vec<_>>()
-    };
-    (
-        lines(crate::screen::shell::Tab::Queue, Mode::Browsing),
-        lines(
-            crate::screen::shell::Tab::Routines,
-            Mode::Routines(RoutineNav::new()),
-        ),
-    )
-}
-
 /// Which of the ordinary line's row keys would act on the rows on screen,
 /// so [`footer`] names each one only then, and names it again the moment it
 /// would.

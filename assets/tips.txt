@@ -1,228 +1,150 @@
 # the tips the dispatch tab shows on its last row, one per line. the board
-# shuffles them. a tip is one plain lowercase sentence of at most 69
-# characters. after a bar, a line names what it explains: a key on a tab's
-# key line, a config setting, a pipeline or step key, or a task key. the
-# board draws only the text before the bar.
+# shuffles them and shows a new one every 30 seconds.
+#
+# a feature gets a tip when a user cannot see what it does without digging
+# deep into the documentation.
+# a tip says what a feature does, and never names the key that runs it.
+# a tip puts names in quotes, such as "agent:" or "edit pipeline".
+#
+# a line in brackets starts a section, such as [queue]. the board shows the
+# section's name before each of its tips: tip: queue · <the tip>.
+# a tip is one lowercase sentence, and that whole row fits 80 columns.
 
-# the dispatch tab
-enter starts dispatching here. press it again to stop. | key dispatch enter
-r resumes the task under the cursor. it shows only when it can. | key dispatch r
-r opens the resume picker. pick any step to resume the task there. | key dispatch r
-pick done in the resume picker to close a task that cannot pass.
-the NEXT column shows where r would send a stopped task.
-r and o work even when no dispatcher is running.
-o on a task opens its menu: open, pause, focus, restart, unqueue. | key dispatch o
-o then open task opens the task file in your editor.
-o then open plan opens the plan page the task was cut from.
-o then focus brings that task's pane to the front.
-o then pause can wait until the current step finishes.
-o then restart runs the step again with a fresh chat.
-o then unqueue moves a task back to pending.
-unqueue deletes a started task's local branch and worktree.
-u loads your config changes into the running dispatcher. | key dispatch u
-quitting stops dispatching here, but running lanes keep working. | key dispatch q
-k skips a failed issue hook. r runs the hook again.
-a dim ↻ 3 beside a step means the task is there for the third time.
-the spool beside the name turns while a dispatcher is running.
-RECENT lists the moves tasks made, newest first.
-slots 1/∞ means that agent has no concurrency cap.
-"1 held" on a slots line is a slot kept free for a started group.
-a task file that does not parse is named in amber under the board.
+[dispatch]
+a held task can "resume" at any step, or skip to "done".
+"open task" opens the task file, "open plan" its plan.
+"focus" brings a task's pane to the front.
+"pause when <step> finishes" lets the step end first.
+"restart" reruns a step. an agent gets a fresh session.
+"unqueue" moves a task back to pending.
+"unqueue" deletes a task's local branch and worktree.
+"update config" loads changes into a running dispatcher.
+quitting stops dispatching, but running lanes keep going.
+a failed issue hook can be skipped, or run again.
+the spool by the name turns while a dispatcher runs.
+"RECENT" lists the moves tasks made, newest first.
+"slots 1/∞" means that agent has no concurrency cap.
 
-# moving between tabs
-number keys switch tabs. the strip shows each tab's number.
-q quits spoolway from any tab. | key * q
+[tabs]
 dispatching keeps running while you look at other tabs.
 a project set up in home mode has no overrides tab.
 
-# the queue tab
-space ticks a group on the queue tab. | key queue space
-enter on the queue tab queues every group you ticked. | key queue enter
-o on the queue tab opens a menu to change a pending task. | key queue o
-f searches the queue tab. enter keeps the results, esc clears. | key queue f
-h on the queue tab shows or hides done tasks. | key queue h
-writing a task file does not queue it. queue it on the queue tab.
-queueing moves a group's tasks out of pending and into the queue.
-tasks you queue while dispatching start on the next pass.
+[queue]
+ticking several groups or routines queues them all at once.
+the queue and overrides tabs each have a search.
+done tasks can be shown or hidden on the queue tab.
+writing a task file does not queue it. the queue tab does.
+queueing moves a group's tasks from pending into the queue.
+tasks you queue while dispatching start right away.
 a group is one chain. each task waits for the one before it.
-a group can wait for another group: o then edit depends on.
-o then edit lands in changes the branch a group's work lands in.
-o then edit pipeline moves a pending task to another pipeline.
-o then gate pauses one task after a step you pick.
-o then trial runs one group on several pipelines to compare them.
-o then save as routine keeps a group to queue again later.
-a task waits until the task it depends on is done and archived.
-a dependent task branches off its dependency, so pull requests stack.
-a row saying use /spoolway-tasks is a plan not cut into tasks yet.
-do not delete queue files by hand. unqueue the task instead.
+"edit depends on" makes a group wait for another group.
+"edit lands in" changes the branch a group's work lands in.
+"edit pipeline" moves a pending task to another pipeline.
+"gate" pauses one task after a step you pick.
+"trial" runs one group on several pipelines to compare them.
+"save as routine" keeps a group to queue again later.
+a task waits until its dependency is done and archived.
+a dependent task starts from its dependency's branch.
+if a start branch is gone, set "starts_from:" and resume.
+"use /spoolway-tasks" marks a plan not cut into tasks yet.
+never delete queue files by hand. "unqueue" the task.
 
-# the routines tab
-space ticks a routine on the routines tab. | key routines space
-enter on the routines tab queues the routines you ticked. | key routines enter
-o on a routine edits its schedule, turns its job off, or deletes it. | key routines o
-o then edit schedule makes a routine run on a timer, as a job.
-jobs fire only while a dispatcher runs. missed times are skipped.
-dispatching started here stays up on an empty queue, so jobs fire.
-a routine runs one copy at a time.
-deactivating a job keeps its schedule for later.
+[routines]
+"edit schedule" makes a routine run on a timer, as a job.
+jobs fire only while dispatching. missed runs are skipped.
 
-# the overrides tab
-overrides change settings for this machine only, never the repo.
-← and → switch sections on the overrides tab.
-enter on a config key in overrides sets your own value for it. | key overrides enter
-enter on a prompt in overrides copies it so you can edit your own.
-the pipeline section of overrides sets one field on many steps.
-f searches the list on the overrides tab. | key overrides f
-o on the overrides tab opens the menu for the row under the cursor. | key overrides o
-w opens your private overrides folder. | key overrides w
-space ticks a key in the active section of the overrides tab. | key overrides space
-a ticks every key in the active section. | key overrides a
-promote, in the active section's menu, moves overrides onto a branch.
+[overrides]
+overrides set config values for this machine only.
+a prompt can be copied and edited for this machine only.
 
-# the eval tab
-the eval tab reads the lane ledger: what each lane ran and cost.
-→ on the eval tab moves between the lanes, dirs and trials tables.
-enter on the eval tab's trials table opens a trial. | key eval enter
-a on the eval tab picks a column to sort by, smallest first. | key eval a
-d on the eval tab picks a column to sort by, largest first. | key eval d
-t on the eval tab flips between totals and per-task figures. | key eval t
-f on the eval tab opens the filter panel. | key eval f
-e exports the eval table on screen to a CSV file. | key eval e
-r on the eval tab reads the ledger again. | key eval r
+[eval]
+the eval tab shows what each lane ran and what it cost.
+the eval tab has three tables: "lanes", "dirs" and "trials".
+trials can be opened from the eval tab's "trials" table.
+the eval tab sorts by any column, either way, and filters.
+the eval tab shows totals or per-task figures.
+the eval table on screen can be exported to a CSV file.
 
-# task files
-a task's id: becomes its file name, its branch and its lane name. | task id
-a task's title: is a commit line, such as feat(queue): add a flag. | task title
-group: names the chain of work a task belongs to. | task group
-pipeline: picks which pipeline a task runs on. | task pipeline
-depends_on: makes a task wait until another task is done. | task depends_on
-base: is the branch a task's work lands in. | task base
-starts_from: cuts a task's worktree from another branch. | task starts_from
-gate_at: pauses one task after a step, for you to resume. | task gate_at
-plan: holds the plan page path. o then open plan opens it. | task plan
-source: holds the URL of the issue a task came from. | task source
-tracking: off runs no issue hook for that task. | task tracking
-ticket: holds the tracker's ticket id for a task. | task ticket
-epic: holds the tracker's epic id for a task's group. | task epic
-group_description: is the text of the group's tracker issue. | task group_description
-labels: adds labels to a task's tracker issue. | task labels
-complexity: is a 1 to 100 guess, shown beside the cost in eval. | task complexity
-every task works in its own git worktree, never in your checkout.
-quote a task title that holds ": " or the file will not parse.
-
-# pipelines
-the first step in steps: is where every task starts. | pipeline steps
-steps lower in a pipeline file get free slots first.
-raise a pipeline's version: after a change, to compare runs. | pipeline version
-a pipeline's description: says in one line what it is for. | pipeline description
-a step's description: is a one-line note on what it does. | step description
-task_template: picks the task skeleton a pipeline's tasks use. | pipeline task_template
-a step's id: is written into a task's stage:, so rename with care. | step id
-agent: on a step makes it an agent step, run by that profile. | step agent
-prompt: names a step's prompt file. it defaults to the step id. | step prompt
-model: is required on every agent step. | step model
-effort: sets how hard a step's model thinks. | step effort
-skills: runs those skills at the top of a step's first prompt. | step skills
-session: true lets a step continue an earlier step's chat. | step session
-slot: false lets a step run without using an agent slot. | step slot
-gate: on a step makes a person check its outcome first. | step gate
-on_pass: names the step a task moves to when a step passes. | step on_pass
-on_fail: names where a fail goes. without it, the task blocks. | step on_fail
-loop: caps how many times a task may arrive at a step. | step loop
-run: makes a step a command step. its exit code is its outcome. | step run
-timeout: kills a command step after that long. 30m by default. | step timeout
-background: true lets a task move on while its command runs. | step background
-hide: true runs a command step without a pane. | step hide
-first: runs a step only on the first task of a chain. | step first
-last: runs a step once per chain, on its top task. | step last
-serial: true runs a command step for one task at a time. | step serial
-every step runs for every task. optional steps need another pipeline.
-command steps cannot be gated. gate the agent step after them.
+[pipeline]
+the first step in "steps:" is where every task starts.
+raise "version:" after a change, to compare runs.
+"task_template:" picks the skeleton of a pipeline's tasks.
+"agent:" makes a step an agent step, run by that profile.
+"prompt:" names a step's prompt file, by default its id.
+"model:" is required on every agent step.
+"effort:" sets how hard a step's model thinks.
+"skills:" opens a step's first prompt with those skills.
+"session: true" continues an earlier step's chat.
+"slot: false" lets a step run without using an agent slot.
+"gate:" on a step makes a person check its outcome first.
+"on_pass:" names the step a task goes to on a pass.
+"on_fail:" names where a fail goes, else the task blocks.
+"loop:" caps how many times a task may arrive at a step.
+"run:" makes a command step. its exit code is the outcome.
+"timeout:" kills a command after that long. default 30m.
+"background: true" moves a task on while its command runs.
+"hide: true" runs a command step without a pane.
+"first:" runs a step only on the first task of a chain.
+"last:" runs a step once per chain, on its top task.
+"serial: true" runs a command step for one task at a time.
+a task runs every step. skip one with another pipeline.
+command steps cannot be gated. gate the next agent step.
 a gate still waits for a person in an unattended run.
-a running dispatcher ignores pipeline edits until you press u.
-prompt edits need no reload. each lane reads its prompt as it starts.
-the default and bugfix pipelines are samples. change them freely.
+pipeline edits apply after "update config" or a restart.
+prompt edits need no reload. each lane reads it fresh.
 
-# lanes
-a lane is one agent working one step of one task, in its own pane.
-each task gets its own herdr workspace, named spoolway/<task>.
+[lanes]
+a lane is one agent on one step of one task, in its own pane.
+each task gets a herdr workspace, named "spoolway/<task>".
 finished lanes stay open, and you can still type into them.
-a row reading prompt waits on a permission question in its pane.
-esc typed into a lane's pane pauses its task on the next pass.
-after a pause, typing into the lane's pane resumes the task.
-a lane that answers three reminders without a report is paused.
+a row reading "prompt" waits on a permission question.
+interrupting a lane pauses its task. typing to it resumes.
+a lane is paused after three reminders with no report.
 a paused task frees its slot for other tasks.
 
-# when something stops
-stopping tears nothing down. the next run picks every lane back up.
-interrupt them now pauses running tasks until you dispatch again.
-a gate pause means a step finished and waits for your go-ahead.
-to see why a task blocked, read its status log: o then open task.
-leaving blocked resets every step's loop count to zero.
-pausing a command step kills it. resuming runs it from the start.
+[stopping]
+stopping tears nothing down. the next run picks lanes up.
+"interrupt them now" pauses tasks until the next dispatch.
+a gate pause is a finished step waiting for your go-ahead.
+the status log in a task file says why the task blocked.
+leaving "blocked" resets every step's loop count to zero.
+pausing kills a command. resuming runs it from the start.
 only you can resume a task. its own lane cannot.
-if your checkout has a task's branch out, switch away, then resume.
 
-# config.toml
-a quiet lane is asked to report after dispatch.lane_quiet. | config dispatch.lane_quiet
-dispatch.auto_commit commits work a lane left uncommitted. | config dispatch.auto_commit
-dispatch.priority = "group" finishes started groups first. | config dispatch.priority
-dispatch.lane_child_ceiling stops a program a lane waits on too long. | config dispatch.lane_child_ceiling
-dispatch.visible_lanes sets how many of a task's panes stay open. | config dispatch.visible_lanes
-dispatch.hide_commands = true runs command steps without a pane. | config dispatch.hide_commands
-dispatch.autofocus_panes brings a pane forward when it needs you. | config dispatch.autofocus_panes
-dispatch.lane_layout = "tabs" gives each step its own herdr tab. | config dispatch.lane_layout
-dispatch.tips = false hides these tips. | config dispatch.tips
-unattended.enabled hands blocked tasks to an agent, not to you. | config unattended.enabled
-unattended.max_output_tokens stops new work past that many tokens. | config unattended.max_output_tokens
-unattended.max_cost_usd stops new work once a run spends that much. | config unattended.max_cost_usd
-unattended.blocked_agent picks the agent that fixes blocked tasks. | config unattended.blocked_agent
-set unattended.blocked_model before any unattended run. | config unattended.blocked_model
-unattended.blocked_effort sets how hard that model thinks. | config unattended.blocked_effort
-unattended.blocked_session lets the fixer continue its last chat. | config unattended.blocked_session
-unattended.blocked_prompt names the prompt the fixer is given. | config unattended.blocked_prompt
-housekeeping.update_check tells you when a new release is out. | config housekeeping.update_check
-housekeeping.calibrate_window sets how far back calibration looks. | config housekeeping.calibrate_window
-housekeeping.retention_days deletes old logs after that many days. | config housekeeping.retention_days
-housekeeping.archive_retention_days deletes old finished tasks. | config housekeeping.archive_retention_days
-watch.dirs adds folders whose agent sessions count toward cost. | config watch.dirs
-issue_tracking.hook names the script that updates your tracker. | config issue_tracking.hook
-issue_tracking.project_key names your project, such as owner/repo. | config issue_tracking.project_key
-issue_tracking.key_in_names puts the issue key in branch names. | config issue_tracking.key_in_names
-agents.<profile>.kind picks the program: claude, codex or pi. | config agents.<profile>.kind
-agents.<profile>.concurrency caps how many of its lanes run at once. | config agents.<profile>.concurrency
-an agent's session_reuse_ctx reuses a chat only below this % full. | config agents.<profile>.session_reuse_ctx
-an agent's session_blocked_ctx stops it at this % of its context. | config agents.<profile>.session_blocked_ctx
-an agent's permission_mode sets the mode it starts in. | config agents.<profile>.permission_mode
-a model's context_window sets how many tokens it can hold. | config models.<glob>.context_window
-a model's compact_ctx sets how full a chat gets before it shrinks. | config models.<glob>.compact_ctx
-a model's input sets its price per million input tokens. | config models.<glob>.input
-a model's output sets its price per million output tokens. | config models.<glob>.output
-a model's cache_read sets the price of reading cached tokens. | config models.<glob>.cache_read
-a model's cache_write_5m prices writes to a 5-minute cache. | config models.<glob>.cache_write_5m
-a model's cache_write_1h prices writes to a 1-hour cache. | config models.<glob>.cache_write_1h
-a model's above_<N>k_tokens prices apply to very long prompts. | config models.<glob>.above_<N>k_tokens.<rate>
-a model's prompt_cache_ttl starts a fresh chat after a long pause. | config models.<glob>.prompt_cache_ttl
-a model's slots caps how many lanes use it, in place of concurrency. | config models.<glob>.slots
-a model's local = true marks it as running on your machine. | config models.<glob>.local
-config changes reach a running dispatcher on its next pass.
-unattended settings need u or a restart to take effect.
-spoolway config contract lists every setting, one line each.
+[config]
+a quiet lane is asked to report after "dispatch.lane_quiet".
+"dispatch.auto_commit" commits work a lane left uncommitted.
+"dispatch.priority = group" finishes started groups first.
+"dispatch.lane_child_ceiling" ends a lane's stuck program.
+"dispatch.visible_lanes" sets how many panes stay open.
+"dispatch.hide_commands = true" runs commands with no pane.
+"dispatch.autofocus_panes" raises a pane that needs you.
+"dispatch.lane_layout = tabs" gives each step its own tab.
+"dispatch.tips = false" hides these tips.
+"unattended.enabled" hands blocked tasks to an agent.
+"unattended.max_output_tokens" caps a run's output tokens.
+"unattended.max_cost_usd" caps what a run may spend.
+"housekeeping.update_check" tells you about new releases.
+"housekeeping.calibrate_window" sets calibration's lookback.
+"housekeeping.retention_days" deletes logs past that age.
+"housekeeping.archive_retention_days" prunes old done tasks.
+"watch.dirs" adds folders whose sessions count toward cost.
+"issue_tracking.hook" names the script for your tracker.
+"issue_tracking.project_key" names your project: owner/repo.
+"issue_tracking.key_in_names" puts issue keys in branches.
+an agent's "kind" picks the agent: claude, codex or pi.
+an agent's "concurrency" caps its lanes running at once.
+"session_reuse_ctx" reuses a chat only below this % full.
+"session_blocked_ctx" stops an agent at this % of context.
+an agent's "permission_mode" sets the mode it starts in.
+a model's "context_window" sets how many tokens it can hold.
+"compact_ctx" sets how full a chat gets before it shrinks.
+"prompt_cache_ttl" starts a fresh chat after a long pause.
+"local = true" marks a model that runs on your machine.
 
-# commands
-most board actions have a command too. run spoolway --help.
-spoolway doctor checks that your pipelines can run on this machine.
-spoolway lane "<task> · <step>" prints what a lane has been doing.
-spoolway queue route <task> shows a task's steps and its next stop.
-spoolway task contract --from <dir> checks tasks without queueing.
-spoolway issue show <ref> reads one issue through your tracker hook.
-spoolway pipeline copy makes a pipeline only your machine sees.
-after spoolway update, run spoolway sync in each project.
-spoolway whats-new prints the release notes, even offline.
-dispatching needs herdr. open herdr, then run spoolway inside it.
-one dispatcher per project. a second one says one is already running.
+[commands]
+most board actions have a command too: "spoolway --help".
 
-# issues and pull requests
-spoolway never merges. landing each pull request is your call.
-the github.sh and jira.sh hooks are samples you can edit.
-unqueue keeps the pushed branch and its pull request.
+[pull requests]
+spoolway never merges. merging is your call.
+"unqueue" keeps the pushed branch and pull request.

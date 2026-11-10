@@ -2132,61 +2132,6 @@ struct PauseConfirm {
     cursor: usize,
 }
 
-/// The dispatch tab's key line in each state it draws at rest: nothing to
-/// act on, a task under the cursor, a resumable task under it, and a
-/// dispatcher holding the lock over a config edit it has not loaded. The test
-/// that holds the board's tips complete reads the keys off them.
-#[cfg(test)]
-pub(crate) fn resting_key_lines() -> Vec<String> {
-    use crate::status::testutil::{add_to, edit_a_pipeline_since_start, fixture};
-    let (repo, _root_guard) = fixture("resting-keys");
-    let pipelines = Pipelines::builtin();
-    let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
-    let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
-    crate::pipeline_snapshot::write(&repo, &pipelines, &repo.config.unattended).unwrap();
-    let mut board = Board::for_test();
-    // Hosted, the key line sits under the box, the frame's last row.
-    let key_line = |board: &mut Board, holder: Option<u32>, dispatching: bool| {
-        let frame = crate::screen::shell::plain(
-            &board
-                .frame(
-                    &repo,
-                    &pipelines,
-                    Phase::Watching {
-                        holder,
-                        dispatching,
-                    },
-                )
-                .unwrap(),
-        );
-        frame
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap()
-            .trim()
-            .to_string()
-    };
-    let mut lines = vec![
-        key_line(&mut board, None, false),
-        key_line(&mut board, Some(4242), true),
-    ];
-    add_to(&repo, "login", &[], Some("implement"), Some("login"));
-    add_to(&repo, "logout", &[], None, Some("logout"));
-    let mut paused = repo.task("logout").unwrap();
-    paused.front.paused_at = Some("implement".into());
-    paused.set_stage(crate::pipeline::PAUSED, None);
-    paused.save().unwrap();
-    for cursor in ["login", "logout"] {
-        board.cursor = Some(cursor.to_string());
-        lines.push(key_line(&mut board, None, false));
-        lines.push(key_line(&mut board, Some(4242), true));
-    }
-    edit_a_pipeline_since_start(&repo);
-    lines.push(key_line(&mut board, Some(4242), false));
-    lines
-}
-
 /// Every panel the board draws to ask something, drawn once each with
 /// made-up content — for the test that walks every popup in the project
 /// that asks something; see `crate::screen`'s own tests.

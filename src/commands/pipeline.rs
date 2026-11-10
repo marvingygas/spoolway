@@ -241,12 +241,12 @@ fn build_list(pipelines: &Pipelines) -> PipelineListJson {
 }
 
 /// Keys a pipeline file may carry at the top level, above `steps:`.
-pub(crate) const PIPELINE_KEYS: &[&str] = &["version", "description", "task_template", "steps"];
+const PIPELINE_KEYS: &[&str] = &["version", "description", "task_template", "steps"];
 
 /// Keys a step may carry — every one `Step` actually reads a value from.
 /// `loop` stands for the struct's own `r#loop`, a raw identifier only
 /// because `loop` is a Rust keyword.
-pub(crate) const STEP_KEYS: &[&str] = &[
+const STEP_KEYS: &[&str] = &[
     "id",
     "description",
     "agent",

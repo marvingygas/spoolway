@@ -1033,21 +1033,15 @@ screen reads the setting when it starts, so a change takes effect the next time 
 
 `assets/tips.txt` holds one tip per line, and it is compiled into the binary. Lines that start with `#` and blank lines are not tips.
 
-A tip may end with a bar and a tag that names what it explains. The text before the bar is the tip.
+A line in brackets, such as `[queue]`, starts a section. Every tip belongs to the section above it. The sections are `dispatch`, `tabs`, `queue`, `routines`, `overrides`, `eval`, `pipeline`, `lanes`, `stopping`, `config`, `commands` and `pull requests`.
 
-```
-o on a task opens its menu: open, pause, focus, restart, unqueue. | key dispatch o
-```
+Three rules are written at the top of the file, for whoever edits it:
 
-| Tag | Names |
-|---|---|
-| `key <tab> <key>` | A key on that tab's key line. `key * q` covers `q` on every tab. |
-| `config <setting>` | A setting that `spoolway config contract` lists. |
-| `pipeline <key>` | A key that `spoolway pipeline contract` lists. |
-| `step <key>` | A step key that `spoolway pipeline contract` lists. |
-| `task <key>` | A required or optional key that `spoolway task contract` lists. |
+- A feature gets a tip when a user cannot see what it does without digging deep into the documentation.
+- A tip says what a feature does, and never names the key that runs it.
+- A tip puts names in quotes, such as `"agent:"` or `"edit pipeline"`.
 
-Two tests hold the list to the code. One fails, and names the line to add, when a key, setting or contract key has no tagged tip. The other fails when a tip is longer than 69 characters or breaks the lowercase rule in [the CLI reference](cli-reference.md). A tip may hold `∞`, `↻`, `←` and `→`, and each counts as one character.
+No test asks for a tip per key or setting. One test fails when a tip is longer than 69 characters or breaks the lowercase rule in [the CLI reference](cli-reference.md). A tip may hold `∞`, `↻`, `←` and `→`, and each counts as one character.
 
 ## The overrides tab
 
