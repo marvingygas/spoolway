@@ -1119,9 +1119,9 @@ pub(crate) fn overlay_painted(
 }
 
 /// The colour each character of `panel`'s `i`th row is drawn in, `None`
-/// for the terminal's own: [`crate::status::CYAN`] on the box's border and
-/// its title, [`crate::status::GREEN`] on each `[enter]` pair of its key
-/// row and [`crate::status::RED`] on each `[esc]` pair.
+/// for the terminal's own: [`crate::status::TEAL`] on the box's border and
+/// its title, [`crate::status::MINT`] on each `[enter]` pair of its key
+/// row and [`crate::status::PINK`] on each `[esc]` pair.
 ///
 /// A panel that is not a box — one whose first row does not open on
 /// [`corner::TOP_LEFT`] — is left plain: there is no border to find.
@@ -1133,10 +1133,10 @@ pub(crate) fn overlay_painted(
 /// pairs with two spaces rather than [`crate::status::GUTTER`]'s three. The
 /// spaces after a pair stay plain, so the gap between two pairs is never
 /// drawn in either's colour. The colour follows the key alone, so
-/// `[enter] save` is as green as `[enter] confirm`, and any other key is
+/// `[enter] save` is as mint as `[enter] confirm`, and any other key is
 /// plain.
 fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
-    use crate::status::{CYAN, GREEN, RED};
+    use crate::status::{MINT, PINK, TEAL};
     let line: Vec<char> = panel[i].chars().collect();
     let mut paint = vec![None; line.len()];
     let boxed = panel[0].starts_with(corner::TOP_LEFT);
@@ -1145,13 +1145,13 @@ fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
         return paint;
     }
     if i == 0 || i == last {
-        paint.fill(Some(CYAN));
+        paint.fill(Some(TEAL));
         return paint;
     }
     let inner = match (line.first(), line.last()) {
         (Some('│'), Some('│')) if line.len() >= 2 => {
-            paint[0] = Some(CYAN);
-            paint[line.len() - 1] = Some(CYAN);
+            paint[0] = Some(TEAL);
+            paint[line.len() - 1] = Some(TEAL);
             1..line.len() - 1
         }
         // A row laid out by hand with no side borders of its own is read
@@ -1171,9 +1171,9 @@ fn paint(panel: &[String], i: usize) -> Vec<Option<&'static str>> {
         }
         let pair: String = text[open..close].iter().collect();
         let colour = if pair.starts_with("[enter]") {
-            GREEN
+            MINT
         } else if pair.starts_with("[esc]") {
-            RED
+            PINK
         } else {
             continue;
         };
@@ -1703,13 +1703,18 @@ mod tests {
     }
 
     /// Every popup that asks, laid over a tab, draws its border and title
-    /// in cyan, its `[enter]` pair green, its `[esc]` pair red and its body
-    /// in the terminal's own colour, while the builders still hand over
-    /// rows with no codes in them. With its codes taken out, the frame
+    /// in the tip row's teal, its `[enter]` pair mint, its `[esc]` pair pink
+    /// and its body in the terminal's own colour, while the builders still
+    /// hand over rows with no codes in them. With its codes taken out, the frame
     /// reads exactly as a character-for-character replace would write it.
     #[test]
-    fn every_popup_laid_over_a_tab_is_painted_cyan_green_and_red() {
-        use crate::status::{CYAN, GREEN, RED};
+    fn every_popup_laid_over_a_tab_is_painted_teal_mint_and_pink() {
+        use crate::status::{MINT, PINK, TEAL};
+        // The 256-colour numbers the CLI reference names for each.
+        assert_eq!(
+            (TEAL, MINT, PINK),
+            ("\x1b[38;5;109m", "\x1b[38;5;151m", "\x1b[38;5;181m")
+        );
         let popups = [
             crate::status::asking_panels(),
             crate::commands::dispatch_asking_panels(),
@@ -1751,11 +1756,11 @@ mod tests {
                 let esc = pair("[esc] close");
                 for (k, (ch, colour)) in drawn.iter().enumerate() {
                     let want = if i == 0 || i == last || k == 0 || k == drawn.len() - 1 {
-                        CYAN
+                        TEAL
                     } else if enter.as_ref().is_some_and(|r| r.contains(&k)) {
-                        GREEN
+                        MINT
                     } else if esc.as_ref().is_some_and(|r| r.contains(&k)) {
-                        RED
+                        PINK
                     } else {
                         ""
                     };
@@ -1778,7 +1783,7 @@ mod tests {
     /// plain.
     #[test]
     fn only_enter_and_esc_pairs_on_the_key_row_are_painted() {
-        use crate::status::{GREEN, RED};
+        use crate::status::{MINT, PINK};
         let panel = super::panel(
             "save as a routine",
             &["[enter] here is body text".to_string()],
@@ -1795,9 +1800,9 @@ mod tests {
         let span = |s: &str| at(s)..at(s) + s.len();
         for (k, colour) in painted.iter().enumerate() {
             let want = if span("[enter] save").contains(&k) {
-                GREEN
+                MINT
             } else if span("[esc] back").contains(&k) {
-                RED
+                PINK
             } else {
                 ""
             };
@@ -1820,14 +1825,14 @@ mod tests {
 
     /// The popup's colour is closed on its right border, before the row's
     /// own colour opens again, so the text beyond the box keeps the row's
-    /// dim and carries no cyan. A row that ends under the popup closes it
+    /// dim and carries no teal. A row that ends under the popup closes it
     /// too.
     #[test]
     fn a_popups_colour_stops_at_its_right_border() {
-        let (dim, reset, cyan) = (
+        let (dim, reset, teal) = (
             crate::status::DIM,
             crate::status::RESET,
-            crate::status::CYAN,
+            crate::status::TEAL,
         );
         let panel = boxed("t", &["x".to_string()]);
         let mut frame = vec![
@@ -1840,7 +1845,7 @@ mod tests {
         let width = panel[0].chars().count();
         let x = (16 - width) / 2;
         let row = colours(&frame[1]);
-        assert_eq!(row[x], (TOP_LEFT, cyan.to_string()), "{:?}", frame[1]);
+        assert_eq!(row[x], (TOP_LEFT, teal.to_string()), "{:?}", frame[1]);
         assert!(
             row[x + width..row.len() - 1]
                 .iter()
@@ -1851,7 +1856,7 @@ mod tests {
         let row = colours(&frame[2]);
         assert_eq!(
             row[x + width - 1],
-            ('│', cyan.to_string()),
+            ('│', teal.to_string()),
             "{:?}",
             frame[2]
         );

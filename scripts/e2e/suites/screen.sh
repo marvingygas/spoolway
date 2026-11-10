@@ -480,10 +480,10 @@ lacks "never that one is running" "dispatcher is running" "$LAST"
 lacks "with no key row, since it closes itself" "[enter] confirm" "$LAST"
 works "the task was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/billing-export.md"
 
-# A submission that takes longer than 200 ms turns a cyan spool over the dimmed
-# tab, between the frame that picked the group and the queued popup. A `git`
-# in front of the real one sleeps on every call but the branch lookup once the
-# `slow` file exists, which stretches the submission past a second. The file
+# A submission that takes longer than 200 ms turns a bright white spool over
+# the dimmed tab, between the frame that picked the group and the queued popup.
+# A `git` in front of the real one sleeps on every call but the branch lookup
+# once the `slow` file exists, which stretches the submission past a second. The file
 # is made only after the screen is up, so it opens at full speed. The mark's
 # two frames are `▀█▀██▀` and `▀██▀█▀`, and the board's own lockup spells the
 # first, so only the frames drawn after the first two are read.
@@ -499,10 +499,10 @@ SLOW="$LIVE/slow.txt"
 works "a slow submission on the queue tab ends when its keys run out" \
   script -qec "stty cols 100 rows 30; { sleep 1.5; printf 2; sleep 1; touch '$LIVE/slow'; printf ' \\r'; sleep 4; } | PATH='$LIVE/slowbin':\$PATH '$SPOOLWAY'" "$SLOW"
 rm -f "$LIVE/slow"
-CYAN=$'\033[36m'
+WHITE=$'\033[97m'
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR > 3' "$SLOW" >"$LIVE/slow-frames.raw"
-has "a slow submission draws the spool's frame A in cyan" "${CYAN}▀█▀██▀" "$LIVE/slow-frames.raw"
-has "and then its frame B" "${CYAN}▀██▀█▀" "$LIVE/slow-frames.raw"
+has "a slow submission draws the spool's frame A in bright white" "${WHITE}▀█▀██▀" "$LIVE/slow-frames.raw"
+has "and then its frame B" "${WHITE}▀██▀█▀" "$LIVE/slow-frames.raw"
 works "the spool frames come before the queued popup" bash -c '
   spool=$(grep -an "▀██▀█▀" "$1" | head -1 | cut -d: -f1)
   popup=$(grep -an "╭─ queued " "$1" | head -1 | cut -d: -f1)
@@ -512,8 +512,8 @@ rm -f "$SPOOLWAY_PROJECT_HOME/pending/slow-spool.md"
 
 # Switching tabs turns the same spool over the tab being left until the next tab
 # draws its first frame. Opening the queue tab runs git, so with the slow `git`
-# above the switch from the dispatch tab takes over 200 ms. The spool is cyan
-# and is read only after the first frame, the dispatch tab's own, since the
+# above the switch from the dispatch tab takes over 200 ms. The spool is bright
+# white and is read only after the first frame, the dispatch tab's own, since the
 # board's lockup spells the mark too. The next tab's frame must come after the
 # last spool frame, and the key typed meanwhile is dropped, so `3` never lands.
 # Opening the queue tab runs only the cheap branch lookup and one `rev-parse`, so
@@ -530,8 +530,8 @@ works "a slow tab switch ends when its keys run out" \
   script -qec "stty cols 100 rows 30; { sleep 1.5; touch '$LIVE/slow'; printf 2; sleep 0.1; printf 3; sleep 4; } | PATH='$LIVE/slowall':\$PATH '$SPOOLWAY'" "$SWITCH"
 rm -f "$LIVE/slow"
 awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR > 2' "$SWITCH" >"$LIVE/switch-frames.raw"
-has "a slow tab switch draws the spool's frame A in cyan" "${CYAN}▀█▀██▀" "$LIVE/switch-frames.raw"
-works "and a tab frame is drawn after the last spool frame" awk -v c="${CYAN}▀" '
+has "a slow tab switch draws the spool's frame A in bright white" "${WHITE}▀█▀██▀" "$LIVE/switch-frames.raw"
+works "and a tab frame is drawn after the last spool frame" awk -v c="${WHITE}▀" '
   BEGIN { RS = "\033\\[\\?2026h\033\\[H" }
   NR > 2 { if (index($0, c)) last = NR; n = NR }
   END { exit !(last && n > last) }' "$SWITCH"

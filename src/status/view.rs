@@ -115,14 +115,21 @@ pub(crate) const DIM: &str = "\x1b[2m";
 
 pub(crate) const GREEN: &str = "\x1b[32m";
 
-// Drawn only on a pop-up, never on the board: the cyan of its border and
-// title, and the red of its `[esc]` keys, which `screen::overlay` paints as
-// it lays the pop-up over a tab. Cyan is also the loading spool's, laid over
-// a tab the same way by `screen::spool`. No board state is either colour, so
-// nothing laid over a tab ever reads as part of the rows behind it.
-pub(crate) const CYAN: &str = "\x1b[36m";
+// The bright white of the loading spool's ink: bright rather than plain
+// white, which many terminals draw as a light grey. Cyan read as blue on some
+// terminals, so the spool moved off it. Unlike the lockup's default colour, a
+// fixed white is lost on a light background, which was accepted for this.
+pub(crate) const WHITE: &str = "\x1b[97m";
 
-pub(crate) const RED: &str = "\x1b[31m";
+// Drawn only on a pop-up, never on the board: the light mint of its `[enter]`
+// keys and the dusty pink of its `[esc]` keys, 256-colour 151 and 181, which
+// `screen::overlay` paints as it lays the pop-up over a tab. Pastels rather
+// than the terminal's full green and red: the board draws a running task in
+// `GREEN`, and full colours made the pop-up the loudest thing on screen. Both
+// are faint on a light background, which was accepted for this.
+pub(crate) const MINT: &str = "\x1b[38;5;151m";
+
+pub(crate) const PINK: &str = "\x1b[38;5;181m";
 
 pub(super) const AMBER: &str = "\x1b[33m";
 
@@ -1241,8 +1248,10 @@ pub(super) fn config_notice(waiting: &Waiting) -> Option<String> {
 /// Green, amber and orange already mean running, paused and blocked, so a
 /// tip in any of them would read as a task state. This one appears nowhere
 /// else on the board, and sits close enough to the dim labels that the row
-/// stands apart without pulling the eye from the table.
-const TEAL: &str = "\x1b[38;5;109m";
+/// stands apart without pulling the eye from the table. Every pop-up laid
+/// over a tab draws its border and title in it too, read from here so the
+/// two cannot drift apart.
+pub(crate) const TEAL: &str = "\x1b[38;5;109m";
 
 /// The dispatch tab's tip row for `tip`, as `tip: queue · <the tip>`, with
 /// the one-column margin every row of the board keeps. `tip:` and the
@@ -2920,7 +2929,8 @@ mod tests {
             State::Waiting,
             State::Done,
         ] {
-            assert!(!state.dot().contains(RED), "{}", state.word());
+            // The terminal's own red, named here since nothing draws it.
+            assert!(!state.dot().contains("\x1b[31m"), "{}", state.word());
         }
     }
 

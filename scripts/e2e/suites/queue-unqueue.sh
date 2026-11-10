@@ -501,7 +501,7 @@ has "whose body says what enter does" \
   "enter queues it without issue tracking." "$GATE_ESC_OUT"
 lacks "with no answer row" \
   "> queue anyway, without issue tracking" "$GATE_ESC_OUT"
-# The key row is painted green and red, so its words sit between colour codes.
+# The key row is painted mint and pink, so its words sit between colour codes.
 sed 's/\x1b\[[0-9;]*m//g' "$GATE_ESC_OUT" >"$GATE_ESC_OUT.plain"
 has "under the shared key row" "[enter] confirm   [esc] close" "$GATE_ESC_OUT.plain"
 works "esc leaves the task in pending, unqueued" \
