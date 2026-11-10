@@ -916,6 +916,45 @@ impl Board {
         Ok(())
     }
 
+    /// [`Board::on_key`] for the dispatch tab, under the loading spool in
+    /// [`crate::screen::spool`] whenever the key does work — see
+    /// [`Board::key_works`]. A key that does none runs as it is, so it can
+    /// never show the spool or have the keys typed after it thrown away.
+    pub(crate) fn on_key_under_spool(
+        &mut self,
+        repo: &Repo,
+        pipelines: &Pipelines,
+        key: crate::screen::Key,
+        writer: &mut crate::screen::frame_writer::FrameWriter,
+        out: &mut (impl std::io::Write + Send),
+        input: &mut impl crate::screen::PollableRead,
+    ) -> Result<()> {
+        if !self.key_works(key) {
+            return self.on_key(repo, pipelines, key);
+        }
+        crate::screen::spool::under_spool(writer, out, input, || self.on_key(repo, pipelines, key))
+    }
+
+    /// Whether [`Board::on_key`] does work on `key` in the mode the board is
+    /// in now: reads the queue, asks the multiplexer, writes a task, or opens
+    /// an editor or a browser. Browsing, that is `o`, `r` and `k`. In a menu,
+    /// picker or confirm panel it is `enter`, which runs the answer under the
+    /// cursor. Every other key only moves a cursor or closes what is open, and
+    /// a refusal's popup does nothing on `enter` but close.
+    fn key_works(&self, key: crate::screen::Key) -> bool {
+        use crate::screen::Key;
+        match &self.mode {
+            BoardMode::Browsing => matches!(key, Key::Char('o' | 'r' | 'k')),
+            BoardMode::Outcome(_) => false,
+            BoardMode::Options(_)
+            | BoardMode::ConfirmPause(_)
+            | BoardMode::ResumePicker(_)
+            | BoardMode::ConfirmUnqueue(_)
+            | BoardMode::ConfirmRestart(_)
+            | BoardMode::ConfirmSkipHook(_) => key == Key::Enter,
+        }
+    }
+
     fn on_key_browsing(
         &mut self,
         repo: &Repo,

@@ -429,8 +429,13 @@ fn host(
     loop {
         let leave = {
             let _hosting = Hosting::open_in(tab, tabs);
+            // The tab being left's last frame, for the loading spool to turn
+            // over while the next one reads its rows, runs git or waits on a
+            // reading before its first frame. Nothing on the very first
+            // entry, when nothing is on screen yet.
+            let left = writer.last().cloned();
             writer.forget();
-            match tab {
+            super::spool::until_drawn(left, &mut *out, input, |out, input| match tab {
                 Tab::Dispatch => dispatch_tab(
                     repo,
                     pipelines,
@@ -440,21 +445,21 @@ fn host(
                     &mut writer,
                     input,
                     out,
-                )?,
+                ),
                 Tab::Queue => {
-                    crate::commands::queue_tab(repo, pipelines, cwd, &mut writer, input, out)?
+                    crate::commands::queue_tab(repo, pipelines, cwd, &mut writer, input, out)
                 }
                 // Its routine folders are read again on every visit, so a
                 // routine saved with save as routine on the queue tab is
                 // already listed.
                 Tab::Routines => {
-                    crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)?
+                    crate::commands::routines_tab(repo, pipelines, cwd, &mut writer, input, out)
                 }
                 // Read again on every visit, so a key set from the CLI while
                 // another tab was open is already listed with its value.
-                Tab::Overrides => super::overrides::tab(repo, &mut writer, input, out)?,
-                Tab::Eval => crate::eval::tab(repo, pipelines, &mut writer, input, out)?,
-            }
+                Tab::Overrides => super::overrides::tab(repo, &mut writer, input, out),
+                Tab::Eval => crate::eval::tab(repo, pipelines, &mut writer, input, out),
+            })?
         };
         // A caught `ctrl-c` ends every tab's own wait with `None` — see
         // `wait_key` — which each reads as `Quit` already; checked here too
@@ -1165,6 +1170,22 @@ impl DispatchTab {
         }
     }
 
+    /// Whether [`DispatchTab::answer`] does work on `key`: `enter` on a
+    /// gate or a stop popup, which goes on to the next gate, starts, stops
+    /// or interrupts. `enter` on a notice only closes it.
+    fn answer_works(&self, key: Key) -> bool {
+        key == Key::Enter
+            && matches!(
+                self.popup,
+                Some(
+                    Popup::Overrides(_)
+                        | Popup::Warnings(_)
+                        | Popup::Stop(_)
+                        | Popup::StopQueued { .. }
+                )
+            )
+    }
+
     /// A key read while a popup is open. On a gate and on the stop popup
     /// the arrows move the cursor between its answers. `enter` on a gate's
     /// first answer goes on to the next gate, or starts; on its second it
@@ -1269,7 +1290,7 @@ fn dispatch_tab(
     tab: &mut DispatchTab,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl Write,
+    out: &mut (impl Write + Send),
 ) -> Result<Leave> {
     // The first frame each time the tab is entered waits for a reading of
     // its own, so the tab never opens on one left over from before it was
@@ -1355,15 +1376,28 @@ fn dispatch_tab(
         // keys meant for the panel on screen. A popup that reads no key —
         // `Starting` — leaves every key to the board and the shell below.
         if board.at_rest() && tab.popup.as_ref().is_some_and(Popup::reads_keys) {
-            tab.answer(repo, pipelines, cwd, key);
+            // `enter` on a gate runs the checks after it, or starts, and on
+            // the stop popup it may interrupt every running step first, so
+            // it goes under the loading spool. The arrows only move the
+            // popup's cursor, and `esc` only closes it.
+            match tab.answer_works(key) {
+                true => super::spool::under_spool(writer, out, input, || {
+                    tab.answer(repo, pipelines, cwd, key)
+                }),
+                false => tab.answer(repo, pipelines, cwd, key),
+            }
             continue;
         }
         if board.at_rest() {
             if let Some(leave) = leave_on(key) {
                 return Ok(leave);
             }
+            // Under the loading spool: the start gates load the pipelines
+            // and run doctor's checks, and a stop asks what is running. The
+            // spool is down before the loop draws whatever popup this
+            // opened, `Starting` among them.
             if key == Key::Enter {
-                tab.enter(repo, pipelines, cwd);
+                super::spool::under_spool(writer, out, input, || tab.enter(repo, pipelines, cwd));
                 continue;
             }
             // Only while the frame on screen offers it: with nothing a
@@ -1379,7 +1413,7 @@ fn dispatch_tab(
         // Best-effort, the same as the dispatch loop's own `on_key`: a key
         // that failed against a queue being rewritten under it is lost, not a
         // reason to close the screen.
-        let _ = board.on_key(repo, pipelines, key);
+        let _ = board.on_key_under_spool(repo, pipelines, key, writer, out, input);
     }
 }
 

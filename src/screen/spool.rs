@@ -15,7 +15,11 @@
 //! write to the terminal at once, and whatever the work hands back, a
 //! pop-up of its own included, is drawn with the spool already gone.
 
-use std::sync::mpsc;
+use std::cell::RefCell;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use super::PollableRead;
@@ -128,22 +132,23 @@ fn hold_left(shown: Duration, ended: Duration) -> Duration {
     (shown + HOLD).saturating_sub(ended)
 }
 
-/// The drawing thread: turn the spool over the last frame `writer` wrote
-/// until `stop` says the work is done, then hold it up out to [`HOLD`].
-/// Whether the spool was ever drawn.
+/// A frame already on screen, and the pane size it was written for: what
+/// [`FrameWriter::last`] answers, and what the spool is laid over.
+type Last = (Vec<String>, (usize, usize));
+
+/// The drawing thread: turn the spool over `last` through `writer` until
+/// `stop` says the work is done, then hold it up out to [`HOLD`]. Whether
+/// the spool was ever drawn.
 ///
 /// A dropped sender stops it the same as a sent stop, so a work that panics
 /// never leaves this turning while the scope it runs in waits to join it.
 fn turn(
     writer: &mut FrameWriter,
-    out: &mut impl std::io::Write,
+    out: &mut impl Write,
+    (last, pane): Last,
     stop: mpsc::Receiver<()>,
     start: Instant,
 ) -> bool {
-    // Nothing written yet means nothing on screen to lay the spool over.
-    let Some((last, pane)) = writer.last().cloned() else {
-        return false;
-    };
     let mut drawn = None;
     let mut shown = None;
     loop {
@@ -186,19 +191,25 @@ fn turn(
 ///
 /// `work` must not write to the terminal itself — it is handed neither
 /// `writer` nor `out`, which belong to the drawing thread until it returns.
+/// Work that has to draw partway, the way a tab opening draws its first
+/// frame, goes through [`until_drawn`] instead.
 pub(crate) fn under_spool<T>(
     writer: &mut FrameWriter,
-    out: &mut (impl std::io::Write + Send),
+    out: &mut (impl Write + Send),
     input: &mut impl PollableRead,
     work: impl FnOnce() -> T,
 ) -> T {
+    // Nothing written yet means nothing on screen to lay the spool over.
+    let Some(last) = writer.last().cloned() else {
+        return work();
+    };
     let start = Instant::now();
     let (stop, stopped) = mpsc::channel();
     let (result, shown) = std::thread::scope(|scope| {
         // Moved in so a panic in `work` drops it on the way out of this
         // closure, which stops the drawing thread before the scope joins it.
         let stop = stop;
-        let turning = scope.spawn(move || turn(writer, out, stopped, start));
+        let turning = scope.spawn(move || turn(writer, out, last, stopped, start));
         let result = work();
         let _ = stop.send(());
         // A drawing thread that panicked drew no spool anyone needs to
@@ -211,8 +222,244 @@ pub(crate) fn under_spool<T>(
     result
 }
 
+/// Run `work` with the loading spool turning over `last` until `work` first
+/// writes to the terminal, or returns, and answer what it returned. For a tab
+/// switch: `last` is the frame the tab being left wrote, `work` opens the
+/// next tab, and its first frame is what takes the spool down.
+///
+/// [`under_spool`] cannot do this, because it keeps the terminal from its
+/// work until the work returns, and a tab returns only once the person
+/// leaves it again. So `work` is handed the terminal as [`Drawn`], whose
+/// first write stops the drawing thread, waits for it, and only then writes.
+/// The spool keeps to the same clock and hold either way.
+///
+/// Typed keys are thrown away once the spool has shown, as [`under_spool`]
+/// throws them away, but when `work` next asks the keyboard for a key rather
+/// than when it returns: `work` holds the keyboard, as [`Held`], from the
+/// start. A tab reads no key before its first frame, so what is thrown away
+/// is what was typed during the wait. With no `last` there is nothing on
+/// screen to lay the spool over, and `work` runs with nothing drawn.
+pub(crate) fn until_drawn<T, W: Write + Send, R: PollableRead>(
+    last: Option<Last>,
+    out: W,
+    input: &mut R,
+    work: impl FnOnce(&mut Drawn<'_, W>, &mut Held<'_, R>) -> T,
+) -> T {
+    let start = Instant::now();
+    let out = Mutex::new(out);
+    let drop_typed = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        let turning = last.map(|last| {
+            let (stop, stopped) = mpsc::channel();
+            let out = &out;
+            // Holds `out` for the whole of its turn: [`Drawn`] takes it only
+            // after stopping and joining this thread, so the two never wait
+            // on each other.
+            let turning = scope.spawn(move || {
+                let mut out = lock(out);
+                turn(&mut FrameWriter::new(), &mut *out, last, stopped, start)
+            });
+            (stop, turning)
+        });
+        let mut drawn = Drawn {
+            out: &out,
+            turning,
+            drop_typed: &drop_typed,
+        };
+        let mut held = Held {
+            input: RefCell::new(&mut *input),
+            drop_typed: &drop_typed,
+        };
+        let result = work(&mut drawn, &mut held);
+        // Work that returned without writing anything still takes the spool
+        // down before it hands its answer back.
+        drawn.stop();
+        result
+    });
+    if drop_typed.load(Ordering::Relaxed) {
+        input.discard_typed();
+    }
+    result
+}
+
+/// `out`, locked whether or not a holder panicked: a drawing thread that
+/// panicked partway through a frame leaves the terminal as usable as any
+/// half-written frame does, and the next whole frame paints over it.
+fn lock<W>(out: &Mutex<W>) -> std::sync::MutexGuard<'_, W> {
+    out.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The terminal [`until_drawn`] hands its work: the spool turns on it until
+/// the first write, which stops the spool and goes through, as every write
+/// after it does.
+pub(crate) struct Drawn<'a, W> {
+    out: &'a Mutex<W>,
+    /// The drawing thread and the sender that stops it, until the first
+    /// write; `None` once it has stopped, or when it never started.
+    turning: Option<(mpsc::Sender<()>, ScopedJoinHandle<'a, bool>)>,
+    /// Set once a spool that showed has stopped, for [`Held`] to act on.
+    drop_typed: &'a AtomicBool,
+}
+
+impl<W> Drawn<'_, W> {
+    /// Stop the drawing thread, if it still turns, and wait for it to let go
+    /// of the terminal, held up out to [`HOLD`] if it showed.
+    fn stop(&mut self) {
+        let Some((stop, turning)) = self.turning.take() else {
+            return;
+        };
+        let _ = stop.send(());
+        // A drawing thread that panicked drew no spool anyone needs to
+        // answer for, the same as in `under_spool`.
+        if turning.join().unwrap_or(false) {
+            self.drop_typed.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl<W: Write> Write for Drawn<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.stop();
+        lock(self.out).write(buf)
+    }
+
+    /// Nothing of the work's own has reached the terminal while the spool
+    /// still turns, so a flush then has nothing to send. Taking the lock for
+    /// it would wait on the drawing thread, which holds it until stopped.
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.turning {
+            Some(_) => Ok(()),
+            None => lock(self.out).flush(),
+        }
+    }
+}
+
+/// The keyboard [`until_drawn`] hands its work, which throws away what was
+/// typed during the spool the first time the work asks it anything after
+/// the spool came down.
+///
+/// In a [`RefCell`] because a key is waited for through `&self` —
+/// [`PollableRead::byte_pending`] and [`PollableRead::wait_pending`] — and
+/// throwing keys away takes `&mut`. A key must not be read before the throw:
+/// a wait that saw a key typed during the spool would hand it to the tab.
+pub(crate) struct Held<'a, R> {
+    input: RefCell<&'a mut R>,
+    drop_typed: &'a AtomicBool,
+}
+
+impl<R: PollableRead> Held<'_, R> {
+    fn catch_up(&self) {
+        if self.drop_typed.swap(false, Ordering::Relaxed) {
+            self.input.borrow_mut().discard_typed();
+        }
+    }
+}
+
+impl<R: PollableRead> Read for Held<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.catch_up();
+        self.input.get_mut().read(buf)
+    }
+}
+
+impl<R: PollableRead> PollableRead for Held<'_, R> {
+    fn byte_pending(&self, timeout: Duration) -> bool {
+        self.catch_up();
+        self.input.borrow().byte_pending(timeout)
+    }
+
+    fn wait_pending(&self, timeout: Duration, wake: Option<&super::Wake>) -> bool {
+        self.catch_up();
+        self.input.borrow().wait_pending(timeout, wake)
+    }
+
+    fn discard_typed(&mut self) {
+        self.input.get_mut().discard_typed();
+    }
+}
+
+/// The stand-ins for a keyboard and a terminal that the spool's tests drive
+/// it with, shared with the tests of the screens that put their keys under
+/// it.
+#[cfg(test)]
+pub(crate) mod testutil {
+    use super::*;
+
+    /// A reader with nothing to read that remembers being asked to throw
+    /// typed keys away.
+    #[derive(Default)]
+    pub(crate) struct Typed {
+        pub(crate) discarded: bool,
+    }
+
+    impl Read for Typed {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl PollableRead for Typed {
+        fn byte_pending(&self, _: Duration) -> bool {
+            true
+        }
+
+        fn discard_typed(&mut self) {
+            self.discarded = true;
+        }
+    }
+
+    /// The terminal the drawing thread writes to, which says on `drew` each
+    /// frame of the mark it has seen written, so a work can wait for the
+    /// spool itself rather than sleep for as long as it ought to take.
+    pub(crate) struct Watched {
+        pub(crate) bytes: Vec<u8>,
+        drew: mpsc::Sender<usize>,
+    }
+
+    impl Write for Watched {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let text = String::from_utf8_lossy(buf);
+            for (frame, art) in SPOOL.iter().enumerate() {
+                if text.contains(art[0]) {
+                    let _ = self.drew.send(frame);
+                }
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Watched {
+        /// Whether either frame of the mark was ever written here.
+        pub(crate) fn drew_spool(&self) -> bool {
+            let text = String::from_utf8_lossy(&self.bytes);
+            SPOOL.iter().any(|art| text.contains(art[0]))
+        }
+    }
+
+    /// A [`Watched`] terminal, and what it says it drew.
+    pub(crate) fn watched() -> (Watched, mpsc::Receiver<usize>) {
+        let (drew, seen) = mpsc::channel();
+        let out = Watched {
+            bytes: Vec::new(),
+            drew,
+        };
+        (out, seen)
+    }
+
+    /// How long a work waits for the spool before it gives up on it. Only a
+    /// backstop, so a broken spool fails the test rather than hanging it.
+    pub(crate) const BACKSTOP: Duration = Duration::from_secs(10);
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testutil::*;
     use super::*;
     use crate::status::{CYAN, DIM, strip_ansi};
 
@@ -372,29 +619,6 @@ mod tests {
         }
     }
 
-    /// A reader with nothing to read that remembers being asked to throw
-    /// typed keys away.
-    #[derive(Default)]
-    struct Typed {
-        discarded: bool,
-    }
-
-    impl std::io::Read for Typed {
-        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-            Ok(0)
-        }
-    }
-
-    impl PollableRead for Typed {
-        fn byte_pending(&self, _: Duration) -> bool {
-            true
-        }
-
-        fn discard_typed(&mut self) {
-            self.discarded = true;
-        }
-    }
-
     /// A writer holding one frame already, the way a tab's writer does by the
     /// time a key is pressed on it — blank first row and all, as inside bare
     /// `spoolway`.
@@ -415,45 +639,6 @@ mod tests {
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
         assert!(!input.discarded);
     }
-
-    /// The terminal the drawing thread writes to, which says on `drew` each
-    /// frame of the mark it has seen written, so a work can wait for the
-    /// spool itself rather than sleep for as long as it ought to take.
-    struct Watched {
-        bytes: Vec<u8>,
-        drew: mpsc::Sender<usize>,
-    }
-
-    impl std::io::Write for Watched {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let text = String::from_utf8_lossy(buf);
-            for (frame, art) in SPOOL.iter().enumerate() {
-                if text.contains(art[0]) {
-                    let _ = self.drew.send(frame);
-                }
-            }
-            self.bytes.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// A [`Watched`] terminal, and what it says it drew.
-    fn watched() -> (Watched, mpsc::Receiver<usize>) {
-        let (drew, seen) = mpsc::channel();
-        let out = Watched {
-            bytes: Vec::new(),
-            drew,
-        };
-        (out, seen)
-    }
-
-    /// How long a work waits for the spool before it gives up on it. Only a
-    /// backstop, so a broken spool fails the test rather than hanging it.
-    const BACKSTOP: Duration = Duration::from_secs(10);
 
     /// The work runs until the drawing thread has written frame B, however
     /// long a loaded machine takes to get there.
@@ -498,6 +683,83 @@ mod tests {
             std::thread::sleep(ms(300));
         });
         assert!(out.is_empty());
+        assert!(!input.discarded);
+    }
+
+    /// The next tab's first frame, as [`until_drawn`]'s tests write it.
+    const NEXT_TAB: &str = "the next tab";
+
+    /// A tab switch whose next tab takes until frame B is on screen to draw
+    /// its first frame: the spool turns over the tab being left, its first
+    /// write takes the spool down, nothing of the spool is written after it,
+    /// and the keys typed during the wait go at the next tab's first look at
+    /// its keyboard, not before.
+    #[test]
+    fn a_slow_tab_switch_turns_the_spool_until_the_next_tab_draws() {
+        let mut writer = written();
+        let ((mut out, seen), mut input) = (watched(), Typed::default());
+        let left = writer.last().cloned();
+        let answer = until_drawn(left, &mut out, &mut input, |out, input| {
+            while seen.recv_timeout(BACKSTOP).expect("frame B never drawn") != 1 {}
+            writer.forget();
+            writer.write_frame(&[NEXT_TAB.to_string()], (41, 12), out);
+            assert!(
+                !input.input.borrow().discarded,
+                "keys thrown away before the next tab looked at its keyboard"
+            );
+            input.byte_pending(Duration::ZERO);
+            assert!(input.input.borrow().discarded);
+            "opened"
+        });
+        assert_eq!(answer, "opened");
+        let drawn = String::from_utf8_lossy(&out.bytes);
+        let b = drawn.find(SPOOL[1][0]).expect("frame B never drawn");
+        let next = drawn.find(NEXT_TAB).expect("the next tab never drew");
+        assert!(b < next, "the spool drawn after the next tab's first frame");
+        assert!(!drawn[next..].contains(SPOOL[0][0]), "{drawn}");
+        assert!(!drawn[next..].contains(SPOOL[1][0]), "{drawn}");
+    }
+
+    /// A next tab that draws its first frame at once shows no spool, and the
+    /// keys typed meanwhile are left for it.
+    #[test]
+    fn a_quick_tab_switch_draws_no_spool_and_keeps_typed_keys() {
+        let mut writer = written();
+        let ((mut out, _seen), mut input) = (watched(), Typed::default());
+        let left = writer.last().cloned();
+        until_drawn(left, &mut out, &mut input, |out, input| {
+            writer.forget();
+            writer.write_frame(&[NEXT_TAB.to_string()], (41, 12), out);
+            input.byte_pending(Duration::ZERO);
+        });
+        assert!(!out.drew_spool());
+        assert!(String::from_utf8_lossy(&out.bytes).contains(NEXT_TAB));
+        assert!(!input.discarded);
+    }
+
+    /// A next tab that returns having written nothing, the way one that
+    /// fails to open does, still takes the spool down before the switch
+    /// answers, and the keys typed during it are thrown away all the same.
+    #[test]
+    fn a_tab_that_returns_without_drawing_takes_the_spool_down() {
+        let writer = written();
+        let ((mut out, seen), mut input) = (watched(), Typed::default());
+        until_drawn(writer.last().cloned(), &mut out, &mut input, |_, _| {
+            seen.recv_timeout(BACKSTOP).expect("frame A never drawn");
+        });
+        assert!(out.drew_spool());
+        assert!(input.discarded);
+    }
+
+    /// The first tab the screen opens has nothing on screen to lay a spool
+    /// over, however long it takes.
+    #[test]
+    fn the_first_tab_opened_draws_no_spool() {
+        let ((mut out, _seen), mut input) = (watched(), Typed::default());
+        until_drawn(None, &mut out, &mut input, |_, _| {
+            std::thread::sleep(ms(300));
+        });
+        assert!(out.bytes.is_empty());
         assert!(!input.discarded);
     }
 
