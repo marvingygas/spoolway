@@ -1494,7 +1494,9 @@ pub(crate) fn parse_submission(name: &str, raw: &str, base: Option<&str>) -> Res
 /// [`queue_add_tasks`] so a caller can hold the validated batch before
 /// writing it. The queue screen does, across its conflict gate, through
 /// [`validate_batch_undescribed`]; this form serves the callers with no
-/// question to ask.
+/// question to ask. Only the tests call it: every caller outside them
+/// keeps the answers of `origin`, through [`validate_batch_with`].
+#[cfg(test)]
 pub(crate) fn validate_batch(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2655,17 +2657,14 @@ fn queue_add_tasks(
     let gate = ToolGate::Print {
         interactive: crate::ask::interactive(),
     };
-    if let Err(err) = open_and_prefix_waiting(
+    if let Err(err) = open_and_prefix(
         repo,
         submitted,
         &task_files,
         &mut tasks,
         gate,
         &mut PrintedTickets,
-        OpenSettings {
-            wait: crate::tracking::OpenWait::Block,
-            asks: &mut asks,
-        },
+        &mut asks,
     ) {
         return match err.downcast_ref::<GateCancelled>() {
             Some(_) => Ok(()),
@@ -2915,6 +2914,7 @@ fn open_and_prefix(
     tasks: &mut [Task],
     gate: ToolGate,
     log: &mut dyn TicketLog,
+    asks: &mut OriginAsks,
 ) -> Result<()> {
     open_and_prefix_waiting(
         repo,
@@ -2925,7 +2925,7 @@ fn open_and_prefix(
         log,
         OpenSettings {
             wait: crate::tracking::OpenWait::Block,
-            asks: &mut OriginAsks::default(),
+            asks,
         },
     )
 }
@@ -3005,8 +3005,7 @@ fn open_and_prefix_waiting(
     // caller's `asks` carry what `origin` said then, a failure included, so
     // a submission that listed `origin` before the hook does not list it
     // again, and one whose `origin` did not answer does not wait a second
-    // limit. A caller whose `asks` are fresh, the board after a person has
-    // answered its popups, lists `origin` once here instead.
+    // limit. `asks` that nothing has used yet list `origin` here, once.
     for task in tasks.iter() {
         let branch = task_branch(task);
         let renamed = branch != crate::task::default_branch(task.id());
@@ -11689,7 +11688,7 @@ fn begin_submission(
         left_out: &left_out,
         tracking_off: tracking == Tracking::Off,
     };
-    match finish_submit(repo, groups, pending, &submit, &mut hook) {
+    match finish_submit(repo, groups, pending, &submit, &mut hook, &mut asks) {
         Ok(_msg) => {
             state.selected.clear();
             state.gates.clear();
@@ -11740,6 +11739,7 @@ fn finish_submit(
     mut pending: Vec<Task>,
     submit: &Submit,
     log: &mut dyn TicketLog,
+    asks: &mut OriginAsks,
 ) -> Result<String> {
     let Submit {
         tasks,
@@ -11760,7 +11760,7 @@ fn finish_submit(
     // answered here, not printed.
     let task_files = readable_task_files(tasks);
     let gate = ToolGate::Answered { tracking_off };
-    open_and_prefix(repo, tasks, &task_files, &mut pending, gate, log)?;
+    open_and_prefix(repo, tasks, &task_files, &mut pending, gate, log, asks)?;
 
     save_new_tasks(repo, &pending)?;
 
@@ -13304,6 +13304,7 @@ fn validate_routine_batch(
     target: &std::path::Path,
     pipeline: &str,
     routine: &[RoutineTask],
+    asks: &mut OriginAsks,
 ) -> Result<ValidatedRoutine> {
     let tasks: Vec<&RoutineTask> = routine.iter().collect();
     let (mut submitted, names) = if target.is_dir() {
@@ -13316,7 +13317,7 @@ fn validate_routine_batch(
         *doc = with_frontmatter_field(doc, "pipeline", pipeline);
     }
 
-    let tasks = validate_batch(repo, pipelines, base, &submitted).map_err(|err| {
+    let tasks = validate_batch_with(repo, pipelines, base, &submitted, asks).map_err(|err| {
         // `parse_submission` tells a person at `queue add` to pass `--base`,
         // which a job has no way to do. Name the job's own key instead, so
         // the advice works.
@@ -13346,7 +13347,16 @@ pub(crate) fn check_routine_target(
     pipeline: &str,
 ) -> Result<()> {
     let routine = read_routine_tasks(target)?;
-    validate_routine_batch(repo, pipelines, base, target, pipeline, &routine).map(|_| ())
+    validate_routine_batch(
+        repo,
+        pipelines,
+        base,
+        target,
+        pipeline,
+        &routine,
+        &mut OriginAsks::default(),
+    )
+    .map(|_| ())
 }
 
 /// Queue a routine target the way the routines tab does, but driven by a job
@@ -13384,8 +13394,9 @@ pub(crate) fn queue_routine_target(
     if !live.is_empty() {
         return Err(anyhow::Error::new(StillQueued(live)));
     }
+    let mut asks = OriginAsks::default();
     let (mut tasks, submitted, names) =
-        validate_routine_batch(repo, pipelines, base, target, pipeline, &routine)?;
+        validate_routine_batch(repo, pipelines, base, target, pipeline, &routine, &mut asks)?;
     stamp_routines(&mut tasks, &names);
     // No task to write ids back into — see `open_and_prefix`. The
     // dispatcher firing a job has no screen and nobody to answer it, even
@@ -13421,7 +13432,7 @@ pub(crate) fn queue_routine_target(
         &mut log,
         OpenSettings {
             wait: crate::tracking::OpenWait::Poll,
-            asks: &mut OriginAsks::default(),
+            asks: &mut asks,
         },
     );
     // Whatever ended the firing — answered, failed or timed out — its `open`
@@ -13460,9 +13471,10 @@ fn finish_routine(
     task_files: &[String],
     tracking_off: bool,
     log: &mut dyn TicketLog,
+    asks: &mut OriginAsks,
 ) -> Result<()> {
     let gate = ToolGate::Answered { tracking_off };
-    open_and_prefix(repo, &[], task_files, tasks, gate, log)?;
+    open_and_prefix(repo, &[], task_files, tasks, gate, log, asks)?;
     save_new_tasks(repo, tasks)?;
     Ok(())
 }
@@ -13573,7 +13585,14 @@ fn finish_routine_mode(
         .collect();
     let mut hook = PopupHook::new(&tasks, redraw);
     let tracking_off = tracking == Tracking::Off;
-    match finish_routine(repo, &mut tasks, task_files, tracking_off, &mut hook) {
+    match finish_routine(
+        repo,
+        &mut tasks,
+        task_files,
+        tracking_off,
+        &mut hook,
+        &mut asks,
+    ) {
         Ok(()) => {
             // Back onto the pane with nothing ticked: the batch is queued,
             // and a tick left standing is one `enter` away from the refusal
@@ -21882,7 +21901,15 @@ mod tests {
             left_out: &[],
             tracking_off: false,
         };
-        let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
+        let msg = finish_submit(
+            &repo,
+            &mut groups,
+            pending,
+            &submit,
+            &mut PrintedTickets,
+            &mut OriginAsks::default(),
+        )
+        .unwrap();
 
         assert!(!beta_path.exists(), "beta's pending task must be gone");
         assert!(alpha_path.exists(), "alpha's queue task must be untouched");
@@ -21939,7 +21966,15 @@ mod tests {
             left_out: &[],
             tracking_off: false,
         };
-        let msg = finish_submit(&repo, &mut groups, pending, &submit, &mut PrintedTickets).unwrap();
+        let msg = finish_submit(
+            &repo,
+            &mut groups,
+            pending,
+            &submit,
+            &mut PrintedTickets,
+            &mut OriginAsks::default(),
+        )
+        .unwrap();
 
         assert!(!beta_path.exists(), "beta's pending task must be gone");
         assert!(
@@ -29171,6 +29206,7 @@ mod tests {
                 &mut tasks,
                 gate,
                 &mut PrintedTickets,
+                &mut OriginAsks::default(),
             )
             .unwrap();
 
@@ -29600,6 +29636,72 @@ mod tests {
             assert_eq!(
                 queued(&repo, "auth-01").extra_str("url"),
                 "https://acme.atlassian.net/browse/PROJ-12"
+            );
+        }
+
+        /// A hook that answers a slug renames every branch after validation
+        /// has asked about the `task/<id>` ones. The leftover check of the
+        /// renamed ones reads the listing validation made, so `queue add`
+        /// and a job's firing each put one `git ls-remote` to `origin`, not
+        /// a second after the hook.
+        #[test]
+        fn a_renamed_batch_asks_origin_once_for_queue_add_and_for_a_firing() {
+            let (mut repo, _root_guard) = fixture("open-prefix-origin-once");
+            repo.config.issue_tracking.key_in_names = true;
+            with_hook(
+                &mut repo,
+                r#"{ echo "epic=PROJ-12"; echo "ticket=PROJ-13"
+                     echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
+            );
+            let calls = counting_origin(&repo, true);
+            let docs: Vec<String> = ["p", "q"]
+                .iter()
+                .map(|id| {
+                    let extra = format!("group: g{id}\ngroup_description: the {id} group\n");
+                    write_doc(&repo, &format!("{id}.md"), &task_text(id, &extra, BODY))
+                })
+                .collect();
+            let docs: Vec<&str> = docs.iter().map(String::as_str).collect();
+
+            queue_add(
+                &repo,
+                &Pipelines::builtin(),
+                &from_args(&docs),
+                &repo.root,
+                false,
+            )
+            .unwrap();
+
+            assert_eq!(
+                queued(&repo, "p").front.branch.as_deref(),
+                Some("task/proj-12-p")
+            );
+            assert_eq!(origin_calls(&calls), 1, "queue add");
+
+            write_routine(
+                &repo,
+                "nightly",
+                "audit-deps",
+                &task_text(
+                    "audit-deps",
+                    "group: nightly\ngroup_description: nightly audits\n",
+                    BODY,
+                ),
+            );
+            let folder = repo.routines_dir().join("nightly");
+            routine_settled(
+                &repo,
+                &Pipelines::builtin(),
+                Some("plan/demo"),
+                &folder,
+                "bugfix",
+            )
+            .unwrap();
+
+            assert_eq!(
+                origin_calls(&calls),
+                2,
+                "the firing added one listing of its own"
             );
         }
 
@@ -31444,7 +31546,16 @@ group_description: audit
             .unwrap();
 
             let gate = ToolGate::Print { interactive: false };
-            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+            open_and_prefix(
+                &repo,
+                &[],
+                &[],
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+                &mut OriginAsks::default(),
+            )
+            .unwrap();
 
             assert!(!repo.checkout.join("login-ran").exists());
         }
@@ -31541,7 +31652,16 @@ group_description: audit
             .unwrap();
 
             let gate = ToolGate::Print { interactive: false };
-            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+            open_and_prefix(
+                &repo,
+                &[],
+                &[],
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+                &mut OriginAsks::default(),
+            )
+            .unwrap();
 
             assert!(tasks[0].tracking_off());
             assert!(repo.checkout.join("login-ran").exists());
@@ -31573,7 +31693,16 @@ group_description: audit
             .unwrap();
 
             let gate = ToolGate::Print { interactive: false };
-            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+            open_and_prefix(
+                &repo,
+                &[],
+                &[],
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+                &mut OriginAsks::default(),
+            )
+            .unwrap();
 
             assert_eq!(tasks[0].extra_str("ticket"), "");
             assert_eq!(tasks[0].extra_str("epic"), "");
@@ -31608,7 +31737,16 @@ group_description: audit
             .unwrap();
 
             let gate = ToolGate::Print { interactive: false };
-            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+            open_and_prefix(
+                &repo,
+                &[],
+                &[],
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+                &mut OriginAsks::default(),
+            )
+            .unwrap();
 
             assert!(tasks[0].tracking_off());
             assert_eq!(tasks[0].extra_str("tracking"), "off");
@@ -31632,7 +31770,16 @@ group_description: audit
             let gate = ToolGate::Answered {
                 tracking_off: false,
             };
-            open_and_prefix(&repo, &[], &[], &mut tasks, gate, &mut PrintedTickets).unwrap();
+            open_and_prefix(
+                &repo,
+                &[],
+                &[],
+                &mut tasks,
+                gate,
+                &mut PrintedTickets,
+                &mut OriginAsks::default(),
+            )
+            .unwrap();
 
             assert!(!tasks[0].tracking_off());
             assert_eq!(tasks[0].extra_str("tracking"), "");
