@@ -1579,7 +1579,7 @@ fn validate_batch_undescribed(
             .base
             .as_deref()
             .expect("parse_submission always resolves a base or refuses the task");
-        check_task_base_with(repo, name, resolved, asks)?;
+        check_task_base_with(repo, name, resolved, &mut reads, asks)?;
 
         let pipeline_name = task
             .front
@@ -1966,6 +1966,9 @@ struct LocalReads {
     queued: Option<BTreeMap<String, std::path::PathBuf>>,
     routines: Option<BTreeSet<String>>,
     branches: Option<BTreeSet<String>>,
+    /// Bases that passed [`refuse_unusable_base`], so a batch sharing one
+    /// base runs `git check-ref-format` for it once.
+    usable_bases: BTreeSet<String>,
 }
 
 impl LocalReads {
@@ -1983,14 +1986,21 @@ impl LocalReads {
         self.routines.get_or_insert_with(|| routine_names(repo))
     }
 
+    /// [`refuse_unusable_base`], run once for each distinct base.
+    fn refuse_unusable_base(&mut self, repo: &Repo, name: &str, base: &str) -> Result<()> {
+        if !self.usable_bases.contains(base) {
+            refuse_unusable_base(repo, name, base)?;
+            self.usable_bases.insert(base.to_string());
+        }
+        Ok(())
+    }
+
     /// Whether `branch` is a local branch, from one `git for-each-ref`. A
     /// listing git cannot give reads as no branches, as `git show-ref` failing
     /// read as no branch.
     fn has_branch(&mut self, repo: &Repo, branch: &str) -> bool {
         self.branches
             .get_or_insert_with(|| {
-                #[cfg(test)]
-                counted_reads::REF_LISTINGS.with(|n| n.set(n.get() + 1));
                 repo.git(&["for-each-ref", "--format=%(refname)", "refs/heads"])
                     .map(|refs| {
                         refs.lines()
@@ -2004,16 +2014,15 @@ impl LocalReads {
     }
 }
 
-/// How often the current thread's [`LocalReads`] parsed the queue folder and
-/// listed refs, for the test that holds a batch to one of each per pass. Per
-/// thread, so tests running side by side count only their own.
+/// How often the current thread's [`LocalReads`] parsed the queue folder,
+/// for the test that holds a batch to one parse per pass. Per thread, so
+/// tests running side by side count only their own.
 #[cfg(test)]
 mod counted_reads {
     use std::cell::Cell;
 
     thread_local! {
         pub(super) static QUEUE_PARSES: Cell<usize> = const { Cell::new(0) };
-        pub(super) static REF_LISTINGS: Cell<usize> = const { Cell::new(0) };
     }
 }
 
@@ -2369,13 +2378,27 @@ fn ref_exists(repo: &Repo, branch: &str) -> bool {
 /// reaches `rev-parse` and `check-ref-format` here would otherwise be read
 /// as a flag, the same reason `branch:` is refused outright.
 pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
-    check_task_base_with(repo, name, base, &mut OriginAsks::default())
+    check_task_base_with(
+        repo,
+        name,
+        base,
+        &mut LocalReads::default(),
+        &mut OriginAsks::default(),
+    )
 }
 
-/// [`check_task_base`] reading what `origin` has from `asks`, so a batch's
-/// bases are not each asked about on their own.
-fn check_task_base_with(repo: &Repo, name: &str, base: &str, asks: &mut OriginAsks) -> Result<()> {
-    if check_task_base_locally(repo, name, base)? {
+/// [`check_task_base`] reading the local branches from `reads` and what
+/// `origin` has from `asks`, so a batch's bases are not each looked up on
+/// their own.
+fn check_task_base_with(
+    repo: &Repo,
+    name: &str,
+    base: &str,
+    reads: &mut LocalReads,
+    asks: &mut OriginAsks,
+) -> Result<()> {
+    reads.refuse_unusable_base(repo, name, base)?;
+    if reads.has_branch(repo, base) {
         return Ok(());
     }
     match asks.has_branch(repo, base) {
@@ -2401,6 +2424,20 @@ fn check_task_base_with(repo: &Repo, name: &str, base: &str, asks: &mut OriginAs
 /// only `origin` could still have it. A caller on a path that must not reach
 /// the network (`doctor`'s pre-run warnings) stops there.
 pub(crate) fn check_task_base_locally(repo: &Repo, name: &str, base: &str) -> Result<bool> {
+    refuse_unusable_base(repo, name, base)?;
+    Ok(repo
+        .git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{base}"),
+        ])
+        .is_ok())
+}
+
+/// The refusal for a `base:` git would read as a flag or that is no branch
+/// name, before any lookup of it.
+fn refuse_unusable_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
     if base.starts_with('-') {
         return Err(anyhow::Error::msg(format!(
             "{name}: `base: {base}` starts with `-`, which git would read as a flag — name a \
@@ -2412,14 +2449,7 @@ pub(crate) fn check_task_base_locally(repo: &Repo, name: &str, base: &str) -> Re
             "{name}: `base: {base}` is not a valid branch name — name a branch instead"
         )));
     }
-    Ok(repo
-        .git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{base}"),
-        ])
-        .is_ok())
+    Ok(())
 }
 
 /// A task in a batch that queueing leaves out because it cannot start, and
@@ -14289,44 +14319,47 @@ mod tests {
     }
 
     /// However many tasks a batch holds, the unlocked check and the locked
-    /// save each parse the queue folder once and list the local branches with
-    /// one `git for-each-ref`, rather than once per task.
+    /// save each parse the queue folder once and run the same git processes:
+    /// one `git for-each-ref` for every ref check, and none per task.
     #[test]
     fn a_batch_reads_the_queue_and_the_refs_once_per_pass() {
-        let (repo, _root_guard) = fixture("batch-local-reads-once");
-        let submitted: Vec<(String, String)> = ["a", "b", "c", "d"]
-            .iter()
-            .map(|id| {
-                (
-                    format!("{id}.md"),
-                    task_text(id, &format!("group: g{id}\n"), BODY),
-                )
-            })
-            .collect();
-        let counts = || {
+        // Every git process of both passes and the queue folder parses
+        // between them, for a batch of `n` tasks under one base.
+        let costs = |n: usize| {
+            let (repo, _root_guard) = fixture(&format!("batch-local-reads-{n}"));
+            let submitted: Vec<(String, String)> = (0..n)
+                .map(|i| {
+                    (
+                        format!("t{i}.md"),
+                        task_text(&format!("t{i}"), &format!("group: g{i}\n"), BODY),
+                    )
+                })
+                .collect();
+            let parses = || counted_reads::QUEUE_PARSES.with(|n| n.get());
+            let start = (crate::repo::runs_here_under(&repo.root), parses());
+
+            let tasks = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+                .unwrap();
+            let validated = (crate::repo::runs_here_under(&repo.root), parses());
+            save_new_tasks(&repo, &tasks).unwrap();
+            let saved = (crate::repo::runs_here_under(&repo.root), parses());
+
             (
-                counted_reads::QUEUE_PARSES.with(|n| n.get()),
-                counted_reads::REF_LISTINGS.with(|n| n.get()),
+                validated.0 - start.0,
+                validated.1 - start.1,
+                saved.0 - validated.0,
+                saved.1 - validated.1,
             )
         };
-        let before = counts();
 
-        let tasks =
-            validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted).unwrap();
-        let validated = counts();
-        assert_eq!(
-            (validated.0 - before.0, validated.1 - before.1),
-            (1, 1),
-            "four tasks, one folder parse and one ref listing"
-        );
+        let small = costs(2);
+        let large = costs(6);
 
-        save_new_tasks(&repo, &tasks).unwrap();
-        let saved = counts();
         assert_eq!(
-            (saved.0 - validated.0, saved.1 - validated.1),
-            (1, 1),
-            "the locked pass reads once too, and afresh"
+            large, small,
+            "six tasks cost the git processes and queue parses two do"
         );
+        assert_eq!((small.1, small.3), (1, 1), "one queue parse per pass");
     }
 
     /// A task a check of this checkout refuses puts nothing to `origin`: the
@@ -14381,7 +14414,14 @@ mod tests {
         refuse_missing_start(&repo, &tasks, &mut asks).unwrap();
 
         assert_eq!(origin_calls(&calls), 1);
-        let err = check_task_base_with(&repo, "a", "only-origin", &mut asks).unwrap_err();
+        let err = check_task_base_with(
+            &repo,
+            "a",
+            "only-origin",
+            &mut LocalReads::default(),
+            &mut asks,
+        )
+        .unwrap_err();
         assert!(err.downcast_ref::<OriginUnreachable>().is_some(), "{err:#}");
         assert_eq!(
             origin_calls(&calls),
