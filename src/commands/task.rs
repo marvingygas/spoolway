@@ -21,7 +21,7 @@
 //!
 //! Both modes are read straight off [`super::queue::RESERVED_KEYS`],
 //! [`super::queue::longest_agent_step`], [`super::queue::gather_tasks`]
-//! and [`super::queue::validate_batch`] — the functions that actually
+//! and [`super::queue::validate_batch_with`] — the functions that actually
 //! enforce the contract — so this can never say something the enforcement
 //! does not, or the other way round.
 
@@ -540,7 +540,7 @@ fn print_check_report(tasks: &[Task], pipelines: &Pipelines) -> Result<()> {
 
 /// `spoolway task contract`: the contract itself with no arguments, or a
 /// task checked against it with `--from` — the same validation `queue
-/// add --from` runs, [`super::queue::validate_batch`] and all, with nothing
+/// add --from` runs, [`super::queue::validate_batch_with`] and all, with nothing
 /// saved at the end of it. A refusal propagates exactly as `queue add
 /// --from`'s own does, which is what gives the two the same wording: this is
 /// not a second message written to match, it is the one error value both
