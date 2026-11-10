@@ -1084,24 +1084,28 @@ pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
 /// Over a row with no codes, a panel [`paint`] leaves plain is written
 /// exactly as a character-for-character replace would write it.
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
-    overlay_painted(frame, panel, paint);
-}
-
-/// [`overlay`], with each row of `panel` drawn in the colours `paint_row`
-/// gives it rather than in [`paint`]'s. For a panel that is not a box, so
-/// [`paint`] would leave it plain, but still has colours of its own: the
-/// loading spool in [`spool`] is the one.
-pub(crate) fn overlay_painted(
-    frame: &mut [String],
-    panel: &[String],
-    paint_row: impl Fn(&[String], usize) -> Vec<Option<&'static str>>,
-) {
     let Some(width) = frame
         .first()
         .map(|line| crate::status::strip_ansi(line).chars().count())
     else {
         return;
     };
+    overlay_painted(frame, panel, width, paint);
+}
+
+/// [`overlay`], centred across `width` columns rather than the frame's first
+/// row, with each row of `panel` drawn in the colours `paint_row` gives it
+/// rather than in [`paint`]'s. For a panel that is not a box, so [`paint`]
+/// would leave it plain, but still has colours of its own: the loading spool
+/// in [`spool`] is the one. It is laid over a whole written frame, whose
+/// first row is the blank one above the tab strip, so it cannot measure the
+/// tab from that row the way [`overlay`] does.
+pub(crate) fn overlay_painted(
+    frame: &mut [String],
+    panel: &[String],
+    width: usize,
+    paint_row: impl Fn(&[String], usize) -> Vec<Option<&'static str>>,
+) {
     let panel_width = panel.first().map_or(0, |line| line.chars().count());
     let x = width.saturating_sub(panel_width) / 2;
     let y = (frame.len().saturating_sub(panel.len()) / 2).max(1);

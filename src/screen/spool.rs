@@ -76,17 +76,24 @@ fn cyan(patch: &[String], i: usize) -> Vec<Option<&'static str>> {
 /// `last` dimmed, with `frame` of the spool on its patch in the middle — the
 /// same centring every pop-up is laid down with, see [`super::overlay`].
 ///
+/// Measured across `last`'s widest row, not its first: the frames a tab
+/// writes inside bare `spoolway` open on the blank row above the tab strip,
+/// so the first row is empty and would put the patch nowhere.
+///
 /// `None` when `last` is narrower or shorter than the patch: a pane that
 /// small has nowhere to put the spool, so it draws none, and the next normal
 /// frame is drawn at whatever size the pane is by then.
 fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
-    let width = crate::status::strip_ansi(last.first()?).chars().count();
+    let width = last
+        .iter()
+        .map(|row| crate::status::strip_ansi(row).chars().count())
+        .max()?;
     if width < PATCH_WIDTH || last.len() < PATCH_HEIGHT {
         return None;
     }
     let mut rows = last.to_vec();
     super::dim(&mut rows);
-    super::overlay_painted(&mut rows, &patch(frame), cyan);
+    super::overlay_painted(&mut rows, &patch(frame), width, cyan);
     Some(rows)
 }
 
@@ -298,6 +305,23 @@ mod tests {
         assert!(!drawn[y + 4].contains(CYAN), "{:?}", drawn[y + 4]);
     }
 
+    /// The shape of every frame a tab writes inside bare `spoolway`: a blank
+    /// row above the tab strip, then the tab. Measured from that first row,
+    /// the tab is no columns wide and the spool is never drawn.
+    #[test]
+    fn the_spool_is_centred_on_a_tab_whose_first_row_is_blank() {
+        let mut last = tab(40, 12);
+        last[0] = String::new();
+        let drawn = spool_frame(&last, 0).expect("no spool over a tab with a blank first row");
+        let plain: Vec<String> = drawn.iter().map(|row| strip_ansi(row)).collect();
+        assert_eq!(plain[0], "");
+        let (x, y) = (16, 3);
+        for (r, want) in patch(0).iter().enumerate() {
+            let over: String = plain[y + r].chars().skip(x).take(PATCH_WIDTH).collect();
+            assert_eq!(&over, want, "row {}", y + r);
+        }
+    }
+
     #[test]
     fn the_second_frame_draws_the_other_phase_of_the_thread() {
         let drawn = spool_frame(&tab(40, 12), 1).unwrap();
@@ -338,10 +362,13 @@ mod tests {
     }
 
     /// A writer holding one frame already, the way a tab's writer does by the
-    /// time a key is pressed on it.
+    /// time a key is pressed on it — blank first row and all, as inside bare
+    /// `spoolway`.
     fn written() -> FrameWriter {
+        let mut last = tab(40, 12);
+        last[0] = String::new();
         let mut writer = FrameWriter::new();
-        writer.write_frame(&tab(40, 12), (41, 12), &mut Vec::new());
+        writer.write_frame(&last, (41, 12), &mut Vec::new());
         writer
     }
 
