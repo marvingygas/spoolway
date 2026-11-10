@@ -661,8 +661,8 @@ asks and opens no ticket. See [`spoolway queue`](cli-reference.md#spoolway-queue
 [`tracking`](tasks.md#the-frontmatter-is-spoolways).
 
 With `ask_to_deactivate = false`, the question is skipped on both the pending screen and the
-routines tab. `enter` then opens every group's tickets with no question, so the screen has no
-way left to keep a group off the tracker. Set `tracking: off` on its tasks, or queue it with
+routines tab. `enter` then opens every group's tickets with no question, so the screen cannot
+keep a group off the tracker. Set `tracking: off` on its tasks, or queue it with
 `spoolway queue add --no-tracking <group>`, to leave it untracked.
 
 The script answers by writing lines to the file named in `SPOOLWAY_OUT`:
