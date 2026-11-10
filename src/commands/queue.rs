@@ -4812,9 +4812,11 @@ enum Mode {
     /// one left untracked for this run — see [`issue_question`] and
     /// [`IssueChecklist`]. A ticket on a public tracker is seen by other
     /// people and hard to take back, so nothing reaches the hook until a
-    /// person confirms here. `enter` runs `then` again, opening the
-    /// tickets of every group left unticked and queuing the ticked ones
-    /// with `tracking: off`, and `esc` goes back having queued nothing.
+    /// person confirms here, unless the project switched the question off
+    /// with `issue_tracking.ask_to_deactivate`. `enter` runs `then` again,
+    /// opening the tickets of every group left unticked and queuing the
+    /// ticked ones with `tracking: off`, and `esc` goes back having queued
+    /// nothing.
     IssueQuestion {
         checklist: IssueChecklist,
         then: Resume,
@@ -5514,7 +5516,8 @@ impl Resume {
 enum Tracking {
     /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and with
     /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
-    /// opened. Nothing is queued until each is answered.
+    /// opened, unless `issue_tracking.ask_to_deactivate` is off. Nothing is
+    /// queued until each is answered.
     Ask,
     /// The tool gate's answer: queue the whole batch with issue tracking
     /// switched off.
@@ -5732,16 +5735,25 @@ fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
 
 /// [`Mode::IssueQuestion`] over the batch `tasks`, or `None` when there is
 /// nothing to ask: the submit has already been answered, no hook is
-/// configured, or every task already names its `ticket:` — a batch a failed
-/// hook wrote back, which [`open_tickets`] reports `kept` and never hands
-/// the hook again.
+/// configured, the project set `issue_tracking.ask_to_deactivate` off, or
+/// every task already names its `ticket:` — a batch a failed hook wrote
+/// back, which [`open_tickets`] reports `kept` and never hands the hook
+/// again.
+///
+/// The key is read here and nowhere else. `None` is the same answer as
+/// `enter` with nothing ticked, so both submits go on to the group
+/// description check, the progress popup and the `queued` popup unchanged,
+/// opening every group's tickets.
 ///
 /// One row per group with at least one task naming no `ticket:`, in batch
 /// order, counting every task of that group the batch queues. A group whose
 /// every task already names one has nothing for a tick to stop, so it is
 /// left off.
 fn issue_question(repo: &Repo, tracking: &Tracking, tasks: &[Task], then: Resume) -> Option<Mode> {
-    if *tracking != Tracking::Ask || !crate::tracking::configured(repo) {
+    if *tracking != Tracking::Ask
+        || !crate::tracking::configured(repo)
+        || !repo.config.issue_tracking.ask_to_deactivate
+    {
         return None;
     }
     let mut groups: Vec<(String, usize)> = Vec::new();
@@ -30700,6 +30712,67 @@ group_description: audit
                 assert_eq!(
                     popup_rows(frame, "queued")[..2],
                     ["", "queued 1 task"],
+                    "{frame}"
+                );
+            }
+
+            /// With `issue_tracking.ask_to_deactivate` off, `enter` on the
+            /// pending screen never asks: the hook opens every group's
+            /// tickets, and the `queued` popup says it ran.
+            #[test]
+            fn enter_with_the_question_off_opens_every_ticket_unasked() {
+                let (mut repo, _root_guard) = shop("issue-question-off");
+                repo.config.issue_tracking.ask_to_deactivate = false;
+                let drawn = screen(&repo, listed(&repo), " \x1b[B \r");
+                assert!(
+                    !drawn.contains("deactivate issue tracking for selected groups:"),
+                    "{drawn}"
+                );
+                let mut calls = hook_calls(&repo);
+                calls.sort();
+                assert_eq!(calls, ["cart-empty-state", "cart-totals", "search-box"]);
+                assert_eq!(repo.queued_ids().len(), 3, "{:?}", repo.queued_ids());
+                assert!(!queued(&repo, "search-box").tracking_off());
+                let frame = last_frame(&drawn);
+                assert_eq!(
+                    popup_rows(frame, "queued")[..4],
+                    ["", "hook executed successfully", "", "queued 3 tasks"],
+                    "{frame}"
+                );
+            }
+
+            /// With `issue_tracking.ask_to_deactivate` off, queuing a
+            /// routine never asks either: its group's ticket opens, and the
+            /// `queued` popup says the hook ran.
+            #[test]
+            fn queuing_a_routine_with_the_question_off_opens_its_ticket() {
+                let (mut repo, _root_guard) = cart("issue-question-off-routine");
+                repo.config.issue_tracking.ask_to_deactivate = false;
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let drawn = routines_screen(&repo, " \r");
+                assert!(
+                    !drawn.contains("deactivate issue tracking for selected groups:"),
+                    "{drawn}"
+                );
+                assert_eq!(hook_calls(&repo).len(), 1);
+                let ids = repo.queued_ids();
+                assert_eq!(ids.len(), 1, "{ids:?}");
+                assert!(!queued(&repo, ids.first().unwrap()).tracking_off());
+                let frame = last_frame(&drawn);
+                assert_eq!(
+                    popup_rows(frame, "queued")[..4],
+                    ["", "hook executed successfully", "", "queued 1 task"],
                     "{frame}"
                 );
             }

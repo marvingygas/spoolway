@@ -132,6 +132,7 @@ a quiet lane is asked to report after "dispatch.lane_quiet".
 "issue_tracking.hook" names the script for your tracker.
 "issue_tracking.project_key" names your project: owner/repo.
 "issue_tracking.key_in_names" puts issue keys in branches.
+"ask_to_deactivate = false" skips the issue question.
 an agent's "kind" picks the agent: claude, codex or pi.
 an agent's "concurrency" caps its lanes running at once.
 "session_reuse_ctx" reuses a chat only below this % full.
