@@ -26,6 +26,7 @@
 # issue_tracking.hook                     file name, or blank    Script in the hooks folder that updates your issue tracker as tasks move. Blank = none.
 # issue_tracking.project_key              text                   Your project in the tracker, e.g. owner/repo on GitHub. Passed to the hook.
 # issue_tracking.key_in_names             true, false            Put the issue key in branch and worktree names.
+# issue_tracking.ask_to_deactivate        true, false            Ask which groups to leave untracked before the queue screen opens tickets. false = open every group's tickets without asking.
 # agents.<profile>.kind                   claude, codex, pi      Which agent program this profile starts.
 # agents.<profile>.concurrency            number                 Most agents of this profile running at once. 0 = no limit.
 # agents.<profile>.session_reuse_ctx      0 to 100               Continue an earlier conversation only while it fills less than this % of the context window. 0 = always.
@@ -79,6 +80,7 @@ dirs = []
 hook = "github.sh"
 project_key = "marvingygas/spoolway"
 key_in_names = true
+ask_to_deactivate = true
 
 [agents.claude]
 kind = "claude"
