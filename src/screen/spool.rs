@@ -463,6 +463,27 @@ pub(crate) mod testutil {
     /// How long a work waits for the spool before it gives up on it. Only a
     /// backstop, so a broken spool fails the test rather than hanging it.
     pub(crate) const BACKSTOP: Duration = Duration::from_secs(10);
+
+    /// `drawn`, what a terminal was sent, cut into the frames written to it,
+    /// each with its start code taken off and the spool's left out.
+    ///
+    /// For a test that counts or reads a tab's own frames: a tab switch or
+    /// a key whose work runs past [`DELAY`] puts spool frames among them,
+    /// as many as it turns for, and how long that work takes is the
+    /// machine's to decide, not the test's. A spool frame is told by its
+    /// mark in cyan. The board's lockup draws the same art bold, never
+    /// cyan, so a dispatch tab frame is kept.
+    pub(crate) fn tab_frames(drawn: &str) -> Vec<&str> {
+        drawn
+            .split("\x1b[?2026h\x1b[H")
+            .skip(1)
+            .filter(|frame| {
+                !SPOOL
+                    .iter()
+                    .any(|art| frame.contains(&format!("{}{}", crate::status::CYAN, art[0])))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -769,6 +790,36 @@ mod tests {
         });
         assert!(out.bytes.is_empty());
         assert!(!input.discarded);
+    }
+
+    /// [`tab_frames`] leaves out every frame the spool turned over a slow
+    /// tab switch and keeps the two tabs' own: the one left, though it
+    /// draws the mark bold the way the board's lockup does, and the next.
+    #[test]
+    fn tab_frames_leave_out_the_spool_and_keep_a_bold_mark() {
+        let mut writer = FrameWriter::new();
+        let ((mut out, seen), mut input) = (watched(), Typed::default());
+        let mut left = tab(40, 12);
+        left[0] = String::new();
+        left[1] = format!(
+            "{}{}{}",
+            crate::status::BOLD,
+            SPOOL[0][0],
+            crate::status::RESET
+        );
+        writer.write_frame(&left, (41, 12), &mut out);
+        let last = writer.last().cloned();
+        until_drawn(last, &mut out, &mut input, |out, _| {
+            while seen.recv_timeout(BACKSTOP).expect("frame B never drawn") != 1 {}
+            writer.forget();
+            writer.write_frame(&[NEXT_TAB.to_string()], (41, 12), out);
+        });
+        assert!(out.drew_spool());
+        let drawn = String::from_utf8_lossy(&out.bytes);
+        let frames = tab_frames(&drawn);
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert!(frames[0].contains(SPOOL[0][0]), "{:?}", frames[0]);
+        assert!(frames[1].contains(NEXT_TAB), "{:?}", frames[1]);
     }
 
     /// The spool's art is generated, the same way the board's lockup is — see

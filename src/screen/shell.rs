@@ -604,7 +604,9 @@ pub(crate) fn lit_tab(line: &str) -> Option<&'static str> {
 }
 
 /// The frames `host` draws over `input` typed at it from the tab it opens
-/// on, each with its colour codes taken out.
+/// on, each with its colour codes taken out. Any spool a slow tab switch
+/// turned is left out, so the count is one frame per tab drawn however
+/// slow the machine — see [`super::spool::testutil::tab_frames`].
 #[cfg(test)]
 fn drive_from_start(repo: &Repo, input: &str) -> Vec<String> {
     drive_coloured_from_start(repo, input)
@@ -627,9 +629,8 @@ fn drive_coloured_from_start(repo: &Repo, input: &str) -> Vec<String> {
     )
     .unwrap();
     let drawn = String::from_utf8(out).unwrap();
-    drawn
-        .split("\x1b[?2026h\x1b[H")
-        .skip(1)
+    super::spool::testutil::tab_frames(&drawn)
+        .into_iter()
         .map(str::to_string)
         .collect()
 }
@@ -2026,7 +2027,10 @@ mod tests {
     /// [`drive_host`] with the same queue-tab start, dropping the opening
     /// dispatch frame as [`drive_frames`] does. Keeps each frame's own bytes
     /// whole — colour codes, cursor moves and all — with its own start code
-    /// put back on the front (`split` throws the delimiter it matched away).
+    /// put back on the front (`tab_frames` takes it off). A spool frame a
+    /// slow switch turned is left out, as in [`drive_from_start`]; playing
+    /// the rest into an emulator still paints what a terminal shows, since
+    /// the next tab's first frame after a switch is always written whole.
     /// A frame's own bytes can never hold another frame's text — a fresh
     /// write replaces the whole picture — so a check for stale text has to
     /// read it off the *screen* an emulator paints these bytes onto instead,
@@ -2044,9 +2048,8 @@ mod tests {
         )
         .unwrap();
         let drawn = String::from_utf8(out).unwrap();
-        let mut frames = drawn
-            .split("\x1b[?2026h\x1b[H")
-            .skip(1)
+        let mut frames = crate::screen::spool::testutil::tab_frames(&drawn)
+            .into_iter()
             .map(|body| format!("\x1b[?2026h\x1b[H{body}"))
             .collect::<Vec<_>>();
         assert!(
@@ -2883,12 +2886,31 @@ mod tests {
     /// on a gate, which runs the checks after it or starts, and on either
     /// stop popup, which stops or interrupts. Moving a popup's cursor,
     /// closing one, and `enter` on a notice, which only closes it, never do.
+    ///
+    /// Both gates are the real ones `enter` opens, as in
+    /// `hiding_the_overrides_popup_asks_the_warnings_next`: the warnings
+    /// gate runs doctor's checks, the slowest answer the tab has.
     #[test]
     fn only_enter_on_a_gate_or_a_stop_goes_under_the_spool() {
-        let mut tab = DispatchTab {
-            popup: Some(Popup::Stop(1)),
-            ..Default::default()
-        };
+        let (mut repo, _root_guard) = fixture_with_layer("shell-answer-works");
+        repo.config.unattended.enabled = true;
+        let pipelines = Pipelines::builtin();
+        let mut tab = DispatchTab::default();
+        tab.enter(&repo, &pipelines, &repo.root);
+        assert!(matches!(tab.popup, Some(Popup::Overrides(_))));
+        assert!(tab.answer_works(Key::Enter));
+        for key in [Key::Up, Key::Down, Key::Esc] {
+            assert!(!tab.answer_works(key), "{key:?} on the overrides gate");
+        }
+        tab.answer(&repo, &pipelines, &repo.root, Key::Enter);
+        assert!(matches!(tab.popup, Some(Popup::Warnings(_))));
+        assert!(tab.answer_works(Key::Enter));
+        for key in [Key::Up, Key::Down, Key::Esc] {
+            assert!(!tab.answer_works(key), "{key:?} on the warnings gate");
+        }
+        assert!(tab.child.is_none());
+
+        tab.popup = Some(Popup::Stop(1));
         assert!(tab.answer_works(Key::Enter));
         for key in [Key::Up, Key::Down, Key::Esc] {
             assert!(!tab.answer_works(key), "{key:?} on the stop popup");
