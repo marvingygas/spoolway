@@ -14,6 +14,13 @@
 //! joined before the work's result goes back to the loop. So the two never
 //! write to the terminal at once, and whatever the work hands back, a
 //! pop-up of its own included, is drawn with the spool already gone.
+//!
+//! A tab switch is the one wait whose work has to draw: the next tab's first
+//! frame is what ends it, and the tab keeps the terminal long after. So
+//! [`until_drawn`] hands the work the terminal after all, behind a writer
+//! whose first write stops and joins the drawing thread before anything of
+//! the work's reaches the screen. The rule above holds there too: one writer
+//! at a time, and the spool gone before the work's own frame.
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -236,9 +243,10 @@ pub(crate) fn under_spool<T>(
 /// Typed keys are thrown away once the spool has shown, as [`under_spool`]
 /// throws them away, but when `work` next asks the keyboard for a key rather
 /// than when it returns: `work` holds the keyboard, as [`Held`], from the
-/// start. A tab reads no key before its first frame, so what is thrown away
-/// is what was typed during the wait. With no `last` there is nothing on
-/// screen to lay the spool over, and `work` runs with nothing drawn.
+/// start. Every tab draws its first frame before it waits for a key, so
+/// what is thrown away is what was typed during the wait. With no `last`
+/// there is nothing on screen to lay the spool over, and `work` runs with
+/// nothing drawn.
 pub(crate) fn until_drawn<T, W: Write + Send, R: PollableRead>(
     last: Option<Last>,
     out: W,

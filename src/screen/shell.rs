@@ -2879,6 +2879,32 @@ mod tests {
         assert!(!tab.dispatching());
     }
 
+    /// Which of the tab's popup answers go under the loading spool: `enter`
+    /// on a gate, which runs the checks after it or starts, and on either
+    /// stop popup, which stops or interrupts. Moving a popup's cursor,
+    /// closing one, and `enter` on a notice, which only closes it, never do.
+    #[test]
+    fn only_enter_on_a_gate_or_a_stop_goes_under_the_spool() {
+        let mut tab = DispatchTab {
+            popup: Some(Popup::Stop(1)),
+            ..Default::default()
+        };
+        assert!(tab.answer_works(Key::Enter));
+        for key in [Key::Up, Key::Down, Key::Esc] {
+            assert!(!tab.answer_works(key), "{key:?} on the stop popup");
+        }
+        tab.popup = Some(Popup::StopQueued {
+            queued: 2,
+            cursor: 0,
+        });
+        assert!(tab.answer_works(Key::Enter));
+        tab.popup = Some(Popup::Ended(super::super::dispatcher::popup(
+            true,
+            "unattended.max_cost_usd reached",
+        )));
+        assert!(!tab.answer_works(Key::Enter));
+    }
+
     /// How many reload requests wait in `repo`'s project home.
     fn requests(repo: &Repo) -> usize {
         std::fs::read_dir(crate::reload::requests_dir(repo))

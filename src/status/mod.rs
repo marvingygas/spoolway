@@ -14984,6 +14984,103 @@ mod tests {
         runs.stop(&key);
     }
 
+    /// The pause panel's `pause now`, answered the way the dispatch tab
+    /// answers it, under the loading spool. The park waits on the task's
+    /// lock, held here until the spool has drawn, so the confirm runs as
+    /// long as a slow one does on any machine. Without `enter` on a confirm
+    /// counted as work, nothing is drawn, the park waits the lock out, and
+    /// the keys typed meanwhile are left for the board.
+    #[test]
+    fn pause_now_on_the_board_turns_the_spool_while_the_park_waits() {
+        use crate::screen::spool::testutil::{BACKSTOP, Typed, watched};
+
+        let (repo, _root_guard) = fixture("pause-under-spool");
+        let pipelines = Pipelines::builtin();
+        add_to(&repo, "login", &[], Some("handover"), Some("login"));
+        let mut board = Board::for_test();
+        board.mode = BoardMode::ConfirmPause(PauseConfirm {
+            aborts: vec![Abort {
+                task: "login".into(),
+                lane: String::new(),
+                step: "handover".into(),
+                kind: AbortKind::Command,
+                elapsed: None,
+            }],
+            name: "login".into(),
+            scheduled: false,
+            cursor: 0,
+        });
+        // The board on screen, the way the dispatch tab's writer holds it
+        // by the time a key is pressed.
+        let mut writer = crate::screen::frame_writer::FrameWriter::new();
+        writer.write_frame(&vec!["x".repeat(40); 12], (41, 12), &mut Vec::new());
+
+        let lock = crate::lock::TaskLock::acquire(&repo.task_lock_file("login")).unwrap();
+        let ((mut out, seen), mut input) = (watched(), Typed::default());
+        let holder = std::thread::spawn(move || {
+            let drew = seen.recv_timeout(BACKSTOP).is_ok();
+            drop(lock);
+            drew
+        });
+        board
+            .on_key_under_spool(
+                &repo,
+                &pipelines,
+                crate::screen::Key::Enter,
+                &mut writer,
+                &mut out,
+                &mut input,
+            )
+            .unwrap();
+
+        assert!(holder.join().unwrap(), "no spool while the park waited");
+        assert!(out.drew_spool());
+        assert!(input.discarded);
+        assert_eq!(repo.task("login").unwrap().stage(), crate::pipeline::PAUSED);
+    }
+
+    /// Which board keys go under the spool. Moving a cursor, in a menu, a
+    /// picker or a panel, and closing one never do; `o`, `r` and `k`, and
+    /// `enter` on whatever is open, do. A refusal's popup does nothing on
+    /// `enter` but close.
+    #[test]
+    fn only_keys_that_do_work_go_under_the_spool() {
+        use crate::screen::Key;
+
+        let mut board = Board::for_test();
+        for key in [Key::Char('o'), Key::Char('r'), Key::Char('k')] {
+            assert!(board.key_works(key), "{key:?} browsing");
+        }
+        for key in [Key::Up, Key::Down, Key::Esc, Key::Enter, Key::Char('j')] {
+            assert!(!board.key_works(key), "{key:?} browsing");
+        }
+
+        board.mode = BoardMode::Options(OptionsMenu {
+            id: "login".into(),
+            name: "login".into(),
+            items: vec![RowAction::Open, RowAction::Pause],
+            cursor: 0,
+        });
+        assert!(board.key_works(Key::Enter));
+        for key in [Key::Up, Key::Down, Key::Esc, Key::Char('o')] {
+            assert!(!board.key_works(key), "{key:?} in the menu");
+        }
+
+        board.mode = BoardMode::ConfirmPause(PauseConfirm {
+            aborts: Vec::new(),
+            name: "login".into(),
+            scheduled: false,
+            cursor: 0,
+        });
+        assert!(board.key_works(Key::Enter));
+        for key in [Key::Up, Key::Down, Key::Esc] {
+            assert!(!board.key_works(key), "{key:?} on the panel");
+        }
+
+        board.mode = BoardMode::Outcome(crate::screen::Notice::new("focus", "o: refused"));
+        assert!(!board.key_works(Key::Enter));
+    }
+
     /// `pause`, on the cursor's row, opens a panel scoped to just that task —
     /// titled with its id, and worded in the singular since killing it only
     /// ever stops this one task's step.
