@@ -1567,7 +1567,7 @@ fn validate_batch_undescribed(
         .iter()
         .map(|(name, raw)| parse_submission(name, raw, base))
         .collect();
-    asks.ask_all(
+    asks.ask_if_any(
         repo,
         parsed
             .iter()
@@ -2066,71 +2066,61 @@ fn leftover_refusal(
     ))
 }
 
-/// What one submission has learnt from `origin`: per branch whether it is
-/// there or the question went unanswered, and whether `origin` has failed to
-/// answer at all.
+/// What one submission has learnt from `origin`: every branch it has, or
+/// that it could not be asked.
 ///
-/// A submission names its branches up front and puts them to `origin` in one
-/// `git ls-remote` — see [`OriginAsks::ask_all`] — so a batch waits one
-/// [`Repo::remote_branch_answer`] limit however many tasks it holds. A branch
-/// nobody named is asked about on its own, unless `origin` has already failed
-/// to answer: that first non-answer is remembered and every later question is
-/// declined without asking, so an `origin` that hangs still costs one limit.
+/// A submission puts one `git ls-remote` to `origin`, listing every branch
+/// there, and reads each of its checks from the answer — the leftover check
+/// of every task, the base check and the start-branch check, and the
+/// leftover check after the issue hook renamed branches. So a batch waits
+/// one [`Repo::remote_heads_answer`] limit however many tasks it holds, and
+/// an `origin` that hangs costs that limit once. A failed listing is kept
+/// too: every check gets the same non-answer, and none asks again.
 ///
-/// It lives for one check of one submission and is never kept beyond it. A
-/// person refused on the board deletes the branch the refusal named and
-/// submits again, and that second submission must ask `origin` afresh.
+/// It lives for one submission and is never kept beyond it. A person refused
+/// on the board deletes the branch the refusal named and submits again, and
+/// that second submission must ask `origin` afresh.
 #[derive(Default)]
 pub(crate) struct OriginAsks {
-    silent: bool,
-    branches: BTreeMap<String, Option<bool>>,
+    answer: Option<Option<BTreeSet<String>>>,
 }
 
 impl OriginAsks {
-    /// Puts every branch of `wanted` not answered yet to `origin` in one
-    /// `git ls-remote`. A failure answers all of them alike with `None`, the
-    /// same non-answer each check would have got from asking alone.
-    fn ask_all(&mut self, repo: &Repo, wanted: impl IntoIterator<Item = String>) {
-        if self.silent {
-            return;
-        }
-        let wanted: BTreeSet<String> = wanted
-            .into_iter()
-            .filter(|branch| !self.branches.contains_key(branch))
-            .collect();
-        let wanted: Vec<String> = wanted.into_iter().collect();
-        if wanted.is_empty() {
-            return;
-        }
-        let has = repo.remote_branches_answer(&wanted);
-        self.silent = has.is_none();
-        for branch in wanted {
-            let answer = has.as_ref().map(|has| has.contains(&branch));
-            self.branches.insert(branch, answer);
+    /// The listing of `origin`, asked for on first use only.
+    fn heads(&mut self, repo: &Repo) -> Option<&BTreeSet<String>> {
+        self.answer
+            .get_or_insert_with(|| repo.remote_heads_answer())
+            .as_ref()
+    }
+
+    /// Asks `origin` now if any branch of `wanted` is to be read from it, and
+    /// not otherwise: a submission whose every branch the checkout answers
+    /// never touches the network. This is how the one question goes out
+    /// before the first task is checked rather than inside its turn.
+    fn ask_if_any(&mut self, repo: &Repo, mut wanted: impl Iterator<Item = String>) {
+        if wanted.next().is_some() {
+            self.heads(repo);
         }
     }
 
     /// Whether `origin` has `branch`, or `None` when it could not be asked.
     fn has_branch(&mut self, repo: &Repo, branch: &str) -> Option<bool> {
-        if let Some(&answer) = self.branches.get(branch) {
-            return answer;
-        }
-        if self.silent {
-            return None;
-        }
-        let answer = repo.remote_branch_answer(branch);
-        self.silent = answer.is_none();
-        self.branches.insert(branch.to_string(), answer);
-        answer
+        self.heads(repo).map(|heads| heads.contains(branch))
     }
 
-    /// What this submission has learnt, in the shape
+    /// What this submission knows of `branches`, in the shape
     /// [`crate::dispatch::branch_known`] keeps its own. The submission fills
     /// a cache of its own from it; the dispatcher's is never touched.
-    fn remote_cache(&self) -> crate::dispatch::RemoteCache {
-        self.branches
-            .iter()
-            .map(|(branch, answer)| (branch.clone(), *answer))
+    fn remote_cache(
+        &mut self,
+        repo: &Repo,
+        branches: impl Iterator<Item = String>,
+    ) -> crate::dispatch::RemoteCache {
+        branches
+            .map(|branch| {
+                let answer = self.has_branch(repo, &branch);
+                (branch, answer)
+            })
             .collect()
     }
 }
@@ -2140,9 +2130,9 @@ impl OriginAsks {
 /// checkout does not already answer, since each check asks `origin` only
 /// after its local reads come up empty.
 ///
-/// A superset is harmless, since an answer nobody reads costs nothing, while
-/// a branch left out is asked about on its own later. So this does not stop
-/// where a check would refuse.
+/// A superset is harmless, since the one listing answers every branch
+/// whether or not it was named. All this decides is whether `origin` needs to
+/// be asked at all, so it does not stop where a check would refuse.
 fn origin_candidates(repo: &Repo, task: &Task) -> Vec<String> {
     let mut wanted = Vec::new();
     if let Some(base) = task.front.base.as_deref()
@@ -2497,18 +2487,17 @@ fn start_branch_to_check(repo: &Repo, task: &Task) -> Option<String> {
 /// In batch order, so a chain reads top to bottom.
 ///
 /// `asks` holds what the submission's validation already learnt from
-/// `origin`. Any start branch it did not name is put to `origin` here in one
-/// call, and the whole batch's answers fill a cache of this check's own, a
-/// failed ask included, so the dispatcher's cache is never involved.
+/// `origin`, and fills a cache of this check's own with the start branches
+/// the checkout does not have, a failed ask included, so the dispatcher's
+/// cache is never involved.
 pub(crate) fn not_queued(repo: &Repo, tasks: &[Task], asks: &mut OriginAsks) -> Vec<NotQueued> {
-    asks.ask_all(
+    let mut remote_cache = asks.remote_cache(
         repo,
         tasks
             .iter()
             .filter_map(|task| start_branch_to_check(repo, task))
             .filter(|start| !known_locally(repo, start)),
     );
-    let mut remote_cache = asks.remote_cache();
     let mut out: Vec<NotQueued> = tasks
         .iter()
         .filter_map(|task| {
@@ -2666,13 +2655,17 @@ fn queue_add_tasks(
     let gate = ToolGate::Print {
         interactive: crate::ask::interactive(),
     };
-    if let Err(err) = open_and_prefix(
+    if let Err(err) = open_and_prefix_waiting(
         repo,
         submitted,
         &task_files,
         &mut tasks,
         gate,
         &mut PrintedTickets,
+        OpenSettings {
+            wait: crate::tracking::OpenWait::Block,
+            asks: &mut asks,
+        },
     ) {
         return match err.downcast_ref::<GateCancelled>() {
             Some(_) => Ok(()),
@@ -2930,8 +2923,21 @@ fn open_and_prefix(
         tasks,
         gate,
         log,
-        crate::tracking::OpenWait::Block,
+        OpenSettings {
+            wait: crate::tracking::OpenWait::Block,
+            asks: &mut OriginAsks::default(),
+        },
     )
+}
+
+/// How [`open_and_prefix_waiting`] waits for the hook, and what `origin` has
+/// already told the caller's submission.
+struct OpenSettings<'a> {
+    /// Whether to wait for an `open` hook that is still running.
+    wait: crate::tracking::OpenWait,
+    /// What the caller's validation learnt from `origin`, for the leftover
+    /// check of a branch the prefix renames; see the comment there.
+    asks: &'a mut OriginAsks,
 }
 
 /// [`open_and_prefix`], saying whether to wait for a running `open` hook.
@@ -2945,7 +2951,7 @@ fn open_and_prefix_waiting(
     tasks: &mut [Task],
     gate: ToolGate,
     log: &mut dyn TicketLog,
-    wait: crate::tracking::OpenWait,
+    OpenSettings { wait, asks }: OpenSettings<'_>,
 ) -> Result<()> {
     // Before `open_tickets` ever calls the hook: a declared requirement this
     // machine cannot meet means the call can only fail, and by the time it
@@ -2995,26 +3001,17 @@ fn open_and_prefix_waiting(
     // it instead of opening a second one.
     //
     // `origin` is asked only about a branch the prefix has just renamed,
-    // since `validate_batch` already asked about every `task/<id>`, and one
-    // `git ls-remote` names all of them. The asks here start afresh, so the
-    // renamed branches can cost a second limit on an `origin` that did not
-    // answer there. The silence is not carried across the issue hook, which
-    // the board may wait on for a person's answer.
-    let mut asks = OriginAsks::default();
-    asks.ask_all(
-        repo,
-        tasks
-            .iter()
-            .map(|task| (task.id(), task_branch(task)))
-            .filter(|(id, branch)| *branch != crate::task::default_branch(id))
-            .map(|(_, branch)| branch)
-            .filter(|branch| !has_local_leftover(repo, branch)),
-    );
+    // since `validate_batch` already asked about every `task/<id>`. The
+    // caller's `asks` carry what `origin` said then, a failure included, so
+    // a submission that listed `origin` before the hook does not list it
+    // again, and one whose `origin` did not answer does not wait a second
+    // limit. A caller whose `asks` are fresh, the board after a person has
+    // answered its popups, lists `origin` once here instead.
     for task in tasks.iter() {
         let branch = task_branch(task);
         let renamed = branch != crate::task::default_branch(task.id());
         if let Some(refusal) =
-            leftover_refusal(repo, task.id(), &branch, renamed.then_some(&mut asks))
+            leftover_refusal(repo, task.id(), &branch, renamed.then_some(&mut *asks))
         {
             let written_back = write_back_ids(repo, submitted, tasks, &opened.tasks)?;
             let rows = lost_ids_rows(&opened.opened, &written_back);
@@ -13422,7 +13419,10 @@ pub(crate) fn queue_routine_target(
         &mut tasks,
         gate,
         &mut log,
-        crate::tracking::OpenWait::Poll,
+        OpenSettings {
+            wait: crate::tracking::OpenWait::Poll,
+            asks: &mut OriginAsks::default(),
+        },
     );
     // Whatever ended the firing — answered, failed or timed out — its `open`
     // runs are spent; only a pending one keeps them for the next pass.
@@ -14174,6 +14174,7 @@ mod tests {
         run(&["push", "-q", "origin", "plan/demo"]);
         run(&["push", "-q", "origin", "plan/demo:only-origin"]);
         run(&["push", "-q", "origin", "plan/demo:task/start-here"]);
+        run(&["push", "-q", "origin", "plan/demo:task/acme-a"]);
         // The push left remote-tracking refs behind, which would answer the
         // start-branch check locally.
         run(&["update-ref", "-d", "refs/remotes/origin/task/start-here"]);
@@ -14232,6 +14233,16 @@ mod tests {
         refuse_missing_start(&repo, &tasks, &mut asks).unwrap();
 
         assert_eq!(origin_calls(&calls), 1, "one ls-remote for the whole batch");
+
+        // The leftover check after the issue hook renamed `task/a` reads
+        // the same listing, a branch nobody named earlier included.
+        let gh = repo.root.join("gh-stub");
+        std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let _gh = crate::platform::GhOverride::new(&gh);
+        let refusal = leftover_refusal(&repo, "a", "task/acme-a", Some(&mut asks));
+        assert!(refusal.is_some_and(|r| r.contains("`origin/task/acme-a`")));
+        assert_eq!(origin_calls(&calls), 1, "the renamed branch asked nothing");
     }
 
     /// An `origin` that cannot be asked fails the one call for every check

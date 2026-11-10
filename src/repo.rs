@@ -523,51 +523,62 @@ impl Repo {
     /// (pausing a task for a person) must not act on that. A repository with
     /// no `origin` answers `Some(false)`: there is nothing to ask.
     pub fn remote_branch_answer(&self, branch: &str) -> Option<bool> {
-        self.remote_branches_answer(&[branch.to_string()])
-            .map(|has| has.contains(branch))
-    }
-
-    /// [`Repo::remote_branch_answer`] for several branches at once: the ones
-    /// of `branches` that `origin` has, from one `git ls-remote` however
-    /// many are named. `None` when `origin` could not be asked, for the
-    /// whole set alike. A repository with no `origin` answers an empty set,
-    /// and so does an empty `branches`, neither of which runs git at all.
-    pub fn remote_branches_answer(
-        &self,
-        branches: &[String],
-    ) -> Option<std::collections::BTreeSet<String>> {
-        if branches.is_empty() || !self.has_remote() {
-            return Some(std::collections::BTreeSet::new());
+        if !self.has_remote() {
+            return Some(false);
         }
         // The full ref, never the bare name: `ls-remote` reads a pattern as
         // a glob matched against the tail of a ref, starting at a `/`
         // boundary, so a bare `gh-412-checkout` would answer `true` for a
         // real `refs/heads/task/gh-412-checkout` it never named at all
-        // (review finding 1). The same tail matching means the listing can
-        // hold refs no branch asked for, so each line is compared against
-        // the full ref of a branch asked about, never against a tail.
-        let mut args = vec!["ls-remote".to_string(), "--heads".into(), "origin".into()];
-        args.extend(branches.iter().map(|b| format!("refs/heads/{b}")));
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        match crate::mux::git_within(&self.root, &args, REMOTE_ASK_TIMEOUT, true) {
+        // (review finding 1).
+        let full_ref = format!("refs/heads/{branch}");
+        match crate::mux::git_within(
+            &self.root,
+            &["ls-remote", "--heads", "origin", &full_ref],
+            REMOTE_ASK_TIMEOUT,
+            true,
+        ) {
             crate::mux::GitWithin::Finished {
                 success: true,
                 stdout,
                 ..
-            } => {
-                let listing = String::from_utf8_lossy(&stdout);
-                let listed: std::collections::BTreeSet<&str> = listing
+            } => Some(!stdout.is_empty()),
+            _ => None,
+        }
+    }
+
+    /// Every branch `origin` has, from one `git ls-remote` that names no
+    /// pattern: a submission asks this once and reads each of its branches
+    /// from the answer, rather than putting a question per branch. `None`
+    /// when `origin` could not be asked, as for [`Repo::remote_branch_answer`],
+    /// which this shares the credential prompt and the limit with. A
+    /// repository with no `origin` answers an empty set, without running git.
+    ///
+    /// Each listed ref is stripped of exactly `refs/heads/`, so a caller
+    /// looking a branch up in the set matches the whole name and never the
+    /// tail of another.
+    pub fn remote_heads_answer(&self) -> Option<std::collections::BTreeSet<String>> {
+        if !self.has_remote() {
+            return Some(std::collections::BTreeSet::new());
+        }
+        match crate::mux::git_within(
+            &self.root,
+            &["ls-remote", "--heads", "origin"],
+            REMOTE_ASK_TIMEOUT,
+            true,
+        ) {
+            crate::mux::GitWithin::Finished {
+                success: true,
+                stdout,
+                ..
+            } => Some(
+                String::from_utf8_lossy(&stdout)
                     .lines()
                     .filter_map(|line| line.split_whitespace().nth(1))
-                    .collect();
-                Some(
-                    branches
-                        .iter()
-                        .filter(|b| listed.contains(format!("refs/heads/{b}").as_str()))
-                        .cloned()
-                        .collect(),
-                )
-            }
+                    .filter_map(|name| name.strip_prefix("refs/heads/"))
+                    .map(str::to_string)
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -6654,29 +6665,22 @@ mod tests {
         );
     }
 
-    /// One `git ls-remote` answers every branch asked about, and the tail
-    /// matching of its patterns does not leak into the set: a branch that is
-    /// only the tail of a real one is left out, and the real one is in.
+    /// One `git ls-remote` lists every branch `origin` has, each under its
+    /// whole name: a branch that is only the tail of a real one is not in it.
     #[test]
-    fn remote_branches_answer_names_exactly_the_branches_origin_has() {
-        let (origin, work, _base_guard) = fixture("remote-branches-set");
+    fn remote_heads_answer_lists_every_branch_by_its_whole_name() {
+        let (origin, work, _base_guard) = fixture("remote-heads-set");
         git(&work, &["push", "-q", "origin", "plan/x:main"]);
         git(&origin, &["branch", "task/gh-412-checkout", "main"]);
         git(&origin, &["branch", "task/other", "main"]);
         let (repo, _home) = discover_registered(&work).unwrap();
 
-        let asked: Vec<String> = ["gh-412-checkout", "task/gh-412-checkout", "task/nowhere"]
-            .iter()
-            .map(|b| b.to_string())
-            .collect();
-        let has = repo.remote_branches_answer(&asked).unwrap();
+        let heads = repo.remote_heads_answer().unwrap();
 
         assert_eq!(
-            has.into_iter().collect::<Vec<_>>(),
-            ["task/gh-412-checkout"],
-            "only the full ref counts, and `task/other` was not asked about"
+            heads.into_iter().collect::<Vec<_>>(),
+            ["main", "task/gh-412-checkout", "task/other"]
         );
-        assert_eq!(repo.remote_branches_answer(&[]), Some(Default::default()));
     }
 
     /// An `origin` whose transport never answers — an ssh command named by
