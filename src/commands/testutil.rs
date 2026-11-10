@@ -5,7 +5,8 @@ use super::*;
 /// A project on a branch of its own. Real git, because `check_task_base`
 /// looks a task's `base:` up against the repository's own local branches —
 /// `refs/heads/plan/demo` included, which needs a commit to exist at all: an
-/// unborn branch has no ref for `check_task_base`'s `rev-parse` to find.
+/// unborn branch has no ref for `check_task_base`'s listing of local branches
+/// to find.
 pub fn fixture(name: &str) -> (Repo, crate::scratch::ScratchRoot) {
     let root = crate::scratch::root(&format!("commands-{name}"));
     let _ = std::fs::remove_dir_all(&root);

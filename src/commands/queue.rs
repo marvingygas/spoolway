@@ -1983,7 +1983,11 @@ impl LocalReads {
 
     /// [`routine_names`], read once.
     fn routines(&mut self, repo: &Repo) -> &BTreeSet<String> {
-        self.routines.get_or_insert_with(|| routine_names(repo))
+        self.routines.get_or_insert_with(|| {
+            #[cfg(test)]
+            counted_reads::ROUTINE_READS.with(|n| n.set(n.get() + 1));
+            routine_names(repo)
+        })
     }
 
     /// [`refuse_unusable_base`], run once for each distinct base.
@@ -2014,15 +2018,16 @@ impl LocalReads {
     }
 }
 
-/// How often the current thread's [`LocalReads`] parsed the queue folder,
-/// for the test that holds a batch to one parse per pass. Per thread, so
-/// tests running side by side count only their own.
+/// How often the current thread's [`LocalReads`] parsed the queue folder and
+/// read the routine files, for the test that holds a batch to one of each per
+/// pass. Per thread, so tests running side by side count only their own.
 #[cfg(test)]
 mod counted_reads {
     use std::cell::Cell;
 
     thread_local! {
         pub(super) static QUEUE_PARSES: Cell<usize> = const { Cell::new(0) };
+        pub(super) static ROUTINE_READS: Cell<usize> = const { Cell::new(0) };
     }
 }
 
@@ -2375,8 +2380,7 @@ fn ref_exists(repo: &Repo, branch: &str) -> bool {
 /// the same way.
 ///
 /// The leading `-` is refused before git sees the value at all: what
-/// reaches `rev-parse` and `check-ref-format` here would otherwise be read
-/// as a flag, the same reason `branch:` is refused outright.
+/// reaches `check-ref-format` here would otherwise be read as a flag, the same reason `branch:` is refused outright.
 pub(crate) fn check_task_base(repo: &Repo, name: &str, base: &str) -> Result<()> {
     check_task_base_with(
         repo,
@@ -14336,11 +14340,14 @@ mod tests {
                 })
                 .collect();
             let parses = || counted_reads::QUEUE_PARSES.with(|n| n.get());
+            let routine_reads = || counted_reads::ROUTINE_READS.with(|n| n.get());
             let start = (crate::repo::runs_here_under(&repo.root), parses());
+            let routines_start = routine_reads();
 
             let tasks = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
                 .unwrap();
             let validated = (crate::repo::runs_here_under(&repo.root), parses());
+            let routines_validated = routine_reads();
             save_new_tasks(&repo, &tasks).unwrap();
             let saved = (crate::repo::runs_here_under(&repo.root), parses());
 
@@ -14349,6 +14356,7 @@ mod tests {
                 validated.1 - start.1,
                 saved.0 - validated.0,
                 saved.1 - validated.1,
+                routines_validated - routines_start,
             )
         };
 
@@ -14360,6 +14368,7 @@ mod tests {
             "six tasks cost the git processes and queue parses two do"
         );
         assert_eq!((small.1, small.3), (1, 1), "one queue parse per pass");
+        assert_eq!(small.4, 1, "one read of the routine names for the check");
     }
 
     /// A task a check of this checkout refuses puts nothing to `origin`: the
@@ -29562,6 +29571,55 @@ mod tests {
             // untouched, since the hook never answered with anything.
             let untouched = std::fs::read_to_string(&path).unwrap();
             assert_eq!(untouched, text);
+        }
+
+        /// However many tasks the prefix renames, the issue-hook pass lists
+        /// the local branches once: six tasks run the git processes two do.
+        #[test]
+        fn the_hook_pass_runs_the_same_git_processes_for_any_batch_size() {
+            let costs = |n: usize| {
+                let (mut repo, _root_guard) = fixture(&format!("open-prefix-cost-{n}"));
+                repo.config.issue_tracking.key_in_names = true;
+                with_hook(
+                    &mut repo,
+                    r#"{ echo "ticket=PROJ-1"; echo "slug=proj-12"; } >"$SPOOLWAY_OUT""#,
+                );
+                let submitted: Vec<(String, String)> = (0..n)
+                    .map(|i| {
+                        let extra = format!("group: g{i}\ngroup_description: group {i}\n");
+                        (
+                            format!("t{i}.md"),
+                            task_text(&format!("t{i}"), &extra, BODY),
+                        )
+                    })
+                    .collect();
+                let mut tasks =
+                    validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+                        .unwrap();
+
+                let before = crate::repo::runs_here_under(&repo.root);
+                open_and_prefix(
+                    &repo,
+                    &submitted,
+                    &[],
+                    &mut tasks,
+                    ToolGate::Answered {
+                        tracking_off: false,
+                    },
+                    &mut Recorded::default(),
+                    &mut OriginAsks::default(),
+                )
+                .unwrap();
+                assert!(
+                    tasks
+                        .iter()
+                        .all(|t| task_branch(t) != crate::task::default_branch(t.id())),
+                    "the prefix renamed every branch"
+                );
+                crate::repo::runs_here_under(&repo.root) - before
+            };
+
+            assert_eq!(costs(6), costs(2));
         }
 
         /// A slug a successful call secured is written back into its pending
