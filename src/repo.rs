@@ -547,6 +547,42 @@ impl Repo {
         }
     }
 
+    /// Every branch `origin` has, from one `git ls-remote` that names no
+    /// pattern: a submission asks this once and reads each of its branches
+    /// from the answer, rather than putting a question per branch. `None`
+    /// when `origin` could not be asked, as for [`Repo::remote_branch_answer`],
+    /// which this shares the credential prompt and the limit with. A
+    /// repository with no `origin` answers an empty set, without running git.
+    ///
+    /// Each listed ref is stripped of exactly `refs/heads/`, so a caller
+    /// looking a branch up in the set matches the whole name and never the
+    /// tail of another.
+    pub fn remote_heads_answer(&self) -> Option<std::collections::BTreeSet<String>> {
+        if !self.has_remote() {
+            return Some(std::collections::BTreeSet::new());
+        }
+        match crate::mux::git_within(
+            &self.root,
+            &["ls-remote", "--heads", "origin"],
+            REMOTE_ASK_TIMEOUT,
+            true,
+        ) {
+            crate::mux::GitWithin::Finished {
+                success: true,
+                stdout,
+                ..
+            } => Some(
+                String::from_utf8_lossy(&stdout)
+                    .lines()
+                    .filter_map(|line| line.split_whitespace().nth(1))
+                    .filter_map(|name| name.strip_prefix("refs/heads/"))
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
     /// The checkout that has `branch` out, if any.
     ///
     /// The main checkout is one entry among the worktrees here, so a plan
@@ -6626,6 +6662,24 @@ mod tests {
         assert_eq!(
             repo.remote_branch_answer("task/gh-412-checkout"),
             Some(true)
+        );
+    }
+
+    /// One `git ls-remote` lists every branch `origin` has, each under its
+    /// whole name: a branch that is only the tail of a real one is not in it.
+    #[test]
+    fn remote_heads_answer_lists_every_branch_by_its_whole_name() {
+        let (origin, work, _base_guard) = fixture("remote-heads-set");
+        git(&work, &["push", "-q", "origin", "plan/x:main"]);
+        git(&origin, &["branch", "task/gh-412-checkout", "main"]);
+        git(&origin, &["branch", "task/other", "main"]);
+        let (repo, _home) = discover_registered(&work).unwrap();
+
+        let heads = repo.remote_heads_answer().unwrap();
+
+        assert_eq!(
+            heads.into_iter().collect::<Vec<_>>(),
+            ["main", "task/gh-412-checkout", "task/other"]
         );
     }
 

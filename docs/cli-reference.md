@@ -455,9 +455,10 @@ remove --force` and `git branch -D` commands that drop them, and the `git branch
 keeps the work. A task whose `task/<id>` branch only `origin` still has is refused too. The message
 names `origin/task/<id>` and the open pull request opened from it, when `gh` lists one. It gives
 `git push origin --delete task/<id>` to drop the branch, which also closes that pull request, and a
-`git fetch` and `git push` pair that keeps its commits under another name. `queue add` asks
-`origin` once per branch and gives up after 10 seconds. An `origin` that cannot be asked refuses
-nothing. The queue screen and routines refuse the same id. A task still in the queue is
+`git fetch` and `git push` pair that keeps its commits under another name. `queue add` lists
+the branches on `origin` once for the whole batch, however many tasks it holds, and gives up after
+10 seconds. The same listing answers the start-branch and base checks. An `origin` that cannot be
+asked refuses nothing. The queue screen and routines refuse the same id. A task still in the queue is
 reported as already existing instead. See [A start branch that does not
 exist](tasks.md#a-start-branch-that-does-not-exist).
 
