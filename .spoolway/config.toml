@@ -9,6 +9,7 @@
 # dispatch.hide_commands                  true, false            Run command steps without opening a pane.
 # dispatch.autofocus_panes                true, false            Bring a pane to the front on its own: a task paused at a gate, a task waiting for you on blocked or hook_failed, and a lane that was stopped and given up on.
 # dispatch.lane_layout                    panes, tabs            Show a task's steps as panes in one tab, or give each step its own tab.
+# dispatch.tips                           true, false            Show a tip on the dispatch tab's last row, changing every 30 seconds.
 # unattended.enabled                      true, false            Run without a person: a blocked task goes to an agent (the unblocker) instead of waiting for you.
 # unattended.max_output_tokens            number                 Stop starting new work once an unattended run has used this many output tokens. 0 = no limit.
 # unattended.max_cost_usd                 dollars                Stop starting new work once an unattended run has spent this much. 0 = no limit.
@@ -51,6 +52,7 @@ visible_lanes = 3
 hide_commands = false
 autofocus_panes = false
 lane_layout = "panes"
+tips = true
 
 [unattended]
 enabled = true
