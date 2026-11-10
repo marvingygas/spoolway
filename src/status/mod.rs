@@ -644,7 +644,7 @@ impl Board {
     /// The tip the dispatch tab's last row shows, or `None` while
     /// `dispatch.tips` is off. Off, the deck is not asked either, so its
     /// clock does not run while nothing is drawn from it.
-    fn current_tip(&mut self, repo: &Repo) -> Option<&'static str> {
+    fn current_tip(&mut self, repo: &Repo) -> Option<crate::tips::Tip<'static>> {
         if !repo.config.dispatch.tips {
             return None;
         }
@@ -4692,7 +4692,7 @@ fn paint(
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
-    tip: Option<&str>,
+    tip: Option<crate::tips::Tip<'_>>,
 ) -> String {
     paint_at(
         repo,
@@ -4713,7 +4713,7 @@ fn paint(
 /// otherwise, inside the dispatch tab, `tip`. The notice wins because it is
 /// the one of the two that asks for a key press. Off the dispatch tab no tip
 /// is drawn, so a board printed on its own ends as it always has.
-fn last_row(waiting: &Waiting, tip: Option<&str>, hosted: bool) -> Option<String> {
+fn last_row(waiting: &Waiting, tip: Option<crate::tips::Tip<'_>>, hosted: bool) -> Option<String> {
     match config_notice(waiting) {
         Some(notice) => Some(format!(" {notice}")),
         None => tip.filter(|_| hosted).map(tip_row),
@@ -4734,7 +4734,7 @@ fn paint_at(
     cursor: Option<&str>,
     recent: &VecDeque<RecentEvent>,
     name: Option<&str>,
-    tip: Option<&str>,
+    tip: Option<crate::tips::Tip<'_>>,
     height: Option<usize>,
 ) -> String {
     let phase = Phase::Watching {
@@ -5080,7 +5080,7 @@ fn paint_empty(
     takes_enter: bool,
     waiting: &Waiting,
     name: Option<&str>,
-    tip: Option<&str>,
+    tip: Option<crate::tips::Tip<'_>>,
     jobs: &[crate::jobs::ActiveJob],
     lockup_frame: usize,
 ) -> String {
@@ -9336,8 +9336,9 @@ mod tests {
     }
 
     /// Inside the dispatch tab the busy board, a short one and the empty one
-    /// all end on the tip, under a blank row, as the box's last row, its
-    /// label and sentence in grey teal. The frame keeps the row count it had
+    /// all end on the tip, under a blank row, as the box's last row:
+    /// `tip:` and the sentence in grey teal, the section label and its ` · `
+    /// in dim grey between them. The frame keeps the row count it had
     /// without the tip, so the tab strip stays on screen. While a reload has
     /// something to load the notice takes the row and no tip is drawn, the
     /// frame the same height again. A board printed on its own draws no tip.
@@ -9347,7 +9348,7 @@ mod tests {
         let (repo, _root_guard) = fixture("board-tip-row");
         let pipelines = Pipelines::builtin();
         let _terminal = crate::screen::test_terminal((100, 30));
-        let tip = "a tip drawn for the test.";
+        let tip = crate::tips::Tip::drawn(Some("queue"), "a tip drawn for the test.");
         let busy = |waiting: Waiting| Snapshot {
             holder: Some(4242),
             waiting,
@@ -9367,7 +9368,7 @@ mod tests {
             pipelines: vec!["t.yml".to_string()],
             keys: Vec::new(),
         };
-        let draw = |snapshot: &Snapshot, tip: Option<&str>| {
+        let draw = |snapshot: &Snapshot, tip: Option<crate::tips::Tip<'_>>| {
             paint(
                 &repo,
                 &pipelines,
@@ -9384,13 +9385,16 @@ mod tests {
             [("busy", &busy), ("short", &short), ("empty", &empty)];
         for (board, snapshot) in boards {
             let alone = strip(&draw(&snapshot(Waiting::default()), Some(tip)));
-            assert!(!alone.contains("tip  "), "{board}, on its own:\n{alone}");
+            assert!(!alone.contains("tip: "), "{board}, on its own:\n{alone}");
 
             let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
             let without = strip(&draw(&snapshot(Waiting::default()), None));
             let raw = draw(&snapshot(Waiting::default()), Some(tip));
             assert!(
-                raw.contains(&format!("\x1b[38;5;109mtip  {tip}{RESET}")),
+                raw.contains(&format!(
+                    "\x1b[38;5;109mtip: {RESET}{DIM}queue · {RESET}\x1b[38;5;109m\
+                     a tip drawn for the test.{RESET}"
+                )),
                 "{board}:\n{raw}"
             );
             let with = strip(&raw);
@@ -9402,7 +9406,7 @@ mod tests {
             let rows: Vec<&str> = with.lines().collect();
             let bottom = rows.iter().position(|row| row.starts_with('╰')).unwrap();
             assert!(
-                rows[bottom - 1].starts_with(&format!("│ tip  {tip} ")),
+                rows[bottom - 1].starts_with("│ tip: queue · a tip drawn for the test. "),
                 "{board}:\n{with}"
             );
             assert_eq!(
@@ -9412,7 +9416,7 @@ mod tests {
             );
 
             let notice = strip(&draw(&snapshot(changed()), Some(tip)));
-            assert!(!notice.contains("tip  "), "{board}:\n{notice}");
+            assert!(!notice.contains("tip: "), "{board}:\n{notice}");
             assert_eq!(
                 notice.lines().count(),
                 with.lines().count(),
@@ -9459,7 +9463,7 @@ mod tests {
             let mut board = Board::for_test();
             repo.config.dispatch.tips = true;
             let with = strip(&board.paint_from(&repo, &pipelines, true, None, true, &snapshot));
-            assert!(with.contains("tip  "), "{board_name}:\n{with}");
+            assert!(with.contains("tip: "), "{board_name}:\n{with}");
 
             repo.config.dispatch.tips = false;
             let mut board = Board::for_test();
@@ -9477,7 +9481,7 @@ mod tests {
                 None,
             );
             assert_eq!(off, without, "{board_name}");
-            assert!(!strip(&off).contains("tip  "), "{board_name}");
+            assert!(!strip(&off).contains("tip: "), "{board_name}");
         }
     }
 
@@ -9496,7 +9500,7 @@ mod tests {
             holder: Some(4242),
             ..full_board()
         };
-        let draw = |tip: Option<&str>| {
+        let draw = |tip: Option<crate::tips::Tip<'_>>| {
             strip(&paint(
                 &repo,
                 &pipelines,
@@ -9510,7 +9514,10 @@ mod tests {
             ))
         };
         let without = draw(None);
-        let with = draw(Some("a tip drawn for the test."));
+        let with = draw(Some(crate::tips::Tip::drawn(
+            Some("queue"),
+            "a tip drawn for the test.",
+        )));
         assert_eq!(
             with.lines().count(),
             without.lines().count(),
@@ -9525,7 +9532,10 @@ mod tests {
         };
         assert_eq!(rule(&with), rule(&without) - 1, "{without}\n{with}");
         assert!(with.contains("tasks below"), "{with}");
-        assert!(with.contains("│ tip  a tip drawn for the test."), "{with}");
+        assert!(
+            with.contains("│ tip: queue · a tip drawn for the test."),
+            "{with}"
+        );
         assert!(
             with.lines().last().unwrap().contains("[o] options"),
             "{with}"
@@ -9543,7 +9553,9 @@ mod tests {
         let _terminal = crate::screen::test_terminal((120, 30));
         let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
         let mut board = Board::for_test();
-        let tips = crate::tips::texts();
+        let tips = crate::tips::all();
+        let row =
+            |tip: crate::tips::Tip<'_>| format!("tip: {} · {}", tip.section.unwrap(), tip.text);
         let phase = Phase::Watching {
             holder: None,
             dispatching: false,
@@ -9556,10 +9568,48 @@ mod tests {
                 .trim_matches(|c| c == '│' || c == ' ')
                 .to_string()
         };
-        assert_eq!(tip_row(&mut board), format!("tip  {}", tips[0]));
-        assert_eq!(tip_row(&mut board), format!("tip  {}", tips[0]));
+        assert_eq!(tip_row(&mut board), row(tips[0]));
+        assert_eq!(tip_row(&mut board), row(tips[0]));
         board.tips.current(Instant::now() + crate::tips::SHOWN_FOR);
-        assert_eq!(tip_row(&mut board), format!("tip  {}", tips[1]));
+        assert_eq!(tip_row(&mut board), row(tips[1]));
+    }
+
+    /// In an 80-column pane the longest tip a `pipeline` label allows, 58
+    /// characters, fills the box's last row whole with the one-column margin
+    /// kept on both sides, the `·` before it measured as the one column it
+    /// takes. Fails if the row grows wider than the length check in
+    /// `src/tips.rs` allows for, so the box would cut the tip short, or if
+    /// the box pads the row by the `·`'s two bytes rather than its one
+    /// column, so its right border would no longer line up.
+    #[test]
+    fn the_longest_tip_beside_its_label_fits_80_columns() {
+        let (repo, _root_guard) = fixture("board-tip-80-columns");
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((80, 30));
+        let _hosting = crate::screen::shell::Hosting::open(crate::screen::shell::Tab::Dispatch);
+        let text = format!("{}.", "a".repeat(57));
+        let tip = crate::tips::Tip::drawn(Some("pipeline"), &text);
+        let snapshot = Snapshot {
+            holder: Some(4242),
+            ..full_board()
+        };
+        let frame = strip(&paint(
+            &repo,
+            &pipelines,
+            true,
+            true,
+            &snapshot,
+            None,
+            &VecDeque::new(),
+            None,
+            Some(tip),
+        ));
+        let rows: Vec<&str> = frame.lines().collect();
+        let bottom = rows.iter().position(|row| row.starts_with('╰')).unwrap();
+        let row = rows[bottom - 1];
+        assert_eq!(row, format!("│ tip: pipeline · {text} │"), "{frame}");
+        assert_eq!(row.chars().count(), rows[bottom].chars().count(), "{frame}");
+        assert!(rows[bottom].chars().count() <= 80, "{frame}");
     }
 
     /// The `[u] update config` pair is drawn out of the dim on the busy

@@ -1004,14 +1004,15 @@ the line, and `[u] update config` is off the key line.
 
 Inside the dispatch tab, the box ends on one tip from [the tip list](#the-tip-list). It is the
 box's last row, with a blank row above it, on the busy board and the empty board alike. The row
-starts with `tip`, two spaces and the tip. The label and the tip are drawn in grey teal,
-256-colour 109, a colour no task state uses.
+reads `tip:`, the label of the tip's section, a `·` and the tip. `tip:` and the tip are drawn in
+grey teal, 256-colour 109, a colour no task state uses. The label and its `·` are drawn in the
+board's dim grey, so the tip stays the thing you read.
 
 ```
 jobs     2 active
          ○ nightly-audit   Tue 20 Oct 03:00   (in 5h 22m)
 
-tip  r opens the resume picker. pick any step to resume the task there.
+tip: queue · "edit pipeline" moves a pending task to another pipeline.
 ```
 
 The tip's row comes out of the rows the table and `RECENT` share, so the board is no taller with
@@ -1041,7 +1042,9 @@ Three rules are written at the top of the file, for whoever edits it:
 - A tip says what a feature does, and never names the key that runs it.
 - A tip puts names in quotes, such as `"agent:"` or `"edit pipeline"`.
 
-No test asks for a tip per key or setting. One test fails when a tip is longer than 69 characters or breaks the lowercase rule in [the CLI reference](cli-reference.md). A tip may hold `∞`, `↻`, `←` and `→`, and each counts as one character.
+The board draws a tip's section label before it, so the label, the ` · ` and the tip share one row. Together they fit an 80-column terminal: a tip holds at most 66 characters less its label's length, so a `pipeline` tip holds at most 58.
+
+No test asks for a tip per key or setting. One test fails when a tip is too long beside its label, naming the line, the label and the limit, or when it breaks the lowercase rule in [the CLI reference](cli-reference.md). A tip may hold `∞`, `↻`, `←` and `→`, and each counts as one character, as the `·` does.
 
 ## The overrides tab
 

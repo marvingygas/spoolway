@@ -3,33 +3,52 @@
 //! The list is compiled into the binary, the way `assets/known-copies.txt` is,
 //! so the board needs nothing on disk to draw one. Each line is a plain
 //! sentence. A line in brackets, such as `[queue]`, starts a section, and
-//! every tip below it belongs to that section. The rules for what earns a
-//! tip are written at the top of the file, for the person editing it. A
-//! [`Deck`] deals the tips in shuffled order, one every [`SHOWN_FOR`].
+//! every tip below it belongs to that section. The board draws a tip's
+//! section label before it, as `tip: queue · <the tip>`. The rules for what
+//! earns a tip are written at the top of the file, for the person editing
+//! it. A [`Deck`] deals the tips in shuffled order, one every [`SHOWN_FOR`].
 
 use std::time::{Duration, Instant};
 
 /// The list, embedded so the binary needs nothing on disk to show a tip.
 const LIST: &str = include_str!("../assets/tips.txt");
 
-/// The most characters a tip holds, so it fits one row of an 80-column
-/// terminal. Counted in characters, not bytes: a tip may hold `∞`, `↻`, `←`
-/// or `→`, each more than one byte but one column on screen.
+/// What the board draws between a tip's label and the tip itself.
+pub const SEPARATOR: &str = " · ";
+
+/// The most characters the row holds after `tip: `: the label, the
+/// [`SEPARATOR`] and the tip together, so the row fits an 80-column
+/// terminal. A tip with no label holds all of them. Counted in characters,
+/// not bytes: the separator's `·`, and the `∞`, `↻`, `←` or `→` a tip may
+/// hold, are each more than one byte but one column on screen.
 #[cfg(test)]
 const MAX_CHARACTERS: usize = 69;
 
 /// One tip as the file holds it.
-///
-/// Only the tests read `line` and `section`; the board draws `text` alone.
-#[allow(dead_code)]
-struct Tip<'a> {
-    /// The line it sits on, counted from 1, as an editor shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tip<'a> {
+    /// The line it sits on, counted from 1, as an editor shows it. Only the
+    /// tests read it, to name a tip that breaks a rule.
+    #[cfg_attr(not(test), allow(dead_code))]
     line: usize,
     /// The sentence the board draws.
-    text: &'a str,
-    /// The label of the section it sits under, such as `queue`. `None` for
-    /// a tip above the file's first section line.
-    section: Option<&'a str>,
+    pub text: &'a str,
+    /// The label of the section it sits under, such as `queue`, which the
+    /// board draws before the tip. `None` for a tip above the file's first
+    /// section line, which the board draws without a label.
+    pub section: Option<&'a str>,
+}
+
+impl<'a> Tip<'a> {
+    /// A tip with no line in the file, for a test that draws one.
+    #[cfg(test)]
+    pub fn drawn(section: Option<&'a str>, text: &'a str) -> Tip<'a> {
+        Tip {
+            line: 0,
+            text,
+            section,
+        }
+    }
 }
 
 /// Every tip in `list`, in file order. Comment lines, blank lines and
@@ -56,10 +75,10 @@ fn parse(list: &str) -> Vec<Tip<'_>> {
     tips
 }
 
-/// Every tip's text in file order, with comment lines, blank lines and
-/// section lines left out.
-pub fn texts() -> Vec<&'static str> {
-    parse(LIST).into_iter().map(|tip| tip.text).collect()
+/// Every tip in the shipped list in file order, with comment lines, blank
+/// lines and section lines left out.
+pub fn all() -> Vec<Tip<'static>> {
+    parse(LIST)
 }
 
 /// How long one tip stays on the board before the next one takes its row:
@@ -76,9 +95,9 @@ pub const SHOWN_FOR: Duration = Duration::from_secs(30);
 /// in the deck carry from one frame to the next. A deck made on every frame
 /// would either never move past its first tip or move on every redraw.
 pub struct Deck {
-    /// Every tip's text, in file order.
-    texts: Vec<&'static str>,
-    /// Indexes into `texts`, in the order they are shown.
+    /// Every tip, in file order.
+    tips: Vec<Tip<'static>>,
+    /// Indexes into `tips`, in the order they are shown.
     order: Vec<usize>,
     /// Where in `order` the tip on screen sits.
     at: usize,
@@ -97,27 +116,27 @@ impl Deck {
     /// random tip in each would make no two runs agree.
     pub fn for_board() -> Deck {
         #[cfg(test)]
-        return Deck::in_order(texts());
+        return Deck::in_order(all());
         #[cfg(not(test))]
-        Deck::shuffled(texts(), seed())
+        Deck::shuffled(all(), seed())
     }
 
-    /// `texts` in the order given, and kept in it every time round.
+    /// `tips` in the order given, and kept in it every time round.
     #[cfg(test)]
-    pub fn in_order(texts: Vec<&'static str>) -> Deck {
-        Deck::dealt(texts, None)
+    pub fn in_order(tips: Vec<Tip<'static>>) -> Deck {
+        Deck::dealt(tips, None)
     }
 
-    /// `texts` shuffled from `seed`, and shuffled again from the same
+    /// `tips` shuffled from `seed`, and shuffled again from the same
     /// generator each time the last tip has shown.
-    pub fn shuffled(texts: Vec<&'static str>, seed: u64) -> Deck {
-        Deck::dealt(texts, Some(seed))
+    pub fn shuffled(tips: Vec<Tip<'static>>, seed: u64) -> Deck {
+        Deck::dealt(tips, Some(seed))
     }
 
-    fn dealt(texts: Vec<&'static str>, random: Option<u64>) -> Deck {
+    fn dealt(tips: Vec<Tip<'static>>, random: Option<u64>) -> Deck {
         let mut deck = Deck {
-            order: (0..texts.len()).collect(),
-            texts,
+            order: (0..tips.len()).collect(),
+            tips,
             at: 0,
             since: None,
             random,
@@ -133,7 +152,7 @@ impl Deck {
     /// Moves at most one tip per call. A board that went undrawn for minutes,
     /// on another tab, shows the next tip when it comes back rather than
     /// skipping the ones it would have shown meanwhile.
-    pub fn current(&mut self, now: Instant) -> Option<&'static str> {
+    pub fn current(&mut self, now: Instant) -> Option<Tip<'static>> {
         if self.order.is_empty() {
             return None;
         }
@@ -145,7 +164,7 @@ impl Deck {
             }
             Some(_) => {}
         }
-        Some(self.texts[self.order[self.at]])
+        Some(self.tips[self.order[self.at]])
     }
 
     /// Move to the next tip, shuffling the deck again past its last one.
@@ -209,9 +228,9 @@ mod tests {
     /// text, no comment line, no section line and no bar.
     #[test]
     fn the_shipped_list_yields_bare_sentences() {
-        let texts = texts();
-        assert!(!texts.is_empty());
-        for text in texts {
+        let tips = all();
+        assert!(!tips.is_empty());
+        for Tip { text, .. } in tips {
             assert!(!text.trim().is_empty(), "an empty tip");
             assert!(!text.starts_with('#'), "a comment as a tip: {text}");
             assert!(!text.starts_with('['), "a section line as a tip: {text}");
@@ -234,13 +253,27 @@ mod tests {
         let mut report = String::new();
         for tip in tips {
             let length = tip.text.chars().count();
-            if length > MAX_CHARACTERS {
-                report += &format!(
-                    "assets/tips.txt:{} is {length} characters. a tip holds at most \
-                     {MAX_CHARACTERS},\nso it fits one row of an 80-column terminal. \
-                     shorten it.\n\n",
-                    tip.line
-                );
+            // Measured off the label and separator the board draws, so a
+            // wider separator or a longer label costs the tip its width.
+            let beside = tip
+                .section
+                .map_or(0, |label| format!("{label}{SEPARATOR}").chars().count());
+            let room = MAX_CHARACTERS.saturating_sub(beside);
+            if length > room {
+                report += &match tip.section {
+                    Some(label) => format!(
+                        "assets/tips.txt:{} is {length} characters. beside its label \
+                         \"{label}\", a tip\nholds at most {room}, so the row fits an \
+                         80-column terminal. shorten it.\n\n",
+                        tip.line
+                    ),
+                    None => format!(
+                        "assets/tips.txt:{} is {length} characters. a tip holds at most \
+                         {room},\nso it fits one row of an 80-column terminal. \
+                         shorten it.\n\n",
+                        tip.line
+                    ),
+                };
             }
             if let Some((_, word)) = crate::screen::capital_violation(tip.text) {
                 let mut letters = word.chars();
@@ -262,9 +295,9 @@ mod tests {
         report
     }
 
-    /// A tip longer than 69 characters is named by its line. It is counted in
-    /// characters, so `∞` and `→` cost one each and a tip of exactly 69
-    /// passes.
+    /// A tip with no label longer than 69 characters is named by its line.
+    /// It is counted in characters, so `∞` and `→` cost one each and a tip
+    /// of exactly 69 passes.
     #[test]
     fn a_tip_longer_than_69_characters_is_named() {
         let long = "a".repeat(70);
@@ -276,6 +309,24 @@ mod tests {
             "{report}"
         );
         assert!(!report.contains("assets/tips.txt:1"), "{report}");
+    }
+
+    /// Under a label the tip holds 66 characters less the label's, since
+    /// the label and ` · ` share the row with it: a `pipeline` tip holds 58.
+    /// One of 59 is named by its line, its label and that limit; one of 58
+    /// passes, though it holds a `→` of three bytes. Fails before the label
+    /// was counted: the limit was 69 for every tip.
+    #[test]
+    fn a_tip_too_long_beside_its_label_is_named() {
+        let exact = format!("{}→", "a".repeat(57));
+        let long = "a".repeat(59);
+        let list = format!("[pipeline]\n{exact}\n{long}\n");
+        let report = complaints(&parse(&list));
+        assert_eq!(
+            report,
+            "assets/tips.txt:3 is 59 characters. beside its label \"pipeline\", a tip\n\
+             holds at most 58, so the row fits an 80-column terminal. shorten it.\n\n"
+        );
     }
 
     /// A tip that starts a word with a capital is named by its line, with
@@ -319,34 +370,47 @@ mod tests {
     fn shown(deck: &mut Deck, rounds: usize) -> Vec<&'static str> {
         let start = Instant::now();
         (0..deck.order.len() * rounds)
-            .map(|step| deck.current(start + SHOWN_FOR * step as u32).unwrap())
+            .map(|step| deck.current(start + SHOWN_FOR * step as u32).unwrap().text)
             .collect()
+    }
+
+    /// A deck of `texts`, each a tip with no label, in the order given.
+    fn bare(texts: &[&'static str]) -> Vec<Tip<'static>> {
+        texts.iter().map(|text| Tip::drawn(None, text)).collect()
+    }
+
+    /// The text of the tip `deck` draws at `now`.
+    fn text_at(deck: &mut Deck, now: Instant) -> Option<&'static str> {
+        deck.current(now).map(|tip| tip.text)
     }
 
     /// One tip stays up for 30 seconds by the clock it is given, and the
     /// next one takes its place at 30.
     #[test]
     fn a_tip_stays_up_for_30_seconds() {
-        let mut deck = Deck::in_order(vec!["one", "two", "three"]);
+        let mut deck = Deck::in_order(bare(&["one", "two", "three"]));
         let start = Instant::now();
-        assert_eq!(deck.current(start), Some("one"));
-        assert_eq!(deck.current(start + Duration::from_secs(29)), Some("one"));
-        assert_eq!(deck.current(start + SHOWN_FOR), Some("two"));
+        assert_eq!(text_at(&mut deck, start), Some("one"));
         assert_eq!(
-            deck.current(start + SHOWN_FOR + Duration::from_secs(29)),
+            text_at(&mut deck, start + Duration::from_secs(29)),
+            Some("one")
+        );
+        assert_eq!(text_at(&mut deck, start + SHOWN_FOR), Some("two"));
+        assert_eq!(
+            text_at(&mut deck, start + SHOWN_FOR + Duration::from_secs(29)),
             Some("two")
         );
-        assert_eq!(deck.current(start + SHOWN_FOR * 2), Some("three"));
+        assert_eq!(text_at(&mut deck, start + SHOWN_FOR * 2), Some("three"));
     }
 
     /// A board left undrawn for minutes shows the next tip when it comes
     /// back, not one several places further on.
     #[test]
     fn a_long_gap_moves_one_tip() {
-        let mut deck = Deck::in_order(vec!["one", "two", "three"]);
+        let mut deck = Deck::in_order(bare(&["one", "two", "three"]));
         let start = Instant::now();
         deck.current(start);
-        assert_eq!(deck.current(start + SHOWN_FOR * 10), Some("two"));
+        assert_eq!(text_at(&mut deck, start + SHOWN_FOR * 10), Some("two"));
     }
 
     /// The shipped list, shuffled: each round shows every tip once, in an
@@ -354,8 +418,9 @@ mod tests {
     /// rather than repeating the first.
     #[test]
     fn a_shuffled_deck_shows_every_tip_once_a_round() {
-        let all = texts();
-        let mut deck = Deck::shuffled(all.clone(), 7);
+        let tips = all();
+        let all: Vec<_> = tips.iter().map(|tip| tip.text).collect();
+        let mut deck = Deck::shuffled(tips, 7);
         let shown = shown(&mut deck, 2);
         let (first, second) = shown.split_at(all.len());
         for round in [first, second] {
@@ -372,8 +437,8 @@ mod tests {
     /// Two boards opened apart deal two different orders.
     #[test]
     fn two_seeds_deal_two_orders() {
-        let first = shown(&mut Deck::shuffled(texts(), 1), 1);
-        let second = shown(&mut Deck::shuffled(texts(), 2), 1);
+        let first = shown(&mut Deck::shuffled(all(), 1), 1);
+        let second = shown(&mut Deck::shuffled(all(), 2), 1);
         assert_ne!(first, second);
     }
 
@@ -382,7 +447,7 @@ mod tests {
     #[test]
     fn a_new_round_never_opens_on_the_tip_that_closed_the_last() {
         for seed in 0..200 {
-            let mut deck = Deck::shuffled(vec!["one", "two", "three"], seed);
+            let mut deck = Deck::shuffled(bare(&["one", "two", "three"]), seed);
             let shown = shown(&mut deck, 20);
             for pair in shown.windows(2) {
                 assert_ne!(pair[0], pair[1], "seed {seed}: {shown:?}");
@@ -396,11 +461,11 @@ mod tests {
     fn a_deck_of_none_or_one_tip() {
         let start = Instant::now();
         let mut empty = Deck::shuffled(Vec::new(), 3);
-        assert_eq!(empty.current(start), None);
-        assert_eq!(empty.current(start + SHOWN_FOR), None);
-        let mut one = Deck::shuffled(vec!["only"], 3);
-        assert_eq!(one.current(start), Some("only"));
-        assert_eq!(one.current(start + SHOWN_FOR), Some("only"));
-        assert_eq!(one.current(start + SHOWN_FOR * 2), Some("only"));
+        assert_eq!(text_at(&mut empty, start), None);
+        assert_eq!(text_at(&mut empty, start + SHOWN_FOR), None);
+        let mut one = Deck::shuffled(bare(&["only"]), 3);
+        assert_eq!(text_at(&mut one, start), Some("only"));
+        assert_eq!(text_at(&mut one, start + SHOWN_FOR), Some("only"));
+        assert_eq!(text_at(&mut one, start + SHOWN_FOR * 2), Some("only"));
     }
 }
