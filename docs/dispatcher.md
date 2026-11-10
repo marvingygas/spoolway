@@ -1006,7 +1006,7 @@ Inside the dispatch tab, the box ends on one tip from [the tip list](#the-tip-li
 box's last row, with a blank row above it, on the busy board and the empty board alike. The row
 reads `tip:`, the label of the tip's section, a `·` and the tip. `tip:` and the tip are drawn in
 grey teal, 256-colour 109, a colour no task state uses. The label and its `·` are drawn in the
-board's dim grey, so the tip stays the thing you read.
+board's dim grey.
 
 ```
 jobs     2 active
