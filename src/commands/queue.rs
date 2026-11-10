@@ -570,7 +570,7 @@ pub(crate) fn longest_agent_step(pipeline: &crate::pipeline::Pipeline) -> &str {
 ///
 /// `routine` is here because only the routines tab and a job may say a task
 /// is a copy of a routine: they stamp it onto the parsed task after
-/// [`validate_batch`] (see [`stamp_routines`]), never into the text it
+/// [`validate_batch_with`] (see [`stamp_routines`]), never into the text it
 /// reads. Being reserved also makes unqueueing drop it, so a copy carried
 /// back to pending and queued again is an ordinary task.
 pub(crate) const RESERVED_KEYS: &[&str] = &[
@@ -614,7 +614,7 @@ pub fn queue_add(
 /// pass can route until somebody restarted the run, with nothing saying why.
 /// Only the pipelines the submitted tasks name are decoded; a task whose
 /// front matter will not parse names none, and is refused by
-/// [`validate_batch`] in its own words.
+/// [`validate_batch_with`] in its own words.
 pub fn queue_add_on(
     repo: &Repo,
     loaded: &crate::pipeline_snapshot::LoadedPipelines,
@@ -1506,9 +1506,9 @@ pub(crate) fn validate_batch(
     validate_batch_with(repo, pipelines, base, submitted, &mut OriginAsks::default())
 }
 
-/// [`validate_batch`] with the answers of `origin` kept in `asks`, so the
-/// caller can hand the same ones to [`refuse_missing_start`] and the whole
-/// submission asks `origin` once.
+/// Validates as `validate_batch` does, with the answers of `origin` kept in
+/// `asks`, so the caller can hand the same ones to [`refuse_missing_start`]
+/// and the whole submission asks `origin` once.
 pub(crate) fn validate_batch_with(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -1519,7 +1519,7 @@ pub(crate) fn validate_batch_with(
     validate_batch_untracking(repo, pipelines, base, submitted, &[], asks)
 }
 
-/// [`validate_batch`] for `queue add --no-tracking`: `no_tracking` is the
+/// [`validate_batch_with`] for `queue add --no-tracking`: `no_tracking` is the
 /// flag's values, applied by [`untrack_named_groups`] before the
 /// `group_description:` check looks. A group the flag names opens no issue,
 /// so it is no more asked for a description than one that wrote
@@ -1547,8 +1547,9 @@ fn validate_batch_untracking(
 /// stamped the ticked groups. Checked first, it would refuse a group the
 /// person is about to untrack before the checklist could be drawn.
 ///
-/// `origin` is asked once, before the first task is checked, about every
-/// branch any task's checks will need: see [`origin_candidates`].
+/// `origin` is asked when the first check that needs it gets there, never
+/// for a task a check of this checkout refuses first, and once for the
+/// whole batch: see [`OriginAsks`].
 fn validate_batch_undescribed(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -1561,24 +1562,9 @@ fn validate_batch_undescribed(
         bail!("`--from` named nothing to queue");
     }
 
-    // Every task is parsed before the first is checked, so the one question
-    // to `origin` can name all their branches. A task that fails to parse
-    // is refused when its turn comes, as before: the error waits in
-    // `parsed` and no earlier task's refusal is overtaken by it.
-    let parsed: Vec<Result<Task>> = submitted
-        .iter()
-        .map(|(name, raw)| parse_submission(name, raw, base))
-        .collect();
-    asks.ask_if_any(
-        repo,
-        parsed
-            .iter()
-            .flatten()
-            .flat_map(|task| origin_candidates(repo, task)),
-    );
     let mut tasks = Vec::new();
-    for ((name, _), parsed) in submitted.iter().zip(parsed) {
-        let mut task = parsed?;
+    for (name, raw) in submitted {
+        let mut task = parse_submission(name, raw, base)?;
         // Whatever base a task ends up with — a task's own, or the
         // submission's `--base` — has to be a branch this repository really
         // has, checked here rather than only when a task's value
@@ -2072,7 +2058,8 @@ fn leftover_refusal(
 /// that it could not be asked.
 ///
 /// A submission puts one `git ls-remote` to `origin`, listing every branch
-/// there, and reads each of its checks from the answer — the leftover check
+/// there, when the first check that needs `origin` gets there, and reads
+/// each of its checks from the answer — the leftover check
 /// of every task, the base check and the start-branch check, and the
 /// leftover check after the issue hook renamed branches. So a batch waits
 /// one [`Repo::remote_heads_answer`] limit however many tasks it holds, and
@@ -2095,16 +2082,6 @@ impl OriginAsks {
             .as_ref()
     }
 
-    /// Asks `origin` now if any branch of `wanted` is to be read from it, and
-    /// not otherwise: a submission whose every branch the checkout answers
-    /// never touches the network. This is how the one question goes out
-    /// before the first task is checked rather than inside its turn.
-    fn ask_if_any(&mut self, repo: &Repo, mut wanted: impl Iterator<Item = String>) {
-        if wanted.next().is_some() {
-            self.heads(repo);
-        }
-    }
-
     /// Whether `origin` has `branch`, or `None` when it could not be asked.
     fn has_branch(&mut self, repo: &Repo, branch: &str) -> Option<bool> {
         self.heads(repo).map(|heads| heads.contains(branch))
@@ -2125,52 +2102,6 @@ impl OriginAsks {
             })
             .collect()
     }
-}
-
-/// The branches `origin` may be asked about for `task`, across the leftover
-/// check, the base check and the start-branch check: only those the local
-/// checkout does not already answer, since each check asks `origin` only
-/// after its local reads come up empty.
-///
-/// A superset is harmless, since the one listing answers every branch
-/// whether or not it was named. All this decides is whether `origin` needs to
-/// be asked at all, so it does not stop where a check would refuse.
-fn origin_candidates(repo: &Repo, task: &Task) -> Vec<String> {
-    let mut wanted = Vec::new();
-    if let Some(base) = task.front.base.as_deref()
-        && matches!(check_task_base_locally(repo, task.id(), base), Ok(false))
-    {
-        wanted.push(base.to_string());
-    }
-    let branch = task_branch(task);
-    if !has_local_leftover(repo, &branch) {
-        wanted.push(branch);
-    }
-    wanted.extend(start_branch_to_check(repo, task).filter(|start| !known_locally(repo, start)));
-    wanted
-}
-
-/// Whether `branch` has a worktree or a local branch left behind, which
-/// [`leftover_refusal`] reports without asking `origin`.
-fn has_local_leftover(repo: &Repo, branch: &str) -> bool {
-    repo.worktree_root()
-        .join(crate::mux::branch_slug(branch))
-        .exists()
-        || ref_exists(repo, branch)
-}
-
-/// Whether `branch` is a local branch or a remote-tracking ref of `origin`:
-/// what [`crate::dispatch::branch_known`] reads before it asks `origin`.
-fn known_locally(repo: &Repo, branch: &str) -> bool {
-    ["refs/heads", "refs/remotes/origin"].iter().any(|prefix| {
-        repo.git(&[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{prefix}/{branch}"),
-        ])
-        .is_ok()
-    })
 }
 
 /// How long [`open_pull_request`] waits for `gh`, the same as the question
@@ -2498,7 +2429,7 @@ pub(crate) fn not_queued(repo: &Repo, tasks: &[Task], asks: &mut OriginAsks) -> 
         tasks
             .iter()
             .filter_map(|task| start_branch_to_check(repo, task))
-            .filter(|start| !known_locally(repo, start)),
+            .filter(|start| !crate::dispatch::branch_known_locally(repo, start)),
     );
     let mut out: Vec<NotQueued> = tasks
         .iter()
@@ -2611,7 +2542,7 @@ pub(crate) fn refuse_missing_start(
 /// the whole batch shares a base — the ordinary case, everything given the
 /// same `--base` — and one line per task when tasks named bases of their
 /// own, so what is printed is always the base each task was actually given.
-/// Every task passed in has already been through [`validate_batch`], which
+/// Every task passed in has already been through [`validate_batch_with`], which
 /// never leaves `front.base` unset.
 pub(crate) fn based_on_note(tasks: &[Task], base: &str) -> String {
     let bases: Vec<&str> = tasks
@@ -2631,7 +2562,7 @@ pub(crate) fn based_on_note(tasks: &[Task], base: &str) -> String {
 
 /// Validate every task as one set, then write all or none — the shape
 /// `queue add --from` needs, and the same all-or-nothing pass
-/// [`validate_batch`] runs, right before this saves what it validated.
+/// [`validate_batch_with`] runs, right before this saves what it validated.
 fn queue_add_tasks(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2733,7 +2664,7 @@ fn groups_to_lock(repo: &Repo, tasks: &[Task]) -> BTreeSet<String> {
 }
 
 /// Write a validated batch of brand-new tasks, refusing any id that was
-/// taken after [`validate_batch`] looked.
+/// taken after [`validate_batch_with`] looked.
 ///
 /// `validate_batch` checks that each id is free, but the files are written
 /// later, and nothing held the ids in between. Parallel adds of one id (the
@@ -2805,7 +2736,7 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
         }
     }
     // The group's shape is checked again now that the group is locked. The
-    // check in [`validate_batch`] ran with no lock, so six parallel adds of a
+    // check in [`validate_batch_with`] ran with no lock, so six parallel adds of a
     // root into one group each saw it empty and each passed. Under the lock
     // the earlier add's file is on disk, and this one is refused naming the
     // root that is already there.
@@ -2879,7 +2810,7 @@ fn readable_task_files(tasks: &[(String, String)]) -> Vec<String> {
 }
 
 /// What every path that saves a validated batch runs between
-/// [`validate_batch`] and its writes: open the batch's tickets, then apply
+/// [`validate_batch_with`] and its writes: open the batch's tickets, then apply
 /// the prefix `issue_tracking.key_in_names` asks for. One place for the
 /// pair, so a batch is named the same way however it arrived — `queue add
 /// --from`, the queue screen's `enter`, or a routine fired from the routines
@@ -3001,7 +2932,7 @@ fn open_and_prefix_waiting(
     // it instead of opening a second one.
     //
     // `origin` is asked only about a branch the prefix has just renamed,
-    // since `validate_batch` already asked about every `task/<id>`. The
+    // since validation already asked about every `task/<id>`. The
     // caller's `asks` carry what `origin` said then, a failure included, so
     // a submission that listed `origin` before the hook does not list it
     // again, and one whose `origin` did not answer does not wait a second
@@ -12998,7 +12929,7 @@ fn routine_batch_tasks(repo: &Repo, routines: &[RoutineFolder], nav: &RoutineNav
 /// job both run once they have the list of tasks to queue. `tasks` is
 /// already deduped and in the order the batch should keep. Nothing is
 /// written: the returned `(source path, rewritten task)` pairs are the
-/// shape [`validate_batch`] takes, and the names beside them are what
+/// shape [`validate_batch_with`] takes, and the names beside them are what
 /// [`stamp_routines`] writes onto the tasks it hands back.
 fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> RoutineBatch {
     let mut minted: std::collections::BTreeSet<String> = Default::default();
@@ -13034,7 +12965,7 @@ fn mint_routine_batch(repo: &Repo, tasks: &[&RoutineTask]) -> RoutineBatch {
     (docs, names)
 }
 
-/// A routine batch ready for [`validate_batch`]: the `(source path,
+/// A routine batch ready for [`validate_batch_with`]: the `(source path,
 /// rewritten task)` pairs, and each minted id mapped to the routine file's
 /// own `id:` it was minted from.
 ///
@@ -13107,7 +13038,7 @@ pub(crate) fn routine_target_refusal(target: &std::path::Path) -> Option<String>
 /// submissions can each hold a lock the other is waiting on. A lock another
 /// submission still holds after [`crate::lock::TaskLock`]'s wait comes back
 /// as a [`RoutineBusy`]. A routine whose name is not a valid id is not
-/// locked: it is not a safe file name, and [`validate_batch`] refuses the id
+/// locked: it is not a safe file name, and [`validate_batch_with`] refuses the id
 /// minted from it before anything is saved.
 fn claim_routines<'a>(
     repo: &Repo,
@@ -13368,7 +13299,7 @@ pub(crate) fn check_routine_target(
 /// [`crate::jobs::Job::refusal`] stops any other target first. Every
 /// queued task is put on `pipeline` — a job names its own, where the `r`
 /// pane leaves each task on whatever it carried. The batch goes through
-/// [`validate_batch`] all-or-nothing and the saved tasks are handed back so
+/// [`validate_batch_with`] all-or-nothing and the saved tasks are handed back so
 /// a caller can record which ids it minted. The source tasks under
 /// `.spoolway/routines/` are never touched.
 ///
@@ -14262,6 +14193,25 @@ mod tests {
         let refusal = leftover_refusal(&repo, "a", "task/acme-a", Some(&mut asks));
         assert!(refusal.is_some_and(|r| r.contains("`origin/task/acme-a`")));
         assert_eq!(origin_calls(&calls), 1, "the renamed branch asked nothing");
+    }
+
+    /// A task a check of this checkout refuses puts nothing to `origin`: the
+    /// listing waits for the first check that needs it, so a refusal that
+    /// needs no network never waits for one.
+    #[test]
+    fn a_task_refused_locally_asks_origin_nothing() {
+        let (repo, _root_guard) = fixture("batch-origin-refused-locally");
+        let calls = counting_origin(&repo, true);
+        let submitted = vec![(
+            "a.md".to_string(),
+            task_text("a", "group: ga\npipeline: nosuch\n", BODY),
+        )];
+
+        let err = validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted)
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("nosuch"), "{err:#}");
+        assert_eq!(origin_calls(&calls), 0);
     }
 
     /// An `origin` that cannot be asked fails the one call for every check

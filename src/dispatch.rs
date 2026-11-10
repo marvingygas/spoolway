@@ -7378,22 +7378,28 @@ pub(crate) fn branch_known(
     branch: &str,
     remote_cache: &mut RemoteCache,
 ) -> Option<bool> {
-    for prefix in ["refs/heads", "refs/remotes/origin"] {
-        if repo
-            .git(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{prefix}/{branch}"),
-            ])
-            .is_ok()
-        {
-            return Some(true);
-        }
+    if branch_known_locally(repo, branch) {
+        return Some(true);
     }
     *remote_cache
         .entry(branch.to_string())
         .or_insert_with(|| repo.remote_branch_answer(branch))
+}
+
+/// Whether `branch` is a local branch or a remote-tracking ref of `origin`:
+/// what [`branch_known`] reads before it asks `origin`. Queueing's own
+/// check reads it too, to tell which start branches only `origin` could
+/// have, so the two never disagree about what is local.
+pub(crate) fn branch_known_locally(repo: &Repo, branch: &str) -> bool {
+    ["refs/heads", "refs/remotes/origin"].iter().any(|prefix| {
+        repo.git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{prefix}/{branch}"),
+        ])
+        .is_ok()
+    })
 }
 
 /// Whether `task`'s branch is already checked out somewhere, which makes it
