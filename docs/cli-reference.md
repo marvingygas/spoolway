@@ -135,8 +135,8 @@ routines tab has been working for 200 ms. It sits on a blank patch eight columns
 the middle of the tab, and the rest of the tab is drawn dim behind it. It switches between the
 mark's two frames every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work
 ends sooner. Work that ends within 200 ms draws nothing. A pane too small for the patch draws no
-spool. When the spool has shown, keys typed while it was up are thrown away when the work ends,
-so a second `enter` does not land on the screen that follows. When it never showed, typed keys
+spool. When the spool has shown, every key typed while the work ran is thrown away when the work
+ends, so a second `enter` does not land on the screen that follows. When it never showed, typed keys
 are kept.
 
 The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
