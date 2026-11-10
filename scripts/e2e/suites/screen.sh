@@ -31,11 +31,14 @@
 # section deletes one config key from it, then promotes one pipeline onto a
 # local branch with no checkout, into a worktree it makes beside the project.
 # A full board in a short pane scrolls its task table under a marker row and
-# keeps its key line. Off a terminal, bare `spoolway` still prints the grouped
-# help.
+# keeps its key line. The dispatch tab's box ends on a tip row, on the empty
+# board and the full one alike, and `dispatch.tips = false` draws none. Off a
+# terminal, bare `spoolway` still prints the grouped help.
 #
-# No `covers:` tag — the coverage map only enumerates `config.toml` keys and
-# pipeline step keys, and a screen gesture is neither.
+# covers: dispatch.tips — set to false, the full board draws no tip row and keeps its table
+#
+# Every other check here is a screen gesture. The coverage map lists only
+# `config.toml` keys and pipeline step keys, so it has no row for those.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=../lib.sh
@@ -140,6 +143,22 @@ lacks "drawn inside a box with no title" "─ dispatch" "$FIRST"
 # Both spellings, since the queue tab brackets whichever pane has focus.
 lacks "not on the queue tab" "─ [groups] ─" "$FIRST"
 lacks "under either spelling of its title" "─ groups ─" "$FIRST"
+
+# The row above the box's bottom border in the frame drawn to `$1`. Each row
+# ends in the frame writer's save-cursor, clear-to-end, restore-cursor, which
+# is taken out with every other cursor code, as the margin check below does.
+box_last_row() {
+  tr -d '\r' <"$1" | sed -e 's/\x1b7\x1b\[K\x1b8//g' -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' |
+    awk '/^ *╰/ { print prev; exit } { prev = $0 }'
+}
+# `$1` names the board, `$2` the frame it was drawn to.
+ends_on_a_tip() {
+  local row
+  row=$(box_last_row "$2")
+  if [[ "$row" =~ ^\ *│\ tip\ \ [^\ ] ]]; then ok "the $1 board's box ends on a tip"
+  else bad "the $1 board's box ends on a tip (its last row: '$row')"; fi
+}
+ends_on_a_tip "empty" "$FIRST"
 
 has "2 reaches the queue tab, its groups pane focused" "─ [groups] ─" "$LAST"
 has "beside the tasks pane's plain title" "─ tasks ─" "$LAST"
@@ -565,6 +584,20 @@ has "the full board is under the strip" "[1] DISPATCH        [2] QUEUE" "$LAST"
 has "its cursor's row is drawn" "▸ " "$LAST"
 has "its last table row counts the tasks out of view" "tasks below" "$LAST"
 has "the key line is still drawn under it" "[o] options" "$LAST"
+ends_on_a_tip "full" "$LAST"
+
+# `dispatch.tips = false` takes the row away. The frame goes to a file of its
+# own, so the margin check below still measures the board with its tip row, and
+# the setting is put back straight after.
+must "tips are turned off" "$SPOOLWAY" config set dispatch.tips false
+NOTIPS="$LIVE/no-tips.txt"
+works "the full board is drawn again" \
+  script -qec "stty rows 30 cols 120; printf '' | '$SPOOLWAY'" "$NOTIPS"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } { last = $0 } END { print last }' "$NOTIPS" |
+  sed 's/\x1b\[[0-9;]*m//g' >"$NOTIPS.plain"
+has "with tips off it is still the full board" "tasks below" "$NOTIPS.plain"
+lacks "with tips off no tip row is drawn" "│ tip  " "$NOTIPS.plain"
+must "tips are turned back on" "$SPOOLWAY" config set dispatch.tips true
 
 # The margin, read off a real pty rather than a test terminal: at 120 columns
 # no row of the full board touches column 0 or column 119. Each row ends in the

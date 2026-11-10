@@ -65,6 +65,7 @@ mod sync_plans;
 mod task;
 mod task_template;
 mod teardown;
+mod tips;
 mod tracking;
 mod update;
 mod usage;

@@ -668,6 +668,13 @@ pub struct DispatchConfig {
     /// or one tab to a step. See [`LaneLayout`].
     pub lane_layout: LaneLayout,
 
+    /// Whether the dispatch tab ends on a tip row, one tip at a time,
+    /// changing every 30 seconds.
+    ///
+    /// On by default. Off, the tab draws the frame it had before tips: no
+    /// tip row, and RECENT keeps the row the tip would have taken.
+    pub tips: bool,
+
     /// Retired: whether a finished step's agent stayed open in its own pane.
     /// [`Self::visible_lanes`] replaces it, and [`Config::migrate`] reads this
     /// one only to carry it over — `true` kept every pane, which is `all`,
@@ -731,6 +738,7 @@ impl Default for DispatchConfig {
             hide_commands: false,
             autofocus_panes: false,
             lane_layout: LaneLayout::default(),
+            tips: true,
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
             herdr_mode: None,
@@ -4149,6 +4157,7 @@ mod tests {
             "hide_commands = false",
             "autofocus_panes = false",
             "lane_layout = \"panes\"",
+            "tips = true",
         ] {
             assert!(body.contains(line), "{line} missing from {body}");
         }
@@ -4160,6 +4169,7 @@ mod tests {
         assert_eq!(back.dispatch.visible_lanes, VisibleLanes::Count(3));
         assert!(!back.dispatch.hide_commands);
         assert_eq!(back.dispatch.lane_layout, LaneLayout::Panes);
+        assert!(back.dispatch.tips);
         config.agrees_with(&rendered).unwrap();
     }
 

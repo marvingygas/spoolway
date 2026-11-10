@@ -29,10 +29,10 @@ use super::*;
 
 /// Keys a task must set — refused by `parse_submission` when blank or
 /// absent.
-const REQUIRED_KEYS: &[&str] = &["id", "title", "group", "pipeline"];
+pub(crate) const REQUIRED_KEYS: &[&str] = &["id", "title", "group", "pipeline"];
 
 /// Keys a task may set, and spoolway keeps exactly what it wrote.
-const OPTIONAL_KEYS: &[&str] = &[
+pub(crate) const OPTIONAL_KEYS: &[&str] = &[
     "source",
     "plan",
     "depends_on",

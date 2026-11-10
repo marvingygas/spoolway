@@ -152,6 +152,14 @@ fn which(program: &str) -> Option<String> {
 #[cfg(test)]
 pub mod testutil;
 
+/// The keys `spoolway task contract` and `spoolway pipeline contract` list,
+/// for the test that holds the board's tips complete.
+#[cfg(test)]
+pub(crate) mod contract_keys {
+    pub(crate) use super::pipeline::{PIPELINE_KEYS, STEP_KEYS};
+    pub(crate) use super::task::{OPTIONAL_KEYS, REQUIRED_KEYS};
+}
+
 #[cfg(test)]
 mod tests {
     /// A prose-only command must refuse `--json` by name, and stay silent

@@ -1236,6 +1236,19 @@ pub(super) fn config_notice(waiting: &Waiting) -> Option<String> {
     Some(format!("{BOLD}config changed:{RESET} {}", kinds.join(", ")))
 }
 
+/// The colour of the dispatch tab's tip row, 256-colour 109, a grey teal.
+/// Green, amber and orange already mean running, paused and blocked, so a
+/// tip in any of them would read as a task state. This one appears nowhere
+/// else on the board, and sits close enough to the dim labels that the row
+/// stands apart without pulling the eye from the table.
+const TEAL: &str = "\x1b[38;5;109m";
+
+/// The dispatch tab's tip row for `tip`, label and sentence alike in
+/// [`TEAL`], with the one-column margin every row of the board keeps.
+pub(super) fn tip_row(tip: &str) -> String {
+    format!(" {TEAL}tip  {tip}{RESET}")
+}
+
 /// The name a footer line gives the pool behind `[models]` row `key`: the
 /// first of a profile's `spellings` (its `agent_model` entry) whose model
 /// has its own `slots` and resolves to that row. Two spellings of one row,

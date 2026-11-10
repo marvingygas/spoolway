@@ -68,7 +68,8 @@ pub(crate) enum Tab {
 }
 
 /// Every tab, left to right — the order the strip draws and numbers them,
-/// from `1`. Routines sit beside queue, the tab `s` saves them from.
+/// from `1`. Routines sit beside queue, the tab whose `o`, then `save as
+/// routine`, saves them.
 const TABS: [Tab; 5] = [
     Tab::Dispatch,
     Tab::Queue,

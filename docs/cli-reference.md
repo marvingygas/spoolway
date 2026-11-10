@@ -103,6 +103,7 @@ and sentences, and the details panes. These capitals are allowed:
 - Month and weekday names and their short forms, such as `August`, `Aug`, `Monday`, `Mon` and
   `Mo`.
 - Proper nouns, such as `Windows`, `Unix` and `Jira`.
+- The placeholder `N`, where a key is written with a number, as in `above_<N>k_tokens`.
 - The greeting: `Good morning`, `Good afternoon`, `Good evening` and `Working late`, and the
   name that follows it.
 - Values read from tasks, routines, jobs and pipelines, shown as the author wrote them.
