@@ -129,7 +129,7 @@ strip, the tab's frame and its key line, so the popup is the only bright thing o
 whole strip is dim, including the open tab's label. The dim stops at the popup's border. When the popup closes, the tab draws in its own colours again.
 
 The loading spool shows that the screen is busy. It is the spoolway mark alone, six columns by
-three rows, in cyan, with no box and no text. It shows when work has been running for 200 ms.
+three rows, in bright white, with no box and no text. It shows when work has been running for 200 ms.
 The work that can show it is:
 
 | Tab | Keys |

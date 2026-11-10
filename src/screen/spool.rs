@@ -1,5 +1,5 @@
-//! The loading spool: the mark alone, in cyan, turned over a tab while a
-//! key's work runs.
+//! The loading spool: the mark alone, in bright white, turned over a tab
+//! while a key's work runs.
 //!
 //! Keys and drawing share one thread, so a key whose work takes a second or
 //! more leaves the last frame frozen on screen for the whole wait, and a
@@ -74,13 +74,13 @@ fn patch(frame: usize) -> Vec<String> {
     rows
 }
 
-/// Cyan on every inked character of the patch's `i`th row and nothing on its
-/// blanks — the colour of every pop-up's border, which no board state is,
-/// so the spool never reads as part of the rows behind it.
-fn cyan(patch: &[String], i: usize) -> Vec<Option<&'static str>> {
+/// Bright white on every inked character of the patch's `i`th row and
+/// nothing on its blanks — a colour no board state is, so the spool never
+/// reads as part of the rows behind it.
+fn white(patch: &[String], i: usize) -> Vec<Option<&'static str>> {
     patch[i]
         .chars()
-        .map(|c| (c != ' ').then_some(crate::status::CYAN))
+        .map(|c| (c != ' ').then_some(crate::status::WHITE))
         .collect()
 }
 
@@ -113,7 +113,7 @@ fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
     for row in &mut rows {
         *row = super::pad_visible(row, width);
     }
-    super::overlay_painted(&mut rows, &patch(frame), width, cyan);
+    super::overlay_painted(&mut rows, &patch(frame), width, white);
     Some(rows)
 }
 
@@ -499,8 +499,9 @@ pub(crate) mod testutil {
     /// a key whose work runs past [`DELAY`] puts spool frames among them,
     /// as many as it turns for, and how long that work takes is the
     /// machine's to decide, not the test's. A spool frame is told by its
-    /// mark in cyan. The board's lockup draws the same art bold, never
-    /// cyan, so a dispatch tab frame is kept.
+    /// mark in bright white. The board's lockup draws the same art bold in
+    /// the terminal's default colour, never bright white, so a dispatch tab
+    /// frame is kept.
     pub(crate) fn tab_frames(drawn: &str) -> Vec<&str> {
         drawn
             .split("\x1b[?2026h\x1b[H")
@@ -508,7 +509,7 @@ pub(crate) mod testutil {
             .filter(|frame| {
                 !SPOOL
                     .iter()
-                    .any(|art| frame.contains(&format!("{}{}", crate::status::CYAN, art[0])))
+                    .any(|art| frame.contains(&format!("{}{}", crate::status::WHITE, art[0])))
             })
             .collect()
     }
@@ -518,7 +519,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::*;
     use super::*;
-    use crate::status::{CYAN, DIM, strip_ansi};
+    use crate::status::{DIM, WHITE, strip_ansi};
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
@@ -602,20 +603,21 @@ mod tests {
         for row in &drawn {
             assert!(row.starts_with(DIM), "{row:?}");
         }
-        // The mark is cyan, its row opening the colour where its ink starts.
+        // The mark is bright white, its row opening the colour where its ink
+        // starts.
         assert!(
-            drawn[y + 1].contains(&format!("{CYAN}{}", SPOOL[0][0])),
+            drawn[y + 1].contains(&format!("{WHITE}{}", SPOOL[0][0])),
             "{:?}",
             drawn[y + 1]
         );
         assert!(
-            drawn[y + 2].contains(&format!("{CYAN}{}", SPOOL[0][1].trim())),
+            drawn[y + 2].contains(&format!("{WHITE}{}", SPOOL[0][1].trim())),
             "{:?}",
             drawn[y + 2]
         );
-        // The blank rows of the patch carry no cyan at all.
-        assert!(!drawn[y].contains(CYAN), "{:?}", drawn[y]);
-        assert!(!drawn[y + 4].contains(CYAN), "{:?}", drawn[y + 4]);
+        // The blank rows of the patch carry no white at all.
+        assert!(!drawn[y].contains(WHITE), "{:?}", drawn[y]);
+        assert!(!drawn[y + 4].contains(WHITE), "{:?}", drawn[y + 4]);
     }
 
     /// The shape of every frame a tab writes inside bare `spoolway`: a blank
@@ -669,7 +671,7 @@ mod tests {
                 assert_eq!(&over, want, "{height} rows, row {}", 1 + r);
             }
             assert!(
-                drawn[2].contains(&format!("{CYAN}{}", SPOOL[0][0])),
+                drawn[2].contains(&format!("{WHITE}{}", SPOOL[0][0])),
                 "{:?}",
                 drawn[2]
             );
@@ -712,7 +714,7 @@ mod tests {
         let a = drawn.find(SPOOL[0][0]).expect("frame A never drawn");
         let b = drawn.find(SPOOL[1][0]).expect("frame B never drawn");
         assert!(a < b, "frame B drawn before frame A");
-        assert!(drawn.contains(CYAN), "{drawn}");
+        assert!(drawn.contains(WHITE), "{drawn}");
         assert!(input.discarded);
     }
 

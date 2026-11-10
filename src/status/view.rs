@@ -117,10 +117,17 @@ pub(crate) const GREEN: &str = "\x1b[32m";
 
 // Drawn only on a pop-up, never on the board: the cyan of its border and
 // title, and the red of its `[esc]` keys, which `screen::overlay` paints as
-// it lays the pop-up over a tab. Cyan is also the loading spool's, laid over
-// a tab the same way by `screen::spool`. No board state is either colour, so
-// nothing laid over a tab ever reads as part of the rows behind it.
+// it lays the pop-up over a tab. The loading spool, laid over a tab the same
+// way by `screen::spool`, is drawn in `WHITE` below instead. No board state
+// is any of these colours, so nothing laid over a tab ever reads as part of
+// the rows behind it.
 pub(crate) const CYAN: &str = "\x1b[36m";
+
+// The bright white of the loading spool's ink: bright rather than plain
+// white, which many terminals draw as a light grey. Cyan read as blue on some
+// terminals, so the spool moved off it. Unlike the lockup's default colour, a
+// fixed white is lost on a light background, which was accepted for this.
+pub(crate) const WHITE: &str = "\x1b[97m";
 
 pub(crate) const RED: &str = "\x1b[31m";
 
