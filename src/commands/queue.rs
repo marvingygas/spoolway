@@ -1562,6 +1562,9 @@ fn validate_batch_undescribed(
         bail!("`--from` named nothing to queue");
     }
 
+    // This pass's own reads of the checkout: nothing of this batch is written
+    // until it has passed, so one read of each answers every task.
+    let mut reads = LocalReads::default();
     let mut tasks = Vec::new();
     for (name, raw) in submitted {
         let mut task = parse_submission(name, raw, base)?;
@@ -1601,10 +1604,10 @@ fn validate_batch_undescribed(
         crate::mux::check_task_id(&task.front.id)?;
 
         task.path = repo.queue_dir().join(format!("{}.md", task.front.id));
-        if let Some(refusal) = routine_name_refusal(repo, &task.front.id) {
+        if let Some(refusal) = routine_name_refusal(repo, &task.front.id, &mut reads) {
             bail!("{refusal}");
         }
-        if let Some(existing) = existing_task_path(repo, &task.front.id) {
+        if let Some(existing) = existing_task_path(repo, &task.front.id, &mut reads) {
             bail!(
                 "task `{}` already exists at {}",
                 task.front.id,
@@ -1614,9 +1617,13 @@ fn validate_batch_undescribed(
         // After the existing-task check: a task still in the queue owns its
         // own worktree and branch, and telling a person to remove those would
         // be advice to destroy live work.
-        if let Some(refusal) =
-            leftover_refusal(repo, &task.front.id, &task_branch(&task), Some(&mut *asks))
-        {
+        if let Some(refusal) = leftover_refusal(
+            repo,
+            &task.front.id,
+            &task_branch(&task),
+            &mut reads,
+            Some(&mut *asks),
+        ) {
             bail!("{refusal}");
         }
         if tasks.iter().any(|t: &Task| t.id() == task.id()) {
@@ -1933,14 +1940,81 @@ fn require_group_description(repo: &Repo, tasks: &[Task]) -> Result<()> {
 /// A queue file holds an id under any name, not only `<id>.md`: a copy such
 /// as `dd1 - Copy.md` still says `id: dd1`, and a second task saved under
 /// that id would run beside it. So the queue is read for its ids as well.
-fn existing_task_path(repo: &Repo, id: &str) -> Option<std::path::PathBuf> {
+fn existing_task_path(repo: &Repo, id: &str, reads: &mut LocalReads) -> Option<std::path::PathBuf> {
     for dir in [repo.queue_dir(), repo.archive_dir()] {
         let path = dir.join(format!("{id}.md"));
         if path.exists() {
             return Some(path);
         }
     }
-    queued_id_paths(repo).remove(id)
+    reads.queued(repo).get(id).cloned()
+}
+
+/// What one pass of a submission has read of this checkout, each part on
+/// first use and then kept: the queue folder, the routine names and the local
+/// branches. Without it every task of a batch parsed the whole queue, read
+/// every routine file and ran its own `git show-ref`.
+///
+/// A value lives for one pass and is never handed to another. The unlocked
+/// check, the issue-hook pass and the locked save each make their own, since
+/// a parallel add can write a task or a branch between them. The locked save
+/// makes its own only after every group and task lock is held, the point its
+/// checks read at before this existed, so two adds of one id still cannot
+/// both pass.
+#[derive(Default)]
+struct LocalReads {
+    queued: Option<BTreeMap<String, std::path::PathBuf>>,
+    routines: Option<BTreeSet<String>>,
+    branches: Option<BTreeSet<String>>,
+}
+
+impl LocalReads {
+    /// [`queued_id_paths`], read once.
+    fn queued(&mut self, repo: &Repo) -> &BTreeMap<String, std::path::PathBuf> {
+        self.queued.get_or_insert_with(|| {
+            #[cfg(test)]
+            counted_reads::QUEUE_PARSES.with(|n| n.set(n.get() + 1));
+            queued_id_paths(repo)
+        })
+    }
+
+    /// [`routine_names`], read once.
+    fn routines(&mut self, repo: &Repo) -> &BTreeSet<String> {
+        self.routines.get_or_insert_with(|| routine_names(repo))
+    }
+
+    /// Whether `branch` is a local branch, from one `git for-each-ref`. A
+    /// listing git cannot give reads as no branches, as `git show-ref` failing
+    /// read as no branch.
+    fn has_branch(&mut self, repo: &Repo, branch: &str) -> bool {
+        self.branches
+            .get_or_insert_with(|| {
+                #[cfg(test)]
+                counted_reads::REF_LISTINGS.with(|n| n.set(n.get() + 1));
+                repo.git(&["for-each-ref", "--format=%(refname)", "refs/heads"])
+                    .map(|refs| {
+                        refs.lines()
+                            .filter_map(|name| name.strip_prefix("refs/heads/"))
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .contains(branch)
+    }
+}
+
+/// How often the current thread's [`LocalReads`] parsed the queue folder and
+/// listed refs, for the test that holds a batch to one of each per pass. Per
+/// thread, so tests running side by side count only their own.
+#[cfg(test)]
+mod counted_reads {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static QUEUE_PARSES: Cell<usize> = const { Cell::new(0) };
+        pub(super) static REF_LISTINGS: Cell<usize> = const { Cell::new(0) };
+    }
 }
 
 /// The path of every queue file that parses, by the `id:` it holds. A file
@@ -1984,8 +2058,8 @@ pub(crate) fn routine_file(repo: &Repo, routine: &str) -> Option<std::path::Path
 /// the routine (`nite · implement`). An ordinary task with the id `nite`
 /// would be given the same lane name, and the two would take over each
 /// other's panes.
-fn routine_name_refusal(repo: &Repo, id: &str) -> Option<String> {
-    routine_names(repo).contains(id).then(|| {
+fn routine_name_refusal(repo: &Repo, id: &str, reads: &mut LocalReads) -> Option<String> {
+    reads.routines(repo).contains(id).then(|| {
         format!(
             "task id `{id}` is the name of routine `{id}`, whose copies' lanes are named \
              `{id}{}<step>`. give this task another id; nothing was queued.",
@@ -2014,11 +2088,12 @@ fn leftover_refusal(
     repo: &Repo,
     id: &str,
     branch: &str,
+    reads: &mut LocalReads,
     asks: Option<&mut OriginAsks>,
 ) -> Option<String> {
     let worktree = repo.worktree_root().join(crate::mux::branch_slug(branch));
     let has_worktree = worktree.exists();
-    let has_branch = ref_exists(repo, branch);
+    let has_branch = reads.has_branch(repo, branch);
     if !has_worktree && !has_branch {
         return remote_leftover_refusal(repo, id, branch, asks?);
     }
@@ -2720,8 +2795,11 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
             })?,
         );
     }
+    // Read only now, with every lock held: a listing taken earlier could miss
+    // a parallel add that wrote its file or branch while this one waited.
+    let mut reads = LocalReads::default();
     for task in tasks {
-        if let Some(existing) = existing_task_path(repo, task.id()) {
+        if let Some(existing) = existing_task_path(repo, task.id(), &mut reads) {
             bail!(
                 "task `{}` already exists at {} — nothing was queued",
                 task.id(),
@@ -2731,7 +2809,9 @@ fn save_new_tasks(repo: &Repo, tasks: &[Task]) -> Result<()> {
         // The branch the task will really get: `task/<slug>-<id>` once
         // `issue_tracking.key_in_names` has prefixed it, which `validate_batch`
         // could not know when it ran.
-        if let Some(refusal) = leftover_refusal(repo, task.id(), &task_branch(task), None) {
+        if let Some(refusal) =
+            leftover_refusal(repo, task.id(), &task_branch(task), &mut reads, None)
+        {
             bail!("{refusal}");
         }
     }
@@ -2937,12 +3017,19 @@ fn open_and_prefix_waiting(
     // a submission that listed `origin` before the hook does not list it
     // again, and one whose `origin` did not answer does not wait a second
     // limit. `asks` that nothing has used yet list `origin` here, once.
+    // The hook may have taken a while, so the branches are listed afresh here
+    // rather than reused from validation.
+    let mut reads = LocalReads::default();
     for task in tasks.iter() {
         let branch = task_branch(task);
         let renamed = branch != crate::task::default_branch(task.id());
-        if let Some(refusal) =
-            leftover_refusal(repo, task.id(), &branch, renamed.then_some(&mut *asks))
-        {
+        if let Some(refusal) = leftover_refusal(
+            repo,
+            task.id(),
+            &branch,
+            &mut reads,
+            renamed.then_some(&mut *asks),
+        ) {
             let written_back = write_back_ids(repo, submitted, tasks, &opened.tasks)?;
             let rows = lost_ids_rows(&opened.opened, &written_back);
             if rows.is_empty() {
@@ -14190,9 +14277,56 @@ mod tests {
         std::fs::write(&gh, "#!/bin/sh\necho '[]'\n").unwrap();
         std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let _gh = crate::platform::GhOverride::new(&gh);
-        let refusal = leftover_refusal(&repo, "a", "task/acme-a", Some(&mut asks));
+        let refusal = leftover_refusal(
+            &repo,
+            "a",
+            "task/acme-a",
+            &mut LocalReads::default(),
+            Some(&mut asks),
+        );
         assert!(refusal.is_some_and(|r| r.contains("`origin/task/acme-a`")));
         assert_eq!(origin_calls(&calls), 1, "the renamed branch asked nothing");
+    }
+
+    /// However many tasks a batch holds, the unlocked check and the locked
+    /// save each parse the queue folder once and list the local branches with
+    /// one `git for-each-ref`, rather than once per task.
+    #[test]
+    fn a_batch_reads_the_queue_and_the_refs_once_per_pass() {
+        let (repo, _root_guard) = fixture("batch-local-reads-once");
+        let submitted: Vec<(String, String)> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| {
+                (
+                    format!("{id}.md"),
+                    task_text(id, &format!("group: g{id}\n"), BODY),
+                )
+            })
+            .collect();
+        let counts = || {
+            (
+                counted_reads::QUEUE_PARSES.with(|n| n.get()),
+                counted_reads::REF_LISTINGS.with(|n| n.get()),
+            )
+        };
+        let before = counts();
+
+        let tasks =
+            validate_batch(&repo, &Pipelines::builtin(), Some("plan/demo"), &submitted).unwrap();
+        let validated = counts();
+        assert_eq!(
+            (validated.0 - before.0, validated.1 - before.1),
+            (1, 1),
+            "four tasks, one folder parse and one ref listing"
+        );
+
+        save_new_tasks(&repo, &tasks).unwrap();
+        let saved = counts();
+        assert_eq!(
+            (saved.0 - validated.0, saved.1 - validated.1),
+            (1, 1),
+            "the locked pass reads once too, and afresh"
+        );
     }
 
     /// A task a check of this checkout refuses puts nothing to `origin`: the
