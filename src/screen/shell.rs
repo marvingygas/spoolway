@@ -406,7 +406,7 @@ fn host(
     pipelines: &Pipelines,
     cwd: &Path,
     input: &mut impl PollableRead,
-    out: &mut impl Write,
+    out: &mut (impl Write + Send),
 ) -> Result<()> {
     // Built once and kept across visits, so the board's RECENT ticker and
     // its cursor survive a trip to another tab and back — and so does the

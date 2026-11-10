@@ -117,8 +117,9 @@ pub(crate) const GREEN: &str = "\x1b[32m";
 
 // Drawn only on a pop-up, never on the board: the cyan of its border and
 // title, and the red of its `[esc]` keys, which `screen::overlay` paints as
-// it lays the pop-up over a tab. No board state is either colour, so a
-// pop-up never reads as part of the rows behind it.
+// it lays the pop-up over a tab. Cyan is also the loading spool's, laid over
+// a tab the same way by `screen::spool`. No board state is either colour, so
+// nothing laid over a tab ever reads as part of the rows behind it.
 pub(crate) const CYAN: &str = "\x1b[36m";
 
 pub(crate) const RED: &str = "\x1b[31m";

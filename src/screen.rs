@@ -13,7 +13,8 @@
 //! is what bare `spoolway` opens: the same screens, one per tab, under one
 //! strip, one terminal guard and one quit — and [`dispatcher`] is the
 //! `spoolway dispatch` child its dispatch tab starts and stops. [`picker`] is
-//! the searchable list any of them opens a popup over.
+//! the searchable list any of them opens a popup over, and [`spool`] the
+//! loading spool turned over a tab while a key's work runs.
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
@@ -21,6 +22,7 @@ pub(crate) mod overrides;
 pub(crate) mod pane;
 pub(crate) mod picker;
 pub(crate) mod shell;
+pub(crate) mod spool;
 
 /// One key a screen reads, decoded from however many bytes it took.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1082,6 +1084,18 @@ pub(crate) fn wrap(line: &str, width: usize) -> Vec<String> {
 /// Over a row with no codes, a panel [`paint`] leaves plain is written
 /// exactly as a character-for-character replace would write it.
 pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
+    overlay_painted(frame, panel, paint);
+}
+
+/// [`overlay`], with each row of `panel` drawn in the colours `paint_row`
+/// gives it rather than in [`paint`]'s. For a panel that is not a box, so
+/// [`paint`] would leave it plain, but still has colours of its own: the
+/// loading spool in [`spool`] is the one.
+pub(crate) fn overlay_painted(
+    frame: &mut [String],
+    panel: &[String],
+    paint_row: impl Fn(&[String], usize) -> Vec<Option<&'static str>>,
+) {
     let Some(width) = frame
         .first()
         .map(|line| crate::status::strip_ansi(line).chars().count())
@@ -1096,7 +1110,7 @@ pub(crate) fn overlay(frame: &mut [String], panel: &[String]) {
         let Some(row) = frame.get_mut(y + i) else {
             break;
         };
-        *row = overlay_row(row, line, &paint(panel, i), x);
+        *row = overlay_row(row, line, &paint_row(panel, i), x);
     }
 }
 

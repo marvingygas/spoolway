@@ -6564,7 +6564,7 @@ pub(crate) fn queue_tab(
     cwd: &std::path::Path,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
@@ -6628,7 +6628,7 @@ pub(crate) fn routines_tab(
     cwd: &std::path::Path,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
@@ -6663,7 +6663,7 @@ fn run_screen(
     groups: Vec<Group>,
     routines: Vec<RoutineFolder>,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<ScreenExit> {
     run_screen_from(
         repo,
@@ -6693,7 +6693,7 @@ fn run_screen_from(
     mut state: ScreenState,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<ScreenExit> {
     let (mut groups, mut routines) = lists;
     let routines_dir = repo.routines_dir();
@@ -6964,15 +6964,19 @@ fn run_screen_from(
                 {
                     let nav = nav.clone();
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_routine_queue(
-                        repo,
-                        pipelines,
-                        &base,
-                        &routines,
-                        &nav,
-                        Tracking::Ask,
-                        &mut |_| {},
-                    );
+                    // Under the loading spool: checking and writing a batch
+                    // can take seconds, and nothing else draws meanwhile.
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        begin_routine_queue(
+                            repo,
+                            pipelines,
+                            &base,
+                            &routines,
+                            &nav,
+                            Tracking::Ask,
+                            &mut |_| {},
+                        )
+                    });
                 }
                 // `o`: the menu for whichever row the focused pane
                 // highlights — see `routine_options`. Read here rather than
@@ -7185,7 +7189,8 @@ fn run_screen_from(
             },
             Mode::Browsing => match key {
                 // `enter` validates the selection and writes it straight
-                // through — nothing is drawn in between but the
+                // through — nothing is drawn in between but the loading
+                // spool, while the work runs past its delay, and the
                 // tool-requirements gate and the issue question, when each
                 // has something to ask. A refusal hands back
                 // `Mode::Outcome`; a clean write says what it queued in
@@ -7193,15 +7198,20 @@ fn run_screen_from(
                 // tab's `enter`, not this one's.
                 Key::Enter if !state.selected.is_empty() => {
                     let base = crate::repo::branch_at(cwd)?;
-                    state.mode = begin_submission(
-                        repo,
-                        pipelines,
-                        &base,
-                        &mut groups,
-                        &mut state,
-                        Tracking::Ask,
-                        &mut |_| {},
-                    );
+                    // A batch's checks and writes can take seconds, and
+                    // nothing else draws meanwhile.
+                    let mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        begin_submission(
+                            repo,
+                            pipelines,
+                            &base,
+                            &mut groups,
+                            &mut state,
+                            Tracking::Ask,
+                            &mut |_| {},
+                        )
+                    });
+                    state.mode = mode;
                     known_reading = known_reading.max(reader.started_count());
                 }
                 _ => handle_browse_key(&groups, &mut state, key),
