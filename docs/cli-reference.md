@@ -117,9 +117,11 @@ line. The tab strip's widest row is centred, and every popup stays centred on it
 than the tab breaks between two keys, and each broken row starts one column in. Every row it
 adds comes off the tab's body.
 
-Every popup drawn over a tab has its border and title in cyan. On its key row, every `[enter]`
-key and the word after it are green, and every `[esc]` key and its word are red. The colour
-follows the key, not the word, so `[enter] save` is as green as `[enter] confirm`. Other keys,
+Every popup drawn over a tab has its border and title in grey teal, 256-colour 109, the same
+colour as the dispatch tab's tip row. On its key row, every `[enter]` key and the word after it
+are light mint (256-colour 151), and every `[esc]` key and its word are dusty pink (256-colour
+181). Both pastels are faint on a light terminal background. The colour follows the key, not the
+word, so `[enter] save` is as mint as `[enter] confirm`. Other keys,
 such as `[f] search`, and the popup's body keep the terminal's own colour. The key line under
 each tab is not a popup and stays dim. Prompts printed straight to a terminal, such as
 `spoolway sync`'s, have no colour.

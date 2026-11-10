@@ -1798,8 +1798,8 @@ mod tests {
                 continue;
             }
             // `overlay` paints the popup's left border, so the popup opens
-            // where the first cyan does.
-            let at = row.find(crate::status::CYAN).unwrap();
+            // where the first teal does.
+            let at = row.find(crate::status::TEAL).unwrap();
             popup_rows += 1;
             // The dim before the popup row, if any, is closed before it.
             let before = &row[..at];

@@ -25,6 +25,7 @@ bookkeeping out of them and describe user-visible outcomes.
 
 ### Changed
 - `issue_tracking.ask_to_deactivate` switches off the queue screen's question about which groups to leave untracked. It defaults to `true`, so every project keeps the question until it says otherwise. Set to `false`, `enter` on the pending screen or the routines tab opens every group's tickets with no question; `tracking: off` and `queue add --no-tracking` still leave a group untracked. (#1514)
+- Every popup draws its border and title in the tip row's grey teal instead of cyan, its `[enter]` keys in a light mint instead of green, and its `[esc]` keys in a dusty pink instead of red, so a popup no longer reads louder than the board behind it. The board's own colours are unchanged. (#1535)
 
 ## 0.18.1
 
