@@ -621,8 +621,9 @@ request. `spoolway queue add` also refuses an id whose `task/<id>` branch `origi
 because the new task's push of that branch would be rejected. The message names `origin/task/<id>`
 and its open pull request when `gh` lists one. It gives `git push origin --delete task/<id>`, which
 closes that pull request, and a `git fetch` and `git push` pair that keeps the commits under
-another name. Nothing is queued, pushed, deleted or renamed. `queue add` asks `origin` once per
-branch and gives up after 10 seconds. An `origin` that cannot be asked refuses nothing.
+another name. Nothing is queued, pushed, deleted or renamed. `queue add` lists the branches on
+`origin` once for the whole batch and gives up after 10 seconds. The same listing answers the
+start-branch and base checks. An `origin` that cannot be asked refuses nothing.
 
 ### The stop is yours to work in
 
