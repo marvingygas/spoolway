@@ -270,12 +270,11 @@ says "queue add queues a task when origin cannot be asked" "queued offline" \
   "$SPOOLWAY" queue add --from "$LIVE/offline.md"
 must "origin is back" git remote set-url origin "$ORIGIN_URL"
 
-# An `origin` that hangs on the question. `queue add` asks it whether each
-# task's branch is there, from more than one place per task, and each ask is
-# given up on after ten seconds. A batch of three that paid the limit at every
-# ask would hold the person for over a minute with nothing printed. The first
-# ask that gets no answer is remembered, so the whole batch waits one limit and
-# every task still queues. The transport is the person's own `core.sshCommand`,
+# An `origin` that hangs on the question. `queue add` lists origin's branches
+# once for the whole batch, and that ask is given up on after ten seconds. A
+# batch of three that paid the limit at every check would hold the person for
+# over a minute with nothing printed. The one listing, or its failure, is read
+# by every check, so the batch waits one limit and every task still queues. The transport is the person's own `core.sshCommand`,
 # a script that holds `git ls-remote` and serves everything else.
 for n in 1 2 3; do
   task_doc "$LIVE/slow$n.md" "slow$n" "$BODY" "group: slow$n" "base: plan/live"
