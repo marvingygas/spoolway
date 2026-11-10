@@ -26,6 +26,7 @@
 # covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) moves the task to `hook_failed` with the reason `issue_tracking hook exited N`, fires no `paused` event for it, and `queue list --json` names the state `hook_failed`; the task gains a `## Hook error` section holding the run's last output; `spoolway resume --skip-hook` on a failed `done` hook archives the task without running the hook a second time; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a failed `done` hook back to `done` and a failed `queued` hook back to `queued`
 # covers: an `open` hook still running after 60 seconds is stopped and fails `queue add`, all or nothing, naming the limit; `fetch` has the same limit, and `queued`, `started` and `done` hooks are stopped after 10 minutes (unit-tested in `src/dispatch.rs`) and move the task to `hook_failed` with a problem line the dispatcher prints
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
+# covers: issue_tracking.ask_to_deactivate — set to false, `enter` on the queue tab draws no `deactivate issue tracking for selected groups:` checklist, the hook opens the group's ticket, and the queued popup opens on `hook executed successfully`
 # covers: `started` fires once a task actually leaves `queued` for its entry step, not merely once it is queued — a dependent task's own `started` event only fires once the task it depends on has already reached `done`
 # covers: the shipped github.sh and jira.sh run in bash under `set -eE` with an ERR trap, no `check` branch and no `|| exit $?`; a failing command's trace — command, line, case arm, callers — lands in the hook's own log, which `## Hook error` reads its tail from
 # covers: a task's `labels:` reaches every event with a task behind it as SPOOLWAY_LABELS, comma-joined and empty when the task has none; `queue add` refuses a label holding whitespace or a comma, naming the task and the label
@@ -585,6 +586,26 @@ has "and the result popup says the hook ran" "hook executed successfully" "$ASK_
 has "above the queued list" "╭─ queued " "$ASK_YES"
 lacks "with no ticket rows" "issues created" "$ASK_YES"
 lacks "and the untracked popup carries no success line" "hook executed successfully" "$ASK_N"
+
+# With `issue_tracking.ask_to_deactivate` off, the same `enter` skips the
+# question: the hook opens the group's ticket straight away and the queued
+# popup says it ran, with no checklist frame drawn on the way.
+must "the issue question is switched off" \
+  "$SPOOLWAY" config set issue_tracking.ask_to_deactivate false
+pending_doc asked-off "$BODY" "group: asked-off" \
+  "group_description: one task queued with the question switched off"
+ASK_OFF="$LIVE/ask-off.out"
+on_screen ' \r' "$ASK_OFF"; sed -i 's/\x1b\[[0-9;]*m//g' "$ASK_OFF"
+lacks "enter with the question off draws no checklist" \
+  "deactivate issue tracking for selected groups:" "$ASK_OFF"
+works "and queues the group" test -f "$SPOOLWAY_PROJECT_HOME/queue/asked-off.md"
+works "after calling the hook for it" test -e "$TRACKING/task-file.asked-off"
+has "whose ticket landed on the task" "ticket: acme/app#" \
+  "$SPOOLWAY_PROJECT_HOME/queue/asked-off.md"
+has "and the queued popup opens on the hook's success line" \
+  "hook executed successfully" "$ASK_OFF"
+must "the issue question is switched back on" \
+  "$SPOOLWAY" config set issue_tracking.ask_to_deactivate true
 
 # -------------------------------------------- tracking off: no hook, ever
 # Ticking a group above proved the hook never runs at `open`. This is this task's own

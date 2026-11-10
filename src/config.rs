@@ -3770,7 +3770,11 @@ mod tests {
             .take_while(|line| !line.is_empty())
             .filter(|line| !line.starts_with('#'))
             .collect();
-        assert_eq!(table.last(), Some(&"ask_to_deactivate = true"), "{rendered}");
+        assert_eq!(
+            table.last(),
+            Some(&"ask_to_deactivate = true"),
+            "{rendered}"
+        );
     }
 
     /// A whole `[pipeline_gen]` table, all six keys it ever carried — the

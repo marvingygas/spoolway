@@ -4812,7 +4812,8 @@ enum Mode {
     /// one left untracked for this run — see [`issue_question`] and
     /// [`IssueChecklist`]. A ticket on a public tracker is seen by other
     /// people and hard to take back, so nothing reaches the hook until a
-    /// person confirms here. `enter` runs `then` again, opening the
+    /// person confirms here, unless the project switched the question off
+    /// with `issue_tracking.ask_to_deactivate`. `enter` runs `then` again, opening the
     /// tickets of every group left unticked and queuing the ticked ones
     /// with `tracking: off`, and `esc` goes back having queued nothing.
     IssueQuestion {
@@ -5514,7 +5515,8 @@ impl Resume {
 enum Tracking {
     /// Ask first: an unmet requirement opens [`Mode::ToolGate`], and with
     /// issue tracking on [`Mode::IssueQuestion`] asks before any ticket is
-    /// opened. Nothing is queued until each is answered.
+    /// opened, unless `issue_tracking.ask_to_deactivate` is off. Nothing is
+    /// queued until each is answered.
     Ask,
     /// The tool gate's answer: queue the whole batch with issue tracking
     /// switched off.
