@@ -21,11 +21,51 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
-## Unreleased
+## 0.19.0
 
-### Changed
-- `issue_tracking.ask_to_deactivate` switches off the queue screen's question about which groups to leave untracked. It defaults to `true`, so every project keeps the question until it says otherwise. Set to `false`, `enter` on the pending screen or the routines tab opens every group's tickets with no question; `tracking: off` and `queue add --no-tracking` still leave a group untracked. (#1514)
-- Every popup draws its border and title in the tip row's grey teal instead of cyan, its `[enter]` keys in a light mint instead of green, and its `[esc]` keys in a dusty pink instead of red, so a popup no longer reads louder than the board behind it. The board's own colours are unchanged. (#1535)
+### Highlights
+- The dispatch tab ends on a tip. One tip at a time sits on the box's last row, after its section's label in dim grey, and changes every 30 seconds. The 115 tips are dealt from a shuffled deck, so each one shows once a round, and `dispatch.tips = false` turns the row off. (#1508, #1509, #1510, #1517, #1526)
+- A loading spool shows when a key's work runs longer than 200 ms. The spoolway mark turns in bright white over the dimmed tab on the queue tab's and routines tab's `enter`, the board's `o`, `r` and `k`, every options menu, picker save and confirm, the overrides tab's writes, the eval tab's export and every tab switch, where the tab froze before. (#1527, #1530, #1531, #1537)
+- A popup is the one bright thing on screen. The tab behind it is drawn dim, its border and title are grey teal, its `[enter]` keys light mint and its `[esc]` keys dusty pink. A clean `queued` popup closes on its own after 2 seconds, and keys reach the screen beneath it meanwhile. (#1498, #1500, #1507, #1538)
+- `queue add`, the queue screen and routines refuse a task whose `task/<id>` branch `origin` still has, before it runs, where the whole task ran and then failed at its push. The refusal names the branch and its open pull request and gives the commands that drop or keep it. A batch asks `origin` once, so it waits at most one 10-second limit however many tasks it holds. (#1484, #1528, #1529)
+- A task whose pipeline was renamed or deleted no longer stops the dispatcher from starting. That one task is held with a line that says how to fix its `pipeline:`, and every other task runs. (#1483)
+
+### Breaking changes and migration
+- `spoolway sync` adds `dispatch.tips` and `issue_tracking.ask_to_deactivate` to `config.toml`, both `true`, and `spoolway doctor` reports the file as behind until it runs. Run `spoolway sync` in each project and commit what it writes. Nothing else changes in a project 0.18.1 wrote. (#1510, #1525)
+- `spoolway pipeline check` fails a prompt that tells its lane to run a command spoolway refuses in a lane, such as `spoolway restart`, `spoolway queue add --from`, `spoolway config set` or `spoolway resume` on any step but `blocked`. A prompt that names one only to forbid it fails too. Describe the action in words instead, such as "do not restart the step". The 0.18.1 to 0.19.0 section of `docs/migrations.md` lists every command. (#1480)
+- A lane in home mode is refused `spoolway config set`, `config override --set`, `pipeline copy` and `override drop`, as a repo-mode lane already was, and so is a repo-mode lane that borrows the main checkout. Run those commands from your own checkout. (#1482)
+- `spoolway queue add`, the queue screen and routines refuse a task whose `task/<id>` branch `origin` still has. Drop the branch with `git push origin --delete task/<id>`, which also closes its pull request, or keep its commits under another name with the `git fetch` and `git push` pair the refusal prints, then queue the task again. (#1484)
+- A clean `queued` popup has no key row and closes on its own after 2 seconds, and every key pressed while it is up acts on the screen beneath it. A pty script that pressed `enter` to close it waits for it to close instead, and one that matched `[enter] confirm` on it no longer finds that pair. The popup that lists left-out tasks and both `not queued` popups still close on `enter`. (#1500)
+- Popups are drawn in colour and the screen behind an open popup is drawn dim, so a popup's text arrives split by colour codes. A pty script that matched popup or board text in raw output strips the colour codes first. (#1498, #1507, #1538)
+- The dispatch tab's box ends on a tip row under one blank row, so RECENT has one row fewer. A pty script that read the box's last rows expects the tip row, or sets `dispatch.tips = false` to draw the board as before. (#1509, #1510, #1526)
+- The tab strip puts four columns between labels when they do not all fit at eight, and breaks onto more rows between labels when one row still does not fit. Every extra strip row comes off each tab's body. A pty script narrower than the strip at an eight-column gap matches the closer spacing, or widens its pty. (#1499)
+- Once the loading spool has shown, every key typed while the work ran is thrown away. A pty script that typed ahead of slow work waits for the next screen before it types. (#1527, #1530, #1531)
+- A task that names a pipeline that does not exist reads `held` on the board and in `spoolway queue list`, where it read `unknown`, and NEXT reads ``<name> is gone: set `pipeline:` in the task file (board: open task) to one that exists, then resume it. Branch and commits kept``. A script that matched the old state or line matches the new one. (#1483)
+
+### Features
+- `issue_tracking.ask_to_deactivate = false` switches off the queue screen's question about which groups to leave untracked. `enter` on the pending screen or the routines tab then opens every group's tickets, and `tracking: off` and `queue add --no-tracking` still leave a group untracked. (#1525)
+- The board's `focus` switches herdr to the task's workspace and tab before it zooms the pane, where it zoomed the pane in a tab you could not see. A refused herdr call is named in the popup. (#1497)
+- The tip list holds 115 tips under 12 labelled sections, each naming what a feature does. (#1517, #1526)
+
+### Fixes
+- A `post-checkout` git hook that fails now fails the cut and removes the checkout and branch the cut made, so the next attempt runs the hook again. The task used to carry on as if cut, and the hook never ran again. (#1478)
+- A task paused at its own `gate_at:` keeps that `gate_at:` when it is unqueued, so its redo pauses at the same step. (#1479)
+- Cleanup keeps a finished task's branch while a pending task names it in `depends_on`, where only queued tasks counted. (#1481)
+- A dependent of a task whose pull request merged is cut from the branch the work landed in, following a chain of merges, where it was cut from a branch GitHub had deleted. (#1485)
+- The tab strip never splits a label across two rows, and a wrapped strip no longer pushes a tab's frame past the bottom of the pane. (#1499)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- spoolway builds against `toml` 1.2.0, `toml_edit` 0.25.18 and `sysinfo` 0.40.1. (#1486)
+- The upgrade suite runs a project the released 0.18.1 binary wrote through the new binary. (#1477)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.19.0`, run it without installing via `npx spoolway@0.19.0`, install it with `brew install marvingygas/tap/spoolway`, or download it with `curl -fsSL https://github.com/marvingygas/spoolway/releases/download/v0.19.0/install.sh | sh`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl, darwin-arm64 and darwin-x64; the GitHub release carries four bare executables, `install.sh` and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, rewrite any prompt that names a command spoolway refuses in a lane, drop or rename a leftover `task/<id>` branch on `origin` before queueing its task again, update pty scripts that close the clean `queued` popup with `enter`, match colour-free popup text, read the dispatch tab's last rows, match the strip on a narrow pty, type ahead of slow work, or match `unknown` for a task on a missing pipeline, and restart the dispatcher. The 0.18.1 to 0.19.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.19.0
 
 ## 0.18.1
 
