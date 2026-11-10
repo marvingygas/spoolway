@@ -509,6 +509,32 @@ works "the spool frames come before the queued popup" bash -c '
 works "and the group was queued" test -e "$SPOOLWAY_PROJECT_HOME/queue/slow-spool.md"
 rm -f "$SPOOLWAY_PROJECT_HOME/pending/slow-spool.md"
 
+# Switching tabs turns the same spool over the tab being left until the next tab
+# draws its first frame. Opening the queue tab runs git, so with the slow `git`
+# above the switch from the dispatch tab takes over 200 ms. The spool is cyan
+# and is read only after the first frame, the dispatch tab's own, since the
+# board's lockup spells the mark too. The next tab's frame must come after the
+# last spool frame, and the key typed meanwhile is dropped, so `3` never lands.
+# Opening the queue tab runs only the cheap branch lookup and one `rev-parse`, so
+# this `git` sleeps on every call, the branch lookup too.
+mkdir -p "$LIVE/slowall"
+{
+  echo '#!/usr/bin/env bash'
+  echo "if [ -e '$LIVE/slow' ]; then sleep 0.3; fi"
+  echo "exec '$(command -v git)' \"\$@\""
+} >"$LIVE/slowall/git"
+chmod +x "$LIVE/slowall/git"
+SWITCH="$LIVE/slow-switch.txt"
+works "a slow tab switch ends when its keys run out" \
+  script -qec "stty cols 100 rows 30; { sleep 1.5; touch '$LIVE/slow'; printf 2; sleep 0.1; printf 3; sleep 4; } | PATH='$LIVE/slowall':\$PATH '$SPOOLWAY'" "$SWITCH"
+rm -f "$LIVE/slow"
+awk 'BEGIN { RS = "\033\\[\\?2026h\033\\[H" } NR > 2' "$SWITCH" >"$LIVE/switch-frames.raw"
+has "a slow tab switch draws the spool's frame A in cyan" "${CYAN}▀█▀██▀" "$LIVE/switch-frames.raw"
+works "and a tab frame is drawn after the last spool frame" awk -v c="${CYAN}▀" '
+  BEGIN { RS = "\033\\[\\?2026h\033\\[H" }
+  NR > 2 { if (index($0, c)) last = NR; n = NR }
+  END { exit !(last && n > last) }' "$SWITCH"
+
 # A failed task hook is named once, when a dispatcher is asked for, and never
 # on the board. `billing-export` is queued above, so a non-zero `.exit` for
 # its `started` hook under `tracking/` is a failure the popup has to name
