@@ -344,11 +344,13 @@ impl Default for Config {
 /// one of them has nowhere else to say so.
 ///
 /// The defaults are "no issue tracking configured, but ready once it is":
-/// `hook` and `project_key` blank, `key_in_names` true. A blank `hook` runs
-/// nothing and changes nothing about a task's four events or about `queue
-/// add`'s generated names, whatever `key_in_names` holds — so the default
-/// being on costs a project with no tracker nothing; it only matters once a
-/// hook actually answers a `slug=` line.
+/// `hook` and `project_key` blank, `key_in_names` and `ask_to_deactivate`
+/// true. A blank `hook` runs nothing and changes nothing about a task's four
+/// events or about `queue add`'s generated names, whatever `key_in_names`
+/// holds — so the default being on costs a project with no tracker nothing;
+/// it only matters once a hook actually answers a `slug=` line. Nor does the
+/// queue screen ask its issue question with no hook, whatever
+/// `ask_to_deactivate` holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IssueTrackingConfig {
@@ -376,6 +378,14 @@ pub struct IssueTrackingConfig {
     /// no hook configured, or a blank `hook`, this changes nothing: there is
     /// no `slug=` line to prefix names with either way.
     pub key_in_names: bool,
+
+    /// Whether `enter` on the queue screen asks which groups to leave
+    /// untracked before the hook opens their tickets. On by default, so a
+    /// project that never names it keeps the question. Off, the pending
+    /// screen and the routines tab skip it and open every group's tickets, as
+    /// if `enter` had been pressed with nothing ticked; a group is then left
+    /// untracked only by `tracking: off` or `queue add --no-tracking`.
+    pub ask_to_deactivate: bool,
 }
 
 impl Default for IssueTrackingConfig {
@@ -384,6 +394,7 @@ impl Default for IssueTrackingConfig {
             hook: String::new(),
             project_key: String::new(),
             key_in_names: true,
+            ask_to_deactivate: true,
         }
     }
 }
@@ -3735,6 +3746,31 @@ mod tests {
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert!(notices[0].contains("issue_tracking.on_fail"), "{notices:?}");
         assert!(notices[0].contains("spoolway sync"), "{notices:?}");
+    }
+
+    /// An `[issue_tracking]` table written before `ask_to_deactivate`
+    /// existed loads with the question on, and a fresh config writes the key
+    /// on as the table's last line.
+    #[test]
+    fn ask_to_deactivate_defaults_on_and_renders_last_in_its_table() {
+        let dir = crate::scratch::root("config-ask-to-deactivate-default");
+        std::fs::create_dir_all(dir.join(STATE_DIR)).unwrap();
+        std::fs::write(
+            Config::path_in(&dir),
+            "[issue_tracking]\nhook = \"github.sh\"\nproject_key = \"owner/repo\"\n\
+             key_in_names = true\n",
+        )
+        .unwrap();
+        assert!(Config::load(&dir).unwrap().issue_tracking.ask_to_deactivate);
+
+        let rendered = Config::default().render().unwrap();
+        let table: Vec<&str> = rendered
+            .lines()
+            .skip_while(|line| *line != "[issue_tracking]")
+            .take_while(|line| !line.is_empty())
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(table.last(), Some(&"ask_to_deactivate = true"), "{rendered}");
     }
 
     /// A whole `[pipeline_gen]` table, all six keys it ever carried — the

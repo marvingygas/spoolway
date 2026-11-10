@@ -5466,6 +5466,7 @@ mod tests {
             hook: "jira.sh".into(),
             project_key: "PROJ".into(),
             key_in_names: true,
+            ask_to_deactivate: true,
         };
         let findings = issue_tracking_checks(&repo, &on);
         let gap = findings.iter().find_map(|f| match f {

@@ -918,6 +918,19 @@ mod tests {
         assert_eq!(config.unattended.blocked_agent, "changed");
     }
 
+    /// `config set issue_tracking.ask_to_deactivate false` writes the key
+    /// into `config.toml`, and the project loads with the question off.
+    #[test]
+    fn config_set_writes_ask_to_deactivate() {
+        let (repo, _root_guard) =
+            crate::commands::testutil::fixture("config-set-ask-to-deactivate");
+        config_set(&repo, "issue_tracking.ask_to_deactivate", "false").unwrap();
+        let text = std::fs::read_to_string(Config::path_in(&repo.root)).unwrap();
+        assert!(text.contains("ask_to_deactivate = false"), "{text}");
+        let config = Config::load(&repo.root).unwrap();
+        assert!(!config.issue_tracking.ask_to_deactivate);
+    }
+
     /// `config list` runs both ways, prints `key = value` rows, and names
     /// every scalar key that resolves to a value today —
     /// `issue_tracking.key_in_names` (the criterion the feature has to meet),

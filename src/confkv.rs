@@ -182,6 +182,12 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Put the issue key in branch and worktree names.",
     },
     Reference {
+        key: "issue_tracking.ask_to_deactivate",
+        values: "true, false",
+        sentence: "Ask which groups to leave untracked before the queue screen opens \
+                    tickets. false = open every group's tickets without asking.",
+    },
+    Reference {
         key: "agents.<profile>.kind",
         values: "claude, codex, pi",
         sentence: "Which agent program this profile starts.",
