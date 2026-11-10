@@ -5656,7 +5656,7 @@ pub(crate) fn tab(
     pipelines: &Pipelines,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     run_screen(repo, pipelines, &bare_args(), writer, input, out)
 }
@@ -5694,7 +5694,7 @@ fn run_screen(
     args: &EvalArgs,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     run_screen_with(
         repo,
@@ -5731,7 +5731,7 @@ fn run_screen_with(
     mut start: impl FnMut(&Filters) -> Pending,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl std::io::Write,
+    out: &mut (impl std::io::Write + Send),
 ) -> Result<crate::screen::shell::Leave> {
     use crate::screen::shell::Leave;
 
@@ -5984,8 +5984,15 @@ fn run_screen_with(
                         Key::Char('t') if state.table != TableKind::Trials => {
                             state.filters.flip_figures();
                         }
+                        // Under the loading spool: the export builds every
+                        // row and writes the file before the notice draws.
                         Key::Char('e') if state.table != TableKind::Trials => {
-                            match export(repo, loaded, &state.filters, pipelines, state.table) {
+                            let (filters, table) = (&state.filters, state.table);
+                            let exported =
+                                crate::screen::spool::under_spool(writer, out, input, || {
+                                    export(repo, loaded, filters, pipelines, table)
+                                });
+                            match exported {
                                 Ok((path, rows)) => {
                                     state.mode = Mode::Notice {
                                         title: "exported",
@@ -10580,6 +10587,36 @@ mod screen_tests {
             assert!(lines[2].starts_with(&format!("{label},")), "{body}");
             assert_eq!(lines.len(), 3, "one header, one row, one closing line");
         }
+    }
+
+    /// `e` exports under the loading spool: held back until the spool has
+    /// drawn, the file is still written. The load runs behind eval's own
+    /// `loading…` box, never under the spool, so `e` is the one key that
+    /// takes the hold. Without the export going under the spool, nothing is
+    /// drawn and the hold is never taken.
+    #[test]
+    fn e_turns_the_spool_while_it_exports() {
+        use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
+
+        let (repo, _root_guard) = fixture_with_one_run("screen-export-spool");
+        let (mut out, seen) = watched();
+        hold_next_work(move || {
+            assert!(seen.recv_timeout(BACKSTOP).is_ok(), "no spool");
+        });
+        run_screen_with(
+            &repo,
+            &Pipelines::builtin(),
+            &no_args(),
+            |filters| load_now(&repo, filters),
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut keys("e"),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(out.drew_spool());
+        let dir = repo.root.join(".spoolway").join("evals");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "one export");
     }
 
     /// `e` on the directory table writes its own columns in the drawn view,

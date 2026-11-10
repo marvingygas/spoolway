@@ -268,16 +268,52 @@ impl State {
     }
 
     /// Whether `w` opens the overrides folder now: on every section with
-    /// nothing open over its list, and in the prompts section's popups,
-    /// which it closes first. Anywhere a field or a search row has the keys,
-    /// `w` is a letter typed into it.
-    fn take_w(&mut self) -> bool {
+    /// nothing open over its list, and in the prompts section's popups.
+    /// Anywhere a field or a search row has the keys, `w` is a letter typed
+    /// into it.
+    fn takes_w(&self) -> bool {
         matches!(self.mode, Mode::Browsing)
             && match self.section {
                 Section::Config => true,
                 Section::Pipeline => self.pipeline.at_rest(),
-                Section::Prompts => self.prompts.take_w(),
+                Section::Prompts => self.prompts.takes_w(),
                 Section::Active => self.layer.at_rest(),
+            }
+    }
+
+    /// [`State::takes_w`], closing the prompts section's popup first when
+    /// `w` was pressed over one.
+    fn take_w(&mut self) -> bool {
+        let takes = self.takes_w();
+        if takes && self.section == Section::Prompts {
+            self.prompts.take_w();
+        }
+        takes
+    }
+
+    /// Whether `key` does work [`tab`] turns the loading spool for, read the
+    /// way [`handle_key`] routes it: `w`, which hands the folder to another
+    /// program, and every `enter` that writes or deletes in the layer or
+    /// hands a file to an editor. Moves, `f`, typing into a field or a
+    /// search, and `enter` that only opens a popup or closes one read
+    /// nothing, so they never show it and never lose a key typed after them.
+    fn works(&self, key: Key) -> bool {
+        if key == Key::Char('w') && self.takes_w() {
+            return true;
+        }
+        if matches!(self.mode, Mode::Browsing) {
+            match self.section {
+                Section::Pipeline => return self.pipeline.works(key),
+                Section::Prompts => return self.prompts.works(key),
+                Section::Active => return self.layer.works(key),
+                Section::Config => {}
+            }
+        }
+        key == Key::Enter
+            && match &self.mode {
+                Mode::Set { key: name, value } => !name.is_empty() && !value.trim().is_empty(),
+                Mode::Delete(_) => true,
+                _ => false,
             }
     }
 
@@ -433,7 +469,7 @@ pub(crate) fn tab(
     repo: &Repo,
     writer: &mut super::frame_writer::FrameWriter,
     input: &mut impl PollableRead,
-    out: &mut impl Write,
+    out: &mut (impl Write + Send),
 ) -> Result<Leave> {
     let mut state = State::new(repo);
     loop {
@@ -463,7 +499,14 @@ pub(crate) fn tab(
         {
             return Ok(leave);
         }
-        handle_key(repo, &mut state, key);
+        // A write, a delete or a hand-off goes under the loading spool, so
+        // the tab does not sit frozen on its last frame while it runs.
+        match state.works(key) {
+            true => {
+                super::spool::under_spool(writer, out, input, || handle_key(repo, &mut state, key))
+            }
+            false => handle_key(repo, &mut state, key),
+        }
     }
 }
 
@@ -1417,6 +1460,76 @@ mod tests {
             "{marker}"
         );
         assert!(drawn.iter().any(|l| l.starts_with("│ > ")), "{drawn:#?}");
+    }
+
+    // Setting a config key writes under the loading spool: held back until
+    // the spool has drawn, the write still lands. Opening the field and
+    // typing into it are not put under it, so the save is the one key that
+    // takes the hold. Without the save going under the spool, nothing is
+    // drawn and the hold is never taken.
+    #[test]
+    fn setting_a_key_turns_the_spool_while_it_writes() {
+        use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
+
+        let (repo, _guard) = project("set-under-spool");
+        let (mut out, seen) = watched();
+        hold_next_work(move || {
+            assert!(seen.recv_timeout(BACKSTOP).is_ok(), "no spool");
+        });
+        let mut input = std::io::Cursor::new(b"\r7\r".to_vec());
+        tab(
+            &repo,
+            &mut super::super::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(out.drew_spool());
+        assert_eq!(State::new(&repo).active, 1, "{}", layer(&repo));
+    }
+
+    // Which keys go under the spool: `w`, and `enter` where it writes,
+    // deletes or hands a file over. Moves, `f`, typing into a field or a
+    // search, and an `enter` that only opens a field never do.
+    #[test]
+    fn only_writes_deletes_and_hand_offs_go_under_the_spool() {
+        let (repo, _guard) = project("works");
+        let mut state = State::new(&repo);
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right, Key::Enter] {
+            assert!(!state.works(key), "{key:?} on the config list");
+        }
+        assert!(!state.works(Key::Char('f')));
+        assert!(state.works(Key::Char('w')));
+
+        state.mode = Mode::Search;
+        for key in [Key::Char('w'), Key::Char('a'), Key::Up, Key::Enter] {
+            assert!(!state.works(key), "{key:?} in the search row");
+        }
+
+        state.mode = Mode::Set {
+            key: "dispatch.lane_quiet".into(),
+            value: " ".into(),
+        };
+        assert!(!state.works(Key::Enter), "an empty field writes nothing");
+        state.mode = Mode::Set {
+            key: "dispatch.lane_quiet".into(),
+            value: "5m".into(),
+        };
+        assert!(state.works(Key::Enter));
+        for key in [Key::Char('w'), Key::Char('5'), Key::Esc] {
+            assert!(!state.works(key), "{key:?} in a field");
+        }
+
+        state.mode = Mode::Browsing;
+        state.section = Section::Prompts;
+        assert!(state.works(Key::Enter), "enter copies a prompt");
+        assert!(!state.works(Key::Down));
+        state.section = Section::Pipeline;
+        assert!(!state.works(Key::Enter), "enter opens the picking list");
+        state.section = Section::Active;
+        assert!(!state.works(Key::Enter), "enter does nothing on the list");
+        assert!(!state.works(Key::Char(' ')));
     }
 
     // `enter` on a key opens the field filled with the value in use now,

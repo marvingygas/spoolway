@@ -217,6 +217,8 @@ pub(crate) fn under_spool<T>(
         // closure, which stops the drawing thread before the scope joins it.
         let stop = stop;
         let turning = scope.spawn(move || turn(writer, out, last, stopped, start));
+        #[cfg(test)]
+        testutil::hold_this_work();
         let result = work();
         let _ = stop.send(());
         // A drawing thread that panicked drew no spool anyone needs to
@@ -463,6 +465,32 @@ pub(crate) mod testutil {
     /// How long a work waits for the spool before it gives up on it. Only a
     /// backstop, so a broken spool fails the test rather than hanging it.
     pub(crate) const BACKSTOP: Duration = Duration::from_secs(10);
+
+    thread_local! {
+        /// What the next [`under_spool`] on this thread waits on before its
+        /// work starts — see [`hold_next_work`].
+        static HOLD_NEXT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Make the next work [`under_spool`] runs on this thread wait on
+    /// `hold` first, with the spool already turning, and only that one.
+    ///
+    /// For a test of a key a screen puts under the spool: the screen runs
+    /// its own work, and no file write or read of it can be made to take
+    /// [`DELAY`] from a test. Handing `hold` a wait on [`watched`]'s
+    /// channel keeps the work back until the spool has drawn, however
+    /// loaded the machine is. A key the screen does not put under the
+    /// spool never reaches here, so nothing draws and the test fails.
+    pub(crate) fn hold_next_work(hold: impl FnOnce() + 'static) {
+        HOLD_NEXT.with(|next| *next.borrow_mut() = Some(Box::new(hold)));
+    }
+
+    /// Run and clear what [`hold_next_work`] left, if anything.
+    pub(super) fn hold_this_work() {
+        if let Some(hold) = HOLD_NEXT.with(|next| next.borrow_mut().take()) {
+            hold();
+        }
+    }
 
     /// `drawn`, what a terminal was sent, cut into the frames written to it,
     /// each with its start code taken off and the spool's left out.

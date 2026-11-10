@@ -530,6 +530,14 @@ impl PipelineSection {
         matches!(self.view, View::Fields)
     }
 
+    /// Whether `key` writes the layer: `enter` on a value field that holds
+    /// something. The tab turns the loading spool for it, and for no other
+    /// key here.
+    pub(super) fn works(&self, key: Key) -> bool {
+        key == Key::Enter
+            && matches!(&self.view, View::Value { value, .. } if !value.trim().is_empty())
+    }
+
     /// The fields the search leaves, in list order.
     fn fields(&self) -> Vec<Field> {
         let query = self.filter.to_lowercase();

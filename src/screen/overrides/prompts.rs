@@ -99,18 +99,27 @@ impl PromptsSection {
     }
 
     /// Whether `w` opens the overrides folder now: over the list, or in
-    /// either popup `enter` opens, which it closes first. Not while a query
-    /// is typed, where `w` is a letter of it, nor over a failed write's
-    /// notice, which only `enter` closes.
+    /// either popup `enter` opens. Not while a query is typed, where `w` is
+    /// a letter of it, nor over a failed write's notice, which only `enter`
+    /// closes.
+    pub(super) fn takes_w(&self) -> bool {
+        !matches!(self.view, View::Search | View::Failed(_))
+    }
+
+    /// [`PromptsSection::takes_w`], closing the popup `w` was pressed over
+    /// first when it does.
     pub(super) fn take_w(&mut self) -> bool {
-        match self.view {
-            View::List => true,
-            View::Wrote(_) | View::Exists(_) => {
-                self.view = View::List;
-                true
-            }
-            View::Search | View::Failed(_) => false,
+        let takes = self.takes_w();
+        if takes {
+            self.view = View::List;
         }
+        takes
+    }
+
+    /// Whether `key` copies a prompt into the layer: `enter` over the list.
+    /// The tab turns the loading spool for it, and for no other key here.
+    pub(super) fn works(&self, key: Key) -> bool {
+        key == Key::Enter && matches!(self.view, View::List)
     }
 
     /// The prompts the search leaves, in list order. A prompt matches on its
