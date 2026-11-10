@@ -154,7 +154,7 @@ box_last_row() {
 }
 # `$1` names the board, `$2` the frame it was drawn to.
 ends_on_a_tip() {
-  local row tip='^ *│ tip: [a-z][a-z ]* · [^ ]'
+  local row tip='^ *│ tip: [a-z][a-z0-9 -]* · [^ ]'
   row=$(box_last_row "$2")
   if [[ "$row" =~ $tip ]]; then ok "the $1 board's box ends on a tip"
   else bad "the $1 board's box ends on a tip (its last row: '$row')"; fi
