@@ -47,8 +47,8 @@ An agent can report four outcomes:
 |---|---|
 | `pass` | Moves to the step's `on_pass` destination. |
 | `fail` | Moves to `on_fail` or to `blocked` if none is set. |
-| `block` | Moves to `blocked`, usually handled by a bigger model you configure. |
-| `pause` | Stops the pipeline. It won't resume without you. Only gates or the blocked agent can pause a pipeline. |
+| `block` | Moves to `blocked`, for you or, in unattended runs, a bigger model you configure. |
+| `pause` | Parks the task until you resume it. Only the `blocked` step can report it. |
 
 A gate can pause a task for a person after a step reports.
 
@@ -58,8 +58,8 @@ A gate can pause a task for a person after a step reports.
 - **Define agents or commands.** Each step names its own agent and model.
 - **A worktree per task.** Every task works on its own branch in its own checkout.
   Made visible through herdr.
-- **Session context configuration.** Set thresholds for when to re-prompt a session,
-  auto-compact, or when to escalate to blocked state.
+- **Session context configuration.** Set thresholds for when to start a fresh session,
+  auto-compact, or stop a lane.
 - **Unattended runs.** When a task blocks, a configurable prompt takes over.
   It pauses the task for you only when it cannot resolve the issue.
 - **Trials.** Fork a group into one full copy per pipeline you tick, and compare
@@ -75,7 +75,7 @@ spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
 
 | Method | Command | Notes |
 |---|---|---|
-| herdr plugin | `herdr plugin install marvingygas/spoolway` | Not needed to run in herdr, any install works. |
+| herdr plugin | `herdr plugin install marvingygas/spoolway` | Not needed to run in herdr, any install works. Does not put `spoolway` on `PATH`. |
 | npm | `npm install -g spoolway` | Small wrapper for the binary. |
 | Homebrew | `brew install marvingygas/tap/spoolway` | macOS and Linux (x64, arm64). |
 | Standalone | `curl -fsSL https://github.com/marvingygas/spoolway/releases/latest/download/install.sh \| sh` | Installs to `~/.local/bin`. Updated manually. |
@@ -85,7 +85,7 @@ spoolway runs on Linux (x64, arm64, musl) and macOS (Apple Silicon, Intel).
 
 | Command | What it does |
 |---|---|
-| `spoolway update` | Installs a newer release. |
+| `spoolway update` | Upgrades an npm or Homebrew install to the newest release. |
 | `spoolway sync` | Run in each project to apply skill or config updates. |
 | `spoolway whats-new` | Prints the release notes offline. |
 
@@ -120,15 +120,15 @@ See **[Planning](docs/planning.md)**. This step is optional.
 ### 3. Create queueable tasks
 
 Use `/spoolway-tasks` to cut an agreed plan or any other defined scope into Markdown tasks.
-It assigns each task to a suitable pipeline and writes the tasks to
-`~/.spoolway/<label>-<id>/pending/`. You can create specialized pipelines for different kinds
+It assigns each task to a suitable pipeline and writes the tasks to the project's `pending/`
+folder under `~/.spoolway/`. You can create specialized pipelines for different kinds
 of work. See **[Tasks](docs/tasks.md)**.
 
 ### 4. Queue
 
 `spoolway` opens on the dispatch tab. `2` from there opens the queue tab, which groups pending
-tasks. Select a group and press `enter` to queue it. The tab strip numbers dispatch, queue,
-routines, overrides and eval from `1` to `5`, and each tab's digit opens it.
+tasks. Tick a group with `space` and press `enter` to queue it. Each tab is numbered in the
+tab strip, and its digit opens it.
 
 <img src="docs/screenshots/readme/queue.png" alt="the queue tab" width="100%">
 
@@ -154,6 +154,8 @@ feedback loop that enables improvement of your workflows over time.
 
 ```yaml
 # .spoolway/pipelines/default.yml
+description: One unit of work, start to finish.
+
 steps:
   - id: implement
     description: Write the code to satisfy the task's acceptance criteria.
@@ -168,7 +170,7 @@ steps:
     description: Check the diff against the acceptance criteria and project standards.
     agent: claude
     prompt: reviewer
-    model: claude-opus-5
+    model: claude-opus-5-5
     effort: high
     session: true
     on_pass: document
@@ -185,7 +187,7 @@ steps:
     description: Push the branch and open its pull request.
     agent: claude
     prompt: create-pr
-    model: claude-opus-5
+    model: claude-opus-5-5
     on_pass: done
 ```
 
@@ -198,12 +200,12 @@ things on your own machine first. There are two ways:
 
 ### Overrides
 
-Apply changes that only affect you. An override patches a tracked pipeline, prompt or config value. It lives in `~/.spoolway/<project>/overrides/`. Use it to apply changes for making your own setup compatible (e.g. use your local LLM to replace certain steps).
+Apply changes that only affect you. An override changes a tracked pipeline, prompt or config value. It lives in `~/.spoolway/<label>-<id>/overrides/`. Use it to apply changes for making your own setup compatible (e.g. use your local LLM to replace certain steps).
 
 ### Private pipelines
 
 A private pipeline is a whole new pipeline that only your machine sees. It lives in
-`~/.spoolway/<project>/local/` with its own prompts and task skeleton. Use this to copy pipelines or prompts to try something new without having to update the repository.
+`~/.spoolway/<label>-<id>/local/` with its own prompts and task skeleton. Use this to copy pipelines or prompts to try something new without having to update the repository.
 
 Tip: the `/spoolway-config` skill activates whenever you want to change something in the spoolway config.
 
@@ -215,21 +217,23 @@ See **[The overrides layer](docs/configuration.md#the-overrides-layer)** and
 A routine is a saved task or group of tasks that you can queue again. It lives in
 `.spoolway/routines/`.
 On the queue tab, press `o` on a group and pick `save as routine` to save it there. The
-routines tab lists what is saved. Select a routine and press `enter` to queue it.
+routines tab lists what is saved. Tick a routine with `space` and press `enter` to queue it.
 
 <img src="docs/screenshots/readme/routines.png" alt="the routines tab" width="100%">
 
 
-A job runs a routine on a schedule. It has three parts: a cron expression, a pipeline, and a
-routine saved under `.spoolway/routines/`.
+A job runs a routine on a schedule. It has four parts: a cron expression, a pipeline, a
+routine saved under `.spoolway/routines/`, and the branch its tasks start from.
 
-A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`:
+A job is a few lines of TOML in `~/.spoolway/<label>-<id>/jobs.toml`, or in `.spoolway/jobs.toml`
+to share it with the team:
 
 ```toml
 [jobs.nightly-audit]
 schedule = "0 3 * * 1-5"   # weekdays at 03:00, local time
-pipeline = "impl_fast"
+pipeline = "default"
 routine  = "nightly"       # a top-level folder under .spoolway/routines/
+base     = "main"          # the branch its tasks are cut from
 ```
 
 The routines tab shows a routine's job above its tasks. Press `o` on the routine to edit,
@@ -251,7 +255,7 @@ Event hooks can sync tasks with an issue tracker.
 | Event | When it fires |
 |---|---|
 | `fetch` | `spoolway issue show <ref>` reads one issue out of the tracker |
-| `open` | `spoolway queue add` opens a ticket per task |
+| `open` | Queueing a task opens a ticket for it |
 | `queued` | A task arrives in the queue |
 | `started` | A queued task is ready and about to leave `queued` for its entry step |
 | `blocked` | A task comes to rest on `blocked` |
@@ -262,10 +266,9 @@ Event hooks can sync tasks with an issue tracker.
 `github.sh` and `jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change
 them, replace them, or leave issue tracking disabled.
 
-See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
+See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-task-events)**.
 
 ## Configurable per project
-
 
 ```toml
 [dispatch]
@@ -284,7 +287,7 @@ enabled = false              # the overnight switch
 max_output_tokens = 0        # output-token ceiling for a run with nobody watching; 0 is none
 max_cost_usd = 0.0           # dollar ceiling for the same run; 0 is none
 blocked_agent = "claude"     # who staffs `blocked` when nobody is at the keyboard
-blocked_model = "claude-opus-5"
+blocked_model = "claude-opus-5-5" # blank after init; set it before an unattended run
 blocked_effort = ""
 blocked_session = true       # the unblocker carries its own earlier session forward
 blocked_prompt = "unblocker"
@@ -302,12 +305,13 @@ dirs = []                    # extra directories whose own agent sessions count 
 hook = ""                    # a script in .spoolway/hooks/, e.g. "github.sh"; blank runs none
 project_key = ""             # handed to the hook verbatim, e.g. owner/repo
 key_in_names = true          # prefix branch and worktree names with the tracker's slug
+ask_to_deactivate = true     # the queue screen asks which groups to leave untracked
 
 [agents.claude]
 kind = "claude"
 # concurrency = 3            # most lanes of this profile at once; unset is no cap
 session_reuse_ctx = 20       # % of the window before a carried session restarts fresh
-session_blocked_ctx = 40     # % of the window at which a running lane is stopped and blocked; 0 is off
+session_blocked_ctx = 40     # % of the window at which a running lane is stopped; 0 is off
 permission_mode = "auto"
 
 [agents.codex]
@@ -323,8 +327,8 @@ session_blocked_ctx = 40
 
 [models."Ornith-1.5-35B-A3B"]  # a local model, served by llama.cpp; [models] is empty by default
 context_window = 100096
-slots = 0                    # parallel lanes the local server can hold; 0 leaves the profile in charge
-local = false                # true when it runs on hardware you own
+slots = 2                    # parallel lanes the local server can hold
+local = true                 # it runs on hardware you own
 ```
 
 See **[Configuration](docs/configuration.md)**.

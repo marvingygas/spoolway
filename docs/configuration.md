@@ -482,7 +482,7 @@ dropped, and the rest of the config still loads.
 Set the list with `spoolway config set watch.dirs ~/notes,docs`, comma-separated, the same as
 every other list-valued key. `spoolway sync` keeps whatever a project has put there.
 
-## `[issue_tracking]` — a hook fired on four task events
+## `[issue_tracking]` — a hook fired on task events
 
 ```toml
 [issue_tracking]
