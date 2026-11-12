@@ -243,7 +243,7 @@ pub enum Command {
 /// `spoolway herdr bind`/`unbind`.
 #[derive(Debug, Subcommand)]
 pub enum HerdrCommand {
-    /// Print the four `[[keys.command]]` blocks this writes, then write them
+    /// Print the three `[[keys.command]]` blocks this writes, then write them
     /// once confirmed. A key already bound — to this or to anything else —
     /// is skipped, never overwritten.
     Bind(HerdrKeysArgs),
