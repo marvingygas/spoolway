@@ -38,8 +38,8 @@ herdr plugin install marvingygas/spoolway
 ```
 
 `herdr-plugin.toml` at the repository root declares spoolway's id, version, minimum herdr
-version, description, platforms, one `[[build]]` step and four panes and actions, one pair per
-command: `init`, `queue`, `dispatch` and `doctor`. The `[[build]]` step runs
+version, description, platforms, one `[[build]]` step and three panes and actions, one pair per
+command: `init`, `dispatch` and `doctor`. The `[[build]]` step runs
 `scripts/fetch-or-build.sh`, which finds the entry in [`npm/targets.json`](../npm/targets.json)
 for the host's operating system and CPU, downloads the release file that entry names and the
 release's `SHA256SUMS`, verifies the checksum, and installs the file as `./bin/spoolway` inside
@@ -66,8 +66,8 @@ brew install marvingygas/tap/spoolway
 
 The first install adds the tap `marvingygas/tap`. Every release updates its formula, and
 `spoolway update` upgrades the copy through `brew upgrade`. See
-[Keeping spoolway current](#keeping-spoolway-current). The formula has no musl build, so a musl
-Linux system installs through npm or the standalone download instead.
+[Keeping spoolway current](#keeping-spoolway-current). Homebrew does not run on musl
+Linux, so a musl system installs through npm or the standalone download instead.
 
 ## Standalone download
 
