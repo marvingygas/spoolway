@@ -262,7 +262,7 @@ Event hooks can sync tasks with an issue tracker.
 `github.sh` and `jira.sh` into `.spoolway/hooks/`, where they belong to your project. Change
 them, replace them, or leave issue tracking disabled.
 
-See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-four-task-events)**.
+See **[Issue Tracking](docs/configuration.md#issue_tracking--a-hook-fired-on-task-events)**.
 
 ## Configurable per project
 

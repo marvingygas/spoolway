@@ -384,7 +384,7 @@ When no group has a task without a `ticket:`, no popup opens. With
 `issue_tracking.ask_to_deactivate = false`, the checklist never opens either, on the pending
 screen or the routines tab: `enter` opens every group's tickets with no question.
 `tracking: off` and `spoolway queue add --no-tracking` still leave a group untracked. See
-[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events).
 While the hook runs, an `issue tracking` popup shows one line, `progress: ` followed by a
 44-cell bar. A `█` marks a finished call and a `░` a cell still to fill. The bar starts empty
 and fills by one call's share each time a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
@@ -937,7 +937,7 @@ no `origin` remote — tasks are cut from the local `main`, unpushed commits inc
 The check reads refs already on disk and asks `origin` nothing. What to do about it is in
 [Configuration](configuration.md). A failed task hook is the exception: its row under `problems`
 also names the event, the task, the exit code, the command that clears it and the log path. See
-[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Each section is skipped when it has nothing to say, and the
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events). Each section is skipped when it has nothing to say, and the
 whole screen is skipped, with nothing drawn, when all three are empty. `hide until these change`
 starts the run and stores its own fingerprint of the rendered lines, separate from the overrides screen's, and the screen returns
 as soon as any line differs from it.
@@ -1136,7 +1136,7 @@ transcript.
 Carry a stopped task on. A `blocked` task resumes the step it stopped on. A `paused` task goes
 on to the gated step's `on_pass`, unless the gate caught a block or a loop-max, in which case
 it goes to `blocked`. A caught `--fail` goes to that step's `on_fail`. A task on `hook_failed`, stopped by an [issue-tracking
-hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events), forgets that
+hook](configuration.md#issue_tracking--a-hook-fired-on-task-events), forgets that
 hook's failed run, so it fires again; a task its `queued` or `started` hook stopped resumes to
 `queued`, and one its `done` hook stopped resumes straight back to `done`. With `--skip-hook`, the
 task goes on without that hook running. See [Skipping a hook](#skipping-a-hook). A task paused because its
@@ -1784,7 +1784,7 @@ Print the prose template a project owns and where it lives.
 Print every event an issue-tracking hook runs on and the environment each one carries, and
 close with this project's own hooks folder: `.spoolway/hooks/` in repo mode, or the workspace's
 `config/hooks/` in home mode. See
-[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events).
 
 | Event | When it runs |
 |---|---|
@@ -2337,7 +2337,7 @@ its event, task, exit code, remedy and log path.
 A `FAIL` row labelled `the configured hook script has Unix line endings` names a hook whose first
 line ends in a carriage return. A `FAIL` row labelled `the configured hook script is executable`
 names a hook with no executable bit and gives its mode. Each row gives the command that fixes it.
-See [The issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+See [The issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-task-events).
 
 A `FAIL` row labelled ``prompt `<name>` `` names a step prompt that starts with `/` or holds `..`.
 A `FAIL` row labelled ``task template of pipeline `<name>` `` names a pipeline whose

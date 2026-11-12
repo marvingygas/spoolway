@@ -125,7 +125,7 @@ Every pipeline may route to `done` and `blocked` without declaring them.
 
 `started` is not one of these five. It is an `[issue_tracking]` hook event, fired the moment a
 task actually leaves `queued` for its entry step — see
-[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). Nothing
+[`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events). Nothing
 ever writes it to a task's own `stage:`, so a step may still use `started` as its id.
 
 ## Routing
