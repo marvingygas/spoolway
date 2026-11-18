@@ -77,6 +77,21 @@ no_source_line() {
   else ok "$1"; fi
 }
 
+# `prompt_used_by <what> <dir> <pipeline>` and `prompt_not_used_by`: whether
+# `prompt list` shows a step of that pipeline running a prompt. The list names
+# every pipeline it read, so this says which folder it read where the prompt's
+# own row, the same from everywhere, cannot.
+prompt_used_by() {
+  if in_dir "$2" "$SPOOLWAY" prompt list 2>/dev/null | answer | grep -qF -- "$3/implement"; then ok "$1"
+  else bad "$1 (no \`$3/implement\` in prompt list from $2)"
+    in_dir "$2" "$SPOOLWAY" prompt list 2>&1 | sed 's/^/        /'; fi
+}
+prompt_not_used_by() {
+  if in_dir "$2" "$SPOOLWAY" prompt list 2>/dev/null | answer | grep -qF -- "$3/implement"; then
+    bad "$1 (\`$3/implement\` is in prompt list from $2)"
+  else ok "$1"; fi
+}
+
 # `is <what> <want> <got>`: equal, or the case fails saying what was printed.
 is() {
   if [ "$3" = "$2" ]; then ok "$1"
@@ -118,6 +133,7 @@ must "the main setup is committed" git commit -qm "e2e: the main checkout's setu
 is "the main checkout prints its own config value" "11m" "$(lane_quiet_in "$MAIN")"
 lists "it lists its own pipeline" "$MAIN" mainpipe
 is "it prints its own prompt text" "MAIN CHECKOUT PROMPT" "$(zed_in "$MAIN")"
+prompt_used_by "prompt list shows its own pipeline's steps" "$MAIN" mainpipe
 says "config path names its own .spoolway/" "setup:     $MAIN/.spoolway" \
   in_dir "$MAIN" "$SPOOLWAY" config path
 says "config path says repo mode" "mode:      repo" in_dir "$MAIN" "$SPOOLWAY" config path
@@ -138,6 +154,8 @@ is "a worktree with its own setup prints its own config value" "22m" "$(lane_qui
 lists "it lists its own pipeline" "$OWN" ownpipe
 unlisted "and not the main checkout's" "$OWN" mainpipe
 is "it prints its own prompt text" "OWN WORKTREE PROMPT" "$(zed_in "$OWN")"
+prompt_used_by "prompt list shows its own pipeline's steps" "$OWN" ownpipe
+prompt_not_used_by "and not the main checkout's" "$OWN" mainpipe
 says "config path names the worktree's .spoolway/" "setup:     $OWN/.spoolway" \
   in_dir "$OWN" "$SPOOLWAY" config path
 says "and the checkout line names the worktree and its branch" \
@@ -159,6 +177,8 @@ is "a worktree without a setup prints the main checkout's config value" "11m" \
 lists "it lists the main checkout's pipeline" "$PLAIN" mainpipe
 unlisted "and not the other worktree's" "$PLAIN" ownpipe
 is "it prints the main checkout's prompt text" "MAIN CHECKOUT PROMPT" "$(zed_in "$PLAIN")"
+prompt_used_by "prompt list shows the main checkout's pipeline's steps" "$PLAIN" mainpipe
+prompt_not_used_by "and not the other worktree's" "$PLAIN" ownpipe
 says "its checkout line names the main checkout, not the worktree" \
   "checkout: $MAIN (plan/live)" in_dir "$PLAIN" "$SPOOLWAY" config path
 says "and config path names the main checkout's .spoolway/" "setup:     $MAIN/.spoolway" \
@@ -184,6 +204,7 @@ cat > "$LIVE/lane-probe.sh" <<PROBE_SH
   echo "config: \$("$SPOOLWAY" config get dispatch.lane_quiet 2>/dev/null | grep -v '^checkout: ')"
   echo "pipelines:"; "$SPOOLWAY" pipeline list 2>/dev/null | grep -v '^[[:space:]]'
   echo "prompt: \$("$SPOOLWAY" prompt show zed 2>/dev/null | grep -v '^checkout: ')"
+  echo "prompts:"; "$SPOOLWAY" prompt list 2>/dev/null | grep -v '^checkout: '
   echo "path:"; "$SPOOLWAY" config path 2>/dev/null
 } > "$PROBE"
 PROBE_SH
@@ -210,12 +231,18 @@ must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/lane.md"
 
 if drive lane gone; then ok "a task runs through the probe step and is archived"
 else bad "a task runs through the probe step and is archived (stuck at \`$(stage_of lane)\`)"; fi
+# `drive` leaves the dispatcher running, and it would start the task queued for
+# the herdr section below, then keep running while the last section switches the
+# main checkout's branch under it.
+dispatcher_stop
 LANE_TREE=$(sed -n 's/^worktree_path: *//p' "$SPOOLWAY_PROJECT_HOME/archive/lane.md")
 has "the lane ran in a worktree of its own" "/worktrees/" "$SPOOLWAY_PROJECT_HOME/archive/lane.md"
 has "a lane prints the setup its worktree carries" "config: 11m" "$PROBE"
 has "its pipelines are the worktree's" "mainpipe" "$PROBE"
 lacks "not the main checkout's uncommitted one" "dirtypipe" "$PROBE"
 has "its prompt is the worktree's" "prompt: MAIN CHECKOUT PROMPT" "$PROBE"
+has "and prompt list shows the worktree's pipeline's steps" "mainpipe/implement" "$PROBE"
+lacks "not the main checkout's uncommitted one" "dirtypipe/implement" "$PROBE"
 has "and config path names the lane's own .spoolway/" "setup:     $LANE_TREE/.spoolway" "$PROBE"
 
 # --------------------------------------------- 8: herdr and a linked worktree
@@ -282,12 +309,15 @@ SEPWT=$(cd "$SEPWT" && pwd -P)
 is "the clone prints its own config value" "44m" "$(lane_quiet_in "$SEP")"
 lists "it lists its own pipeline" "$SEP" seppipe
 is "it prints its own prompt text" "SEPARATE GIT DIR PROMPT" "$(zed_in "$SEP")"
+prompt_used_by "prompt list shows its own pipeline's steps" "$SEP" seppipe
 says "config path names the clone's .spoolway/, not the git directory's folder" \
   "setup:     $SEP/.spoolway" in_dir "$SEP" "$SPOOLWAY" config path
 is "its linked worktree prints its own config value" "55m" "$(lane_quiet_in "$SEPWT")"
 lists "and lists its own pipeline" "$SEPWT" sepwtpipe
 unlisted "and not the clone's" "$SEPWT" seppipe
 is "and its own prompt text" "SEPARATE WORKTREE PROMPT" "$(zed_in "$SEPWT")"
+prompt_used_by "prompt list shows its own pipeline's steps" "$SEPWT" sepwtpipe
+prompt_not_used_by "and not the clone's" "$SEPWT" seppipe
 says "and config path names the worktree's .spoolway/" "setup:     $SEPWT/.spoolway" \
   in_dir "$SEPWT" "$SPOOLWAY" config path
 SEP_HOME=$(in_dir "$SEP" "$SPOOLWAY" config path | sed -n 's/^plans: *//p')
@@ -334,6 +364,7 @@ TOML
 is "a home-mode clone prints the workspace's config value" "13m" "$(lane_quiet_in "$HOMEC")"
 lists "it lists the workspace's pipeline" "$HOMEC" wspipe
 is "it prints the workspace's prompt text" "WORKSPACE PROMPT" "$(zed_in "$HOMEC")"
+prompt_used_by "prompt list shows the workspace's pipeline's steps" "$HOMEC" wspipe
 says "config path says home mode" "mode:      home" in_dir "$HOMEC" "$SPOOLWAY" config path
 says "and names the workspace's config/" "setup:     $WS/config" in_dir "$HOMEC" "$SPOOLWAY" config path
 no_source_line "the workspace's project.toml has no source line either" "$WS/project.toml"
@@ -342,6 +373,8 @@ is "a linked worktree carrying its own setup prints the workspace's config value
 lists "and lists the workspace's pipeline" "$HOMEWT" wspipe
 unlisted "and not the one its branch carries" "$HOMEWT" homewtpipe
 is "and the workspace's prompt text" "WORKSPACE PROMPT" "$(zed_in "$HOMEWT")"
+prompt_used_by "prompt list shows the workspace's pipeline's steps" "$HOMEWT" wspipe
+prompt_not_used_by "and not the one its branch carries" "$HOMEWT" homewtpipe
 says "and config path names the workspace's config/" "setup:     $WS/config" \
   in_dir "$HOMEWT" "$SPOOLWAY" config path
 cd "$MAIN" || exit 2
