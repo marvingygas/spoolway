@@ -22,8 +22,8 @@
 #   8  herdr refusing a dispatcher started in a linked worktree
 #
 # The last section takes `.spoolway/` off the main checkout's branch and pins
-# the three refusals that gives, each shape its own: the main checkout, a
-# worktree with a setup of its own, and a worktree without one.
+# the refusal each of three shapes then gives: the main checkout, a worktree
+# with a setup of its own, and a worktree without one.
 #
 # Matching is by the lines that name a folder, a value or a refusal, never a
 # whole screen, so rewording a command's help or adding a row does not break
@@ -46,11 +46,12 @@ install_agents "$LIVE/bin" "$CTL" "" "" "" "$FORGE"
 
 # ---------------------------------------------------------------- helpers
 
-# Run a command from `dir`, as a person standing there would: with no project
-# home forced by the harness, so the checkout alone decides which project it is.
+# Run a command from `dir`, as a person standing there would. The harness's
+# SPOOLWAY_PROJECT_HOME is only its note of where a project home is; spoolway
+# never reads it, so the checkout alone decides which project a command is in.
 in_dir() {
   local dir=$1; shift
-  (cd "$dir" && env -u SPOOLWAY_PROJECT_HOME "$@")
+  (cd "$dir" && "$@")
 }
 
 # Outside the main checkout a command names the checkout it read on a line of its
@@ -139,8 +140,11 @@ says "config path names its own .spoolway/" "setup:     $MAIN/.spoolway" \
 says "config path says repo mode" "mode:      repo" in_dir "$MAIN" "$SPOOLWAY" config path
 silent_about "it prints no checkout line, being the checkout it reads" "checkout: " \
   in_dir "$MAIN" "$SPOOLWAY" config path
-says "prompt list names the prompt and that nothing runs it" "zed          — nothing runs it" \
-  in_dir "$MAIN" "$SPOOLWAY" prompt list
+# The column is padded to the longest prompt name, so the row is matched by
+# pattern rather than by its spaces.
+if in_dir "$MAIN" "$SPOOLWAY" prompt list | grep -qE '^zed[[:space:]]+— nothing runs it$'; then
+  ok "prompt list names the prompt and that nothing runs it"
+else bad "prompt list names the prompt and that nothing runs it"; fi
 
 # ------------------------------------ 3: a linked worktree with its own setup
 OWN="$LIVE/own"
@@ -238,17 +242,23 @@ dispatcher_stop
 LANE_TREE=$(sed -n 's/^worktree_path: *//p' "$SPOOLWAY_PROJECT_HOME/archive/lane.md")
 has "the lane ran in a worktree of its own" "/worktrees/" "$SPOOLWAY_PROJECT_HOME/archive/lane.md"
 has "a lane prints the setup its worktree carries" "config: 11m" "$PROBE"
-has "its pipelines are the worktree's" "mainpipe" "$PROBE"
-lacks "not the main checkout's uncommitted one" "dirtypipe" "$PROBE"
+# Only the block between `pipelines:` and `prompt:` is the pipeline list; the
+# prompt list further down names pipelines too.
+LANE_PIPELINES=$(sed -n '/^pipelines:$/,/^prompt:/p' "$PROBE")
+if grep -qx mainpipe <<<"$LANE_PIPELINES"; then ok "its pipelines are the worktree's"
+else bad "its pipelines are the worktree's"; sed 's/^/        /' "$PROBE"; fi
+if grep -qx dirtypipe <<<"$LANE_PIPELINES"; then bad "and not the main checkout's uncommitted one"
+else ok "and not the main checkout's uncommitted one"; fi
 has "its prompt is the worktree's" "prompt: MAIN CHECKOUT PROMPT" "$PROBE"
 has "and prompt list shows the worktree's pipeline's steps" "mainpipe/implement" "$PROBE"
-lacks "not the main checkout's uncommitted one" "dirtypipe/implement" "$PROBE"
+lacks "and not the main checkout's uncommitted one" "dirtypipe/implement" "$PROBE"
 has "and config path names the lane's own .spoolway/" "setup:     $LANE_TREE/.spoolway" "$PROBE"
 
 # --------------------------------------------- 8: herdr and a linked worktree
 # `check_backend_checkout` refuses a dispatcher started in a linked worktree
-# when the backend is herdr. The double stands in for herdr; the refusal is
-# reached before it is asked anything.
+# when the backend is herdr. The double stands in for herdr: it answers the
+# agent list that checks herdr is reachable, and the refusal comes before any
+# workspace or pane is opened.
 HSTATE="$LIVE/herdr-stub"
 HERDRBIN="$LIVE/herdr-bin"
 mkdir -p "$HSTATE" "$HERDRBIN"
@@ -294,7 +304,7 @@ must "git identity" git config user.name "spoolway tests"
 echo "fn main() {}" > main.rs
 must "the seed commit" git add -A
 must "the seed commit" git commit -qm "seed"
-must "spoolway init in the clone" env -u SPOOLWAY_PROJECT_HOME "$SPOOLWAY" init --yes
+must "spoolway init in the clone" "$SPOOLWAY" init --yes
 SEP=$(pwd -P)
 stamp_setup "$SEP/.spoolway" 44m seppipe "SEPARATE GIT DIR PROMPT"
 must "the clone's setup is committed" git add -A
@@ -320,8 +330,12 @@ prompt_used_by "prompt list shows its own pipeline's steps" "$SEPWT" sepwtpipe
 prompt_not_used_by "and not the clone's" "$SEPWT" seppipe
 says "and config path names the worktree's .spoolway/" "setup:     $SEPWT/.spoolway" \
   in_dir "$SEPWT" "$SPOOLWAY" config path
-SEP_HOME=$(in_dir "$SEP" "$SPOOLWAY" config path | sed -n 's/^plans: *//p')
-is "both share the clone's project home" "$SEP_HOME" \
+# The id `init` stamped names the project home; it sits in the git directory,
+# not in the checkout.
+SEP_PLANS="$HOME/.spoolway/sep-$(cat "$LIVE/gitdirs/sep/spoolway-id")/plans"
+is "the clone's plans folder is in its project home" "$SEP_PLANS" \
+  "$(in_dir "$SEP" "$SPOOLWAY" config path | sed -n 's/^plans: *//p')"
+is "and its worktree shares that project home" "$SEP_PLANS" \
   "$(in_dir "$SEPWT" "$SPOOLWAY" config path | sed -n 's/^plans: *//p')"
 cd "$MAIN" || exit 2
 
@@ -338,7 +352,7 @@ must "git identity" git config user.name "spoolway tests"
 echo "fn main() {}" > main.rs
 must "the seed commit" git add -A
 must "the seed commit" git commit -qm "seed"
-must "spoolway init in the clone" env -u SPOOLWAY_PROJECT_HOME "$SPOOLWAY" init --yes
+must "spoolway init in the clone" "$SPOOLWAY" init --yes
 HOMEC=$(pwd -P)
 must "the clone's setup is committed" git add -A
 must "the clone's setup is committed" git commit -qm "e2e: the clone's setup"
@@ -354,6 +368,9 @@ mkdir -p "$WS/config" "$WS/dispatchers"
 must "the setup moves into the workspace" cp -a .spoolway/. "$WS/config/"
 must "the clone drops its setup" git rm -rq .spoolway
 must "the clone drops its setup" git commit -qm "e2e: setup lives in the workspace"
+# `init` also made a repo-mode home for the clone. A home-mode clone has none, so
+# it goes with the id, leaving the workspace's `clones` list to answer for it.
+rm -rf "$HOME/.spoolway/homeclone-$(cat .git/spoolway-id)"
 rm -rf .spoolway .git/spoolway-id
 stamp_setup "$WS/config" 13m wspipe "WORKSPACE PROMPT"
 cat > "$WS/project.toml" <<TOML
