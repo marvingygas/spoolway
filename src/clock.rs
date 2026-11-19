@@ -17,7 +17,11 @@ use jiff::{Timestamp, Zoned};
 /// offset and a fraction of none, three, six or nine digits.
 pub fn rfc3339(at: Timestamp) -> String {
     let mut out = at.strftime("%Y-%m-%dT%H:%M:%S").to_string();
-    push_fraction(&mut out, at.subsec_nanosecond());
+    // The fraction is read off the civil time, which is never negative.
+    // `Timestamp::subsec_nanosecond` is negative before 1970, while the
+    // seconds printed above are floored, so using it would name the wrong
+    // instant.
+    push_fraction(&mut out, at.to_zoned(TimeZone::UTC).subsec_nanosecond());
     out.push_str("+00:00");
     out
 }
@@ -50,9 +54,10 @@ pub fn utc_today() -> Date {
 }
 
 /// Append `.fff`, `.ffffff` or `.fffffffff` for the shortest of the three
-/// that holds `nanos` exactly, and nothing for a whole second.
+/// that holds `nanos` exactly, and nothing for a whole second. `nanos` is
+/// the civil time's, so never negative.
 fn push_fraction(out: &mut String, nanos: i32) {
-    let nanos = nanos.unsigned_abs();
+    let nanos = nanos as u32;
     if nanos == 0 {
         return;
     }
@@ -80,6 +85,16 @@ mod tests {
         assert_eq!(rfc3339(at(500_000_000)), "2026-11-19T20:34:59.500+00:00");
         assert_eq!(rfc3339(at(120_000)), "2026-11-19T20:34:59.000120+00:00");
         assert_eq!(rfc3339(at(7)), "2026-11-19T20:34:59.000000007+00:00");
+    }
+
+    /// Before 1970 a timestamp's own fraction is negative while its printed
+    /// seconds are floored, so the text must take the fraction from the
+    /// civil time: a quarter second before the epoch is `.750` past 23:59:59.
+    #[test]
+    fn rfc3339_writes_a_pre_epoch_fraction_as_the_civil_time_reads_it() {
+        let at = Timestamp::from_nanosecond(-250_000_000).unwrap();
+        assert_eq!(rfc3339(at), "1969-12-31T23:59:59.750+00:00");
+        assert_eq!(parse_rfc3339(&rfc3339(at)), Some(at));
     }
 
     /// A zone's offset is written with a colon, and the same instant reads

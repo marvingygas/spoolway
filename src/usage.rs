@@ -3398,7 +3398,13 @@ pub fn parse_instant(raw: &str, end_of_day: bool) -> Result<jiff::Timestamp> {
     let duration = crate::config::parse_duration(raw).map_err(|err| {
         anyhow::anyhow!("{err}; or give a date as YYYY-MM-DD, or a month as YYYY-MM")
     })?;
-    Ok(jiff::Timestamp::now().checked_sub(jiff::SignedDuration::try_from(duration)?)?)
+    // Saturating: a timestamp reaches back about 12,000 years, and a
+    // duration past that means "from the beginning", which is the answer an
+    // unbounded `--since` already gets, not an error about a Unix range.
+    let back = jiff::SignedDuration::try_from(duration).unwrap_or(jiff::SignedDuration::MAX);
+    Ok(jiff::Timestamp::now()
+        .checked_sub(back)
+        .unwrap_or(jiff::Timestamp::MIN))
 }
 
 /// Turn `YYYY-MM` into the window covering that whole calendar month, locally.
@@ -7335,11 +7341,14 @@ mod tests {
     fn at(wall: &str) -> String {
         let naive = jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", wall)
             .expect("a wall clock reading is YYYY-MM-DDTHH:MM:SS");
-        let earliest = jiff::tz::TimeZone::system()
-            .to_ambiguous_zoned(naive)
-            .earlier()
-            .expect("that wall clock reading does not exist here");
-        crate::clock::rfc3339(earliest.timestamp())
+        let ambiguous = jiff::tz::TimeZone::system().to_ambiguous_zoned(naive);
+        // `earlier` does not fail on a gap: it reads the wall time with the
+        // offset after it, an hour early, so the gap is refused here.
+        assert!(
+            !matches!(ambiguous.offset(), jiff::tz::AmbiguousOffset::Gap { .. }),
+            "that wall clock reading does not exist here"
+        );
+        crate::clock::rfc3339(ambiguous.earlier().unwrap().timestamp())
     }
 
     #[test]
@@ -7379,6 +7388,14 @@ mod tests {
         assert!(parse_month("2026").is_err());
         assert!(parse_month("august").is_err());
         assert!(parse_month("").is_err());
+    }
+
+    #[test]
+    fn a_duration_reaching_further_back_than_a_timestamp_holds_means_from_the_start() {
+        assert_eq!(
+            parse_instant("999999999d", false).unwrap(),
+            jiff::Timestamp::MIN
+        );
     }
 
     #[test]

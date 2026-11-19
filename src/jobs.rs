@@ -672,7 +672,10 @@ const CATCH_UP_LIMIT: SignedDuration = SignedDuration::from_hours(1);
 fn due_minute(cron: &Cron, checked: Option<&str>, now: DateTime) -> Option<DateTime> {
     let start = checked
         .and_then(|minute| DateTime::strptime(MINUTE_FMT, minute).ok())
-        .map(|minute| minute + SignedDuration::from_mins(1))
+        // `checked_add`: the state file is hand-editable, and a minute at the
+        // end of year 9999 must fall back to `now` like any unreadable one,
+        // not panic the dispatcher's pass.
+        .and_then(|minute| minute.checked_add(SignedDuration::from_mins(1)).ok())
         .unwrap_or(now)
         .max(now - CATCH_UP_LIMIT)
         .min(now);
@@ -1456,8 +1459,8 @@ pub fn next_fire(schedule: &str) -> Option<Zoned> {
 /// (a fall-back repeat), each occurrence as UTC seconds.
 ///
 /// `to_ambiguous_timestamp` rather than `DateTime::to_zoned`, which silently
-/// picks one occurrence of a repeated minute and moves a skipped one to the
-/// next valid instant — both of which [`next_real_fire`] has to tell apart.
+/// picks one occurrence of a repeated minute and moves a skipped one forward
+/// by the gap's length — both of which [`next_real_fire`] has to tell apart.
 /// An instant outside the range a timestamp holds counts as skipped.
 fn resolve_wall(naive: &DateTime, zone: &TimeZone) -> Wall {
     use jiff::tz::AmbiguousOffset;
@@ -1512,8 +1515,8 @@ pub fn next_fires(schedule: &str, count: usize) -> Vec<Zoned> {
 /// A candidate instant `t` later than `now` carries a wall label
 /// `t + offset(t)`. `jiff` clamps every UTC offset to the closed interval
 /// `[-25:59:59, +25:59:59]`, and `after` is itself `now + offset(now)`, so
-/// any such label is greater than `now - 52h`, hence greater than
-/// `after - 52h`.
+/// any such label is greater than `now - 26h`, and `now` is at least
+/// `after - 26h`, hence any label is greater than `after - 52h`.
 /// Deriving the window from the offset range this way, not from a table of
 /// how far known zones roll back, is the whole point: date-line moves have
 /// shifted a zone by nearly a full day (Pacific/Kwajalein lost 23 hours in
@@ -1981,6 +1984,16 @@ mod tests {
     /// Sunday of March and 03:00 back to 02:00 on the last Sunday of October.
     fn berlin() -> TimeZone {
         TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").unwrap()
+    }
+
+    /// The state file can be edited by hand, so a `checked_minute` at the end
+    /// of the last year a date holds must read as unusable, not panic when a
+    /// minute is added to it.
+    #[test]
+    fn a_checked_minute_at_the_end_of_time_falls_back_to_the_current_minute() {
+        let cron = Cron::parse("* * * * *").unwrap();
+        let now = naive(2027, 3, 15, 2, 0);
+        assert_eq!(due_minute(&cron, Some("9999-12-31T23:59"), now), Some(now));
     }
 
     #[test]

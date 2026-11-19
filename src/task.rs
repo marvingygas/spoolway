@@ -1389,8 +1389,8 @@ impl Task {
     /// Nothing in spoolway reads a status-log line back (`Task::section` is
     /// `#[cfg(test)]`), so the stamp is a display choice: local time reads
     /// the way a person on the board would say it, the way
-    /// `problem_log.rs` and `eval.rs` already do, rather than the `Utc`
-    /// used for machine-read ledger entries in `usage.rs`.
+    /// `problem_log.rs` and `eval.rs` already do, rather than the UTC used
+    /// for machine-read ledger entries in `usage.rs`.
     pub fn log_status(&mut self, text: &str) {
         let stamp = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string();
         self.append_to_section("## Status Log", &format!("- {stamp} {text}\n"));

@@ -6380,6 +6380,12 @@ fn step_calendar_day(year: &mut i32, month: &mut u32, day: &mut u32, delta: i64)
 /// `30th` rather than a day that month's grid never draws.
 fn step_calendar_month(year: &mut i32, month: &mut u32, day: &mut u32, delta: i32) {
     let total = *year * 12 + *month as i32 - 1 + delta;
+    // `jiff` dates stop at the years -9999 and 9999. Paging past either end
+    // leaves the grid where it is rather than asking for a month it cannot
+    // draw, which `days_in_month` would answer with a panic.
+    if !(-9999..=9999).contains(&total.div_euclid(12)) {
+        return;
+    }
     *year = total.div_euclid(12);
     *month = total.rem_euclid(12) as u32 + 1;
     *day = (*day).min(days_in_month(*year, *month));
@@ -8247,6 +8253,39 @@ mod tests {
         assert_eq!(rows[0].tokens.output, 20);
         assert_eq!(rows[0].lines, 2);
         assert_eq!(rows[0].skill, "—", "a session that ran no skill");
+    }
+
+    /// A session's `TIME` is the difference of its first and last record,
+    /// truncated to whole seconds as a whole — not the difference of two
+    /// already-truncated seconds, which reads one higher when the first
+    /// record's fraction is the larger.
+    #[test]
+    fn list_sessions_truncates_the_span_not_its_two_ends() {
+        let line = dir_line("proj", "s1", "2026-09-01T09:00:00+00:00", 0.10);
+        let at = |raw: &str| crate::clock::parse_rfc3339(raw).unwrap();
+        let spans: Spans = HashMap::from([(
+            "s1".to_string(),
+            (
+                at("2026-09-01T06:14:15.900Z"),
+                at("2026-09-01T06:14:17.100Z"),
+            ),
+        )]);
+        let rows = list_sessions(&[&line], &no_models(), &spans, &HashMap::new());
+        assert_eq!(rows[0].time_s, 1);
+    }
+
+    /// The calendar pages by month without limit, but `jiff` dates end at the
+    /// year 9999: paging past it must leave the grid on its last month.
+    #[test]
+    fn paging_the_calendar_past_the_last_year_a_date_can_hold_stays_put() {
+        let (mut year, mut month, mut day) = (9999, 12, 31);
+        step_calendar_month(&mut year, &mut month, &mut day, 1);
+        assert_eq!((year, month, day), (9999, 12, 31));
+        let (mut year, mut month, mut day) = (-9999, 1, 1);
+        step_calendar_month(&mut year, &mut month, &mut day, -1);
+        assert_eq!((year, month, day), (-9999, 1, 1));
+        step_calendar_month(&mut year, &mut month, &mut day, 1);
+        assert_eq!((year, month, day), (-9999, 2, 1));
     }
 
     #[test]
