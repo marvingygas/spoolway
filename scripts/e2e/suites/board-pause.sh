@@ -484,8 +484,8 @@ draws "then restart" "  restart"
 draws "under the shared key row" "[enter] confirm   [esc] close"
 MENU_FRAME=$(frame_showing "[enter] confirm   [esc] close")
 if grep -qE -- '│ +(> )?focus ' <<<"$MENU_FRAME"; then
-  bad "and no focus, which is the `f` key now"; sed 's/^/        /' <<<"$MENU_FRAME"
-else ok "and no focus, which is the `f` key now"; fi
+  bad "and no focus, which is the \`f\` key now"; sed 's/^/        /' <<<"$MENU_FRAME"
+else ok "and no focus, which is the \`f\` key now"; fi
 stage_stays "the task file is untouched while the menu is open" mid-turn implement
 press $'\x1b'
 stops_drawing "esc closes the menu" "╭─ mid-turn ─"

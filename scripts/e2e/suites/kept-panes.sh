@@ -273,8 +273,8 @@ rm -f "$HSTATE/zoom.refused"
 # nothing, so `kept` stands on `paused` with the first step's kept lane and the
 # second step's lane both open. Its key line draws `[f] focus` between
 # `[r] resume` and `[o] options`, and `f` zooms the pane that started last,
-# the second step's, not the kept first one. `zoomed.index` is emptied first, since the
-# running row's zoom above wrote the same pane into it.
+# the second step's, not the kept first one. `zoomed.index` is emptied first,
+# since the running row's zoom above wrote the same pane into it.
 must "the task is parked" "$SPOOLWAY" queue pause kept
 if poll_until 10 board_shows "paused"; then ok "the board shows the parked row"
 else bad "the board shows the parked row"; board_now | sed 's/^/        /'; fi
