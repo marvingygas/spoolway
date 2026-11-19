@@ -1460,9 +1460,9 @@ must "removing its branch" git branch -D task/solo-setup
 must "removing the main checkout's temporary branch" git branch -D e2e-no-setup
 
 # ------------------------------------------- a source folder while main has none
-# A `source` line in the project's own `project.toml`, written by hand, names
-# a folder whose `.spoolway/` the main checkout reads while its branch has
-# none. The first command that finds the checkout's own `.spoolway/` again
+# A `source` line in the project's own `project.toml`, written by hand here,
+# names a folder whose `.spoolway/` the main checkout reads while its branch
+# has none, and the commands that follow it write that folder. The first command that finds the checkout's own `.spoolway/` again
 # deletes the line and says so once.
 HOME_DIR=$(dirname "$("$SPOOLWAY" config path | sed -n 's/^plans: *//p')")
 SRC="$LIVE/source-folder"
@@ -1487,13 +1487,13 @@ says "config get reads the source folder's value" "from-the-source" \
 says "pipeline list lists the source folder's pipeline" "sourceflow" \
   "$SPOOLWAY" pipeline list
 has "and the line is still there" "source = " "$HOME_DIR/project.toml"
-SRC_CONFIG_SUM=$(cksum <"$SRC/.spoolway/config.toml")
-says "config set is refused rather than written into the source" "would land in that folder" \
+says "config set writes the source folder and names it" "  spoolway uses $SRC as its setup" \
   "$SPOOLWAY" config set dispatch.visible_lanes 5
-says "and sync is refused the same way" "would land in that folder" "$SPOOLWAY" sync
-if [ "$(cksum <"$SRC/.spoolway/config.toml")" = "$SRC_CONFIG_SUM" ]; then
-  ok "and the source folder is left as it was"
-else bad "and the source folder is left as it was"; fi
+has "and the source folder's config.toml holds the value" "visible_lanes = 5" \
+  "$SRC/.spoolway/config.toml"
+says "sync reads and writes the source folder, and says so" "checkout: $SRC" "$SPOOLWAY" sync
+refuses "a pipeline write is still refused rather than written into the source" \
+  "would land in that folder" "$SPOOLWAY" pipeline promote nothing
 
 must "the branch that carries .spoolway/ is checked out again" git checkout -q plan/live
 must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"
@@ -1855,5 +1855,43 @@ has   "sync's panel reaches the terminal" \
       "new version installed, apply updates" "$SYNC_OUT"
 lacks "and sync never enters the alternate screen" $'\033[?1049h' "$SYNC_OUT"
 has   "esc under it writes nothing" "Nothing was changed." "$SYNC_OUT"
+
+# -------------------------------------------- config source, and where it reads
+# A main checkout with no `.spoolway/` reads the one in a worktree named by
+# the `source` line of its project.toml. `config source` writes and clears
+# that line, and `config path` names the folder it reads.
+new_repo "$LIVE/source-app"
+configure_project plan/live
+must "a worktree that will hold the setup" \
+  git worktree add -q -b source-wt "$LIVE/source-wt"
+SRC_WT=$(cd "$LIVE/source-wt" && pwd -P)
+must "gives it the setup" cp -a .spoolway "$SRC_WT/.spoolway"
+must "and takes the main checkout's own away" rm -rf .spoolway
+refuses "a main checkout with no setup and no source refuses" "config source <folder>" \
+  "$SPOOLWAY" config path
+says "config source takes a relative folder and prints the line it wrote" \
+  "  spoolway uses $SRC_WT as its setup" \
+  "$SPOOLWAY" config source ../source-wt
+has "and stores the absolute, canonical path" "source = \"$SRC_WT\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+says "config path names the source folder on the checkout: line" \
+  "checkout: $SRC_WT" "$SPOOLWAY" config path
+says "and its setup: line" "setup:     $SRC_WT/.spoolway" "$SPOOLWAY" config path
+silent_about "and names no branch for it" "($(git -C "$SRC_WT" branch --show-current))" \
+  "$SPOOLWAY" config path
+refuses "a folder with no .spoolway/ is refused" "holds no .spoolway/" \
+  "$SPOOLWAY" config source "$LIVE/source-app"
+refuses "a folder that does not exist is refused" "does not exist" \
+  "$SPOOLWAY" config source "$LIVE/no-such-folder"
+refuses "a folder and --clear together are refused" "cannot be used with" \
+  "$SPOOLWAY" config source "$SRC_WT" --clear
+has "and the line is left as it was" "source = \"$SRC_WT\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+says "config source --clear says which folder it stopped reading" \
+  "  cleared the source $SRC_WT" "$SPOOLWAY" config source --clear
+works "and removes the line" \
+  bash -c '! grep -qE "^[[:space:]]*source[[:space:]]*=" "$1"' _ "$SPOOLWAY_PROJECT_HOME/project.toml"
+refuses "and the project refuses again, pointing at the command" "config source <folder>" \
+  "$SPOOLWAY" config path
 
 finish

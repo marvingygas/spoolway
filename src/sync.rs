@@ -39,11 +39,11 @@
 //! too, and a sync taken there has to land on that branch — where it is reviewed and merged — rather than on
 //! whatever the main checkout happens to have out. `config set` and
 //! `override promote` follow the same rule through
-//! `Repo::tracked_write_root`, which also refuses a dispatcher lane's
-//! worktree and one on a detached HEAD. Both also refuse in a main checkout
-//! whose setup is read from a `source` folder, since a write there would land
-//! in that folder. This command refuses in a worktree whose branch has no
-//! `.spoolway/` at all. Its setup is the main checkout's, so there is no
+//! `Repo::source_write_root`, which also refuses a dispatcher lane's
+//! worktree and one on a detached HEAD. In a main checkout whose setup is
+//! read from a `source` folder, all three write that folder's files, which
+//! are the ones the dispatcher reads. This command refuses in a worktree
+//! whose branch has no `.spoolway/` at all. Its setup is the main checkout's, so there is no
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout. A lane in such
 //! a worktree is refused too, without that advice: the folder it reads is
@@ -283,14 +283,11 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
         );
     }
 
-    // A source folder is the person's own; this run would rewrite its
-    // `config.toml` and pipelines.
-    if let Some(source) = repo.source_in_use() {
-        bail!(
-            "{}",
-            crate::repo::source_write_refusal(&repo.checkout, &source)
-        );
-    }
+    // The note is about the checkout the command ran in, so it is asked of
+    // `repo` before this run moves on to the source folder it writes.
+    let note = repo.checkout_note()?;
+    let on_source = repo.on_source();
+    let repo = on_source.as_ref().unwrap_or(repo);
 
     // Held from the first read of the tracked files to the last write, and
     // taken here once: `scan` reads the config and `config set` rewrites it,
@@ -308,7 +305,7 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     // Printed here, not below: this project's own files are what the note is
     // about, and a lane running in a linked worktree needs to know which
     // checkout is about to be rewritten before it reads the report.
-    if let Some(note) = repo.checkout_note()? {
+    if let Some(note) = note {
         note.print(false)?;
         println!();
     }
@@ -564,7 +561,9 @@ fn run_asking_with(
         dry_run: true,
         replace: Vec::new(),
     };
-    let outcomes = scan(repo, &dry)?;
+    // The folder `run` writes, so the panel lists the files it will change.
+    let on_source = repo.on_source();
+    let outcomes = scan(on_source.as_ref().unwrap_or(repo), &dry)?;
     let (wrote, removed) = dedup_paths(&outcomes);
     if wrote.is_empty() && removed.is_empty() {
         return run(repo, args);

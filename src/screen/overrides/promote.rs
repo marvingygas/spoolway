@@ -385,7 +385,7 @@ impl Promotion {
             (Ok(a), Ok(b)) => a == b,
             _ => a == b,
         };
-        if !same(write.root, checkout) {
+        if !same(&write.root, checkout) {
             return Err(Notice::new(
                 "not promoted",
                 format!(
@@ -402,7 +402,8 @@ impl Promotion {
             ));
         }
         for (at, file) in self.files.iter().enumerate() {
-            let Err(err) = crate::commands::promote_override(repo, write.root, &file.target) else {
+            let Err(err) = crate::commands::promote_override(repo, &write.root, &file.target)
+            else {
                 continue;
             };
             let names = |files: &[Promoted]| {
@@ -440,10 +441,10 @@ impl Promotion {
              until you delete them.",
             self.files
                 .iter()
-                .map(|file| tracked_name(write.root, &file.target))
+                .map(|file| tracked_name(&write.root, &file.target))
                 .collect::<Vec<_>>()
                 .join(", "),
-            crate::repo::shorten_home(write.root),
+            crate::repo::shorten_home(&write.root),
             self.branch.name
         );
         if let Some(note) = write.note() {

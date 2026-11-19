@@ -113,17 +113,29 @@ pub enum ParentWork {
 /// Where a tracked write lands, as [`Repo::tracked_write_root`] decides it.
 #[derive(Debug)]
 pub struct TrackedWrite<'a> {
-    /// The checkout whose tracked files the command writes.
-    pub root: &'a Path,
+    /// The folder whose tracked files the command writes: a checkout, or the
+    /// project's `source` folder, which `source` below says.
+    pub root: std::borrow::Cow<'a, Path>,
     /// The branch `root` is on when it is a worktree's own copy, `None` in
     /// the main checkout, where the write is the copy the dispatcher reads.
     pub branch: Option<String>,
+    /// Whether `root` is the folder the project's setup is read from while its
+    /// main checkout has none. It need not sit on a branch, so it is named by
+    /// its folder.
+    pub source: bool,
 }
 
 impl TrackedWrite<'_> {
-    /// The line printed after a write that landed in a worktree's own copy,
-    /// or `None` in the main checkout, where there is nothing to add.
+    /// The line printed after a write that landed in a worktree's own copy or
+    /// in the source folder, or `None` in the main checkout, where there is
+    /// nothing to add.
     pub fn note(&self) -> Option<String> {
+        if self.source {
+            return Some(format!(
+                "  spoolway uses {} as its setup",
+                shorten_home(&self.root)
+            ));
+        }
         self.branch
             .as_ref()
             .map(|branch| format!("  the main checkout keeps its own copy until {branch} merges"))
@@ -1730,10 +1742,11 @@ impl Repo {
 
     /// The `source` folder this checkout's setup is read from, when it has no
     /// `.spoolway/` of its own and a source line names a folder that holds
-    /// one. Every command that writes tracked setup files refuses while this
-    /// answers: a write would land in that folder, which is the person's own
-    /// and not this project's to change, so it is refused as it was before the
-    /// source was read at all.
+    /// one. A write would land in that folder. `config set`, `override
+    /// promote` and `sync` write it ([`Repo::source_write_root`],
+    /// [`Repo::on_source`]); every other command that writes tracked setup
+    /// files refuses while this answers, as it did before the source was read
+    /// at all.
     pub(crate) fn source_in_use(&self) -> Option<PathBuf> {
         source_in_use_at(&self.checkout)
     }
@@ -1759,6 +1772,9 @@ impl Repo {
     /// under [`Repo::worktree_root`] is a dispatcher lane's, and a task must
     /// not move a person's private files out of their home.
     ///
+    /// A worktree that refuses names the folder to run the command in on its
+    /// `-C` line: the main checkout, or its `source` folder while it has one.
+    ///
     /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
     /// command asking, for the same reason as in [`Repo::refuse_in_lane`].
     pub fn tracked_write_root(
@@ -1774,8 +1790,9 @@ impl Repo {
                 bail!("{}", source_write_refusal(&self.checkout, &source));
             }
             return Ok(TrackedWrite {
-                root: &self.checkout,
+                root: std::borrow::Cow::Borrowed(&self.checkout),
                 branch: None,
+                source: false,
             });
         }
         if self.in_lane_worktree() {
@@ -1788,23 +1805,18 @@ impl Repo {
                  will make the change."
             );
         }
-        let dash_c = format!("spoolway -C {} {typed}", self.root.display());
-        // While the main checkout's setup is a `source` folder, the `-C` line
-        // would be refused there too, so it is left out and the remedy
-        // `source_write_refusal` gives stands in for it.
+        // While the main checkout's setup is a `source` folder, a command run
+        // in the main checkout may be refused (`pipeline promote` is). The
+        // folder the worktree reads is the source, which has a setup to
+        // write, so the line points there.
         let source = source_in_use_at(&self.root);
+        let folder = source.as_deref().unwrap_or(&self.root);
+        let dash_c = format!("spoolway -C {} {typed}", folder.display());
         if self.borrowed {
-            match &source {
-                Some(source) => bail!(
-                    "this worktree's branch has no .spoolway/ of its own, so there is no setup \
-                     here to write.\n  {}",
-                    source_write_refusal(&self.root, source)
-                ),
-                None => bail!(
-                    "this worktree's branch has no .spoolway/ of its own, so there is no setup \
-                     here to write.\n  {dash_c}"
-                ),
-            }
+            bail!(
+                "this worktree's branch has no .spoolway/ of its own, so there is no setup \
+                 here to write.\n  {dash_c}"
+            );
         }
         // Resolved here, before anything is written, and handed back for
         // the note printed after the write: asked after it, a detached HEAD
@@ -1814,23 +1826,61 @@ impl Repo {
             format!("cannot tell which branch {} is on", self.checkout.display())
         })?;
         let Some(branch) = branch else {
-            match &source {
-                Some(source) => bail!(
-                    "this worktree is on a detached HEAD, so a change written here would have \
-                     no branch to be committed on. check a branch out here to write its \
-                     setup.\n  {}",
-                    source_write_refusal(&self.root, source)
-                ),
-                None => bail!(
-                    "this worktree is on a detached HEAD, so a change written here would have \
-                     no branch to be committed on. check a branch out here to write its setup, \
-                     or write the main checkout's:\n  {dash_c}"
-                ),
-            }
+            bail!(
+                "this worktree is on a detached HEAD, so a change written here would have \
+                 no branch to be committed on. check a branch out here to write its setup, \
+                 or write {}:\n  {dash_c}",
+                match source {
+                    Some(_) => "the source folder's",
+                    None => "the main checkout's",
+                }
+            );
         };
         Ok(TrackedWrite {
-            root: &self.checkout,
+            root: std::borrow::Cow::Borrowed(&self.checkout),
             branch: Some(branch),
+            source: false,
+        })
+    }
+
+    /// [`Repo::tracked_write_root`] for the commands that follow a `source`
+    /// folder: `config set` and `override promote`. In the main checkout
+    /// whose setup is read from one, the write lands in that folder, which is
+    /// the file the dispatcher reads, and the note after it names the folder.
+    /// Everything else is `tracked_write_root`'s, so a command that does not
+    /// call this one still refuses there.
+    pub fn source_write_root(
+        &self,
+        command: &crate::commands::LaneRefusal,
+        reads: &str,
+        typed: &str,
+    ) -> Result<TrackedWrite<'_>> {
+        if !self.in_linked_worktree()
+            && !self.in_lane_worktree()
+            && let Some(source) = self.source_in_use()
+        {
+            return Ok(TrackedWrite {
+                root: std::borrow::Cow::Owned(source),
+                branch: None,
+                source: true,
+            });
+        }
+        self.tracked_write_root(command, reads, typed)
+    }
+
+    /// This `Repo` as it stands in the `source` folder its setup is read
+    /// from, for a command that writes the setup's files through
+    /// `repo.checkout`, as `sync` does. `None` anywhere that
+    /// [`Repo::source_write_root`] would not write the source: a linked
+    /// worktree, a lane, or a checkout with a setup of its own.
+    pub(crate) fn on_source(&self) -> Option<Repo> {
+        if self.in_linked_worktree() || self.in_lane_worktree() {
+            return None;
+        }
+        let source = self.source_in_use()?;
+        Some(Repo {
+            checkout: source,
+            ..self.clone()
         })
     }
 
@@ -1895,16 +1945,26 @@ impl Repo {
     /// main checkout, but the command ran in a linked worktree, and the
     /// line is what tells a reader whose setup they are looking at.
     ///
+    /// While the checkout's setup is read from a `source` folder, the line
+    /// names that folder and no branch: it is the folder whose files the
+    /// command reads, and it need not sit on a branch.
+    ///
     /// Built once, here, so the line and its `--json` twin
     /// ([`CheckoutNote`]) always agree — both are read off the same
     /// [`branch_at`] call rather than each call site asking git again.
     pub fn checkout_note(&self) -> Result<Option<CheckoutNote>> {
+        if let Some(source) = self.source_in_use() {
+            return Ok(Some(CheckoutNote {
+                path: source,
+                branch: None,
+            }));
+        }
         if !self.in_linked_worktree() {
             return Ok(None);
         }
         Ok(Some(CheckoutNote {
             path: self.checkout.clone(),
-            branch: branch_at(&self.checkout)?,
+            branch: Some(branch_at(&self.checkout)?),
         }))
     }
 
@@ -1915,7 +1975,7 @@ impl Repo {
 }
 
 /// The fact [`Repo::checkout_note`] found: the checkout's own absolute path
-/// and the branch it has out.
+/// and the branch it has out, or a `source` folder's path alone.
 ///
 /// The one struct feeding both forms a reader of a command's output can ask
 /// for — the `checkout:` line drawn in the mockup, and the `--json` twin
@@ -1924,7 +1984,9 @@ impl Repo {
 #[derive(Debug, Clone, Serialize)]
 pub struct CheckoutNote {
     pub path: PathBuf,
-    pub branch: String,
+    /// `None` for a `source` folder, which is named by its path alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 impl CheckoutNote {
@@ -1942,7 +2004,10 @@ impl CheckoutNote {
         if json {
             eprintln!("{}", serde_json::to_string(self)?);
         } else {
-            println!("checkout: {} ({})", shorten_home(&self.path), self.branch);
+            match &self.branch {
+                Some(branch) => println!("checkout: {} ({branch})", shorten_home(&self.path)),
+                None => println!("checkout: {}", shorten_home(&self.path)),
+            }
         }
         Ok(())
     }
@@ -2411,8 +2476,9 @@ pub(crate) const BINDING_FILE: &str = "project.toml";
 /// What a home's `project.toml` says: the id its checkout was stamped with,
 /// and the checkout itself. The two files that must agree — the checkout's
 /// own `.git/spoolway-id` and this — are read and reconciled together only
-/// by [`bind`], which is also what writes this file. The one other write is
-/// [`clear_source_once_merged`], which deletes the `source` line.
+/// by [`bind`], which is also what writes this file. The other writes are
+/// [`change_source`], which sets or clears the `source` line, and
+/// [`clear_source_once_merged`], which deletes it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Binding {
     id: String,
@@ -2424,7 +2490,7 @@ struct Binding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     root_commit: Option<String>,
     /// A folder holding the `.spoolway/` this project reads while its main
-    /// checkout has none, written by hand. [`write_binding`] rewrites the
+    /// checkout has none, written by `spoolway config source`. [`write_binding`] rewrites the
     /// whole file from this struct, so a record that dropped the field here
     /// would lose the line the next time a moved checkout is recorded. An
     /// older binary does not know the key: it ignores it on reading, and a
@@ -2519,6 +2585,126 @@ fn clear_source_once_merged(root: &Path, home: &Path) {
     }
 }
 
+/// What [`change_source`] did to the `source` line.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SourceChange {
+    /// The line now names this folder, absolute and canonical.
+    Set(PathBuf),
+    /// The line named this folder and is gone.
+    Cleared(PathBuf),
+    /// There was no line to clear.
+    NothingSet,
+}
+
+/// Set, change or (with `None`) clear the `source` line in the project
+/// `start` belongs to: `spoolway config source`.
+///
+/// The project is found from `start` without reading its setup, which is what
+/// lets this run when the refusal for a missing or broken source sends a
+/// person to it: [`Repo::discover`] would refuse before the command ran. A
+/// folder is stored as its canonical absolute path, since a relative one would
+/// name a different place from every other directory, and a folder that holds
+/// no `.spoolway/`, or that is not a checkout or worktree of the same
+/// repository, is refused rather than stored for the next command to refuse
+/// on. The read and the write of `project.toml` are made under the edit
+/// lock, so a parallel `config set` or `config source` does not write over
+/// the other's line.
+///
+/// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
+/// command asking, for the same reason as in [`Repo::refuse_in_lane`].
+pub(crate) fn change_source(
+    start: &Path,
+    folder: Option<&Path>,
+    _command: &crate::commands::LaneRefusal,
+) -> Result<SourceChange> {
+    // A relative folder is read from where the command ran, as the person
+    // typed it; `start` is that directory.
+    let folder = folder.map(|folder| start.join(folder));
+    let start = start
+        .canonical()
+        .with_context(|| format!("resolving {}", start.display()))?;
+    let project = match main_checkout(&start) {
+        Some(main) => main,
+        None => git_toplevel(&start).with_context(|| {
+            format!(
+                "{} is not in a git repository, so it has no project whose source can be \
+                 changed\n  run `spoolway config source` from inside the project's main checkout",
+                start.display()
+            )
+        })?,
+    };
+    if workspace_clone(&project).is_some() {
+        bail!(
+            "{} is a clone in a workspace, which keeps its setup in the workspace's own config/ \
+             and reads no source\n  to read a setup from a folder instead, remove this \
+             checkout's entry from the workspace's project.toml and run `spoolway init` in it",
+            project.display()
+        );
+    }
+    let home = bind_as(&project, Bind::Peek)?;
+    if started_in_lane(&start, &home) {
+        bail!(
+            "the source is the project's setup, not this worktree's.\n  a lane does not change \
+             the project's setup. write the change you wanted into your report, and a person \
+             will make the change."
+        );
+    }
+    let _lock = crate::lock::EditLock::acquire(&crate::lock::EditLock::path_in(&home))?;
+    let mut binding = read_binding(&home)?.with_context(|| {
+        format!(
+            "{} has no project record to hold a source\n  run `spoolway init` there first",
+            project.display()
+        )
+    })?;
+    let Some(folder) = folder else {
+        return Ok(match binding.source.take() {
+            Some(old) => {
+                write_binding(&home, &binding)?;
+                SourceChange::Cleared(old)
+            }
+            None => SourceChange::NothingSet,
+        });
+    };
+    if crate::config::tracked_setup_dir_in(&project).is_dir() {
+        bail!(
+            "{} has its own .spoolway/, so it reads no source\n  a source only stands in for a \
+             setup the main checkout does not have",
+            project.display()
+        );
+    }
+    let given = folder;
+    let folder = given.canonical().with_context(|| {
+        format!(
+            "the folder {} does not exist\n  give the path of a checkout or worktree that holds \
+             a .spoolway/",
+            given.display()
+        )
+    })?;
+    if !crate::config::tracked_setup_dir_in(&folder).is_dir() {
+        bail!(
+            "{} holds no .spoolway/\n  give the folder of a checkout or worktree that has one, \
+             or run `spoolway init` in it first",
+            shorten_home(&folder)
+        );
+    }
+    // Overrides, the lock and every note are keyed off the git repository of
+    // the folder a write lands in. A folder of another repository, or none,
+    // would write this project's setup under another project's state.
+    let common = common_git_dir(&project)?;
+    if common.is_none() || common_git_dir(&folder)? != common {
+        bail!(
+            "{} is not a checkout or worktree of {}, so a setup written there would belong to \
+             another project\n  give the folder of a worktree of this repository; `git \
+             worktree list` shows them, and `git worktree add` makes one",
+            shorten_home(&folder),
+            shorten_home(&project)
+        );
+    }
+    binding.source = Some(folder.clone());
+    write_binding(&home, &binding)?;
+    Ok(SourceChange::Set(folder))
+}
+
 /// The binding recorded at `home`, if there is one readable. `Ok(None)` only
 /// for "nothing written there yet" (a missing file); a file that exists but
 /// will not parse is a real error, never silently treated the same as no
@@ -2566,9 +2752,10 @@ fn write_binding(home: &Path, binding: &Binding) -> Result<()> {
          # `.git` is stamped with. Checked against each other on every\n\
          # command — see the `binding-record` task. Updated on its own to\n\
          # record a checkout that moved (the one it named is gone, or no\n\
-         # longer carries this id), and to delete `source` below.\n\
-         # `source` names a folder whose .spoolway/ is read while the main\n\
-         # checkout has none; deleted on its own once it has one.\n{}",
+         # longer carries this id), and to set, change or delete `source`\n\
+         # below. `spoolway config source <folder>` writes it. `source` names\n\
+         # a folder whose .spoolway/ is read while the main checkout has\n\
+         # none; deleted on its own once it has one.\n{}",
         toml::to_string_pretty(binding).context("serialising project.toml")?
     );
     crate::task::write_atomic(&home.join(BINDING_FILE), body)
@@ -6305,7 +6492,7 @@ mod tests {
             .unwrap()
             .expect("checkout and root differ, so there is a note");
         assert_eq!(note.path.canonical().unwrap(), wt.canonical().unwrap());
-        assert_eq!(note.branch, "task/note");
+        assert_eq!(note.branch.as_deref(), Some("task/note"));
 
         git(
             &work,
@@ -7345,7 +7532,7 @@ mod tests {
             .unwrap()
             .expect("the main checkout's setup was read, and the line says so");
         assert_eq!(note.path.canonical().unwrap(), work.canonical().unwrap());
-        assert_eq!(note.branch, "plan/x");
+        assert_eq!(note.branch.as_deref(), Some("plan/x"));
 
         git(
             &work,
@@ -8814,10 +9001,10 @@ mod tests {
         );
     }
 
-    /// The `-C` line a worktree's refusal gives would be refused in the main
-    /// checkout too, so the refusal gives the source remedy instead.
+    /// A worktree with no setup of its own reads the source, so its `-C` line
+    /// names that folder, where the command is let through.
     #[test]
-    fn a_borrowed_worktree_refusal_gives_no_dash_c_line_on_a_source() {
+    fn a_borrowed_worktree_refusal_names_the_source_in_its_dash_c_line() {
         let project = source_project("source-borrowed");
         crate::platform::test_home::with_home(&project.home, || {
             let repo = Repo::discover(&project.plain).unwrap();
@@ -8827,16 +9014,17 @@ mod tests {
                 "config set k v",
             );
             let said = format!("{:#}", refused.unwrap_err());
-            assert!(said.contains("would land in that folder"), "{said}");
-            assert!(!said.contains("spoolway -C"), "{said}");
+            let line = format!("spoolway -C {} config set k v", project.source.display());
+            assert!(said.contains("no .spoolway/ of its own"), "{said}");
+            assert!(said.ends_with(&line), "{said}");
         });
     }
 
-    /// A detached worktree with its own setup is told to check a branch out
-    /// in one sentence, and what the main checkout's source means in the
-    /// next, with no `-C` line.
+    /// A detached worktree with its own setup is told to check a branch out,
+    /// or to write the source folder's setup, naming that folder in the `-C`
+    /// line.
     #[test]
-    fn a_detached_worktree_refusal_names_the_main_checkouts_source_on_its_own_line() {
+    fn a_detached_worktree_refusal_names_the_source_in_its_dash_c_line() {
         let project = source_project("source-detached");
         crate::platform::test_home::with_home(&project.home, || {
             let repo = Repo::discover(&project.detached).unwrap();
@@ -8851,12 +9039,112 @@ mod tests {
                 "config set k v",
             );
             let said = format!("{:#}", refused.unwrap_err());
-            assert!(
-                said.contains("check a branch out here to write its setup.\n  "),
-                "{said}"
+            let line = format!("spoolway -C {} config set k v", project.source.display());
+            assert!(said.contains("or write the source folder's:"), "{said}");
+            assert!(said.ends_with(&line), "{said}");
+        });
+    }
+
+    /// In the main checkout, `config set` and `override promote` write the
+    /// source folder, with a note naming it, while a command that does not
+    /// follow the source is refused as before.
+    #[test]
+    fn the_main_checkout_writes_the_source_for_the_commands_that_follow_it() {
+        let project = source_project("source-write");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            let write = repo
+                .source_write_root(
+                    &crate::commands::refusal::CONFIG_SET,
+                    "config",
+                    "config set k v",
+                )
+                .unwrap();
+            assert_eq!(write.root.as_ref(), repo.source_in_use().unwrap());
+            let note = write.note().unwrap();
+            assert!(note.starts_with("  spoolway uses "), "{note}");
+            assert!(note.ends_with(" as its setup"), "{note}");
+            assert!(!note.contains("merges"), "{note}");
+            let refused = repo.tracked_write_root(
+                &crate::commands::refusal::PIPELINE_PROMOTE,
+                "pipelines",
+                "pipeline promote x",
             );
+            let said = format!("{:#}", refused.unwrap_err());
             assert!(said.contains("would land in that folder"), "{said}");
-            assert!(!said.contains("spoolway -C"), "{said}");
+        });
+    }
+
+    /// The `checkout:` line names the source folder alone, as text and as
+    /// JSON, since the folder need not sit on a branch.
+    #[test]
+    fn the_checkout_note_names_the_source_folder_and_no_branch() {
+        let project = source_project("source-note");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            let note = repo.checkout_note().unwrap().unwrap();
+            assert_eq!(Some(note.path.as_path()), repo.source_in_use().as_deref());
+            assert_eq!(note.branch, None);
+            assert!(!serde_json::to_string(&note).unwrap().contains("branch"));
+        });
+    }
+
+    /// `config source` stores the canonical absolute path, a relative folder
+    /// included, and `--clear` removes the line it wrote.
+    #[test]
+    fn change_source_sets_a_canonical_path_and_clears_it() {
+        let project = source_project("source-change");
+        crate::platform::test_home::with_home(&project.home, || {
+            let other = project.work.parent().unwrap().join("limits");
+            git(
+                &project.work,
+                &["worktree", "add", "-q", "--detach", other.to_str().unwrap()],
+            );
+            std::fs::create_dir_all(other.join(crate::config::STATE_DIR)).unwrap();
+            let command = &crate::commands::refusal::CONFIG_SOURCE;
+            let relative = std::path::Path::new("../limits");
+            let set = change_source(&project.work, Some(relative), command).unwrap();
+            let canonical = other.canonicalize().unwrap();
+            assert_eq!(set, SourceChange::Set(canonical.clone()));
+            assert_eq!(source_of(&project.work), Some(canonical.clone()));
+            let cleared = change_source(&project.work, None, command).unwrap();
+            assert_eq!(cleared, SourceChange::Cleared(canonical));
+            assert_eq!(source_of(&project.work), None);
+            let again = change_source(&project.work, None, command).unwrap();
+            assert_eq!(again, SourceChange::NothingSet);
+        });
+    }
+
+    /// A folder with no `.spoolway/` is refused, and the line is left alone.
+    #[test]
+    fn change_source_refuses_a_folder_without_a_setup() {
+        let project = source_project("source-change-bare");
+        crate::platform::test_home::with_home(&project.home, || {
+            let bare = project.work.parent().unwrap().join("bare");
+            git(
+                &project.work,
+                &["worktree", "add", "-q", "--detach", bare.to_str().unwrap()],
+            );
+            let command = &crate::commands::refusal::CONFIG_SOURCE;
+            let said = change_source(&project.work, Some(&bare), command)
+                .unwrap_err()
+                .to_string();
+            assert!(said.contains("holds no .spoolway/"), "{said}");
+            assert!(said.contains("spoolway init"), "{said}");
+            let said = change_source(&project.work, Some(&bare.join("gone")), command)
+                .unwrap_err()
+                .to_string();
+            assert!(said.contains("does not exist"), "{said}");
+            // A folder of its own, holding a `.spoolway/`, but outside this
+            // repository.
+            let stray = project.work.parent().unwrap().join("stray");
+            std::fs::create_dir_all(stray.join(crate::config::STATE_DIR)).unwrap();
+            let said = change_source(&project.work, Some(&stray), command)
+                .unwrap_err()
+                .to_string();
+            assert!(said.contains("not a checkout or worktree of"), "{said}");
+            assert!(said.contains("git worktree list"), "{said}");
+            assert_eq!(source_of(&project.work), Some(project.source.clone()));
         });
     }
 

@@ -202,6 +202,16 @@ pub const CONFIG_SET: LaneRefusal = entry!(
     None,
     RefusedOn::Every,
 );
+/// `config source` rewrites the project's record, which a lane's worktree
+/// shares with the person's own.
+pub const CONFIG_SOURCE: LaneRefusal = entry!(
+    "CONFIG_SOURCE",
+    SETUP,
+    &["config", "source"],
+    None,
+    None,
+    RefusedOn::Every,
+);
 pub const OVERRIDE_PROMOTE: LaneRefusal = entry!(
     "OVERRIDE_PROMOTE",
     SETUP,
@@ -243,6 +253,7 @@ pub const LANE_REFUSALS: &[&LaneRefusal] = &[
     &CONFIG_OVERRIDE,
     &OVERRIDE_DROP,
     &CONFIG_SET,
+    &CONFIG_SOURCE,
     &OVERRIDE_PROMOTE,
     &PIPELINE_PROMOTE,
 ];

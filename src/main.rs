@@ -271,7 +271,8 @@ fn run() -> Result<()> {
         // `Repo::tracked_write_root`: in a worktree on its own branch that
         // is the worktree's copy, which the dispatcher does not read until
         // the branch merges. A borrowed, lane or detached-HEAD worktree is
-        // refused.
+        // refused. In a main checkout whose setup is a `source` folder they
+        // write that folder's files.
         // `sync`, further down, writes against `repo.checkout` as well — see
         // its own module doc — and refuses only in a worktree that reads the
         // main checkout's setup. `update` writes no project file at all any
@@ -299,6 +300,13 @@ fn run() -> Result<()> {
         }
         Command::Config(ConfigCommand::Set { key, value }) => {
             commands::config_set(&Repo::discover(&cwd)?, key, value)
+        }
+        // Before a project is discovered: the refusal for a source that is
+        // gone or holds no `.spoolway/` names this command as the way out,
+        // and `Repo::discover` would stop on that same source first.
+        Command::Config(ConfigCommand::Source { folder, .. }) => {
+            commands::refuse_json("config source", cli.json)?;
+            commands::config_source(&cwd, folder.as_deref())
         }
         // Lenient on purpose: a config that no longer parses is exactly when
         // you want to open it.
