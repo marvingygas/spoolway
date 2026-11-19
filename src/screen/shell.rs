@@ -647,8 +647,9 @@ struct DispatchTab {
 /// A reload request `u` wrote: its id, and the dispatcher `holder` that held
 /// the lock when it was written. Kept on the tab, because a popup that reads
 /// keys can open while the request still waits — the exit popup of a child
-/// that was not the dispatcher asked — and the answer must still be shown,
-/// and `u` still refused, once that popup has gone.
+/// that was not the dispatcher asked, or the start gates `enter` opens after
+/// it — and the answer must still be shown, and `u` still refused, once that
+/// popup has gone.
 struct Asked {
     id: String,
     holder: u32,
@@ -1044,10 +1045,10 @@ impl DispatchTab {
     /// lock to reload, and wait for its answer. The key loop runs this under
     /// the loading spool, which is all that shows the wait.
     ///
-    /// Does nothing while a request from this tab is still waiting, so a
-    /// second press cannot send a second request, and nothing with no
-    /// dispatcher up, where the key line does not offer it: a request then
-    /// would sit unread until the next run. The key loop asks this only
+    /// A press while a request from this tab is still waiting writes no
+    /// second request and goes back to waiting on the first. With no
+    /// dispatcher up, where the key line does not offer it, it does nothing:
+    /// a request then would sit unread until the next run. The key loop asks this only
     /// while the frame on screen offers the pair at all — see
     /// `crate::status::Board::offers_update`.
     fn update(&mut self, repo: &Repo) {
@@ -3085,10 +3086,15 @@ mod tests {
                 tab.popup.as_ref().map(Popup::panel)
             );
         };
-        // A little past `RELOAD_LOOK` for the reap's own reads on a busy
-        // machine; the idle tick this replaces is a whole second.
+        // Half the idle tick, not `RELOAD_LOOK` itself: a loaded runner can
+        // oversleep a 50 ms sleep several times over, and a timer as coarse
+        // as Windows' 15.6 ms adds to it. That still tells the wait's own
+        // looks from the once-a-`POLL` reap the answer used to wait for.
         let late = since.saturating_duration_since(answered);
-        assert!(late <= RELOAD_LOOK * 2, "opened {late:?} after the answer");
+        assert!(
+            late < crate::status::POLL / 2,
+            "opened {late:?} after the answer"
+        );
 
         tab.popup = Some(Popup::Loaded(Instant::now() - LOADED_SHOWN / 2));
         let before = Instant::now();
@@ -3298,12 +3304,13 @@ mod tests {
 
     // When the dispatcher asked is the tab's own child and it dies unasked
     // while the reload waits, its exit popup says too that the reload went
-    // unanswered, the wait ends, and `enter` closes it. A real dispatcher deletes its lock
-    // before it exits, so a reap can find the lock gone and the child still
-    // running: here the stand-in, which never holds the lock, waits for `go`
-    // so that reap happens first, then dies. Fails before the change: that
-    // first reap put the `update config` notice up and forgot the request,
-    // and the exit popup then went over it with the exit status alone.
+    // unanswered, the wait ends, and `enter` closes it. A real dispatcher
+    // deletes its lock before it exits, so a reap can find the lock gone and
+    // the child still running: here the stand-in, which never holds the
+    // lock, waits for `go` so that reap happens first, then dies. Fails
+    // before the change: that first reap put the `update config` notice up
+    // and forgot the request, and the exit popup then went over it with the
+    // exit status alone.
     #[test]
     fn the_tabs_own_dispatcher_dying_before_answering_says_so() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-update-child-gone");
