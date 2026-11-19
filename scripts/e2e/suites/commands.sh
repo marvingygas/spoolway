@@ -1461,13 +1461,13 @@ must "removing the main checkout's temporary branch" git branch -D e2e-no-setup
 
 # ------------------------------------------- a source folder while main has none
 # A `source` line in the project's own `project.toml`, written by hand here,
-# names a folder whose `.spoolway/` the main checkout reads while its branch
-# has none, and the commands that follow it write that folder. The first command that finds the checkout's own `.spoolway/` again
+# names a worktree of the same repository whose `.spoolway/` the main checkout
+# reads while its branch has none, and the commands that follow it write that
+# worktree. The first command that finds the checkout's own `.spoolway/` again
 # deletes the line and says so once.
 HOME_DIR=$(dirname "$("$SPOOLWAY" config path | sed -n 's/^plans: *//p')")
 SRC="$LIVE/source-folder"
-must "making a folder that holds the only setup" mkdir -p "$SRC"
-must "giving it a copy of the setup" cp -a .spoolway "$SRC/.spoolway"
+must "making a worktree that holds the only setup" git worktree add -q --detach "$SRC"
 must "and a config value of its own" \
   sed -i 's|^blocked_agent = .*|blocked_agent = "from-the-source"|' "$SRC/.spoolway/config.toml"
 must "and a pipeline only it has" \
@@ -1491,9 +1491,38 @@ says "config set writes the source folder and names it" "  spoolway uses $SRC as
   "$SPOOLWAY" config set dispatch.visible_lanes 5
 has "and the source folder's config.toml holds the value" "visible_lanes = 5" \
   "$SRC/.spoolway/config.toml"
+# `sync` removes spoolway's marked block from a tracked `.gitignore`. It stands
+# in the main checkout and in the source, so the one that loses it says which
+# of them the run wrote.
+for ignore in .gitignore "$SRC/.gitignore"; do
+  must "a marked block in $ignore" bash -c \
+    'printf "# >>> spoolway >>>\n/.spoolway/\n# <<< spoolway <<<\n" >>"$1"' _ "$ignore"
+  has "which now holds it" "# >>> spoolway >>>" "$ignore"
+done
 says "sync reads and writes the source folder, and says so" "checkout: $SRC" "$SPOOLWAY" sync
+lacks "and the source's .gitignore lost the block" "# >>> spoolway >>>" "$SRC/.gitignore"
+has "and the main checkout's kept it" "# >>> spoolway >>>" .gitignore
+if [ ! -e .spoolway ]; then ok "and the main checkout has no .spoolway/ of its own"
+else bad "and the main checkout has no .spoolway/ of its own"; fi
+must "the main checkout's .gitignore is removed again" rm -f .gitignore
 refuses "a pipeline write is still refused rather than written into the source" \
   "would land in that folder" "$SPOOLWAY" pipeline promote nothing
+
+# A line written by hand can name a folder of another repository, whose
+# overrides and notes a write would be keyed off. The refusal sends a person
+# to `config source <folder>`, which repairs the line.
+STRANGER="$LIVE/stranger-folder"
+must "a folder of no repository that holds a .spoolway/" mkdir -p "$STRANGER/.spoolway"
+must "named as the source by hand" \
+  sed -i "s|^source = .*|source = \"$STRANGER\"|" "$HOME_DIR/project.toml"
+refuses "config set refuses a source of another repository" \
+  "is not a checkout or worktree of" "$SPOOLWAY" config set dispatch.visible_lanes 6
+refuses "and so does sync" "is not a checkout or worktree of" "$SPOOLWAY" sync
+works "config source puts the worktree back, as the refusal says" \
+  "$SPOOLWAY" config source "$SRC"
+says "and config set writes it again" "  spoolway uses $SRC as its setup" \
+  "$SPOOLWAY" config set dispatch.visible_lanes 5
+rm -rf "$STRANGER"
 
 must "the branch that carries .spoolway/ is checked out again" git checkout -q plan/live
 must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"
@@ -1504,7 +1533,8 @@ has "the first command there says it cleared the source" \
 lacks "and the line is gone from project.toml" "source = " "$HOME_DIR/project.toml"
 "$SPOOLWAY" config get unattended.blocked_agent >/dev/null 2>"$SOURCE_ERR"
 lacks "and the next command says nothing of it" "cleared the source" "$SOURCE_ERR"
-rm -rf "$LIVE/setup-aside" "$SRC" "$SOURCE_ERR"
+rm -rf "$LIVE/setup-aside" "$SOURCE_ERR"
+must "removing the source worktree" git worktree remove --force "$SRC"
 must "removing the main checkout's temporary branch" git branch -D e2e-source-setup
 
 # --------------------------------------------------------- overrides layer

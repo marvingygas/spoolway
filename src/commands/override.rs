@@ -522,8 +522,9 @@ pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
 /// layer.
 ///
 /// `override promote` prints these lines; the OVERRIDES tab shows them in a
-/// screen of its own. `write_root` comes from [`Repo::tracked_write_root`],
-/// which is also what refuses a lane.
+/// screen of its own. `write_root` comes from [`Repo::source_write_root`] for
+/// the command and from [`Repo::tracked_write_root`] for the tab, and both
+/// refuse a lane.
 pub(crate) fn promote_override(
     repo: &Repo,
     write_root: &Path,

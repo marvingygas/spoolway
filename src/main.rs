@@ -268,7 +268,7 @@ fn run() -> Result<()> {
         // Every read below is against `repo.checkout`, not `repo.root`: a
         // command answers about the file actually in front of it. `set` and
         // `override promote` write `repo.checkout` too, through
-        // `Repo::tracked_write_root`: in a worktree on its own branch that
+        // `Repo::source_write_root`: in a worktree on its own branch that
         // is the worktree's copy, which the dispatcher does not read until
         // the branch merges. A borrowed, lane or detached-HEAD worktree is
         // refused. In a main checkout whose setup is a `source` folder they

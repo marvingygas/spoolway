@@ -79,9 +79,10 @@ pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
 ///
 /// [`Repo::source_write_root`] decides where. The main checkout writes its
 /// own file, or the `source` folder's while its setup is read from one, and
-/// the note after the write names that folder. A worktree on its own branch writes the worktree's copy, so the
-/// change can ride that branch into a pull request; the dispatcher keeps
-/// reading the main checkout's until the branch merges. A worktree that
+/// the note after the write names that folder. A worktree on its own branch
+/// writes the worktree's copy, so the change can ride that branch into a pull
+/// request; the dispatcher keeps reading the main checkout's until the branch
+/// merges. A worktree that
 /// borrows the main checkout's setup, or that is on a detached HEAD, is
 /// refused with the `-C` invocation that lands in the file the dispatcher
 /// reads. A dispatcher lane's worktree is refused too, but without that
