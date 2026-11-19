@@ -1,6 +1,6 @@
 ---
 domain: testing
-covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", "scripts/gate-quick.sh", ".github/workflows/**", "src/scratch.rs", "src/fault.rs"]
+covers: ["scripts/e2e/**", "scripts/e2e-*.sh", "scripts/gate.sh", "scripts/gate-quick.sh", "deny.toml", ".github/workflows/**", "src/scratch.rs", "src/fault.rs"]
 ---
 
 # Testing
@@ -260,6 +260,8 @@ cargo test --all-targets --locked
 cargo build --release
 ./target/release/spoolway pipeline check
 ```
+
+`cargo deny check advisories` reads `deny.toml` at the repository root. Its `ignore` list names the advisories the check skips, each with a reason.
 
 `impl`'s `suite` step runs `scripts/e2e-pr.sh` on the last task of a chain, through `last:`
 (see [`last:`](pipelines.md#last--a-step-the-chain-runs-once)):
