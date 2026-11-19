@@ -420,7 +420,8 @@ impl Repo {
                 }
                 bail!(
                     "{} is a spoolway project, but `.spoolway/` is not on branch `{}` — check \
-                     out a branch that carries it, or run `spoolway init` here",
+                     out a branch that carries it, run `spoolway init` here, or read it from \
+                     another folder: spoolway config source <folder>",
                     top.display(),
                     branch_or_detached(top),
                 );
@@ -8032,6 +8033,10 @@ mod tests {
         assert!(
             said.contains("check out a branch that carries it"),
             "the error says what to do: {said}"
+        );
+        assert!(
+            said.contains("or read it from another folder: spoolway config source <folder>"),
+            "the error names the source command: {said}"
         );
     }
 

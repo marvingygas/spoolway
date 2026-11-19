@@ -409,8 +409,8 @@ must "and its branch has no setup" git commit -qm "e2e: a branch from before ini
 # `.spoolway/` holding even one file counts as a setup, so the folder goes too.
 rm -rf .spoolway
 
-MAIN_REFUSAL="spoolway: $MAIN is a spoolway project, but \`.spoolway/\` is not on branch \`before-init\` — check out a branch that carries it, or run \`spoolway init\` here"
-PLAIN_REFUSAL="spoolway: $PLAIN is a spoolway project, but \`.spoolway/\` is not on branch \`task/plain\` — check out a branch that carries it, or run \`spoolway init\` here"
+MAIN_REFUSAL="spoolway: $MAIN is a spoolway project, but \`.spoolway/\` is not on branch \`before-init\` — check out a branch that carries it, run \`spoolway init\` here, or read it from another folder: spoolway config source <folder>"
+PLAIN_REFUSAL="spoolway: $PLAIN is a spoolway project, but \`.spoolway/\` is not on branch \`task/plain\` — check out a branch that carries it, run \`spoolway init\` here, or read it from another folder: spoolway config source <folder>"
 
 for command in "config get dispatch.lane_quiet" "config path" "pipeline list" "prompt list"; do
   # shellcheck disable=SC2086
