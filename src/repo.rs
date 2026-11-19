@@ -1946,9 +1946,15 @@ fn recorded_or_parent(common: &Path) -> Option<PathBuf> {
     // resolves to this git directory is the real checkout, and wins. When it
     // equals the parent, the ordinary layout, nothing extra is asked of git.
     let recorded = read_recorded_root(common);
+    //
+    // A linked worktree resolves to this git directory too, and is never the
+    // checkout: an older release stamped the worktree it ran in while the main
+    // checkout had no setup. Taking it here would keep the project in that
+    // worktree for good, so it is passed over and the parent answers.
     if let Some(recorded) = recorded.as_ref().filter(|recorded| {
         Some(recorded.as_path()) != common.parent()
             && common_git_dir(recorded).ok().flatten().as_deref() == Some(common)
+            && !is_linked_worktree(recorded)
     }) {
         return Some(recorded.clone());
     }
@@ -8136,6 +8142,45 @@ mod tests {
             read_binding(&main_home).unwrap().unwrap().root
         });
         assert_eq!(bound, work.canonical().unwrap());
+    }
+
+    /// An older release, run in a linked worktree while the main checkout had
+    /// no setup, also stamped `.git/spoolway-root` with that worktree. The
+    /// main checkout is still found as the project, the record moves back to
+    /// it, and the stamp names it afterwards.
+    #[test]
+    fn a_stamp_naming_a_worktree_of_the_same_clone_moves_back_to_the_main_checkout() {
+        let (_origin, work, _base_guard) = fixture("stamp-names-worktree");
+        let (home, _home_guard) = scratch_home("stamp-names-worktree");
+        let wt = crate::scratch::root("repo-test-stamp-names-worktree-wt");
+        let (repo, stamp) = crate::platform::test_home::with_home(&home, || {
+            let main_home = bind(&work).unwrap();
+            let _ = std::fs::remove_dir_all(&wt);
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/w",
+                    wt.to_str().unwrap(),
+                ],
+            );
+            let wt = wt.canonical().unwrap();
+            let mut binding = read_binding(&main_home).unwrap().unwrap();
+            binding.root = wt.clone();
+            write_binding(&main_home, &binding).unwrap();
+            let common = common_git_dir(&work).unwrap().unwrap();
+            std::fs::write(common.join(ROOT_FILE), wt.display().to_string()).unwrap();
+            let repo = Repo::discover(&wt).expect("the main checkout is the project");
+            let stamp = std::fs::read_to_string(common.join(ROOT_FILE)).unwrap();
+            (repo, stamp)
+        });
+        let main = work.canonical().unwrap();
+        assert_eq!(repo.root, main);
+        assert_eq!(read_binding(&repo.home).unwrap().unwrap().root, main);
+        assert_eq!(stamp.trim(), main.display().to_string());
     }
 
     /// `setup_source` names `root` unless a worktree with its own setup is
