@@ -55,6 +55,12 @@ A project can also read its whole setup from a folder elsewhere on the machine, 
 The line is deleted once the main checkout has one. See [The source
 folder](configuration.md#the-source-folder).
 
+While the main checkout has no `.spoolway/`, a command run in a lane's worktree reads the setup
+its dispatcher runs on. That is the source folder, or the linked worktree the dispatcher was
+started in. It makes no difference what `.spoolway/` the lane's own worktree carries, so a task
+cut from a base with no `.spoolway/` can still run `spoolway report`. When the main checkout has
+a `.spoolway/`, a lane reads the one on its own branch.
+
 There is one project per clone, and its `.spoolway/` sits at the top of the repo. A
 `.spoolway/` anywhere below the top is refused by name, and the refusal says where the setup
 belongs. Spoolway does not move or delete it for you.

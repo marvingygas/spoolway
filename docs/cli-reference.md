@@ -1391,7 +1391,8 @@ For a `gate_at:` that names a command step the line reads:
 ```
 
 Run inside a task's worktree, the check reads that branch's own pipelines. Every finding about
-another task in the queue is then a warning, and the check still exits 0. A task that names a
+another task in the queue is then a warning, and the check still exits 0. In a lane of a project
+whose main checkout has no `.spoolway/`, the check reads the pipelines its dispatcher runs on. A task that names a
 pipeline the branch lacks reads:
 
 ```
@@ -2173,9 +2174,11 @@ It writes the checkout it runs in. In a linked worktree that is the worktree's o
 the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one. In a
 linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
 the main checkout. In a main checkout whose setup is read from a [source
-folder](configuration.md#the-source-folder), `sync` writes nothing and refuses.
+folder](configuration.md#the-source-folder), `sync` writes nothing and refuses. It refuses in a
+lane of such a project too, because that lane reads the setup its dispatcher runs on and does not
+change it.
 
-In a lane's worktree, `sync` refreshes the lane's tracked files and leaves the private overrides
+In any other lane's worktree, `sync` refreshes the lane's tracked files and leaves the private overrides
 layer alone. If `overrides/config.toml` holds a retired key, the report names the key and says
 to run `spoolway sync` in the main checkout.
 

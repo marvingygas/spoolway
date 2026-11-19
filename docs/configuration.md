@@ -269,6 +269,7 @@ source = "/home/you/dev/app-adopt"
 |---|---|
 | The main checkout has no `.spoolway/`, and no workspace lists it | The config, pipelines, prompts, hooks and jobs are read from `<source>/.spoolway/`. |
 | A linked worktree has no `.spoolway/` of its own | It reads the same source. A worktree with its own `.spoolway/` reads that. |
+| A dispatcher lane's worktree | It reads the same source, whatever `.spoolway/` the lane's own worktree carries. `spoolway report`, `config get` and `prompt show` there print the dispatcher's setup. |
 | The main checkout has a `.spoolway/` | The first command that finds it deletes the `source` line and prints one note on stderr. |
 | The folder is gone or holds no `.spoolway/` | The command refuses, names the folder and tells you to point the line at another one. |
 | The path is relative or starts with `~` | The command refuses and asks for the full path. |

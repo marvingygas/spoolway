@@ -1620,7 +1620,9 @@ The dispatcher reads the pipelines when it starts and when a [reload](#reloading
 Configuration is reloaded whenever its files change, with a few exceptions; see the end of this
 section. Right after it takes the project's lock, and after each good reload, it writes a copy of
 what it loaded to `<home>/dispatch-pipelines.json`. The copy also records the run's
-`unattended.blocked_*` values. A dispatcher that starts later replaces that copy.
+`unattended.blocked_*` values and the folder the setup was read from. A lane whose project's main
+checkout has no `.spoolway/` reads its setup from that folder, so a reload moves the lane with
+the dispatcher. A dispatcher that starts later replaces that copy.
 
 While a dispatcher is running, these commands route a task on that copy and not on the files:
 
