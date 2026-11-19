@@ -354,7 +354,7 @@ fn try_reload(
     live: &Repo,
     running: &Pipelines,
 ) -> std::result::Result<(crate::config::Config, Pipelines), Vec<Reason>> {
-    let config = crate::config::Config::load_present(&live.root).map_err(|err| {
+    let config = crate::config::Config::load_present(&live.setup_source()).map_err(|err| {
         vec![Reason {
             what: format!("config.toml does not load: {err:#}"),
             fix: "fix config.toml, then reload again.".to_string(),
@@ -373,7 +373,7 @@ fn try_reload(
                 .to_string(),
         }]);
     }
-    let loaded = Pipelines::load(&live.root, &config).map_err(|err| {
+    let loaded = Pipelines::load(&live.setup_source(), &config).map_err(|err| {
         vec![Reason {
             what: format!("the pipelines do not load: {err:#}"),
             fix: "fix the file it names, then reload again.".to_string(),

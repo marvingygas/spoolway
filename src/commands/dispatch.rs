@@ -695,7 +695,7 @@ fn reload_config(
     reported: &mut Option<String>,
     record_reported: &mut Option<String>,
 ) {
-    match crate::config::Config::load_present(&live.root) {
+    match crate::config::Config::load_present(&live.setup_source()) {
         Ok(config) => {
             match crate::pipeline_snapshot::record_config(live, &config) {
                 Ok(()) => *record_reported = None,

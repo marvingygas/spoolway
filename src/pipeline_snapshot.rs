@@ -478,7 +478,7 @@ pub fn config_changed_since_start(repo: &Repo) -> Vec<String> {
     let Some(loaded) = LoadedPipelines::live(repo) else {
         return Vec::new();
     };
-    let Ok(config) = crate::config::Config::load_present(&repo.root) else {
+    let Ok(config) = crate::config::Config::load_present(&repo.setup_source()) else {
         return Vec::new();
     };
     let mut changed = Vec::new();

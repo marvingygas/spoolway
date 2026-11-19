@@ -418,7 +418,7 @@ fn run() -> Result<()> {
             // config commands above run ahead of this at all. Nothing is more
             // certain to break every one of those at once than a rename
             // landing in a worktree before the project has it.
-            let graph = Pipelines::load(&repo.root, &repo.config);
+            let graph = Pipelines::load(&repo.setup_source(), &repo.config);
 
             match command {
                 Command::Init(_)

@@ -1212,11 +1212,11 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // The shipped default, not `repo.config`: `repo.config` is
-            // `Config::load(&repo.root)` (see `Repo::discover`), and once
-            // `checkout` and `root` can diverge that is a different branch's
-            // values, not this one's — the same reason `templates` below
-            // seeds a missing skeleton from `skeleton.shipped` rather than
-            // from anything read out of the main checkout.
+            // `Config::load` of `Repo::setup_source` (see `Repo::discover`),
+            // and once `checkout` and `root` can diverge that is a different
+            // branch's values, not this one's — the same reason `templates`
+            // below seeds a missing skeleton from `skeleton.shipped` rather
+            // than from anything read out of the main checkout.
             let shipped = crate::config::Config::default();
             acts.push(Act::write(
                 crate::config::write_target(&path),
@@ -1245,7 +1245,7 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
 
     // Read from the file rather than taken from `repo`, so that what is
     // written back is what this document says. Not the same config as
-    // `repo.config`: that is `Config::load(&repo.root)`, and in a linked
+    // `repo.config`: that is `Config::load` of `Repo::setup_source`, and in a linked
     // worktree — the run this command now exists for — `root` and
     // `checkout` can hold two different files. `current` is always the
     // checkout's own, so a rewrite is sourced from the file it replaces.

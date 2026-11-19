@@ -138,16 +138,20 @@ impl Repo {
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
-        // `root` carries no `.spoolway/` only when a lane found its project's
-        // main checkout on a branch without it (see `root`). Everything this
-        // command would read from there is the built-in defaults, which is
-        // not the config the run is on, so it stops and says where the
-        // directory went. `report` and `stack` take the dispatcher's record
-        // instead — see `discover_live`.
-        if !crate::config::setup_dir_in(&root).is_dir() {
-            return Err(Config::missing_error(&root));
-        }
         let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
+        // Settled ahead of `bind`, which would otherwise mint a stamp and a
+        // home for a project that has nothing to read.
+        let source = setup_source(&root, &checkout, started_in_lane_dir(&start, &root));
+        // The folder that supplies the setup carries no `.spoolway/` only
+        // when a lane found its project's main checkout on a branch without
+        // it (see `root`), or when the command ran in the main checkout
+        // itself. Everything this command would read from there is the
+        // built-in defaults, which is not the config the run is on, so it
+        // stops and says where the directory went. `report` and `stack` take
+        // the dispatcher's record instead — see `discover_live`.
+        if !crate::config::setup_dir_in(&source).is_dir() {
+            return Err(Config::missing_error(&source));
+        }
         // Checked here, once, rather than in every accessor that creates a
         // directory under a home on demand: `bind` is what decides which
         // `~/.spoolway/<name>/` this checkout is allowed to write into,
@@ -161,7 +165,7 @@ impl Repo {
         // same home: a first command on a fresh clone has no home until
         // `bind` makes one.
         let home = bind(&root)?;
-        let config = Config::load(&root)?;
+        let config = Config::load(&source)?;
         let started_in_lane = started_in_lane(&start, &home);
         Ok(Repo {
             borrowed,
@@ -200,10 +204,11 @@ impl Repo {
         if let Some(err) = home_error {
             return Err(err);
         }
-        let missing = config_error.is_none() && !Config::path_in(&repo.root).exists();
+        let source = repo.setup_source();
+        let missing = config_error.is_none() && !Config::path_in(&source).exists();
         let problem = match config_error {
             Some(err) => err,
-            None if missing => Config::missing_error(&repo.root),
+            None if missing => Config::missing_error(&source),
             None => return Ok(repo),
         };
         match crate::pipeline_snapshot::recorded_config(&repo) {
@@ -217,7 +222,7 @@ impl Repo {
             }
             Ok(None)
                 if missing
-                    && crate::config::setup_dir_in(&repo.root).is_dir()
+                    && crate::config::setup_dir_in(&source).is_dir()
                     && crate::lock::Lock::holder(&repo.lock_file())?.is_none() =>
             {
                 Ok(repo)
@@ -274,6 +279,7 @@ impl Repo {
         let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         let (home, home_error) = bind_lenient(&root, mode);
         let started_in_lane = started_in_lane(&start, &home);
+        let source = setup_source(&root, &checkout, started_in_lane);
         // `Config::load` reads the overrides layer out of the home that
         // `home_error` above just failed to settle, so calling it the
         // ordinary way here could fail again for the identical reason and
@@ -283,9 +289,9 @@ impl Repo {
         // when the home resolved is a config failure worth telling apart
         // from it at all.
         let loaded = if home_error.is_some() {
-            Config::load_tracked(&root)
+            Config::load_tracked(&source)
         } else {
-            Config::load(&root)
+            Config::load(&source)
         };
         match loaded {
             Ok(config) => Ok((
@@ -330,14 +336,17 @@ impl Repo {
             return Ok(main.to_path_buf());
         }
 
-        // The main checkout is a registered project but sits on a branch with
-        // no `.spoolway/`, and `start` is in a linked worktree that carries
+        // The main checkout sits on a branch with no `.spoolway/`, no
+        // workspace lists it, and `start` is in a linked worktree that carries
         // its own. The walk below would take that copy as a second root, and
-        // `bind` would then refuse the lane's command for sharing the main
-        // checkout's id, advising a `spoolway init` that detaches the project.
-        // The project is still the main checkout. It has no config to read
-        // there, so `discover` stops on that and `discover_live` reads the
-        // dispatcher's record. The worktree's own top is what is compared,
+        // `bind` would then record the worktree as the project, or refuse a
+        // later command in the main checkout for sharing its id, advising a
+        // `spoolway init` that detaches the project. The project is still the
+        // main checkout, registered or not. What it reads is `setup_source`'s
+        // to say: this worktree's setup for a person's command, and nothing
+        // for a lane, where `discover` stops on the missing directory and
+        // `discover_live` reads the dispatcher's record. The worktree's own
+        // top is what is compared,
         // not `start`: a subdirectory of the bare main checkout, or a
         // worktree on a branch without `.spoolway/`, gets the refusal below.
         // A worktree nested inside the main checkout is left to the walk as
@@ -348,7 +357,6 @@ impl Repo {
         if let (Some(main), Some(top)) = (main, top.as_deref())
             && !top.starts_with(main)
             && crate::config::tracked_setup_dir_in(top).is_dir()
-            && registered_at(main)
         {
             return Ok(main.to_path_buf());
         }
@@ -919,6 +927,13 @@ impl Repo {
     /// a bare checkout path and not yet a `Repo` to ask.
     pub fn setup_dir(&self) -> PathBuf {
         crate::config::setup_dir_in(&self.checkout)
+    }
+
+    /// The folder whose setup supplies `config.toml` and the pipelines: the
+    /// one place that decides it, so every reader agrees. See
+    /// [`setup_source`].
+    pub fn setup_source(&self) -> PathBuf {
+        setup_source(&self.root, &self.checkout, self.in_lane_worktree())
     }
 
     /// [`crate::config::under_setup`], against this `Repo`'s own
@@ -1884,16 +1899,6 @@ pub(crate) fn main_checkout(dir: &Path) -> Option<PathBuf> {
         .and_then(|common| recorded_or_parent(&common))
 }
 
-/// Whether `dir` is the checkout its project's binding names as the root. Any
-/// failure reading the binding answers no, so the caller falls on to the
-/// ordinary search and its own errors.
-fn registered_at(dir: &Path) -> bool {
-    crate::mux::project_home(dir)
-        .ok()
-        .and_then(|home| read_binding(&home).ok().flatten())
-        .is_some_and(|binding| binding.root == dir)
-}
-
 /// The checkout a common git directory belongs to: whatever [`stamped_id`]
 /// recorded there when it differs from the common directory's parent and
 /// still resolves to this git directory, else the parent, verified, else the
@@ -2643,16 +2648,26 @@ fn bind_stamped(root: &Path, id: &str, mode: Bind) -> Result<PathBuf> {
         None
     };
     match other_stamp {
-        Some(Ok(Stamp::Valid(other))) if other == id => bail!(
-            "two checkouts carry the id {id}\n  {}  recorded in {}, and still carries it\n  \
-             {}  this one, stamped at {}\n  delete {} and run `spoolway init` again to \
-             re-stamp this one with a fresh id",
-            binding.root.display(),
-            record_path.display(),
-            root.display(),
-            stamp_path.display(),
-            stamp_path.display(),
-        ),
+        // A record naming a linked worktree of this same clone is an older
+        // binary's doing: it took a worktree for the project when the main
+        // checkout had no setup. The main checkout is the project, so this
+        // one takes the record over, as it does a stale one.
+        Some(Ok(Stamp::Valid(other)))
+            if other == id
+                && !(is_linked_worktree(&binding.root)
+                    && main_checkout(&binding.root).as_deref() == Some(root)) =>
+        {
+            bail!(
+                "two checkouts carry the id {id}\n  {}  recorded in {}, and still carries it\n  \
+                 {}  this one, stamped at {}\n  delete {} and run `spoolway init` again to \
+                 re-stamp this one with a fresh id",
+                binding.root.display(),
+                record_path.display(),
+                root.display(),
+                stamp_path.display(),
+                stamp_path.display(),
+            )
+        }
         Some(Err(err)) => {
             return Err(err).with_context(|| {
                 format!(
@@ -4704,6 +4719,34 @@ pub(crate) fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (P
         return (root.to_path_buf(), false);
     }
     checkout_of(start, root, main)
+}
+
+/// The folder that supplies `config.toml` and the pipelines: `root`, except
+/// for a command run in a linked worktree that carries its own `.spoolway/`
+/// while `root`, the main checkout, has none and no workspace lists it. That
+/// worktree's setup is then the only one there is, and reading it whole keeps
+/// the config, the pipelines, the prompts, the hooks and the jobs from three
+/// different places. A lane's worktree is left out, as is every project whose
+/// main checkout has a setup: there the dispatcher's own reads and a lane's
+/// must not follow a branch, or two branches would disagree about where a
+/// task goes next.
+pub(crate) fn setup_source(root: &Path, checkout: &Path, in_lane: bool) -> PathBuf {
+    if in_lane
+        || checkout == root
+        || crate::config::setup_dir_in(root).is_dir()
+        || !crate::config::tracked_setup_dir_in(checkout).is_dir()
+    {
+        return root.to_path_buf();
+    }
+    checkout.to_path_buf()
+}
+
+/// [`started_in_lane`] for a caller that has no bound home yet, and must not
+/// make one: a home that cannot be named yet reads as "not a lane".
+fn started_in_lane_dir(start: &Path, root: &Path) -> bool {
+    crate::mux::project_home(root)
+        .ok()
+        .is_some_and(|home| started_in_lane(start, &home))
 }
 
 /// Whether `start` sits under the worktree folder of the project home `home`.
