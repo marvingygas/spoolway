@@ -34,6 +34,14 @@ object, written to stderr so that stdout stays one JSON value a script can parse
 {"path":"/home/you/.spoolway/worktrees/checkout-line","branch":"task/checkout-line"}
 ```
 
+While a project reads its setup from a [source folder](configuration.md#the-source-folder), the
+line names that folder, in the main checkout and in a linked worktree with no `.spoolway/`. It
+carries no branch, and the `--json` object has no `branch` field:
+
+```
+checkout: ~/dev/app-adopt
+```
+
 The commands that print it: `pipeline show`, `pipeline check`, `pipeline list`, `pipeline
 override`, `pipeline copy`, `pipeline rename`, `prompt contract`, `prompt list`, `prompt
 override`, `prompt copy`, `config show`, `config list`, `config get`, `config path`, `config
@@ -44,8 +52,8 @@ override`, `doctor`, `jobs list` and `sync`.
 `--json` is global, but these commands only print text. With `--json` they exit non-zero and
 say so instead of printing prose: `pipeline check`, `pipeline override`, `prompt contract`,
 `prompt list`, `prompt override`, `config show`, `config get`, `config contract`,
-`config override`, `template contract`, `hook contract`, `override contract`, `group list`,
-`sync`, `queue add`, `queue show`, `prompt show` and `whats-new`.
+`config override`, `config source`, `template contract`, `hook contract`, `override contract`,
+`group list`, `sync`, `queue add`, `queue show`, `prompt show` and `whats-new`.
 
 ## Your work
 
@@ -1817,7 +1825,7 @@ spoolway config edit
 | `list` | Print every scalar setting as `key = value`. `--json` prints `[{"key","value"}, …]` |
 | `path` | Print every place this project's setup lives: the setup folder, the plans folder, the private `local/` folder (repo mode only), the overrides folder, the routines folder and both job stores. Also prints this checkout's own workspace and every workspace on the machine. `--json` prints `{"mode","setup","plans","local","overrides","routines","jobs":{"user","project"},"workspace","workspaces"}`, with `local` `null` in home mode |
 | `get <key>` | Print one value |
-| `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Parallel calls run one after another. Refuses a value that can never be right, such as a negative `unattended.max_cost_usd`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
+| `set <key> <value>` | Write one value into the project's file. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. In a main checkout that reads a [source folder](configuration.md#the-source-folder), it writes the source folder's file and prints `  spoolway uses <folder> as its setup`. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Refused when the source is not a checkout or worktree of this repository. Parallel calls run one after another. Refuses a value that can never be right, such as a negative `unattended.max_cost_usd`. Saves a value that names something not set up yet and warns that `doctor` fails until it is. Edits the tracked file against tracked values, and prints a note when the overrides layer still decides the value in effect. See [Configuration](configuration.md#what-config-set-checks) and [With an active overrides layer](configuration.md#with-an-active-overrides-layer) |
 | `edit` | Open the file in `$VISUAL`, else `$EDITOR`, else `vim`, and validate it on save. Fails when the file does not load, and when it holds a value `doctor` fails, such as a `session_blocked_ctx` at or below `session_reuse_ctx`. See [Wrong values written by hand](configuration.md#wrong-values-written-by-hand) |
 
 The `plans:` line follows `setup:`. In repo mode it names `plans/` in the project's home. In home
@@ -1830,6 +1838,30 @@ and the workspace list. That list is what `spoolway init --workspace <name>` nee
 `project.toml` gives that entry an `error` field instead, and the rest of the list still prints.
 
 See [Configuration](configuration.md).
+
+### `spoolway config source <folder>` / `--clear`
+
+Read the project's setup from another folder, or stop doing so. The folder is a checkout or
+worktree of this repository that holds a `.spoolway/`. The command stores its absolute path as
+the `source` line in the project's `project.toml`, and a relative folder is read from the
+directory the command runs in. See [The source folder](configuration.md#the-source-folder).
+
+```
+$ spoolway config source ~/dev/app-limits
+  spoolway uses ~/dev/app-limits as its setup
+$ spoolway config source --clear
+  cleared the source ~/dev/app-limits
+```
+
+| Argument | What it does |
+|---|---|
+| `<folder>` | Set or change the `source` line |
+| `--clear` | Remove the `source` line. Prints `  no source is set, so nothing changed` when there is none |
+
+The command refuses when the main checkout has a `.spoolway/` of its own, when the folder does not
+exist or holds no `.spoolway/`, when the folder is not a checkout or worktree of this
+repository, and in a workspace clone. It is refused in a dispatcher lane's worktree. It has no
+`--json` form. Parallel calls run one after another.
 
 ### `spoolway config override [--set <key>=<value>]`
 
@@ -1878,7 +1910,7 @@ and why. `--json` carries the same list under `ignored`.
 | Subcommand | What it does |
 |---|---|
 | `list` | One line per patched artifact, plus one `ignored` line per stale entry. `--json` prints an array |
-| `promote <target>` | Write the patched values into the tracked file and keep the entry in the layer. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
+| `promote <target>` | Write the patched values into the tracked file and keep the entry in the layer. In a linked worktree that has its own `.spoolway/`, it writes that worktree's file and prints which branch carries it. In a main checkout that reads a [source folder](configuration.md#the-source-folder), it writes the source folder's file and prints `  spoolway uses <folder> as its setup`. Refused in a worktree with no `.spoolway/` of its own, in a dispatcher lane's worktree and on a detached HEAD. Refused when the source is not a checkout or worktree of this repository. `promote config.toml` writes every key or none. A pipeline patch that sets `headless:` on a step is refused and nothing is written |
 | `drop [<target>]` | Remove one entry, or the whole layer when none is named. Works on a layer file that does not parse. Refused in a dispatcher lane's worktree |
 | `drop <target> <key>` | Remove one key from the target's patch and print `cleared <key> from <file>`. The key is written the way `list` prints it: `<step>.<key>`, `description` or `task_template` for a pipeline, a dotted key for `config.toml`. A file left with no key is removed from the layer. Refused on a prompt, because a prompt override has no keys. Refused in a dispatcher lane's worktree |
 
@@ -2173,10 +2205,12 @@ skeletons are never touched.
 It writes the checkout it runs in. In a linked worktree that is the worktree's own files, not
 the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one. In a
 linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
-the main checkout. In a main checkout whose setup is read from a [source
-folder](configuration.md#the-source-folder), `sync` writes nothing and refuses. It refuses in a
-lane of such a project too, because that lane reads the setup its dispatcher runs on and does not
-change it.
+the main checkout. When the main checkout reads a [source
+folder](configuration.md#the-source-folder), that message names the source folder instead.
+In the main checkout of such a project, `sync` writes the source folder's files, and the
+`checkout:` line names the folder. It refuses when the source is not a checkout or worktree of
+this repository. It refuses in a lane of such a project, because that lane reads the setup its
+dispatcher runs on and does not change it.
 
 In any other lane's worktree, `sync` refreshes the lane's tracked files and leaves the private overrides
 layer alone. If `overrides/config.toml` holds a retired key, the report names the key and says

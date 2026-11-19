@@ -258,12 +258,21 @@ and a fresh home.
 ### The source folder
 
 A project whose main checkout has no `.spoolway/` can read its whole setup from another folder.
-Add a `source` line to the project's own `project.toml`, with the absolute path of a folder that
-holds a `.spoolway/`:
+Set it with `spoolway config source <folder>`. The folder is a checkout or worktree of this
+repository that holds a `.spoolway/`. The command stores the folder's absolute path as the
+`source` line in the project's own `project.toml`:
+
+```
+$ spoolway config source ~/dev/app-adopt
+  spoolway uses ~/dev/app-adopt as its setup
+```
 
 ```toml
 source = "/home/you/dev/app-adopt"
 ```
+
+`spoolway config source <folder>` changes the folder. `spoolway config source --clear` removes
+the line. See [`config source`](cli-reference.md#spoolway-config-source-folder--clear).
 
 | Where | What happens |
 |---|---|
@@ -274,15 +283,41 @@ source = "/home/you/dev/app-adopt"
 | The folder is gone or holds no `.spoolway/` | The command refuses, names the folder and tells you to point the line at another one. |
 | The path is relative or starts with `~` | The command refuses and asks for the full path. |
 
+`config source` accepts a relative folder and stores it as an absolute path.
+
 The note reads `note  <checkout> has its own .spoolway/ now; cleared the source <folder>`.
 
 A workspace clone has no `source` line. A project with no line behaves as it always does.
 
-The source folder is never written. While it supplies the setup, these commands refuse in the
-main checkout and say so: `config set`, `sync`, `pipeline promote`, saving or deleting a routine
-or job on the board, and the eval tab's CSV export. Check out a branch that carries
-`.spoolway/`, or run `spoolway init` in the checkout. `spoolway init` writes the checkout's own
-`.spoolway/` and leaves the source alone.
+While the source supplies the setup, these commands run in the main checkout and write the
+source folder's files:
+
+| Command | What it prints |
+|---|---|
+| `config set` | The new value, then `  spoolway uses <folder> as its setup` |
+| `override promote` | The promoted keys, then the same line |
+| `sync` | The [`checkout:` line](cli-reference.md#the-checkout-line) naming the folder, then the report |
+
+`config path` and the `checkout:` line name the source folder:
+
+```
+$ spoolway config path
+checkout: ~/dev/app-adopt
+mode:      repo
+setup:     /home/you/dev/app-adopt/.spoolway
+```
+
+A source that is not a checkout or worktree of this repository is refused by these three
+commands. The refusal says to run `spoolway config source <folder>` or `spoolway config source
+--clear`.
+
+While the source supplies the setup, these commands refuse in the main checkout and say so:
+`pipeline promote`, saving or deleting a routine or job on the board, and the eval tab's CSV
+export. Check out a branch that carries `.spoolway/`, or run `spoolway init` in the checkout.
+`spoolway init` writes the checkout's own `.spoolway/` and leaves the source alone.
+
+A linked worktree with no `.spoolway/` of its own refuses `config set` and `sync`. The refusal
+gives a `-C` line, or a `sync` command, that names the source folder.
 
 A spoolway binary that does not know the `source` key ignores it. If that binary rewrites
 `project.toml`, the line is dropped and the project refuses again until the line is written back.

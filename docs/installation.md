@@ -529,7 +529,9 @@ spoolway sync               # apply it
 checkout it runs in. In a linked worktree that is the worktree's own tracked files, and the
 [`checkout:` line](cli-reference.md#the-checkout-line) names it first. A linked worktree whose
 branch has no `.spoolway/` reads the main checkout's setup, so `sync` refuses there and names
-the main checkout.
+the main checkout. In the main checkout of a project that reads a [source
+folder](configuration.md#the-source-folder), `sync` writes the source folder's files, and the
+`checkout:` line names the folder.
 
 What `sync` replaces, file by file:
 

@@ -51,7 +51,8 @@ the config, the pipelines, the prompts, the hooks and the jobs. The queue, the h
 project's record stay with the main checkout.
 
 A project can also read its whole setup from a folder elsewhere on the machine, named by a
-`source` line in its `project.toml`. This applies while the main checkout has no `.spoolway/`.
+`source` line in its `project.toml`, which `spoolway config source <folder>` writes. This applies
+while the main checkout has no `.spoolway/`. Writes from the main checkout land in that folder.
 The line is deleted once the main checkout has one. See [The source
 folder](configuration.md#the-source-folder).
 
