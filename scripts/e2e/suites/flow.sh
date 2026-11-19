@@ -667,8 +667,6 @@ ADOPT_ASIDE="$LIVE/adopt-aside"
 must "keeping the main checkout's setup as it stands" cp -a .spoolway "$ADOPT_ASIDE"
 must "making a folder that holds the only setup" mkdir -p "$ADOPT_SRC"
 must "giving it a copy of the setup" cp -a .spoolway "$ADOPT_SRC/.spoolway"
-# Forced: the sections above leave `.spoolway/` edited and uncommitted, and the
-# copies taken just above are what carry those edits back.
 # A step the source's pipeline runs after `implement`, in the lane's worktree:
 # it gives that worktree a `.spoolway/` of its own with another config value,
 # as a task whose branch edits the setup has, and prints what `config get`
@@ -717,6 +715,8 @@ else bad "and its pull request targets the base it was cut from"; fi
 if [ -e .spoolway ]; then bad "the main checkout still has no .spoolway/ of its own"
 else ok "the main checkout still has no .spoolway/ of its own"; fi
 
+# Forced: the sections above leave `.spoolway/` edited and uncommitted, and the
+# copies taken just above are what carry those edits back.
 must "the branch that carries .spoolway/ is checked out again" git checkout -q -f plan/live
 must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$ADOPT_ASIDE"
 rm -rf "$ADOPT_ASIDE" "$ADOPT_SRC"

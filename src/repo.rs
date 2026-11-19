@@ -17,20 +17,29 @@ use crate::task::{self, Task};
 pub struct Repo {
     pub root: PathBuf,
     /// The checkout `root` was discovered from — the linked worktree itself
-    /// when a lane runs in one that carries its own `.spoolway/`, `root`
+    /// when a command runs in one that carries its own `.spoolway/`, `root`
     /// again in the main checkout and in a worktree that carries none (see
-    /// [`Repo::borrowed`]). `root`
-    /// still names the one project every command's queue, lane state and
-    /// lock agree on; `checkout` is where the tracked control plane —
-    /// pipelines, prompts, task skeletons — is actually read from, so a
-    /// lane validates its own branch's files rather than the main
-    /// checkout's. See [`Repo::prompts_dir`] and friends.
+    /// [`Repo::borrowed`]). `root` still names the one project every command's
+    /// queue, lane state and lock agree on; `checkout` is where the tracked
+    /// control plane — pipelines, prompts, task skeletons — is actually read
+    /// from, so a person's worktree validates its own branch's files rather
+    /// than the main checkout's. See [`Repo::prompts_dir`] and friends.
+    ///
+    /// A lane is the exception while the project's main checkout has no
+    /// setup of its own: its `checkout` is the folder its dispatcher reads,
+    /// whatever its own branch carries. That is `root`, which answers with
+    /// a `source` folder when there is one, or the linked worktree the
+    /// dispatcher found the setup in. Where the main checkout has a setup, a
+    /// lane's `checkout` is its own worktree when that carries one, as for a
+    /// person.
     pub checkout: PathBuf,
-    /// Whether `checkout` is the main checkout only because the linked
-    /// worktree the command ran in carries no `.spoolway/` of its own. Its
-    /// setup is then the main checkout's, read as it is there, and there is
-    /// no setup of this worktree's for a command to write — see
-    /// [`Repo::checkout_note`] and `sync::run`.
+    /// Whether `checkout` is a folder the command borrows instead of the
+    /// setup of the worktree it ran in. That is the main checkout, when the
+    /// linked worktree carries no `.spoolway/` of its own, and for a lane of a
+    /// project whose main checkout has no setup, the folder its dispatcher
+    /// reads, even when the lane's own worktree carries one. The setup is then
+    /// read as it is there, and there is no setup of this worktree's for a
+    /// command to write — see [`Repo::checkout_note`] and `sync::run`.
     pub borrowed: bool,
     /// Whether the command started in a worktree under
     /// [`Repo::worktree_root`], which is a dispatcher lane's. Where
@@ -148,7 +157,7 @@ impl Repo {
             &root,
             lane_home.as_deref(),
         );
-        let source = command_setup_source(&root, &checkout, lane_home.is_some());
+        let source = setup_source(&root, &checkout);
         // The folder that supplies the setup carries no `.spoolway/` only
         // when a lane found its project's main checkout on a branch without
         // it (see `root`), and its dispatcher has recorded no setup folder for
@@ -294,7 +303,7 @@ impl Repo {
             &root,
             started_in_lane.then_some(home.as_path()),
         );
-        let source = command_setup_source(&root, &checkout, started_in_lane);
+        let source = setup_source(&root, &checkout);
         // `Config::load` reads the overrides layer out of the home that
         // `home_error` above just failed to settle, so calling it the
         // ordinary way here could fail again for the identical reason and
@@ -369,12 +378,12 @@ impl Repo {
         // later command in the main checkout for sharing its id, advising a
         // `spoolway init` that detaches the project. The project is still the
         // main checkout, registered or not. What it reads is `setup_source`'s
-        // to say: this worktree's setup for a person's command, and for a
-        // lane the folder its dispatcher recorded, which `follow_dispatcher`
-        // finds. A lane with no record stops in `discover` on the missing
-        // directory, and `discover_live` reads the dispatcher's config
-        // record instead. The worktree's own
-        // top is what is compared, not `start`: a subdirectory of the bare main checkout, or a
+        // to say: this worktree's setup for a person's command. A lane never
+        // reaches this branch with a readable record, because the branch
+        // above answered it; one with no record stops in `discover` on the
+        // missing directory, and `discover_live` reads the dispatcher's
+        // config record instead. The worktree's own top is what is compared,
+        // not `start`: a subdirectory of the bare main checkout, or a
         // worktree on a branch without `.spoolway/`, gets the refusal below.
         // A worktree nested inside the main checkout is left to the walk as
         // well: `checkout_of` takes everything under the main checkout for
@@ -983,7 +992,7 @@ impl Repo {
     /// one place that decides it, so every reader agrees. See
     /// [`setup_source`].
     pub fn setup_source(&self) -> PathBuf {
-        command_setup_source(&self.root, &self.checkout, self.in_lane_worktree())
+        setup_source(&self.root, &self.checkout)
     }
 
     /// [`crate::config::under_setup`], against this `Repo`'s own
@@ -1046,7 +1055,8 @@ impl Repo {
 
     /// The project-scoped cron-job store, tracked in the checkout — read from
     /// `checkout` like every other tracked file above, so a lane sees its own
-    /// branch's jobs. See [`crate::jobs`].
+    /// branch's jobs, except in a project whose main checkout has no setup,
+    /// where it sees its dispatcher's. See [`crate::jobs`].
     pub fn jobs_file(&self) -> PathBuf {
         self.under_setup(crate::config::JOBS_FILE)
     }
@@ -1866,10 +1876,12 @@ impl Repo {
     }
 
     /// Whether `checkout` itself sits under [`Repo::worktree_root`], which is
-    /// only so for a lane that carries its own branch's setup. A caller that
-    /// reasons about that branch's files, as `pipeline check` does, asks this
-    /// rather than [`Repo::in_lane_worktree`]: a home-mode lane reads the
-    /// workspace's setup, the same files the dispatcher reads.
+    /// only so for a lane that carries its own branch's setup while the main
+    /// checkout has one too. Where it has none, a lane's `checkout` is the
+    /// dispatcher's folder, which is outside that folder, so this is false. A
+    /// caller that reasons about that branch's files, as `pipeline check`
+    /// does, asks this rather than [`Repo::in_lane_worktree`]: a home-mode
+    /// lane reads the workspace's setup, the same files the dispatcher reads.
     pub fn checkout_in_lane_dir(&self) -> bool {
         crate::platform::is_within(&self.checkout, &self.worktree_root())
     }
@@ -4890,7 +4902,9 @@ fn checkout_of(start: &Path, root: &Path, main: Option<&Path>) -> (PathBuf, bool
 ///
 /// A branch-local `.spoolway/` is the whole reason [`checkout_of`] answers a
 /// linked worktree's own path rather than `root`'s — a lane reads the
-/// tracked setup its own branch actually carries. A workspace's `config/`
+/// tracked setup its own branch actually carries, unless the main checkout
+/// has none, when [`follow_dispatcher`] points it at the dispatcher's. A
+/// workspace's `config/`
 /// has no such thing: it is never tracked, never on any branch, and shared
 /// identically by every clone and every worktree of this one, so there is
 /// nothing branch-local left to read `checkout` for. Aliasing it here,
@@ -4911,46 +4925,31 @@ pub(crate) fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (P
 }
 
 /// The folder that supplies `config.toml` and the pipelines: `root`, except
-/// for a command run in a linked worktree that carries its own `.spoolway/`
-/// while `root`, the main checkout, has none and no workspace lists it. That
-/// worktree's setup is then the only one there is, and reading it whole keeps
-/// the config, the pipelines, the prompts, the hooks and the jobs from three
-/// different places. A lane's worktree is left out, as is every project whose
-/// main checkout has a setup: there the dispatcher's own reads and a lane's
-/// must not follow a branch, or two branches would disagree about where a
-/// task goes next.
+/// where `checkout`, a linked worktree, holds the only setup there is. That
+/// is a command run in a worktree that carries its own `.spoolway/` while
+/// `root`, the main checkout, has none and no workspace lists it. Reading
+/// that setup whole keeps the config, the pipelines, the prompts, the hooks
+/// and the jobs from three different places.
+///
+/// A lane is no exception: its `checkout` is already the folder its
+/// dispatcher reads ([`follow_dispatcher`]), `root` unless the dispatcher
+/// found the setup in a linked worktree, and then that worktree. Every project
+/// whose main checkout has a setup keeps reading `root`, for the dispatcher
+/// and a lane alike: neither may follow a branch, or two branches would
+/// disagree about where a task goes next.
 ///
 /// A main checkout's `source` folder is not a setup of its own here
 /// ([`crate::config::own_setup_dir_in`]): a worktree that carries one still
 /// wins over it, and every other command reads `root`, whose
 /// [`crate::config::setup_dir_in`] answers with the source.
-pub(crate) fn setup_source(root: &Path, checkout: &Path, in_lane: bool) -> PathBuf {
-    if in_lane
-        || checkout == root
+pub(crate) fn setup_source(root: &Path, checkout: &Path) -> PathBuf {
+    if checkout == root
         || crate::config::own_setup_dir_in(root).is_dir()
         || !crate::config::tracked_setup_dir_in(checkout).is_dir()
     {
         return root.to_path_buf();
     }
     checkout.to_path_buf()
-}
-
-/// [`setup_source`] for a command, which also knows whether it is a lane's.
-///
-/// A lane of a project whose main checkout has no setup of its own is the
-/// one case where a lane does not read `root`: its `checkout` is already the
-/// folder its dispatcher reads ([`follow_dispatcher`]). That folder is `root`
-/// itself unless the dispatcher found the setup in a linked worktree, and then
-/// it is that worktree.
-fn command_setup_source(root: &Path, checkout: &Path, in_lane: bool) -> PathBuf {
-    let dispatcher_in_worktree = in_lane
-        && checkout != root
-        && !crate::config::own_setup_dir_in(root).is_dir()
-        && crate::config::tracked_setup_dir_in(checkout).is_dir();
-    if dispatcher_in_worktree {
-        return checkout.to_path_buf();
-    }
-    setup_source(root, checkout, in_lane)
 }
 
 /// The folder the dispatcher of project home `home` reads its setup from,
@@ -8445,8 +8444,8 @@ mod tests {
     }
 
     /// `setup_source` names `root` unless a worktree with its own setup is
-    /// the only one: a lane, a main checkout with a setup and a worktree
-    /// without one all keep reading `root`.
+    /// the only one: a main checkout with a setup and a worktree without one
+    /// both keep reading `root`.
     #[test]
     fn setup_source_is_root_unless_a_worktree_holds_the_only_setup() {
         let base = crate::scratch::root("repo-test-setup-source");
@@ -8454,14 +8453,13 @@ mod tests {
         let (root, wt) = (base.join("main"), base.join("wt"));
         std::fs::create_dir_all(wt.join(crate::config::STATE_DIR)).unwrap();
         std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(setup_source(&root, &wt, false), wt);
-        assert_eq!(setup_source(&root, &wt, true), root, "a lane");
-        assert_eq!(setup_source(&root, &root, false), root, "no worktree");
+        assert_eq!(setup_source(&root, &wt), wt);
+        assert_eq!(setup_source(&root, &root), root, "no worktree");
         let bare = base.join("bare");
         std::fs::create_dir_all(&bare).unwrap();
-        assert_eq!(setup_source(&root, &bare, false), root, "no setup there");
+        assert_eq!(setup_source(&root, &bare), root, "no setup there");
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
-        assert_eq!(setup_source(&root, &wt, false), root, "main has one");
+        assert_eq!(setup_source(&root, &wt), root, "main has one");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -8583,7 +8581,9 @@ mod tests {
     /// A lane whose branch edits `.spoolway/` still reads the setup its
     /// dispatcher runs on while the project's setup is a `source` folder, not
     /// the copy in its own worktree.
-    /// Fails without `follow_dispatcher`: the lane's own `config.toml` wins.
+    /// Fails without `follow_dispatcher`: the lane's `checkout` is its own
+    /// worktree, so `config get`, which loads from `checkout`, prints the
+    /// lane's own value.
     #[test]
     fn a_lane_that_edits_its_setup_reads_the_source_its_dispatcher_runs_on() {
         let project = source_project("lane-edits-setup");
@@ -8616,6 +8616,8 @@ mod tests {
             .unwrap();
             let read = Repo::discover(&lane).unwrap();
             assert_ne!(read.config.unattended.blocked_agent, "from-the-lane");
+            let printed = Config::load(&read.checkout).unwrap();
+            assert_ne!(printed.unattended.blocked_agent, "from-the-lane");
             assert_eq!(read.checkout, project.work.canonical().unwrap());
             assert_eq!(
                 read.setup_dir(),

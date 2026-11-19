@@ -6,7 +6,9 @@
 //! `doctor` loads its own [`Config`] from the checkout rather than reading
 //! `repo.config` (loaded from `Repo::setup_source` back in
 //! `Repo::discover`), because a task validating its own branch wants an
-//! answer about the file it actually edited. The setup source's copy
+//! answer about the file it actually edited. A lane of a project whose main
+//! checkout has no setup is the exception: its `checkout` is the folder its
+//! dispatcher reads, so it is that setup that gets checked. The setup source's copy
 //! (`Repo::setup_source`) still matters — it is what the real dispatcher runs
 //! on — so its own parse failure, when there is one, is reported as a finding
 //! of its own rather than silently dropped. See

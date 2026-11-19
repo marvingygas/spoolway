@@ -35,8 +35,8 @@
 //!
 //! Everything below writes `repo.checkout`, never `repo.root`: the control
 //! plane this command refreshes is tracked, so a lane running in a linked
-//! worktree has its own branch's copies, and a sync taken there has to
-//! land on that branch — where it is reviewed and merged — rather than on
+//! worktree has its own branch's copies where the main checkout has a setup
+//! too, and a sync taken there has to land on that branch — where it is reviewed and merged — rather than on
 //! whatever the main checkout happens to have out. `config set` and
 //! `override promote` follow the same rule through
 //! `Repo::tracked_write_root`, which also refuses a dispatcher lane's
@@ -45,7 +45,9 @@
 //! in that folder. This command refuses in a worktree whose branch has no
 //! `.spoolway/` at all. Its setup is the main checkout's, so there is no
 //! branch copy to refresh, and writing one would start a setup the branch
-//! never had. That case is refused, naming the main checkout.
+//! never had. That case is refused, naming the main checkout. A lane in such
+//! a worktree is refused too, without that advice: the folder it reads is
+//! the dispatcher's, where a lane does not write.
 //!
 //! The private override layer and, in a home-mode clone, the plan pages,
 //! `plans-since` and the `plan:` lines of pending and queued tasks are this
@@ -256,6 +258,21 @@ fn closing(
 }
 
 pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
+    // Ahead of the borrowed refusal, which advises running `sync` in the
+    // folder the lane reads. That is no remedy for a lane: in a project whose
+    // setup is a `source` folder it is refused there as well, and in an
+    // adoption it is the person's own worktree that the dispatcher runs in.
+    // A lane also has a worktree that may carry its own `.spoolway/`, so the
+    // refusal cannot say the branch has none.
+    if repo.borrowed && repo.in_lane_worktree() {
+        bail!(
+            "this lane reads the setup its dispatcher runs on, not its own worktree's, so \
+             `sync` has no setup of this worktree's to refresh.\n  a lane does not change the \
+             project's setup. write the change you wanted into your report, and a person will \
+             make the change."
+        );
+    }
+
     if repo.borrowed {
         bail!(
             "this linked worktree has no `.spoolway/` on its branch, so it reads the setup of {} \
@@ -2448,7 +2465,8 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
     // and a lane running in a linked worktree brings its own branch's copies
-    // forward, not the main checkout's.
+    // forward, not the main checkout's. A lane of a project whose main
+    // checkout has no setup never gets here: `run` refuses it.
     let dir = crate::pipeline::Pipelines::dir_in(&repo.checkout);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -3477,6 +3495,29 @@ mod tests {
         assert!(
             said.contains("no `.spoolway/` on its branch")
                 && said.contains(&root.display().to_string()),
+            "{said}"
+        );
+        assert!(
+            !root.join(".spoolway/config.toml").exists(),
+            "nothing may be written before the refusal"
+        );
+    }
+
+    /// A lane that reads its dispatcher's setup has no setup of its own to
+    /// refresh. Its refusal must not say the branch has no `.spoolway/`, which
+    /// a lane's may, nor send it to run `sync` in the folder it reads.
+    #[test]
+    fn sync_refuses_in_a_lane_that_reads_its_dispatchers_setup() {
+        let (mut repo, root) = fixture("borrowed-lane");
+        repo.borrowed = true;
+        repo.started_in_lane = true;
+
+        let err = run(&repo, &args()).expect_err("a lane does not change the project's setup");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("a lane does not change the project's setup")
+                && !said.contains("no `.spoolway/` on its branch")
+                && !said.contains("run `spoolway sync`"),
             "{said}"
         );
         assert!(
