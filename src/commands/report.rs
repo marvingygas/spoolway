@@ -328,12 +328,12 @@ pub fn report(
     // Left for the dispatcher to bank into this lane's ledger line. Recorded
     // with the step it belongs to, so that a later lane which dies without
     // reporting is banked as having no outcome rather than inheriting this one.
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     task.front.last_report = Some(crate::task::LastReport {
         step: current.clone(),
         outcome: outcome.as_str().to_string(),
-        at: now.timestamp(),
-        at_ms: now.timestamp_millis(),
+        at: now.as_second(),
+        at_ms: now.as_millisecond(),
         blocked: destination == crate::pipeline::BLOCKED,
     });
 
@@ -4040,7 +4040,7 @@ mod tests {
             "the step is what lets a later silent lane be told apart from this one"
         );
         assert!(
-            left.at > 0 && (chrono::Utc::now().timestamp() - left.at).abs() < 5,
+            left.at > 0 && (jiff::Timestamp::now().as_second() - left.at).abs() < 5,
             "at has to be stamped from the same clock the dispatcher reads a \
              lane's own started_at from: {}",
             left.at
@@ -12080,7 +12080,7 @@ mod tests {
     /// midnight carries the earlier date, so a check against a date read only
     /// afterwards would fail on timing alone.
     fn dates_around(action: impl FnOnce()) -> Vec<String> {
-        let today = || chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today = || jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
         let before = today();
         action();
         vec![before, today()]

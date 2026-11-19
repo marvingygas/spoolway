@@ -89,7 +89,7 @@ pub fn kept_dir(repo: &Repo) -> PathBuf {
 /// status line pointing at the `commands/` path rather than at a copy that
 /// is not there.
 pub fn keep_command_log(repo: &Repo, task: &str, step: &str, log: &Path) -> Result<PathBuf> {
-    let stamp = chrono::Local::now().format("%Y-%m-%dT%H-%M").to_string();
+    let stamp = jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M").to_string();
     keep_command_log_at(repo, task, step, log, &stamp)
 }
 
@@ -171,7 +171,7 @@ fn write_line(path: &Path, message: &str) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let now = chrono::Local::now().to_rfc3339();
+    let now = crate::clock::rfc3339_local(&jiff::Zoned::now());
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -209,15 +209,15 @@ fn trim(path: &Path, days: u64) -> Result<()> {
     let window = i64::try_from(days)
         .unwrap_or(i64::MAX)
         .saturating_mul(24 * 3600);
-    let cutoff = chrono::Local::now().timestamp().saturating_sub(window);
+    let cutoff = jiff::Timestamp::now().as_second().saturating_sub(window);
     let lines: Vec<&str> = raw.lines().collect();
     let kept: Vec<&str> = lines
         .iter()
         .copied()
         .filter(|line| match line.split_once("  ") {
-            Some((ts, _)) => chrono::DateTime::parse_from_rfc3339(ts)
-                .map(|parsed| parsed.timestamp() >= cutoff)
-                .unwrap_or(true),
+            Some((ts, _)) => {
+                crate::clock::parse_rfc3339(ts).is_none_or(|parsed| parsed.as_second() >= cutoff)
+            }
             None => true,
         })
         .collect();
@@ -326,10 +326,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("proj.log");
 
-        let now = chrono::Local::now();
-        let old = (now - chrono::Duration::days(45)).to_rfc3339();
-        let edge = (now - chrono::Duration::days(31)).to_rfc3339();
-        let fresh = (now - chrono::Duration::days(1)).to_rfc3339();
+        let now = jiff::Zoned::now();
+        let old = crate::clock::rfc3339_local(&(&now - jiff::SignedDuration::from_hours(24 * 45)));
+        let edge = crate::clock::rfc3339_local(&(&now - jiff::SignedDuration::from_hours(24 * 31)));
+        let fresh = crate::clock::rfc3339_local(&(&now - jiff::SignedDuration::from_hours(24)));
         let unparsable = "not-a-timestamp";
 
         let seed = format!(
@@ -353,8 +353,8 @@ mod tests {
         let dir = crate::scratch::root("problem-log-days");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("proj.log");
-        let now = chrono::Local::now();
-        let old = (now - chrono::Duration::days(45)).to_rfc3339();
+        let now = jiff::Zoned::now();
+        let old = crate::clock::rfc3339_local(&(&now - jiff::SignedDuration::from_hours(24 * 45)));
         let seed = format!("{old}  forty-five days old\n");
 
         std::fs::write(&path, &seed).unwrap();
@@ -372,7 +372,9 @@ mod tests {
     #[test]
     fn open_trims_by_the_repos_retention_days() {
         let (mut repo, base) = kept_fixture("problem-log-open-days");
-        let old = (chrono::Local::now() - chrono::Duration::days(45)).to_rfc3339();
+        let old = crate::clock::rfc3339_local(
+            &(&jiff::Zoned::now() - jiff::SignedDuration::from_hours(24 * 45)),
+        );
         let log = path(&repo);
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, format!("{old}  old\n")).unwrap();
@@ -393,9 +395,10 @@ mod tests {
     fn open_trims_at_thirty_days_when_the_config_sets_no_window() {
         let (mut repo, base) = kept_fixture("problem-log-open-default");
         repo.config = toml::from_str::<Config>("").unwrap();
-        let now = chrono::Local::now();
-        let old = (now - chrono::Duration::days(45)).to_rfc3339();
-        let recent = (now - chrono::Duration::days(10)).to_rfc3339();
+        let now = jiff::Zoned::now();
+        let old = crate::clock::rfc3339_local(&(&now - jiff::SignedDuration::from_hours(24 * 45)));
+        let recent =
+            crate::clock::rfc3339_local(&(&now - jiff::SignedDuration::from_hours(24 * 10)));
         let log = path(&repo);
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, format!("{old}  forty-five\n{recent}  ten\n")).unwrap();

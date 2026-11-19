@@ -28,7 +28,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 /// What opens the line [`Task::mark_blocker_cleared`] adds, and what it looks
@@ -1393,7 +1392,7 @@ impl Task {
     /// `problem_log.rs` and `eval.rs` already do, rather than the `Utc`
     /// used for machine-read ledger entries in `usage.rs`.
     pub fn log_status(&mut self, text: &str) {
-        let stamp = Local::now().format("%Y-%m-%d %H:%M");
+        let stamp = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string();
         self.append_to_section("## Status Log", &format!("- {stamp} {text}\n"));
     }
 
@@ -1422,7 +1421,7 @@ impl Task {
         if last.is_empty() || last.starts_with(BLOCKER_CLEARED) {
             return;
         }
-        let stamp = Local::now().format("%Y-%m-%d %H:%M");
+        let stamp = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string();
         self.append_to_section(
             "## Blocker",
             &format!(

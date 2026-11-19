@@ -2793,7 +2793,7 @@ fn jobs_checks(repo: &Repo, pipelines: &Pipelines, ask_origin: bool) -> Vec<Find
             format!("job `{name}` schedule fires"),
             match crate::cron::Cron::parse(&job.spec.schedule) {
                 Err(why) => Err(anyhow::anyhow!("`{}` — {why}", job.spec.schedule)),
-                Ok(cron) => match cron.next_after(chrono::Local::now().naive_local()) {
+                Ok(cron) => match cron.next_after(jiff::Zoned::now().datetime()) {
                     Some(_) => Ok(None),
                     None => Err(anyhow::anyhow!(
                         "`{}` parses but never comes round — check its day-of-month and month \

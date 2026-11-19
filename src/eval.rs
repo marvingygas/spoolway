@@ -268,13 +268,7 @@ fn run_to(
 }
 
 pub(crate) fn local_date(ts: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|at| {
-            at.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d")
-                .to_string()
-        })
-        .unwrap_or_else(|_| "—".to_string())
+    crate::clock::format_local(ts, "%Y-%m-%d").unwrap_or_else(|| "—".to_string())
 }
 
 /// `YYYY-MM-DD HH:MM` in local time: the `WHEN` of `--by task`. A run is
@@ -282,13 +276,7 @@ pub(crate) fn local_date(ts: &str) -> String {
 /// day read apart, where [`local_date`] would draw both the same. A `ts`
 /// that does not parse draws as a dash, the same as there.
 fn local_minute(ts: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|at| {
-            at.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|_| "—".to_string())
+    crate::clock::format_local(ts, "%Y-%m-%d %H:%M").unwrap_or_else(|| "—".to_string())
 }
 
 // ------------------------------------------------------------------- runs
@@ -335,9 +323,8 @@ pub(crate) fn fallback_keys(entries: &[Entry]) -> HashMap<(String, String), Stri
     let mut named: HashMap<(String, String), String> = first
         .into_iter()
         .map(|(key, ts): ((String, String), String)| {
-            let date = chrono::DateTime::parse_from_rfc3339(&ts)
-                .map(|at| at.with_timezone(&chrono::Local).format("%m%d").to_string())
-                .unwrap_or_else(|_| "0000".to_string());
+            let date =
+                crate::clock::format_local(&ts, "%m%d").unwrap_or_else(|| "0000".to_string());
             let name = format!("{}@{date}", key.1);
             (key, name)
         })
@@ -2666,7 +2653,7 @@ struct SessionRow {
     /// The session's own first `timestamp`, or — when its transcript could
     /// not be read a second time to answer that — the line's own `ts`
     /// (when it was banked, not when it ran).
-    when: chrono::DateTime<chrono::Utc>,
+    when: jiff::Timestamp,
     /// Its transcript's own span, in seconds — `0` where the span could not
     /// be read at all.
     time_s: i64,
@@ -2731,11 +2718,9 @@ fn list_sessions(
                 tokens.add(&line.tokens);
             }
             let (when, time_s) = match spans.get(&session) {
-                Some((first, last)) => (*first, (*last - *first).num_seconds().max(0)),
+                Some((first, last)) => (*first, (last.as_second() - first.as_second()).max(0)),
                 None => (
-                    chrono::DateTime::parse_from_rfc3339(&latest.ts)
-                        .map(|at| at.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now()),
+                    crate::clock::parse_rfc3339(&latest.ts).unwrap_or_else(jiff::Timestamp::now),
                     0,
                 ),
             };
@@ -2761,7 +2746,7 @@ fn list_sessions(
     rows
 }
 
-type Spans = HashMap<String, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>;
+type Spans = HashMap<String, (jiff::Timestamp, jiff::Timestamp)>;
 
 /// Every distinct project among `lines`, in name order and joined by ` + `,
 /// for a directory or session row's export to name. Under `--all` two
@@ -2816,7 +2801,7 @@ struct DirRow {
     /// default, the same "this morning's work heads the table" rule the
     /// lanes table follows. `None` for a watched root no session has run in yet, which
     /// sorts after every root that has.
-    latest: Option<chrono::DateTime<chrono::Utc>>,
+    latest: Option<jiff::Timestamp>,
 }
 
 impl DirRow {
@@ -3130,7 +3115,7 @@ fn session_sort_value(row: &SessionRow, key: &str) -> Option<SortValue> {
     let class = |usd: f64| row.class_cost.priced().then_some(SortValue::Figure(0, usd));
     let c = &row.class_cost;
     match key {
-        "when" => SortValue::figure(row.when.timestamp() as f64),
+        "when" => SortValue::figure(row.when.as_second() as f64),
         "dir" => SortValue::text(&dir_name(&row.dir)),
         "skill" => (row.skill != "—").then(|| SortValue::Text(row.skill.clone())),
         "model" => SortValue::text(&row.model),
@@ -3328,9 +3313,9 @@ const SESSIONS_MODEL_MIN_WIDTH: usize = 16;
 /// `MM-DD HH:MM` in local time — a session has no run and no version to lead
 /// a row with, so `WHEN` carries the minute it started: the same minute
 /// `--by task` draws for a run, without the year in front.
-fn session_when(at: chrono::DateTime<chrono::Utc>) -> String {
-    at.with_timezone(&chrono::Local)
-        .format("%m-%d %H:%M")
+fn session_when(at: jiff::Timestamp) -> String {
+    at.to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%m-%d %H:%M")
         .to_string()
 }
 
@@ -4771,7 +4756,7 @@ fn export(
     let dir = evals_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M");
+    let stamp = jiff::Zoned::now().strftime("%Y-%m-%d-%H%M").to_string();
     let base = format!(
         "eval-by-{}-{}-{stamp}",
         by_label(filters, table),
@@ -6252,12 +6237,15 @@ fn sort_panel(descending: bool, columns: &[(&str, &str)], cursor: usize) -> Vec<
 /// holds anything else, such as a `7d` passed on the command line.
 /// Deliberately blind to the ledger, the same as the grid itself.
 fn calendar_open_date(text: &str) -> (i32, u32, u32) {
-    use chrono::Datelike;
-    let today = chrono::Local::now().date_naive();
+    let today = jiff::Zoned::now().date();
     let date = non_empty(text)
-        .and_then(|t| chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d").ok())
+        .and_then(|t| jiff::civil::Date::strptime("%Y-%m-%d", t).ok())
         .unwrap_or(today);
-    (date.year(), date.month(), date.day())
+    (
+        i32::from(date.year()),
+        date.month() as u32,
+        date.day() as u32,
+    )
 }
 
 const CALENDAR_KEYS: &str = "[enter] pick   [esc] back";
@@ -6297,37 +6285,29 @@ fn pad_center(content: &str, width: usize) -> String {
     format!("{}{content}{}", " ".repeat(left), " ".repeat(right))
 }
 
-/// The English name of `month` (`1`..=`12`) — `chrono::Month::name`, so the
-/// calendar spells a month the same way any other reader of this codebase
+/// The English name of `month` (`1`..=`12`) — read off `jiff`'s own `%B`, so
+/// the calendar spells a month the same way any other reader of this codebase
 /// would already expect it to, rather than a table written out again here.
-fn month_name(month: u32) -> &'static str {
-    chrono::Month::try_from(month as u8)
-        .map(|m| m.name())
-        .unwrap_or("?")
+fn month_name(month: u32) -> String {
+    jiff::civil::Date::new(2000, month as i8, 1)
+        .map(|date| date.strftime("%B").to_string())
+        .unwrap_or_else(|_| "?".to_string())
 }
 
-/// How many days `month` has in `year`, found by stepping into the next
-/// month's own first day rather than a hand-written table of month lengths —
-/// so February's leap years fall out of `chrono`'s own calendar instead of
-/// one more thing to get right here.
+/// How many days `month` has in `year`, asked of `jiff`'s own calendar rather
+/// than a hand-written table of month lengths — so February's leap years fall
+/// out of it instead of one more thing to get right here.
 fn days_in_month(year: i32, month: u32) -> u32 {
-    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1..=12");
-    let next_first = if month == 12 {
-        chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
-    } else {
-        chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
-    }
-    .expect("month is 1..=12");
-    (next_first - first).num_days() as u32
+    let first = jiff::civil::Date::new(year as i16, month as i8, 1).expect("month is 1..=12");
+    first.days_in_month() as u32
 }
 
 /// The Monday-first weeks a month draws across, each a row of at most seven
 /// days — `None` where the grid has no day of this month to show, at the
 /// start of the first week and the end of the last.
 fn month_weeks(year: i32, month: u32) -> Vec<[Option<u32>; 7]> {
-    use chrono::Datelike;
-    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1).expect("month is 1..=12");
-    let lead = first.weekday().num_days_from_monday() as usize;
+    let first = jiff::civil::Date::new(year as i16, month as i8, 1).expect("month is 1..=12");
+    let lead = first.weekday().to_monday_zero_offset() as usize;
     let total = days_in_month(year, month);
 
     let mut weeks = Vec::new();
@@ -6384,13 +6364,14 @@ fn render_week(week: &[Option<u32>; 7], selected: u32) -> String {
 /// calendar always does, so the grid simply redraws around wherever the
 /// cursor lands rather than clamping at either edge of the visible month.
 fn step_calendar_day(year: &mut i32, month: &mut u32, day: &mut u32, delta: i64) {
-    use chrono::Datelike;
-    let current = chrono::NaiveDate::from_ymd_opt(*year, *month, *day)
-        .unwrap_or_else(|| chrono::Local::now().date_naive());
-    let next = current + chrono::Duration::days(delta);
-    *year = next.year();
-    *month = next.month();
-    *day = next.day();
+    let current = jiff::civil::Date::new(*year as i16, *month as i8, *day as i8)
+        .unwrap_or_else(|_| jiff::Zoned::now().date());
+    let next = current
+        .checked_add(jiff::Span::new().days(delta))
+        .unwrap_or(current);
+    *year = i32::from(next.year());
+    *month = next.month() as u32;
+    *day = next.day() as u32;
 }
 
 /// Move the calendar to the previous or next month, keeping the day of month
@@ -10799,10 +10780,7 @@ mod screen_tests {
     #[test]
     fn esc_leaves_the_row_untouched_enter_picks_the_day_x_clears_it() {
         let (repo, _root_guard) = fixture("screen-calendar-roundtrip");
-        let today = chrono::Local::now()
-            .date_naive()
-            .format("%Y-%m-%d")
-            .to_string();
+        let today = jiff::Zoned::now().date().strftime("%Y-%m-%d").to_string();
         let to_since = format!("f{}", DOWN.repeat(5));
 
         // No trailing `q` after a bare `Esc`: its own lookahead read would
@@ -11336,14 +11314,14 @@ mod screen_tests {
             )
             .unwrap();
         }
-        let old = chrono::Utc::now() - chrono::Duration::seconds(600);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(600);
         for line in 0..LEDGER_LINES {
             let session = format!("lane-{:04}", line % SESSIONS);
-            let at = old - chrono::Duration::seconds((LEDGER_LINES - line) as i64);
+            let at = old - jiff::SignedDuration::from_secs((LEDGER_LINES - line) as i64);
             crate::usage::append(
                 &repo,
                 &Entry {
-                    ts: at.to_rfc3339(),
+                    ts: crate::clock::rfc3339(at),
                     kind: "claude".into(),
                     agent: "claude".into(),
                     model: "claude-opus-5".into(),

@@ -817,7 +817,7 @@ fn agent_verify_live(
         args.kind,
         dir.display()
     );
-    let started = chrono::Utc::now().timestamp();
+    let started = jiff::Timestamp::now().as_second();
     let output = run_live_turn(adapter.program(), &argv, LIVE_PROMPT, &dir, env.clone())?;
 
     let mut failed = 0;

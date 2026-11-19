@@ -881,7 +881,7 @@ fn bank_command_run(
         (CommandEnd::Interrupted, _) | (CommandEnd::Killed, _) => None,
     };
     let entry = crate::usage::Entry {
-        ts: chrono::Utc::now().to_rfc3339(),
+        ts: crate::clock::rfc3339(jiff::Timestamp::now()),
         task: task.id().to_string(),
         plan: task.front.group.clone(),
         step: step_id.to_string(),
@@ -3681,7 +3681,7 @@ impl<'a> Dispatcher<'a> {
         // that reading — and `usage::catch_up_with_facts` gates a later
         // sweep on exactly that mtime against this line's `ts`, so a `ts`
         // chosen after the read would strand the unread tail forever.
-        let banked_at = chrono::Utc::now();
+        let banked_at = jiff::Timestamp::now();
         // Off the pass's snapshot, not a fresh read: a hand line for the
         // session is already in it, which is all the rule looks for.
         let own_subagents = self.ledger().lane_owns_subagents(&record.session);
@@ -3760,7 +3760,7 @@ impl<'a> Dispatcher<'a> {
         };
 
         let entry = crate::usage::Entry {
-            ts: banked_at.to_rfc3339(),
+            ts: crate::clock::rfc3339(banked_at),
             task: task_id.to_string(),
             plan: task.and_then(|t| t.front.group.clone()),
             step: step_id.to_string(),
@@ -5414,12 +5414,12 @@ impl<'a> Dispatcher<'a> {
                     };
                     // One reading for both start clocks, so they cannot name
                     // different seconds across a boundary.
-                    let launched = chrono::Utc::now();
+                    let launched = jiff::Timestamp::now();
                     self.lanes.insert(
                         name.clone(),
                         LaneRecord {
-                            started_at: launched.timestamp(),
-                            started_at_ms: launched.timestamp_millis(),
+                            started_at: launched.as_second(),
+                            started_at_ms: launched.as_millisecond(),
                             last_progress: now_secs(),
                             output_hash: 0,
                             busy_s: 0,
@@ -9968,7 +9968,7 @@ pub(crate) fn save_lane_records(repo: &Repo, lanes: &HashMap<String, LaneRecord>
 }
 
 pub(crate) fn now_secs() -> i64 {
-    chrono::Utc::now().timestamp()
+    jiff::Timestamp::now().as_second()
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -20330,9 +20330,10 @@ mod tests {
         const LIMIT_RECORD: &str = r#"{"type":"assistant","timestamp":"2026-10-10T23:59:54.020Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit · resets 3am (Europe/Berlin)"}]},"apiError":"usage_limit_reached","apiErrorParams":{"rate_limit_info":{"status":"rejected","resetsAt":1791680400,"rateLimitType":"five_hour"}}}"#;
         let base = now_secs();
         let at = |secs: i64| {
-            chrono::DateTime::from_timestamp(secs, 0)
+            jiff::Timestamp::from_second(secs)
                 .unwrap()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
         };
         let model_turn = |secs: i64| {
             format!(
@@ -20462,9 +20463,10 @@ mod tests {
         let session = "still-lane";
         let base = now_secs();
         let model_turn = |secs: i64| {
-            let stamp = chrono::DateTime::from_timestamp(secs, 0)
+            let stamp = jiff::Timestamp::from_second(secs)
                 .unwrap()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
             format!(
                 "{{\"type\":\"assistant\",\"timestamp\":\"{stamp}\",\"requestId\":\"r{secs}\",\
                  \"message\":{{\"model\":\"claude-x\",\"usage\":{{\"input_tokens\":10,\
@@ -21248,7 +21250,7 @@ mod tests {
         crate::usage::append(
             &repo,
             &crate::usage::Entry {
-                ts: chrono::Utc::now().to_rfc3339(),
+                ts: crate::clock::rfc3339(jiff::Timestamp::now()),
                 task: "demo".to_string(),
                 step: "implement".to_string(),
                 pipeline: "default".to_string(),
@@ -22190,7 +22192,7 @@ mod tests {
         crate::usage::append(
             repo,
             &crate::usage::Entry {
-                ts: chrono::Utc::now().to_rfc3339(),
+                ts: crate::clock::rfc3339(jiff::Timestamp::now()),
                 task: task.to_string(),
                 step: step.to_string(),
                 pipeline: "default".to_string(),
@@ -22210,7 +22212,7 @@ mod tests {
         crate::usage::append(
             repo,
             &crate::usage::Entry {
-                ts: chrono::Utc::now().to_rfc3339(),
+                ts: crate::clock::rfc3339(jiff::Timestamp::now()),
                 task: task.to_string(),
                 agent: String::new(),
                 tokens: crate::usage::Tokens {
@@ -22275,7 +22277,7 @@ mod tests {
         crate::usage::append(
             &repo,
             &crate::usage::Entry {
-                ts: chrono::Utc::now().to_rfc3339(),
+                ts: crate::clock::rfc3339(jiff::Timestamp::now()),
                 task: "demo".to_string(),
                 step: "implement".to_string(),
                 pipeline: "default".to_string(),
@@ -23097,8 +23099,9 @@ mod tests {
         let home = crate::scratch::root("dispatch-claude-cold-reply");
         let dir = home.join(".claude/projects/-home-someone-work");
         std::fs::create_dir_all(&dir).unwrap();
-        let reply = (chrono::Utc::now() - chrono::Duration::hours(34)).to_rfc3339();
-        let now = chrono::Utc::now().to_rfc3339();
+        let reply =
+            crate::clock::rfc3339(jiff::Timestamp::now() - jiff::SignedDuration::from_hours(34));
+        let now = crate::clock::rfc3339(jiff::Timestamp::now());
         std::fs::write(
             dir.join("cold-reply.jsonl"),
             format!(
@@ -23147,14 +23150,14 @@ mod tests {
             let home = crate::scratch::root(&format!("dispatch-{name}-home"));
             let dir = home.join(".pi/agent/sessions/--home-someone-work--");
             std::fs::create_dir_all(&dir).unwrap();
-            let reply = chrono::Utc::now() - chrono::Duration::seconds(reply_age_secs);
+            let reply = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(reply_age_secs);
             std::fs::write(
                 dir.join("2026-08-04T06-14-15-743Z_old-session.jsonl"),
                 format!(
                     "{{\"type\":\"message\",\"id\":\"1\",\"timestamp\":\"{}\",\
                      \"message\":{{\"role\":\"assistant\",\"content\":[],\"model\":\"test-model\",\
                      \"usage\":{{\"input\":10,\"output\":1,\"cacheRead\":0,\"cacheWrite\":0}}}}}}\n",
-                    reply.to_rfc3339()
+                    crate::clock::rfc3339(reply)
                 ),
             )
             .unwrap();
@@ -24187,7 +24190,7 @@ mod tests {
         )]);
         // The report counts: the lane is finished and the task, still on
         // `blocked`, is handed to a fresh lane.
-        let before_ms = chrono::Utc::now().timestamp_millis();
+        let before_ms = jiff::Timestamp::now().as_millisecond();
         let report = run_pass_with(&repo, &mux, &pipelines);
 
         assert!(
@@ -28433,7 +28436,7 @@ mod tests {
             crate::usage::append(
                 &repo,
                 &crate::usage::Entry {
-                    ts: chrono::Utc::now().to_rfc3339(),
+                    ts: crate::clock::rfc3339(jiff::Timestamp::now()),
                     task: "demo".to_string(),
                     step: "implement".to_string(),
                     pipeline: "default".to_string(),

@@ -1534,7 +1534,7 @@ pub fn last_turn(kind: &str, session: &str) -> Option<u64> {
 /// carries a timestamp.
 pub fn last_model_turn(kind: &str, session: &str) -> Option<i64> {
     let path = session_file(kind, session)?;
-    last_turn_at(kind, &path)?.at.map(|at| at.timestamp())
+    last_turn_at(kind, &path)?.at.map(|at| at.as_second())
 }
 
 /// Whether this agent kind writes harness replies into its transcript as
@@ -1678,7 +1678,7 @@ fn last_record(kind_name: &str, path: &Path) -> Option<serde_json::Value> {
 /// against a provider's timestamps is a watchdog that fires on a timezone.
 pub fn last_written(kind: &str, session: &str) -> Option<i64> {
     let modified = touched_at(&session_file(kind, session)?)?;
-    Some(chrono::DateTime::<chrono::Utc>::from(modified).timestamp())
+    Some(jiff::Timestamp::try_from(modified).ok()?.as_second())
 }
 
 /// When this session's store last moved.
@@ -2179,7 +2179,7 @@ struct Turn {
     /// The record's own top-level `timestamp`, when it has one that parses.
     /// All three kinds write it on the line that carries the usage; a
     /// transcript from before one did leaves it `None`.
-    at: Option<chrono::DateTime<chrono::Utc>>,
+    at: Option<jiff::Timestamp>,
     model: String,
     tokens: Tokens,
     cost: Option<f64>,
@@ -2192,8 +2192,7 @@ fn read_turn(kind_name: &str, value: &serde_json::Value) -> Option<Turn> {
     let at = value
         .get("timestamp")
         .and_then(|t| t.as_str())
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map(|t| t.with_timezone(&chrono::Utc));
+        .and_then(crate::clock::parse_rfc3339);
 
     // Deliberately exhaustive, with no wildcard arm: adding a `Format` should
     // fail to compile here rather than silently account every lane of that
@@ -3331,19 +3330,18 @@ fn file_ino(meta: &std::fs::Metadata) -> Option<u64> {
 /// means the whole of the 31st, which is `< 2026-09-01T00:00`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Window {
-    pub from: Option<chrono::DateTime<chrono::Utc>>,
-    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    pub from: Option<jiff::Timestamp>,
+    pub until: Option<jiff::Timestamp>,
 }
 
 impl Window {
     pub fn contains(&self, ts: &str) -> bool {
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        let Some(at) = crate::clock::parse_rfc3339(ts) else {
             // A line whose timestamp will not parse cannot be placed in time.
             // Dropping it from every window is the honest answer; keeping it
             // would put it in windows it may not belong to.
             return false;
         };
-        let at = at.with_timezone(&chrono::Utc);
         self.from.is_none_or(|from| at >= from) && self.until.is_none_or(|until| at < until)
     }
 }
@@ -3356,29 +3354,24 @@ impl Window {
 /// August, not UTC's. `2026-08` is that whole month: the same half-open rule
 /// that turns an `until` date into the start of the next day turns an
 /// `until` month into the start of the next month, via [`parse_month`].
-pub fn parse_instant(raw: &str, end_of_day: bool) -> Result<chrono::DateTime<chrono::Utc>> {
-    use chrono::TimeZone;
-
+pub fn parse_instant(raw: &str, end_of_day: bool) -> Result<jiff::Timestamp> {
     let raw = raw.trim();
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+    if let Ok(date) = jiff::civil::Date::strptime("%Y-%m-%d", raw) {
         // The end of a day is the start of the next one, so that the bound
         // stays half-open and no second of the 31st is lost.
         let date = if end_of_day {
-            date.succ_opt().context("date out of range")?
+            date.tomorrow().context("date out of range")?
         } else {
             date
         };
-        let naive = date.and_hms_opt(0, 0, 0).context("invalid date")?;
-        return match chrono::Local.from_local_datetime(&naive).earliest() {
-            Some(local) => Ok(local.with_timezone(&chrono::Utc)),
-            // A midnight that does not exist locally, which daylight saving
-            // really does produce. The following instant is the honest bound.
-            None => Ok(chrono::Local
-                .from_local_datetime(&naive)
-                .latest()
-                .map(|l| l.with_timezone(&chrono::Utc))
-                .unwrap_or_else(chrono::Utc::now)),
-        };
+        // A midnight that does not exist locally, which daylight saving
+        // really does produce, resolves to the instant after the gap: the
+        // honest bound. A midnight that happens twice resolves to the first.
+        let local = date
+            .at(0, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .context("date out of range")?;
+        return Ok(local.timestamp());
     }
 
     // `YYYY-MM` shaped, so try it as a month before falling to a duration —
@@ -3405,7 +3398,7 @@ pub fn parse_instant(raw: &str, end_of_day: bool) -> Result<chrono::DateTime<chr
     let duration = crate::config::parse_duration(raw).map_err(|err| {
         anyhow::anyhow!("{err}; or give a date as YYYY-MM-DD, or a month as YYYY-MM")
     })?;
-    Ok(chrono::Utc::now() - chrono::Duration::from_std(duration)?)
+    Ok(jiff::Timestamp::now().checked_sub(jiff::SignedDuration::try_from(duration)?)?)
 }
 
 /// Turn `YYYY-MM` into the window covering that whole calendar month, locally.
@@ -3414,17 +3407,15 @@ pub fn parse_month(raw: &str) -> Result<Window> {
     let (year, month) = raw
         .split_once('-')
         .context("a month is YYYY-MM, for example 2026-08")?;
-    let year: i32 = year.parse().context("a month's year is four digits")?;
-    let month: u32 = month.parse().context("a month is 01 to 12")?;
+    let year: i16 = year.parse().context("a month's year is four digits")?;
+    let month: i8 = month.parse().context("a month is 01 to 12")?;
 
-    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+    let first = jiff::civil::Date::new(year, month, 1)
         .with_context(|| format!("`{raw}` is not a real month"))?;
-    // Rolling into the next year is what makes December work.
-    let next = match month {
-        12 => chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1),
-        _ => chrono::NaiveDate::from_ymd_opt(year, month + 1, 1),
-    }
-    .context("month out of range")?;
+    // Adding a month rolls December into January of the next year.
+    let next = first
+        .checked_add(jiff::Span::new().months(1))
+        .context("month out of range")?;
 
     Ok(Window {
         from: Some(parse_instant(&first.to_string(), false)?),
@@ -3660,7 +3651,7 @@ pub fn bank_lane(repo: &Repo, kind: &str, session: &str, task: &str, step: &str)
         return None;
     }
     // Read before the harvest, never after it — see [`bank_lane_at`].
-    let banked_at = chrono::Utc::now();
+    let banked_at = jiff::Timestamp::now();
     // The same rule the dispatcher and the board ask, so a change to it
     // reaches this path too.
     let own_subagents = LedgerTotals::read_at(&ledger_path(repo))
@@ -3678,7 +3669,7 @@ fn bank_lane_from(
     session: &str,
     task: &str,
     step: &str,
-    banked_at: chrono::DateTime<chrono::Utc>,
+    banked_at: jiff::Timestamp,
     harvest: &Harvest,
 ) -> Option<Entry> {
     let _lock = crate::lock::LedgerLock::acquire(&repo.ledger_lock_file());
@@ -3801,7 +3792,7 @@ fn bank_lane_at(
     session: &str,
     task: &str,
     step: &str,
-    banked_at: chrono::DateTime<chrono::Utc>,
+    banked_at: jiff::Timestamp,
     carry: Option<&Entry>,
     ledger: &[Entry],
     harvest: &Harvest,
@@ -3814,7 +3805,7 @@ fn bank_lane_at(
         None => repo.task(task).ok(),
     };
     let entry = Entry {
-        ts: banked_at.to_rfc3339(),
+        ts: crate::clock::rfc3339(banked_at),
         task: task.to_string(),
         plan: carry.and_then(|c| c.plan.clone()),
         step: step.to_string(),
@@ -3878,7 +3869,7 @@ fn bank_lane_at(
 /// and the line it banks.
 struct LaneFacts<'a> {
     /// The newest parseable `ts` of any line naming the session.
-    last_banked: Option<chrono::DateTime<chrono::Utc>>,
+    last_banked: Option<jiff::Timestamp>,
     /// The session's most recent lane line, whose columns a catch-up line
     /// inherits.
     carry: Option<&'a Entry>,
@@ -3903,11 +3894,10 @@ fn lane_facts(ledger: &[Entry]) -> HashMap<&str, LaneFacts<'_>> {
             carry: None,
             hand: false,
         });
-        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.ts) {
-            let ts = ts.with_timezone(&chrono::Utc);
-            if fact.last_banked.is_none_or(|seen| ts > seen) {
-                fact.last_banked = Some(ts);
-            }
+        if let Some(ts) = crate::clock::parse_rfc3339(&entry.ts)
+            && fact.last_banked.is_none_or(|seen| ts > seen)
+        {
+            fact.last_banked = Some(ts);
         }
         if entry.is_lane() {
             fact.carry = Some(entry);
@@ -3929,7 +3919,7 @@ fn catch_up_settled_lane_at(
     kind: &str,
     session: &str,
     path: &Path,
-    banked_at: chrono::DateTime<chrono::Utc>,
+    banked_at: jiff::Timestamp,
     ledger: &[Entry],
 ) -> Option<Entry> {
     let facts = lane_facts(ledger);
@@ -3951,7 +3941,7 @@ fn catch_up_with_facts(
     kind: &str,
     session: &str,
     path: &Path,
-    banked_at: chrono::DateTime<chrono::Utc>,
+    banked_at: jiff::Timestamp,
     ledger: &[Entry],
     facts: &LaneFacts<'_>,
 ) -> Option<Entry> {
@@ -3976,9 +3966,8 @@ fn catch_up_with_facts(
     } else {
         touched_at(path)
     };
-    let moved = touched
-        .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
-        .unwrap_or(false);
+    let moved =
+        touched.is_some_and(|at| jiff::Timestamp::try_from(at).is_ok_and(|at| at >= last_banked));
     if !moved {
         return None;
     }
@@ -4102,7 +4091,7 @@ pub fn sweep(repo: &Repo) -> Vec<Entry> {
         // Taken before the gate and the harvest read the file — see
         // [`bank_lane_at`] for why a stamp chosen after the read loses a
         // racing tail.
-        let banked_at = chrono::Utc::now();
+        let banked_at = jiff::Timestamp::now();
         if let Some(entry) =
             catch_up_with_facts(repo, kind_name, session, &path, banked_at, &ledger, fact)
         {
@@ -4184,7 +4173,7 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
     // The most recent directory line already banked for a session, if any —
     // its `ts` is the mtime gate's watermark and its `dir` is reused rather
     // than re-read off the transcript every sweep.
-    let mut dir_lines: BTreeMap<&str, (chrono::DateTime<chrono::Utc>, &str)> = BTreeMap::new();
+    let mut dir_lines: BTreeMap<&str, (jiff::Timestamp, &str)> = BTreeMap::new();
     for entry in ledger {
         if entry.session.is_empty() {
             continue;
@@ -4199,10 +4188,9 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
         let Some(dir) = entry.dir.as_deref() else {
             continue;
         };
-        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.ts) else {
+        let Some(ts) = crate::clock::parse_rfc3339(&entry.ts) else {
             continue;
         };
-        let ts = ts.with_timezone(&chrono::Utc);
         dir_lines
             .entry(entry.session.as_str())
             .and_modify(|(seen, seen_dir)| {
@@ -4231,12 +4219,12 @@ fn sweep_dirs(repo: &Repo, ledger: &[Entry], live: &HashSet<String>) -> Vec<Entr
             // [`bank_lane_at`]'s own paragraph on why a stamp chosen after
             // the read would make a future sweep's mtime gate skip a tail
             // that landed during this harvest.
-            let banked_at = chrono::Utc::now();
+            let banked_at = jiff::Timestamp::now();
             let known = dir_lines.get(session.as_str()).copied();
             if let Some((last_banked, _)) = known {
-                let moved = touched_at(&path)
-                    .map(|at| chrono::DateTime::<chrono::Utc>::from(at) >= last_banked)
-                    .unwrap_or(false);
+                let moved = touched_at(&path).is_some_and(|at| {
+                    jiff::Timestamp::try_from(at).is_ok_and(|at| at >= last_banked)
+                });
                 if !moved {
                     continue;
                 }
@@ -4493,16 +4481,12 @@ fn task_step_at<'a>(
     repo: &Repo,
     ledger: &'a [Entry],
     task_id: &str,
-    at: chrono::DateTime<chrono::Utc>,
+    at: jiff::Timestamp,
 ) -> Option<(String, &'a Entry)> {
-    let mut lines: Vec<(chrono::DateTime<chrono::Utc>, &Entry)> = ledger
+    let mut lines: Vec<(jiff::Timestamp, &Entry)> = ledger
         .iter()
         .filter(|entry| entry.task == task_id && entry.is_lane())
-        .filter_map(|entry| {
-            chrono::DateTime::parse_from_rfc3339(&entry.ts)
-                .ok()
-                .map(|ts| (ts.with_timezone(&chrono::Utc), entry))
-        })
+        .filter_map(|entry| crate::clock::parse_rfc3339(&entry.ts).map(|ts| (ts, entry)))
         .collect();
     lines.sort_by_key(|(ts, _)| *ts);
 
@@ -4641,13 +4625,13 @@ fn bank_dir_session(
     kind: &str,
     session: &str,
     dir: &str,
-    banked_at: chrono::DateTime<chrono::Utc>,
+    banked_at: jiff::Timestamp,
     ledger: &[Entry],
     harvest: &Harvest,
 ) -> Option<Entry> {
     let delta = banked_delta(session, ledger, harvest)?;
     let entry = Entry {
-        ts: banked_at.to_rfc3339(),
+        ts: crate::clock::rfc3339(banked_at),
         task: String::new(),
         plan: None,
         step: String::new(),
@@ -4701,25 +4685,18 @@ fn bank_dir_session(
 /// also needs. Kept, with its own test, as the direct question this crate's
 /// tests hold it to.
 #[allow(dead_code)]
-pub fn session_span(
-    kind: &str,
-    session: &str,
-) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+pub fn session_span(kind: &str, session: &str) -> Option<(jiff::Timestamp, jiff::Timestamp)> {
     session_span_at(&session_file(kind, session)?)
 }
 
-fn session_span_at(
-    path: &Path,
-) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+fn session_span_at(path: &Path) -> Option<(jiff::Timestamp, jiff::Timestamp)> {
     span_in_raw(&std::fs::read_to_string(path).ok()?)
 }
 
 /// [`session_span_at`]'s own parse, pulled out so [`read_session`] can run it
 /// against bytes it already has in hand, rather than paying for a second
 /// `read_to_string` of the same transcript.
-fn span_in_raw(
-    raw: &str,
-) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+fn span_in_raw(raw: &str) -> Option<(jiff::Timestamp, jiff::Timestamp)> {
     let mut first = None;
     let mut last = None;
     for line in raw.lines() {
@@ -4729,10 +4706,9 @@ fn span_in_raw(
         let Some(ts) = value.get("timestamp").and_then(|t| t.as_str()) else {
             continue;
         };
-        let Ok(at) = chrono::DateTime::parse_from_rfc3339(ts) else {
+        let Some(at) = crate::clock::parse_rfc3339(ts) else {
             continue;
         };
-        let at = at.with_timezone(&chrono::Utc);
         if first.is_none() {
             first = Some(at);
         }
@@ -4914,7 +4890,7 @@ pub struct SessionRead {
     /// none — same as there.
     pub skills: BTreeSet<String>,
     /// See [`session_span`].
-    pub span: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    pub span: Option<(jiff::Timestamp, jiff::Timestamp)>,
 }
 
 /// [`parent_session`], [`skill_markers`] and [`session_span`], answered
@@ -5282,7 +5258,7 @@ mod tests {
         path: &Path,
         ledger: &[Entry],
     ) -> Option<Entry> {
-        catch_up_settled_lane_at(repo, kind, session, path, chrono::Utc::now(), ledger)
+        catch_up_settled_lane_at(repo, kind, session, path, jiff::Timestamp::now(), ledger)
     }
 
     fn prices() -> BTreeMap<String, ModelPrice> {
@@ -6631,7 +6607,7 @@ mod tests {
             "claude",
             session,
             "/work",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             &[],
             harvest,
         )
@@ -6945,7 +6921,7 @@ mod tests {
 
     fn minimal_entry(task: &str) -> Entry {
         Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now()),
             task: task.to_string(),
             step: "implement".into(),
             pipeline: "default".into(),
@@ -7158,7 +7134,9 @@ mod tests {
     #[test]
     fn read_since_sums_the_window_a_full_read_would() {
         let (repo, _, _root_guard) = fixture("totals-since");
-        let at = |secs: i64| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
+        let at = |secs: i64| {
+            crate::clock::rfc3339(jiff::Timestamp::now() + jiff::SignedDuration::from_secs(secs))
+        };
         let lines = [
             Entry {
                 ts: at(-300),
@@ -7355,14 +7333,13 @@ mod tests {
     /// runner's own timezone. Spelling a fixed `+02:00` instead only agrees
     /// with the clock in one place on earth, and CI is not that place.
     fn at(wall: &str) -> String {
-        use chrono::TimeZone;
-        let naive = chrono::NaiveDateTime::parse_from_str(wall, "%Y-%m-%dT%H:%M:%S")
+        let naive = jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", wall)
             .expect("a wall clock reading is YYYY-MM-DDTHH:MM:SS");
-        chrono::Local
-            .from_local_datetime(&naive)
-            .earliest()
-            .expect("that wall clock reading does not exist here")
-            .to_rfc3339()
+        let earliest = jiff::tz::TimeZone::system()
+            .to_ambiguous_zoned(naive)
+            .earlier()
+            .expect("that wall clock reading does not exist here");
+        crate::clock::rfc3339(earliest.timestamp())
     }
 
     #[test]
@@ -7408,8 +7385,8 @@ mod tests {
     fn a_duration_and_a_date_are_both_accepted_as_a_bound() {
         // Durations stay relative to now.
         let hour_ago = parse_instant("1h", false).unwrap();
-        assert!(hour_ago < chrono::Utc::now());
-        assert!(hour_ago > chrono::Utc::now() - chrono::Duration::hours(2));
+        assert!(hour_ago < jiff::Timestamp::now());
+        assert!(hour_ago > jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2));
         // Dates are absolute.
         assert!(parse_instant("2026-08-01", false).is_ok());
         // And nonsense is refused with both forms named — both of which
@@ -7949,6 +7926,43 @@ mod tests {
         Entry::neutral()
     }
 
+    /// A row written by a release that formatted with `chrono` — a `+00:00`
+    /// offset and a nine-digit fraction — loads, reads back as the same
+    /// instant, and falls inside a window that names that instant. Writing it
+    /// out again gives the same text, so a ledger that is read and appended to
+    /// never mixes two spellings of one moment.
+    #[test]
+    fn a_ledger_row_written_in_the_chrono_form_reads_back_the_same_instant() {
+        let (repo, _, _root_guard) = fixture("ledger-chrono-row");
+        let written = "2026-11-19T20:34:59.123456789+00:00";
+        let row = Entry {
+            ts: written.to_string(),
+            task: "t".to_string(),
+            step: "implement".to_string(),
+            session: "s".to_string(),
+            ..plain_entry()
+        };
+        let path = ledger_path(&repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{}\n", serde_json::to_string(&row).unwrap())).unwrap();
+
+        let loaded = read(&repo).unwrap();
+        assert_eq!(loaded.len(), 1, "{loaded:#?}");
+        assert_eq!(loaded[0].ts, written);
+
+        let instant = crate::clock::parse_rfc3339(&loaded[0].ts).expect("the row's ts parses");
+        assert_eq!(
+            instant,
+            jiff::Timestamp::from_nanosecond(1_795_120_499_123_456_789).unwrap()
+        );
+        assert_eq!(crate::clock::rfc3339(instant), written);
+        let window = Window {
+            from: Some(instant),
+            until: Some(instant + jiff::SignedDuration::from_secs(1)),
+        };
+        assert!(window.contains(&loaded[0].ts));
+    }
+
     /// Banking a lane from outside a pass — the headless interrupt's path —
     /// appends only what the ledger has not already seen for its session, so a
     /// later `record_usage` for the same carried session cannot double-count
@@ -7977,7 +7991,7 @@ mod tests {
             "sL",
             "demo",
             "implement",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             &harvest(1_000, 200, 3),
         )
         .expect("a first bank");
@@ -7994,7 +8008,7 @@ mod tests {
             "sL",
             "demo",
             "implement",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             &harvest(1_600, 260, 4),
         )
         .expect("a second bank");
@@ -8010,7 +8024,7 @@ mod tests {
                 "sL",
                 "demo",
                 "implement",
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
                 &harvest(1_600, 260, 4)
             )
             .is_none()
@@ -8103,7 +8117,7 @@ mod tests {
     fn a_settled_lane_whose_transcript_grew_gains_one_line_then_nothing() {
         let (repo, path, _root_guard) = fixture("settled-lane-grew");
         let torn_down = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(30)),
             task: "demo".into(),
             step: "implement".into(),
             session: "s".into(),
@@ -8151,7 +8165,7 @@ mod tests {
         let home = home_with("claude", session, &transcript(&[("", 100), ("", 500)]));
 
         let banked = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60)),
             task: "demo".into(),
             step: "implement".into(),
             pipeline: "impl_tdd".into(),
@@ -8193,7 +8207,7 @@ mod tests {
         let root = crate::scratch::root(&format!("usage-many-{name}"));
         let project = root.join(".claude/projects/-home-someone-work");
         std::fs::create_dir_all(&project).unwrap();
-        let old = chrono::Utc::now() - chrono::Duration::seconds(600);
+        let old = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(600);
         for i in 0..n {
             let session = format!("perf-{i:04}");
             std::fs::write(
@@ -8202,11 +8216,11 @@ mod tests {
             )
             .unwrap();
             for line in 0..=extra_lines {
-                let at = old - chrono::Duration::seconds((extra_lines - line) as i64);
+                let at = old - jiff::SignedDuration::from_secs((extra_lines - line) as i64);
                 append(
                     repo,
                     &Entry {
-                        ts: at.to_rfc3339(),
+                        ts: crate::clock::rfc3339(at),
                         task: "demo".into(),
                         step: "implement".into(),
                         session: session.clone(),
@@ -8340,7 +8354,7 @@ mod tests {
         let home = home_with("claude", session, &transcript(&[("", 100), ("", 500)]));
 
         let banked = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60)),
             task: "demo".into(),
             step: "implement".into(),
             session: session.into(),
@@ -8386,7 +8400,7 @@ mod tests {
     fn the_catch_up_line_copies_the_lanes_own_columns_and_carries_no_outcome() {
         let (repo, path, _root_guard) = fixture("settled-lane-columns");
         let lane = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(30)),
             task: "demo".into(),
             step: "implement".into(),
             pipeline: "impl_tdd".into(),
@@ -8432,7 +8446,7 @@ mod tests {
     fn the_catch_up_line_carries_the_lanes_complexity() {
         let (repo, path, _root_guard) = fixture("settled-lane-complexity");
         let lane = |session: &str, complexity: Option<u32>| Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(30)),
             task: "demo".into(),
             step: "implement".into(),
             plan: Some("epic".into()),
@@ -8512,7 +8526,9 @@ mod tests {
         append(
             &repo,
             &Entry {
-                ts: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+                ts: crate::clock::rfc3339(
+                    jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60),
+                ),
                 task: "demo".into(),
                 step: "implement".into(),
                 session: "s".into(),
@@ -8615,7 +8631,7 @@ mod tests {
             "s",
             "demo",
             "implement",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             &harvest(&first),
         )
         .expect("a first bank");
@@ -8625,7 +8641,7 @@ mod tests {
             "s",
             "demo",
             "implement",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             &harvest(&both),
         )
         .expect("a second bank");
@@ -8684,7 +8700,7 @@ mod tests {
             "s",
             "demo",
             "implement",
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
             &harvest,
         )
         .expect("a banked line");
@@ -8708,7 +8724,7 @@ mod tests {
             std::time::SystemTime::now() - std::time::Duration::from_secs(120),
         );
         let banked = Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now()),
             task: "demo".into(),
             step: "implement".into(),
             session: "s".into(),
@@ -8736,8 +8752,8 @@ mod tests {
         let root = crate::scratch::root("usage-session-age-last-reply");
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("s.jsonl");
-        let reply = chrono::Utc::now() - chrono::Duration::hours(34);
-        let later = chrono::Utc::now().to_rfc3339();
+        let reply = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(34);
+        let later = crate::clock::rfc3339(jiff::Timestamp::now());
         std::fs::write(
             &path,
             format!(
@@ -8749,7 +8765,7 @@ mod tests {
                  {{\"type\":\"queue-operation\",\"timestamp\":\"{later}\"}}\n\
                  {{\"type\":\"cost-state\"}}\n\
                  {{\"type\":\"last-prompt\"}}\n",
-                reply.to_rfc3339()
+                crate::clock::rfc3339(reply)
             ),
         )
         .unwrap();
@@ -8784,7 +8800,7 @@ mod tests {
     fn a_transcript_touched_at_the_banked_lines_instant_is_read() {
         let (repo, path, _root_guard) = fixture("settled-lane-tie");
         let banked = Entry {
-            ts: chrono::Utc::now().to_rfc3339(),
+            ts: crate::clock::rfc3339(jiff::Timestamp::now()),
             task: "demo".into(),
             step: "implement".into(),
             session: "s".into(),
@@ -8796,9 +8812,7 @@ mod tests {
         };
         append(&repo, &banked).unwrap();
         std::fs::write(&path, transcript(&[("", 10), ("", 5)])).unwrap();
-        let at: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(&banked.ts)
-            .unwrap()
-            .into();
+        let at = std::time::SystemTime::from(crate::clock::parse_rfc3339(&banked.ts).unwrap());
         crate::scratch::set_mtime(&path, at);
 
         let ledger = read(&repo).unwrap();
@@ -8819,7 +8833,9 @@ mod tests {
     fn a_record_landing_after_the_harvest_watermark_is_still_swept() {
         let (repo, path, _root_guard) = fixture("settled-lane-watermark");
         let torn_down = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            ts: crate::clock::rfc3339(
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(300),
+            ),
             task: "demo".into(),
             step: "implement".into(),
             session: "s".into(),
@@ -8833,13 +8849,13 @@ mod tests {
         std::fs::write(&path, transcript(&[("", 100), ("", 40)])).unwrap();
 
         // The watermark a sweep takes before it reads the file.
-        let watermark = chrono::Utc::now();
+        let watermark = jiff::Timestamp::now();
         let ledger = read(&repo).unwrap();
         let first = catch_up_settled_lane_at(&repo, "claude", "s", &path, watermark, &ledger)
             .expect("the catch-up line");
         assert_eq!(
             first.ts,
-            watermark.to_rfc3339(),
+            crate::clock::rfc3339(watermark),
             "stamped with the pre-harvest watermark, not a later clock"
         );
 
@@ -8865,7 +8881,9 @@ mod tests {
     fn a_settled_lanes_catch_up_banks_the_spend_of_its_subagents() {
         let (repo, path, _root_guard) = fixture("settled-lane-subagent");
         let torn_down = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            ts: crate::clock::rfc3339(
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(300),
+            ),
             task: "demo".into(),
             step: "implement".into(),
             session: "s".into(),
@@ -9215,7 +9233,7 @@ mod tests {
                 session,
                 task,
                 "implement",
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
                 &harvest,
             )
             .expect("a banked line")
@@ -9251,7 +9269,7 @@ mod tests {
                 session,
                 task,
                 "implement",
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
                 &harvest,
             )
             .expect("a banked line")
@@ -9280,7 +9298,7 @@ mod tests {
             "s",
             "demo",
             "implement",
-            chrono::Utc::now() - chrono::Duration::seconds(300),
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(300),
             None,
             &[],
             &harvest_file("claude", &path, &repo.config.models).unwrap(),
@@ -9339,7 +9357,9 @@ mod tests {
     fn a_lane_resuming_a_hand_session_leaves_its_subagents_to_the_sweep() {
         let (repo, path, _root_guard) = fixture("hand-session-subagent");
         let hand_line = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(300)).to_rfc3339(),
+            ts: crate::clock::rfc3339(
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(300),
+            ),
             task: "demo".into(),
             step: "implement".into(),
             session: "s".into(),
@@ -9356,7 +9376,9 @@ mod tests {
         // line is the dispatcher's and a per-line `hand` check alone would
         // fold the subagent in.
         let lane_line = Entry {
-            ts: (chrono::Utc::now() - chrono::Duration::seconds(200)).to_rfc3339(),
+            ts: crate::clock::rfc3339(
+                jiff::Timestamp::now() - jiff::SignedDuration::from_secs(200),
+            ),
             hand: false,
             command: None,
             tokens: Tokens::default(),
@@ -10812,8 +10834,12 @@ mod tests {
         let (first, last) =
             crate::platform::test_home::with_home(&home, || session_span("claude", session))
                 .expect("a span");
-        assert_eq!(first.format("%H:%M:%S").to_string(), "06:14:15");
-        assert_eq!((last - first).num_seconds(), 64 * 60, "1h 04m apart");
+        assert_eq!(first.strftime("%H:%M:%S").to_string(), "06:14:15");
+        assert_eq!(
+            last.as_second() - first.as_second(),
+            64 * 60,
+            "1h 04m apart"
+        );
         std::fs::remove_dir_all(&home).ok();
     }
 
@@ -10950,7 +10976,7 @@ mod tests {
                 .expect("a span")
         });
         assert_eq!(
-            span.0.format("%Y").to_string(),
+            span.0.strftime("%Y").to_string(),
             "2026",
             "the newer file's own timestamp must win, not the older one's"
         );

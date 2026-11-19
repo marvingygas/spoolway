@@ -268,7 +268,7 @@ impl Project {
     fn spend(&self, output: u64) {
         let line = format!(
             "{{\"ts\":\"{}\",\"task\":\"spent\",\"tokens\":{{\"output\":{output}}}}}\n",
-            chrono::Utc::now().to_rfc3339()
+            jiff::Timestamp::now()
         );
         let ledger = self.project_home().join("usage.jsonl");
         let mut text = fs::read_to_string(&ledger).unwrap_or_default();

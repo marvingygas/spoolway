@@ -16,7 +16,8 @@
 //! Vixie cron, where a field counts as restricted when it does not begin with
 //! `*` — so `*/2` is not restricted, but `1-5` is.
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
+use jiff::civil::{Date, DateTime};
+use jiff::{SignedDuration, Span};
 
 /// A parsed cron expression. Each field is a bitmask with bit `v` set for
 /// every value `v` the field matches.
@@ -244,9 +245,9 @@ impl Cron {
     }
 
     /// Whether this expression fires at `when`, to the minute.
-    pub fn matches(&self, when: &NaiveDateTime) -> bool {
-        bit(self.minute, when.minute())
-            && bit(self.hour, when.hour())
+    pub fn matches(&self, when: &DateTime) -> bool {
+        bit(self.minute, when.minute() as u32)
+            && bit(self.hour, when.hour() as u32)
             && self.date_matches(when.date())
     }
 
@@ -258,14 +259,14 @@ impl Cron {
     /// is `*`, a match on *either* counts (`0 3 13 * fri` is the thirteenth
     /// or any Friday); otherwise both must match, and the `*` one always
     /// does.
-    fn date_matches(&self, date: NaiveDate) -> bool {
-        if !bit(self.month, date.month()) {
+    fn date_matches(&self, date: Date) -> bool {
+        if !bit(self.month, date.month() as u32) {
             return false;
         }
-        // chrono's `num_days_from_sunday` is 0 for Sunday, matching the cron
+        // `to_sunday_zero_offset` is 0 for Sunday, matching the cron
         // day-of-week numbering.
-        let dom_ok = bit(self.dom, date.day());
-        let dow_ok = bit(self.dow, date.weekday().num_days_from_sunday());
+        let dom_ok = bit(self.dom, date.day() as u32);
+        let dow_ok = bit(self.dow, date.weekday().to_sunday_zero_offset() as u32);
         if self.dom_restricted && self.dow_restricted {
             dom_ok || dow_ok
         } else {
@@ -282,11 +283,19 @@ impl Cron {
     /// skipped whole, and only a matching day has its minutes walked. So an
     /// impossible expression like `0 0 30 2 *` costs one cheap check per day
     /// across the cycle rather than one per minute.
-    pub fn next_after(&self, after: NaiveDateTime) -> Option<NaiveDateTime> {
-        let start = (after + Duration::minutes(1))
-            .with_second(0)
-            .and_then(|t| t.with_nanosecond(0))?;
-        let last_day = start.date() + Duration::days(SEARCH_LIMIT_DAYS);
+    pub fn next_after(&self, after: DateTime) -> Option<DateTime> {
+        let start = after
+            .checked_add(SignedDuration::from_mins(1))
+            .ok()?
+            .with()
+            .second(0)
+            .subsec_nanosecond(0)
+            .build()
+            .ok()?;
+        let last_day = start
+            .date()
+            .checked_add(Span::new().days(SEARCH_LIMIT_DAYS))
+            .ok()?;
 
         let mut day = start.date();
         while day <= last_day {
@@ -294,18 +303,18 @@ impl Cron {
                 // On the starting day, only minutes at or after `start`
                 // count; every later day starts from midnight.
                 let from = if day == start.date() {
-                    start.hour() * 60 + start.minute()
+                    start.hour() as u32 * 60 + start.minute() as u32
                 } else {
                     0
                 };
                 for minute in from..1440 {
                     let (hour, minute) = (minute / 60, minute % 60);
                     if bit(self.hour, hour) && bit(self.minute, minute) {
-                        return day.and_hms_opt(hour, minute, 0);
+                        return Some(day.at(hour as i8, minute as i8, 0, 0));
                     }
                 }
             }
-            day = day.succ_opt()?;
+            day = day.tomorrow().ok()?;
         }
         None
     }
@@ -593,10 +602,8 @@ fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
-
-    fn at(s: &str) -> NaiveDateTime {
-        NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()
+    fn at(s: &str) -> DateTime {
+        DateTime::strptime("%Y-%m-%d %H:%M", s).unwrap()
     }
 
     #[test]
@@ -860,12 +867,7 @@ mod tests {
     fn a_leap_day_expression_still_resolves_within_the_window() {
         let cron = Cron::parse("0 0 29 2 *").unwrap();
         let next = cron
-            .next_after(
-                NaiveDate::from_ymd_opt(2026, 3, 1)
-                    .unwrap()
-                    .and_hms_opt(0, 0, 0)
-                    .unwrap(),
-            )
+            .next_after(jiff::civil::date(2026, 3, 1).at(0, 0, 0, 0))
             .unwrap();
         assert_eq!(next, at("2028-02-29 00:00"));
     }
