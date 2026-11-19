@@ -91,8 +91,8 @@ pub fn setup_dir_in(checkout: &Path) -> PathBuf {
     // Last resort, after the checkout's own setup and a workspace's: the
     // folder the project's `project.toml` names as `source`. A source that
     // holds no `.spoolway/` is skipped, so the answer stays the checkout's
-    // own missing directory and every caller's refusal reads as it does for
-    // a project with no source at all.
+    // own missing directory and callers refuse as they do for a project with
+    // no source; `Repo::root` reads the line itself and names the source.
     match crate::repo::source_of(checkout).map(|folder| tracked_setup_dir_in(&folder)) {
         Some(source) if source.is_dir() => source,
         _ => own,
@@ -2008,7 +2008,17 @@ impl Config {
     /// write defaults over the caps the file held.
     pub fn missing_error(root: &Path) -> anyhow::Error {
         let path = Config::path_in(root);
-        if setup_dir_in(root).is_dir() {
+        if let Some(source) = crate::repo::source_of(root)
+            .filter(|_| !own_setup_dir_in(root).is_dir() && setup_dir_in(root).is_dir())
+        {
+            anyhow::anyhow!(
+                "{} does not exist in the source {}, where this project reads its setup while \
+                 the main checkout has none (restore it there, or point the source at a folder \
+                 that holds one: spoolway config source <folder>)",
+                path.display(),
+                crate::repo::shorten_home(&source)
+            )
+        } else if setup_dir_in(root).is_dir() {
             anyhow::anyhow!(
                 "{} does not exist (restore it from git, or run `spoolway sync` to write a \
                  fresh one, which holds the defaults and none of the settings the old file had)",

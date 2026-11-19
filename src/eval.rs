@@ -4768,6 +4768,11 @@ fn export(
 ) -> Result<(std::path::PathBuf, usize)> {
     let own_project = crate::usage::registry::name_of(&repo.root);
     let (header, lines, rows) = export_rows(loaded, filters, pipelines, table, &own_project);
+    // `.spoolway/evals/` in the main checkout would also make it hold a
+    // `.spoolway/`, which ends a `source`: the export is refused instead.
+    if let Some(source) = repo.source_in_use() {
+        bail!("{}", crate::repo::source_write_refusal(&repo.root, &source));
+    }
     let dir = evals_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
