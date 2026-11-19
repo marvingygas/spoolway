@@ -2718,7 +2718,7 @@ fn list_sessions(
                 tokens.add(&line.tokens);
             }
             let (when, time_s) = match spans.get(&session) {
-                Some((first, last)) => (*first, (last.as_second() - first.as_second()).max(0)),
+                Some((first, last)) => (*first, last.duration_since(*first).as_secs().max(0)),
                 None => (
                     crate::clock::parse_rfc3339(&latest.ts).unwrap_or_else(jiff::Timestamp::now),
                     0,
