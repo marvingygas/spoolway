@@ -274,12 +274,17 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     }
 
     if repo.borrowed {
+        // While the main checkout's setup is a `source` folder, that folder
+        // is the setup this worktree reads, so it is the one to name:
+        // `config path` here prints it as the `checkout:` line.
+        let reads = crate::repo::source_in_use_at(&repo.root);
+        let reads = reads.as_deref().unwrap_or(&repo.checkout);
         bail!(
             "this linked worktree has no `.spoolway/` on its branch, so it reads the setup of {} \
              — `sync` would start a second setup in the worktree\n  run `spoolway sync` in {} \
              instead",
-            repo.checkout.display(),
-            repo.checkout.display(),
+            reads.display(),
+            reads.display(),
         );
     }
 
@@ -3500,6 +3505,29 @@ mod tests {
             !root.join(".spoolway/config.toml").exists(),
             "nothing may be written before the refusal"
         );
+    }
+
+    /// While the main checkout's setup is a `source` folder, the worktree
+    /// that borrows it reads that folder, so the refusal names it, in the
+    /// sentence and in the remedy, and not the main checkout it does not read.
+    #[test]
+    fn sync_refusal_in_a_borrowing_worktree_names_the_source_folder() {
+        let project = crate::repo::source_project("sync-borrowed-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.plain).unwrap();
+            assert!(repo.borrowed);
+
+            let err = run(&repo, &args()).expect_err("a borrowed setup is not this worktree's");
+            let said = format!("{err:#}");
+            let source = project.source.display().to_string();
+            let work = project.work.display().to_string();
+            assert!(
+                said.contains(&format!("so it reads the setup of {source} "))
+                    && said.contains(&format!("run `spoolway sync` in {source} instead")),
+                "{said}"
+            );
+            assert!(!said.contains(&work), "{said}");
+        });
     }
 
     /// A lane that reads its dispatcher's setup has no setup of its own to
