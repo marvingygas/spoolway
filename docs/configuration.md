@@ -314,7 +314,10 @@ commands. The refusal says to run `spoolway config source <folder>` or `spoolway
 While the source supplies the setup, these commands refuse in the main checkout and say so:
 `pipeline promote`, saving or deleting a routine or job on the board, and the eval tab's CSV
 export. Check out a branch that carries `.spoolway/`, or run `spoolway init` in the checkout.
-`spoolway init` writes the checkout's own `.spoolway/` and leaves the source alone.
+`spoolway init` in the main checkout writes its own `.spoolway/` and leaves the source alone.
+`spoolway init` in a linked worktree, while the main checkout has no `.spoolway/`, writes the
+worktree's `.spoolway/` and records the worktree as the source. See
+[`init`](cli-reference.md#spoolway-init).
 
 A linked worktree with no `.spoolway/` of its own refuses `config set` and `sync`. The refusal
 gives a `-C` line, or a `sync` command, that names the source folder.

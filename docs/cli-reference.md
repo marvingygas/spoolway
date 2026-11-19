@@ -1977,10 +1977,27 @@ printing the path. With no terminal to answer, `init` writes nothing unless `--y
 it prints one line saying nothing was written and that `--yes` lets such a run write, so a
 script, CI runner or agent passes `--yes`.
 
-Run from a linked worktree, the directory it resolves to is the main checkout the worktree was
-cut from, never the worktree itself — `init` never writes into a worktree or binds it as its own
-project. When the main checkout cannot be found this way, `init` refuses and says to run it in
+Run from a linked worktree, the project it resolves to is the main checkout the worktree was
+cut from. When the main checkout cannot be found this way, `init` refuses and says to run it in
 the main checkout, or to pass `-C <main checkout>`.
+
+While the main checkout has no `.spoolway/`, `init` in a linked worktree writes the setup into
+that worktree, so you can commit it on your feature branch. It asks no `Where should this
+project's setup live?` question, because only a repo-mode setup can sit on a branch. The id is
+stamped in the shared `.git`, `project.toml` records the main checkout as the project, and the
+worktree is recorded as the project's [source folder](configuration.md#the-source-folder). A
+`source` row follows the `project` row and names the worktree:
+
+```
+$ spoolway init --yes
+  project  ~/dev/app
+  source   ~/dev/app-adopt
+```
+
+Once the main checkout has a `.spoolway/`, `init` in a worktree acts on the main checkout and
+prints no `source` row. `--setup home`, `--workspace` and a main checkout that a workspace lists
+act on the main checkout the same way. `init` in a dispatcher lane's worktree is refused while the main checkout has no
+`.spoolway/`, with nothing written.
 
 A project has one setup, at the top of the repo. `init` writes it there, from whichever folder of
 the checkout it runs in. When the top has no setup and a `.spoolway/` sits in a folder below it, `init` writes

@@ -255,6 +255,11 @@ checkout still carries a stamp no home holds. Delete `.git/spoolway-id` too and 
 init` again to mint a fresh id and a fresh home. See [Runtime
 state](configuration.md#runtime-state).
 
+Run in a linked worktree while the main checkout has no `.spoolway/`, `init` writes the setup
+into that worktree and records the worktree as the project's source folder. Commit the setup on
+the worktree's branch. See [`init`](cli-reference.md#spoolway-init) and
+[The source folder](configuration.md#the-source-folder).
+
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
 version wrote there, outside home mode. A home-mode checkout keeps its `.gitignore`
 untouched, matching home mode's own promise to write nothing into the checkout.
