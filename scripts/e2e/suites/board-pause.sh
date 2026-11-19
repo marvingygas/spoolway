@@ -14,7 +14,8 @@
 # unit test can stand up — the last section covers it.
 #
 # Row actions are reached through `o`, which opens a menu of what the
-# cursor's row can take: open task, open plan, pause, restart, unqueue. The menu runs the action's own check again on `enter`, so each
+# cursor's row can take: open task, open plan, pause, restart, unqueue. The
+# menu runs the action's own check again on `enter`, so each
 # section picks its item and then answers the panel it opens. `p`, `s`, `u`
 # and `U` are no longer board keys; `U` gets one pass that proves it does
 # nothing, and `spoolway queue unqueue <task>` does its job.
