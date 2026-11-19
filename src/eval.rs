@@ -10603,6 +10603,36 @@ mod screen_tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "one export");
     }
 
+    /// A worktree with a setup of its own still exports into the main
+    /// checkout's setup folder, which is the source's while the main
+    /// checkout reads one, so the export is refused there too.
+    #[test]
+    fn an_export_from_a_worktree_of_a_source_project_writes_nothing_into_the_source() {
+        let project = crate::repo::source_project("export-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.detached).unwrap();
+            assert_eq!(repo.source_in_use(), None, "it has a setup of its own");
+            let filters = no_filters();
+            let loaded = load(&repo, &filters).unwrap();
+            let refused = export(
+                &repo,
+                &loaded,
+                &filters,
+                &Pipelines::builtin(),
+                TableKind::Dirs,
+            );
+            let said = format!("{:#}", refused.unwrap_err());
+            assert!(said.contains("would land in that folder"), "{said}");
+        });
+        assert!(
+            !project
+                .source
+                .join(crate::config::STATE_DIR)
+                .join("evals")
+                .exists()
+        );
+    }
+
     /// `e` on the directory table writes its own columns in the drawn view,
     /// naming this project on every row — the project's own watched root
     /// too, which no ledger line names it on. Fails while that root's row

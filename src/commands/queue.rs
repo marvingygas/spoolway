@@ -26193,6 +26193,65 @@ mod tests {
         );
     }
 
+    /// On a source, save as routine writes nothing into the source's
+    /// `.spoolway/routines/`, the person's own folder.
+    #[test]
+    fn save_as_routine_writes_nothing_into_a_source_folder() {
+        let project = crate::repo::source_project("routine-save-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            write_pending(&repo, "login", &task_text("login", "group: auth\n", BODY));
+            let groups = super::super::pending::list_groups(&repo).unwrap();
+            let key = group_key(&groups[0]);
+
+            let Mode::Outcome { notice, .. } = save_routine(&repo, &groups, &key, "nightly") else {
+                panic!("save as routine answers a popup");
+            };
+            assert_eq!(notice.title, "not saved");
+            assert!(
+                notice.text.contains("would land in that folder"),
+                "{}",
+                notice.text
+            );
+        });
+        assert!(
+            !project
+                .source
+                .join(crate::config::STATE_DIR)
+                .join("routines")
+                .exists()
+        );
+    }
+
+    /// On a source, delete routine removes nothing: the routine folder
+    /// inside the source stays, and the popup says nothing was removed.
+    #[test]
+    fn delete_routine_removes_nothing_from_a_source_folder() {
+        let project = crate::repo::source_project("routine-delete-source");
+        let folder = project
+            .source
+            .join(crate::config::STATE_DIR)
+            .join("routines")
+            .join("nightly");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("audit-docs.md"), "").unwrap();
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            assert_eq!(repo.routines_dir().join("nightly"), folder);
+            let target = RoutineDelete {
+                name: "nightly".to_string(),
+                path: folder.clone(),
+                tasks: 1,
+                jobs: Vec::new(),
+            };
+
+            let text = delete_routine(&repo, &target).unwrap_err();
+            assert!(text.contains("would land in that folder"), "{text}");
+            assert!(text.ends_with("nothing was removed"), "{text}");
+        });
+        assert!(folder.join("audit-docs.md").is_file(), "the folder is kept");
+    }
+
     /// A store broken between picking delete and `enter` refuses the delete with
     /// nothing removed: the listed job is still in its own store, the folder
     /// is still there, and the popup text sends the person to `spoolway

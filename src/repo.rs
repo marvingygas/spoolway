@@ -5559,6 +5559,11 @@ pub(crate) fn runs_here_under(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
+/// The source-project fixture, for tests of the writers outside this file
+/// that must stay out of a source folder.
+#[cfg(test)]
+pub(crate) use tests::source_project;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8488,16 +8493,16 @@ mod tests {
     /// `config.toml`. `plain` is a worktree cut from the bare branch, so it
     /// has no setup of its own, and `detached` one cut from the branch that
     /// carries the setup and left on a detached HEAD, so it has its own.
-    struct SourceProject {
-        work: PathBuf,
-        source: PathBuf,
-        plain: PathBuf,
-        detached: PathBuf,
-        home: PathBuf,
+    pub(crate) struct SourceProject {
+        pub(crate) work: PathBuf,
+        pub(crate) source: PathBuf,
+        pub(crate) plain: PathBuf,
+        pub(crate) detached: PathBuf,
+        pub(crate) home: PathBuf,
         _guards: (crate::scratch::ScratchRoot, crate::scratch::ScratchRoot),
     }
 
-    fn source_project(name: &str) -> SourceProject {
+    pub(crate) fn source_project(name: &str) -> SourceProject {
         let (_origin, work, base_guard) = fixture(name);
         let (home, home_guard) = scratch_home(name);
         let base = work.parent().unwrap().to_path_buf();
