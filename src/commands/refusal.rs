@@ -202,9 +202,6 @@ pub const CONFIG_SET: LaneRefusal = entry!(
     None,
     RefusedOn::Every,
 );
-/// `init` in a lane's worktree would write the project's setup there, and
-/// record the worktree as the project's source.
-pub const INIT: LaneRefusal = entry!("INIT", SETUP, &["init"], None, None, RefusedOn::Every);
 /// `config source` rewrites the project's record, which a lane's worktree
 /// shares with the person's own.
 pub const CONFIG_SOURCE: LaneRefusal = entry!(
@@ -257,7 +254,6 @@ pub const LANE_REFUSALS: &[&LaneRefusal] = &[
     &OVERRIDE_DROP,
     &CONFIG_SET,
     &CONFIG_SOURCE,
-    &INIT,
     &OVERRIDE_PROMOTE,
     &PIPELINE_PROMOTE,
 ];

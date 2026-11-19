@@ -5224,13 +5224,12 @@ fn follow_dispatcher(
 ///
 /// A project with no home yet has no lane, so a project that cannot be read
 /// without writing is let through, and `init` goes on to the checks of its
-/// own. `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
-/// command asking, for the same reason as in [`Repo::refuse_in_lane`].
-pub(crate) fn refuse_init_in_lane(
-    start: &Path,
-    project: &Path,
-    _command: &crate::commands::LaneRefusal,
-) -> Result<()> {
+/// own.
+///
+/// Narrow on purpose: `init` in a lane of a project whose main checkout has a
+/// setup still acts on the main checkout, as it always did, so there is no
+/// entry in [`crate::commands::LANE_REFUSALS`] for the command as a whole.
+pub(crate) fn refuse_init_in_lane(start: &Path, project: &Path) -> Result<()> {
     let in_lane = bind_as(project, Bind::Peek).is_ok_and(|home| started_in_lane(start, &home));
     if in_lane {
         bail!(

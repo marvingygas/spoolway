@@ -840,7 +840,15 @@ fn init_setup_folder(
     args: &cli::InitArgs,
 ) -> Result<PathBuf> {
     let home_setup = args.setup == Some(cli::Setup::Home) || args.workspace.is_some();
-    if home_setup || !repo::is_linked_worktree(cwd) || config::own_setup_dir_in(project).is_dir() {
+    // A main checkout listed as a workspace clone is a project with a setup
+    // already chosen, even when its `config/` is missing or the workspace file
+    // will not read. Asked the strict way, so that case still reaches the
+    // refusal `init` makes for it on the main checkout, with nothing written.
+    if home_setup
+        || !repo::is_linked_worktree(cwd)
+        || repo::workspace_clone_checked(project)?.is_some()
+        || config::own_setup_dir_in(project).is_dir()
+    {
         return Ok(project.to_path_buf());
     }
     let top = repo::toplevel_raw(cwd)?;
@@ -1167,6 +1175,23 @@ mod tests {
         let args = cli::InitArgs::default();
         assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), wt);
         assert_eq!(init_setup_folder(&work, &work, &args).unwrap(), work);
+    }
+
+    /// A main checkout listed as a workspace clone is acted on, not its
+    /// worktree, whether or not its `config/` is still there. Fails before the
+    /// change: the lenient read of the clone let the worktree branch write
+    /// first, and refuse only afterwards.
+    #[test]
+    fn init_acts_on_a_main_checkout_listed_in_a_workspace() {
+        let (_base, work, wt) = main_and_worktree("init-folder-listed");
+        let home = _base.join("home");
+        crate::platform::test_home::with_home(&home, || {
+            let clone = repo::create_workspace(&work).unwrap();
+            let args = cli::InitArgs::default();
+            assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), work);
+            std::fs::remove_dir_all(clone.config_dir()).unwrap();
+            assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), work);
+        });
     }
 
     /// Once the main checkout has a `.spoolway/`, or a home-mode setup was
