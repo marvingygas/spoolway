@@ -1415,6 +1415,50 @@ else bad "and the project's own config is left untouched"; fi
 must "removing the worktree" git worktree remove --force "$WT"
 must "removing its branch" git branch -D task/config-diff
 
+# ----------------------------------- a worktree's setup while main has none
+# The project is the main checkout, and a linked worktree that carries the
+# only `.spoolway/` supplies every file while the main checkout's branch has
+# none. The queue, the home and the project's record stay with the main
+# checkout, so a worktree command reaches the same queue a command run there
+# did.
+MAIN_PLANS=$("$SPOOLWAY" config path | sed -n 's/^plans: *//p')
+SOLO="$LIVE/worktrees/solo-setup"
+must "cutting a worktree that will hold the only setup" \
+  git worktree add -q -b task/solo-setup "$SOLO" plan/live
+must "giving it a config value of its own" \
+  sed -i 's|^blocked_agent = .*|blocked_agent = "from-the-only-setup"|' "$SOLO/.spoolway/config.toml"
+must "and a pipeline only it has" \
+  cp "$SOLO/.spoolway/pipelines/default.yml" "$SOLO/.spoolway/pipelines/soloflow.yml"
+must "committing its setup" git -C "$SOLO" add -A
+must "committing its setup" git -C "$SOLO" commit -qm "e2e: the only setup"
+# What the sections above left in `.spoolway/`, committed or not, is put back
+# below: later sections read it as it was.
+must "keeping the main checkout's setup as it stands" \
+  cp -a .spoolway "$LIVE/setup-aside"
+must "the main checkout leaves the branch that carries .spoolway/" \
+  git checkout -q -b e2e-no-setup
+must "and its branch has no setup" git rm -rqf .spoolway
+must "and its branch has no setup" git commit -qm "e2e: a branch without a setup"
+rm -rf .spoolway
+
+says "config get in the worktree prints the worktree's value" "from-the-only-setup" \
+  "$SPOOLWAY" -C "$SOLO" config get unattended.blocked_agent
+says "pipeline list in the worktree lists the worktree's pipeline" "soloflow" \
+  "$SPOOLWAY" -C "$SOLO" pipeline list
+works "queue list in the worktree reaches the queue" \
+  "$SPOOLWAY" -C "$SOLO" queue list
+SOLO_PLANS=$("$SPOOLWAY" -C "$SOLO" config path | sed -n 's/^plans: *//p')
+if [ -n "$MAIN_PLANS" ] && [ "$SOLO_PLANS" = "$MAIN_PLANS" ]; then
+  ok "and the plans folder is the main checkout's project home"
+else bad "and the plans folder is the main checkout's project home ($SOLO_PLANS)"; fi
+
+must "putting the main checkout back on its branch" git checkout -q plan/live
+must "and its setup back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"
+rm -rf "$LIVE/setup-aside"
+must "removing the worktree" git worktree remove --force "$SOLO"
+must "removing its branch" git branch -D task/solo-setup
+must "removing the main checkout's temporary branch" git branch -D e2e-no-setup
+
 # --------------------------------------------------------- overrides layer
 # `~/.spoolway/<project>/overrides/` is read by `Pipelines::load`,
 # `Config::load` and `prompt::path_for` through the shared

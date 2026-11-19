@@ -7987,9 +7987,12 @@ mod tests {
     fn a_lane_resolves_to_the_main_checkout_while_it_is_on_a_bare_branch() {
         let (_origin, work, _base_guard) = fixture("lane-while-main-is-bare");
         let (home, _home_guard) = scratch_home("lane-while-main-is-bare");
-        let lane = crate::scratch::root("repo-test-lane-while-main-is-bare-lane");
         let (root, strict) = crate::platform::test_home::with_home(&home, || {
-            Repo::discover(&work).expect("binds on the branch that carries .spoolway/");
+            let repo = Repo::discover(&work).expect("binds on the branch that carries .spoolway/");
+            // Under the home's worktree folder, where a dispatcher cuts its
+            // lanes: a worktree elsewhere is a person's own, which reads its
+            // own setup instead.
+            let lane = repo.worktree_root().join("x");
             leave_main_on_a_bare_branch(&work, &lane);
             let (repo, _, home_error) = Repo::discover_lenient(&lane).unwrap();
             assert!(
@@ -8079,6 +8082,83 @@ mod tests {
         );
     }
 
+    /// A person's own linked worktree that carries the only `.spoolway/`
+    /// supplies the setup while the main checkout is on a bare branch, and
+    /// the project stays the main checkout, with its home bound there. The
+    /// worktree is outside the home's worktree folder, so it is no lane.
+    #[test]
+    fn a_worktree_with_the_only_setup_is_read_whole_and_the_project_stays_main() {
+        let (_origin, work, _base_guard) = fixture("only-setup-worktree");
+        let (home, _home_guard) = scratch_home("only-setup-worktree");
+        let wt = crate::scratch::root("repo-test-only-setup-worktree-wt");
+        let (repo, bound) = crate::platform::test_home::with_home(&home, || {
+            Repo::discover(&work).expect("binds on the branch that carries .spoolway/");
+            leave_main_on_a_bare_branch(&work, &wt);
+            let repo = Repo::discover(&wt).expect("the worktree's own setup is read");
+            let bound = read_binding(&repo.home).unwrap().unwrap();
+            (repo, bound)
+        });
+        let main = work.canonical().unwrap();
+        assert_eq!(repo.root, main);
+        assert_eq!(repo.checkout, wt.canonical().unwrap());
+        assert_eq!(repo.setup_source(), repo.checkout);
+        assert!(!repo.in_lane_worktree());
+        assert_eq!(bound.root, main);
+    }
+
+    /// A home that an older binary left recording a linked worktree as the
+    /// project is rewritten to the main checkout, with the `now records`
+    /// line, rather than refused for two checkouts sharing the id.
+    #[test]
+    fn a_home_recording_a_worktree_of_the_same_clone_moves_to_the_main_checkout() {
+        let (_origin, work, _base_guard) = fixture("record-names-worktree");
+        let (home, _home_guard) = scratch_home("record-names-worktree");
+        let wt = crate::scratch::root("repo-test-record-names-worktree-wt");
+        let bound = crate::platform::test_home::with_home(&home, || {
+            let main_home = bind(&work).unwrap();
+            let _ = std::fs::remove_dir_all(&wt);
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/w",
+                    wt.to_str().unwrap(),
+                ],
+            );
+            let wt = wt.canonical().unwrap();
+            let mut binding = read_binding(&main_home).unwrap().unwrap();
+            binding.root = wt.clone();
+            write_binding(&main_home, &binding).unwrap();
+            bind(&work).expect("the main checkout takes the record back");
+            read_binding(&main_home).unwrap().unwrap().root
+        });
+        assert_eq!(bound, work.canonical().unwrap());
+    }
+
+    /// `setup_source` names `root` unless a worktree with its own setup is
+    /// the only one: a lane, a main checkout with a setup and a worktree
+    /// without one all keep reading `root`.
+    #[test]
+    fn setup_source_is_root_unless_a_worktree_holds_the_only_setup() {
+        let base = crate::scratch::root("repo-test-setup-source");
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, wt) = (base.join("main"), base.join("wt"));
+        std::fs::create_dir_all(wt.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(setup_source(&root, &wt, false), wt);
+        assert_eq!(setup_source(&root, &wt, true), root, "a lane");
+        assert_eq!(setup_source(&root, &root, false), root, "no worktree");
+        let bare = base.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(setup_source(&root, &bare, false), root, "no setup there");
+        std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        assert_eq!(setup_source(&root, &wt, false), root, "main has one");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// While a dispatcher runs, a lane whose main checkout is on a bare
     /// branch runs on the config the dispatcher recorded, caps included. With
     /// no record it stops naming the branch, never on the defaults.
@@ -8086,9 +8166,11 @@ mod tests {
     fn discover_live_reads_the_record_while_main_is_on_a_bare_branch() {
         let (_origin, work, _base_guard) = fixture("live-while-main-is-bare");
         let (home, _home_guard) = scratch_home("live-while-main-is-bare");
-        let lane = crate::scratch::root("repo-test-live-while-main-is-bare-lane");
         let (without, with) = crate::platform::test_home::with_home(&home, || {
             let repo = Repo::discover(&work).unwrap();
+            // A lane lives under the home's worktree folder; see the test
+            // above.
+            let lane = repo.worktree_root().join("x");
             leave_main_on_a_bare_branch(&work, &lane);
             let without = Repo::discover_live(&lane);
             let _recording = dispatcher_recording(&repo, 7);

@@ -396,7 +396,9 @@ fn run() -> Result<()> {
             }
 
             // The graph that *routes* the queue is the project's, read from
-            // `repo.root` — never the checkout's. A lane reports from inside
+            // `repo.setup_source()` — `repo.root`, and never the checkout's,
+            // unless the main checkout has no setup and the command runs in
+            // a worktree that carries the only one. A lane reports from inside
             // its own worktree, and a worktree's committed pipelines are not
             // the graph the dispatcher and the queue agree on: letting a
             // report route off them lets two branches disagree about where a
