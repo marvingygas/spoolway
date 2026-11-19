@@ -26,6 +26,10 @@
 //! the same lock, for a lane's `report` and a `spoolway stack` step to run
 //! on when `config.toml` breaks or goes missing — see [`recorded_config`].
 //!
+//! It also names the folder the dispatcher read its setup from, so a lane
+//! whose own worktree carries no setup, or another one, reads the dispatcher's
+//! — see [`live_setup_folder`].
+//!
 //! Read only while the lock names a live dispatcher, and only when that lock
 //! is the one this snapshot was written under — see [`LoadedPipelines::live`].
 //! A snapshot a crashed dispatcher left behind is never current, and with
@@ -72,7 +76,9 @@ struct Written {
     /// The folder `sources` was read from: the dispatcher's own
     /// [`Repo::setup_source`]. A reader compares against this folder rather
     /// than its own, which differs for a lane and for a second worktree that
-    /// carries a setup of its own. A snapshot from before this existed has
+    /// carries a setup of its own. A lane whose project's main checkout has
+    /// no setup reads from it too: see [`live_setup_folder`]. A snapshot from
+    /// before this existed has
     /// none, which reads as the project's root, where every dispatcher read
     /// then.
     #[serde(default)]
@@ -247,6 +253,30 @@ pub fn recorded_config(repo: &Repo) -> Result<Option<crate::config::Config>> {
     Ok(Some(config))
 }
 
+/// The snapshot in project home `home` and its path, when it was written by
+/// the dispatcher holding that home's lock now. A home, not a [`Repo`]: a lane
+/// asks before it has one, to find which folder its project's setup is in.
+fn read_live(home: &Path) -> Option<(Written, PathBuf)> {
+    let lock_file = home.join(crate::lock::LOCK_FILE);
+    crate::lock::Lock::holder(&lock_file).ok().flatten()?;
+    let lock = std::fs::read_to_string(&lock_file).ok()?;
+    let path = home.join(SNAPSHOT_FILE);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let written: Written = serde_json::from_str(&raw).ok()?;
+    (written.lock == lock).then_some((written, path))
+}
+
+/// The folder whose setup the dispatcher running in project home `home` reads:
+/// its own [`Repo::setup_source`], as it recorded it with the snapshot.
+///
+/// `None` when no dispatcher is running, when the snapshot is not its own, or
+/// when it predates the field. A lane reads this on every command, and a
+/// reload rewrites the snapshot, so a lane follows the dispatcher to wherever
+/// a reload moved it.
+pub fn live_setup_folder(home: &Path) -> Option<PathBuf> {
+    read_live(home)?.0.source
+}
+
 /// A snapshot whose writer is the dispatcher running now.
 #[derive(Debug)]
 pub struct LoadedPipelines {
@@ -264,13 +294,9 @@ impl LoadedPipelines {
     /// files rather than refuse, since the files are what every command
     /// routed on before the snapshot existed.
     pub fn live(repo: &Repo) -> Option<LoadedPipelines> {
-        let lock_file = repo.lock_file();
-        crate::lock::Lock::holder(&lock_file).ok().flatten()?;
-        let lock = std::fs::read_to_string(&lock_file).ok()?;
-        let path = path(repo);
-        let raw = std::fs::read_to_string(&path).ok()?;
-        let written: Written = serde_json::from_str(&raw).ok()?;
-        (written.lock == lock).then_some(LoadedPipelines { written, path })
+        let home = repo.home();
+        let (written, path) = read_live(home)?;
+        Some(LoadedPipelines { written, path })
     }
 
     /// The dispatcher's pid, off the lock text's first line.

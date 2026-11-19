@@ -138,13 +138,21 @@ impl Repo {
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
-        let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         // Settled ahead of `bind`, which would otherwise mint a stamp and a
         // home for a project that has nothing to read.
-        let source = setup_source(&root, &checkout, started_in_lane_dir(&start, &root));
+        let lane_home = crate::mux::project_home(&root)
+            .ok()
+            .filter(|home| started_in_lane(&start, home));
+        let (checkout, borrowed) = follow_dispatcher(
+            checkout_for(&start, &root, main.as_deref()),
+            &root,
+            lane_home.as_deref(),
+        );
+        let source = command_setup_source(&root, &checkout, lane_home.is_some());
         // The folder that supplies the setup carries no `.spoolway/` only
         // when a lane found its project's main checkout on a branch without
-        // it (see `root`). Everything this command would read from there is the
+        // it (see `root`), and its dispatcher has recorded no setup folder for
+        // it to follow. Everything this command would read from there is the
         // built-in defaults, which is not the config the run is on, so it
         // stops and says where the directory went. `report` and `stack` take
         // the dispatcher's record instead — see `discover_live`.
@@ -276,13 +284,17 @@ impl Repo {
             .with_context(|| format!("resolving {}", start.display()))?;
         let main = main_checkout(&start);
         let root = Repo::root(&start, main.as_deref())?;
-        let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         let (home, home_error) = bind_lenient(&root, mode);
         if home_error.is_none() {
             clear_source_once_merged(&root, &home);
         }
         let started_in_lane = started_in_lane(&start, &home);
-        let source = setup_source(&root, &checkout, started_in_lane);
+        let (checkout, borrowed) = follow_dispatcher(
+            checkout_for(&start, &root, main.as_deref()),
+            &root,
+            started_in_lane.then_some(home.as_path()),
+        );
+        let source = command_setup_source(&root, &checkout, started_in_lane);
         // `Config::load` reads the overrides layer out of the home that
         // `home_error` above just failed to settle, so calling it the
         // ordinary way here could fail again for the identical reason and
@@ -340,6 +352,16 @@ impl Repo {
             return Ok(main.to_path_buf());
         }
 
+        // A lane of a dispatcher that found the project's only setup somewhere
+        // else: in a linked worktree, as adoption has it, while the lane's own
+        // worktree is cut from a base that carries none. The main checkout is
+        // the project, and `follow_dispatcher` points the lane at that setup.
+        if let Some(main) = main
+            && lane_of_dispatcher(start, main)
+        {
+            return Ok(main.to_path_buf());
+        }
+
         // The main checkout sits on a branch with no `.spoolway/`, no
         // workspace lists it, and `start` is in a linked worktree that carries
         // its own. The walk below would take that copy as a second root, and
@@ -347,9 +369,11 @@ impl Repo {
         // later command in the main checkout for sharing its id, advising a
         // `spoolway init` that detaches the project. The project is still the
         // main checkout, registered or not. What it reads is `setup_source`'s
-        // to say: this worktree's setup for a person's command, and nothing
-        // for a lane, where `discover` stops on the missing directory and
-        // `discover_live` reads the dispatcher's record. The worktree's own
+        // to say: this worktree's setup for a person's command, and for a
+        // lane the folder its dispatcher recorded, which `follow_dispatcher`
+        // finds. A lane with no record stops in `discover` on the missing
+        // directory, and `discover_live` reads the dispatcher's config
+        // record instead. The worktree's own
         // top is what is compared, not `start`: a subdirectory of the bare main checkout, or a
         // worktree on a branch without `.spoolway/`, gets the refusal below.
         // A worktree nested inside the main checkout is left to the walk as
@@ -959,7 +983,7 @@ impl Repo {
     /// one place that decides it, so every reader agrees. See
     /// [`setup_source`].
     pub fn setup_source(&self) -> PathBuf {
-        setup_source(&self.root, &self.checkout, self.in_lane_worktree())
+        command_setup_source(&self.root, &self.checkout, self.in_lane_worktree())
     }
 
     /// [`crate::config::under_setup`], against this `Repo`'s own
@@ -4911,12 +4935,70 @@ pub(crate) fn setup_source(root: &Path, checkout: &Path, in_lane: bool) -> PathB
     checkout.to_path_buf()
 }
 
-/// [`started_in_lane`] for a caller that has no bound home yet, and must not
-/// make one: a home that cannot be named yet reads as "not a lane".
-fn started_in_lane_dir(start: &Path, root: &Path) -> bool {
-    crate::mux::project_home(root)
+/// [`setup_source`] for a command, which also knows whether it is a lane's.
+///
+/// A lane of a project whose main checkout has no setup of its own is the
+/// one case where a lane does not read `root`: its `checkout` is already the
+/// folder its dispatcher reads ([`follow_dispatcher`]). That folder is `root`
+/// itself unless the dispatcher found the setup in a linked worktree, and then
+/// it is that worktree.
+fn command_setup_source(root: &Path, checkout: &Path, in_lane: bool) -> PathBuf {
+    let dispatcher_in_worktree = in_lane
+        && checkout != root
+        && !crate::config::own_setup_dir_in(root).is_dir()
+        && crate::config::tracked_setup_dir_in(checkout).is_dir();
+    if dispatcher_in_worktree {
+        return checkout.to_path_buf();
+    }
+    setup_source(root, checkout, in_lane)
+}
+
+/// The folder the dispatcher of project home `home` reads its setup from,
+/// when it is one a lane can read: it still holds a `.spoolway/`.
+fn dispatcher_folder(home: &Path) -> Option<PathBuf> {
+    crate::pipeline_snapshot::live_setup_folder(home)
+        .filter(|folder| crate::config::tracked_setup_dir_in(folder).is_dir())
+}
+
+/// Whether `start` is in a lane of the dispatcher running in `main`'s project,
+/// and that dispatcher reads a setup this command can find.
+///
+/// Answered from where the command started, as [`Repo::in_lane_worktree`] is,
+/// so a person's own linked worktree is never a lane: it sits outside the
+/// project home's worktree folder, and reads its own setup.
+fn lane_of_dispatcher(start: &Path, main: &Path) -> bool {
+    crate::mux::project_home(main)
         .ok()
-        .is_some_and(|home| started_in_lane(start, &home))
+        .filter(|home| started_in_lane(start, home))
+        .is_some_and(|home| dispatcher_folder(&home).is_some())
+}
+
+/// A lane's `checkout`, when its project's main checkout has no setup of its
+/// own: the folder its dispatcher reads, and borrowed. `lane_home` is the
+/// project home when the command started in a lane, `None` for any other.
+///
+/// Without it a lane read whichever `.spoolway/` its own worktree carried,
+/// and a worktree cut from a base without one had nothing to read. Both
+/// differ from the setup the dispatcher runs on while the project's setup is
+/// a `source` folder, or the only copy sits in the worktree the dispatcher
+/// was started in. A lane whose dispatcher has recorded nothing readable
+/// borrows `root`, which answers with the `source` folder when there is one.
+/// A project whose main checkout has a setup is left exactly as it was.
+fn follow_dispatcher(
+    checkout: (PathBuf, bool),
+    root: &Path,
+    lane_home: Option<&Path>,
+) -> (PathBuf, bool) {
+    let Some(home) = lane_home else {
+        return checkout;
+    };
+    if crate::config::own_setup_dir_in(root).is_dir() {
+        return checkout;
+    }
+    (
+        dispatcher_folder(home).unwrap_or_else(|| root.to_path_buf()),
+        true,
+    )
 }
 
 /// Whether `start` sits under the worktree folder of the project home `home`.
@@ -8381,6 +8463,166 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         assert_eq!(setup_source(&root, &wt, false), root, "main has one");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A project whose main checkout is on a bare branch while a dispatcher
+    /// runs in `own`, a person's linked worktree that carries the only setup,
+    /// with a lane worktree cut from the bare branch and a second worktree of
+    /// the person's, `person`, cut from it too. The dispatcher holds the lock
+    /// and has written its snapshot, as it does on start.
+    struct AdoptionRun {
+        work: PathBuf,
+        own: PathBuf,
+        lane: PathBuf,
+        person: PathBuf,
+        home: PathBuf,
+        _dispatcher: crate::lock::Lock,
+        _guards: (crate::scratch::ScratchRoot, crate::scratch::ScratchRoot),
+    }
+
+    fn adoption_run(name: &str) -> AdoptionRun {
+        let (_origin, work, base_guard) = fixture(name);
+        let (home, home_guard) = scratch_home(name);
+        let base = work.parent().unwrap().to_path_buf();
+        let (own, person) = (base.join("own-wt"), base.join("person-wt"));
+        let (lane, dispatcher) = crate::platform::test_home::with_home(&home, || {
+            let repo = Repo::discover(&work).unwrap();
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/own",
+                    own.to_str().unwrap(),
+                ],
+            );
+            std::fs::write(
+                own.join(crate::config::STATE_DIR).join("config.toml"),
+                "[unattended]\nblocked_agent = \"from-the-worktree\"\n",
+            )
+            .unwrap();
+            git(&work, &["checkout", "-q", "-b", "bare"]);
+            git(&work, &["rm", "-q", "-r", crate::config::STATE_DIR]);
+            git(&work, &["commit", "-q", "-m", "drop the control plane"]);
+            let lane = repo.worktree_root().join("x");
+            for (branch, dir) in [("task/x", &lane), ("task/person", &person)] {
+                git(
+                    &work,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        branch,
+                        dir.to_str().unwrap(),
+                        "bare",
+                    ],
+                );
+            }
+            let runner = Repo::discover(&own).unwrap();
+            let lock = crate::lock::Lock::acquire(&runner.lock_file(), false, None).unwrap();
+            crate::pipeline_snapshot::write(
+                &runner,
+                &crate::pipeline::Pipelines::builtin(),
+                &runner.config.unattended,
+            )
+            .unwrap();
+            (lane, lock)
+        });
+        AdoptionRun {
+            work,
+            own,
+            lane,
+            person,
+            home,
+            _dispatcher: dispatcher,
+            _guards: (base_guard, home_guard),
+        }
+    }
+
+    /// A lane cut from a base with no `.spoolway/`, under a dispatcher that
+    /// found the only setup in a linked worktree, reads that worktree's setup.
+    /// Fails without `follow_dispatcher`: the lane resolves to no project and
+    /// every command ends on the not-on-branch refusal.
+    #[test]
+    fn a_lane_reads_the_setup_its_dispatcher_found_in_a_worktree() {
+        let run = adoption_run("lane-follows-worktree");
+        crate::platform::test_home::with_home(&run.home, || {
+            let repo = Repo::discover(&run.lane).expect("the lane finds its project");
+            assert_eq!(repo.root, run.work.canonical().unwrap());
+            assert_eq!(repo.checkout, run.own.canonical().unwrap());
+            assert!(repo.borrowed);
+            assert!(repo.in_lane_worktree());
+            assert_eq!(repo.setup_source(), repo.checkout);
+            assert_eq!(repo.config.unattended.blocked_agent, "from-the-worktree");
+            let live = Repo::discover_live(&run.lane).expect("report and stack read it too");
+            assert_eq!(live.checkout, repo.checkout);
+        });
+    }
+
+    /// A person's own linked worktree is not a lane: it sits outside the
+    /// project home's worktree folder, so it reads its own setup, or is told
+    /// it has none, however live the dispatcher's record is.
+    /// Fails if a worktree cut from a base without `.spoolway/` is taken for
+    /// a lane: it would resolve and read the dispatcher's setup.
+    #[test]
+    fn a_persons_own_worktree_is_not_a_lane() {
+        let run = adoption_run("person-is-not-a-lane");
+        crate::platform::test_home::with_home(&run.home, || {
+            let said = format!("{:#}", Repo::discover(&run.person).err().unwrap());
+            assert!(said.contains("is not on branch"), "{said}");
+            assert!(
+                Repo::discover(&run.lane).is_ok(),
+                "the lane beside it reads"
+            );
+        });
+    }
+
+    /// A lane whose branch edits `.spoolway/` still reads the setup its
+    /// dispatcher runs on while the project's setup is a `source` folder, not
+    /// the copy in its own worktree.
+    /// Fails without `follow_dispatcher`: the lane's own `config.toml` wins.
+    #[test]
+    fn a_lane_that_edits_its_setup_reads_the_source_its_dispatcher_runs_on() {
+        let project = source_project("lane-edits-setup");
+        crate::platform::test_home::with_home(&project.home, || {
+            let runner = Repo::discover(&project.work).unwrap();
+            let lock = crate::lock::Lock::acquire(&runner.lock_file(), false, None).unwrap();
+            crate::pipeline_snapshot::write(
+                &runner,
+                &crate::pipeline::Pipelines::builtin(),
+                &runner.config.unattended,
+            )
+            .unwrap();
+            let lane = runner.worktree_root().join("edit");
+            git(
+                &project.work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/edit",
+                    lane.to_str().unwrap(),
+                    "HEAD~1",
+                ],
+            );
+            std::fs::write(
+                lane.join(crate::config::STATE_DIR).join("config.toml"),
+                "[unattended]\nblocked_agent = \"from-the-lane\"\n",
+            )
+            .unwrap();
+            let read = Repo::discover(&lane).unwrap();
+            assert_ne!(read.config.unattended.blocked_agent, "from-the-lane");
+            assert_eq!(read.checkout, project.work.canonical().unwrap());
+            assert_eq!(
+                read.setup_dir(),
+                project.source.join(crate::config::STATE_DIR)
+            );
+            drop(lock);
+        });
     }
 
     /// The three states a hand-written `source` line meets: it is read while
