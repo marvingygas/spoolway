@@ -14,10 +14,10 @@
 # the dispatcher starts a fresh one instead of waiting on the old pane.
 #
 # While the two-step task's second step runs beside its kept first lane, the
-# board's options menu offers `focus` on its row, and picking it zooms the
+# board's key line draws `[f] focus` on its row, and pressing `f` zooms the
 # running lane's pane, never the kept one's. A zoom herdr refuses opens the
 # `focus` popup with herdr's own message. Once the task is parked, its row
-# still offers `focus` and zooms the newest pane the task has open.
+# still draws `[f] focus` and `f` zooms the newest pane the task has open.
 #
 # Against the double rather than a real server — its header says why there is
 # no isolated herdr to run this on. An agent there is a registration, not a
@@ -158,12 +158,12 @@ else
 fi
 
 # ------------------------------------------------------ focus from the board
-# `focus` in the board's options menu brings the running step's pane forward:
-# it looks the pane up with `pane get`, switches to its workspace and tab, then
-# runs `herdr pane zoom <pane> --on`, which the double writes down in
+# `f` on the board brings the running step's pane forward: it looks the pane
+# up with `pane get`, switches to its workspace and tab, then runs
+# `herdr pane zoom <pane> --on`, which the double writes down in
 # `zoomed.index`. The board is opened on the dispatch tab without dispatching
 # — `screen_start` stops the resident dispatcher — so nothing moves the task
-# while the menu is read; the dispatcher is started again after.
+# while the key line is read; the dispatcher is started again after.
 #
 # The pane is found the way the dispatcher named the lane's agent: the alias
 # on record for `kept · second`, then the pane the double started that agent
@@ -191,23 +191,18 @@ else bad "the second step's lane has a record"; fi
 screen_start "$LIVE/board.out"
 screen_board
 # `kept` is the only row, so the cursor is already on it. A running agent
-# row lists open task, pause, focus and restart, in that order; each `↓` is
-# sent only once the screen shows the one before it landed.
-screen_press o
-if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
-  && poll_until 10 board_shows "> pause" && screen_press $'\x1b[B' \
-  && poll_until 10 board_shows "> focus"; then
-  ok "a running agent row's menu lists focus under pause"
+# row's key line draws `[f] focus` between `[enter]` and `[o] options`, and
+# the options menu no longer lists `focus`.
+if poll_until 10 board_shows "[f] focus   [o] options"; then
+  ok "a running agent row's key line draws [f] focus"
 else
-  bad "a running agent row's menu lists focus under pause"; board_now | sed 's/^/        /'
+  bad "a running agent row's key line draws [f] focus"; board_now | sed 's/^/        /'
 fi
-if board_shows "    restart"; then ok "and restart under focus"
-else bad "and restart under focus"; board_now | sed 's/^/        /'; fi
-screen_press $'\r'
+screen_press f
 if poll_until 10 zoomed "$SECOND_PANE"; then
-  ok "picking focus zooms the running lane's pane"
+  ok "pressing f zooms the running lane's pane"
 else
-  bad "picking focus zooms the running lane's pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
+  bad "pressing f zooms the running lane's pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
 fi
 # `pane zoom` maximizes the pane inside its own tab and leaves the person's
 # view where it was, so `focus` first switches to the pane's workspace, then to
@@ -223,33 +218,43 @@ focus_calls_in_order() {
   [ "$n" = 3 ]
 }
 if focus_calls_in_order; then
-  ok "picking focus switches to the pane's workspace, then its tab, then zooms it"
+  ok "pressing f switches to the pane's workspace, then its tab, then zooms it"
 else
-  bad "picking focus switches to the pane's workspace, then its tab, then zooms it: $(cat "$HSTATE/calls.log")"
+  bad "pressing f switches to the pane's workspace, then its tab, then zooms it: $(cat "$HSTATE/calls.log")"
 fi
 if ! zoomed "$FIRST_PANE"; then ok "and not the kept lane's"
 else bad "and not the kept lane's ($FIRST_PANE)"; fi
-if poll_while 10 board_shows "> focus"; then ok "and closes the menu"
-else bad "and closes the menu"; board_now | sed 's/^/        /'; fi
-
-# A zoom herdr refuses opens the `focus` popup with herdr's own message, not
-# the JSON envelope it came in. The double is told to refuse only once the
-# menu stands on `focus`, so the lane is still listed when the menu opens and
-# when `enter` looks its pane up again: what fails is the zoom alone, as when
-# herdr closes the pane after `pane get` found it and before the zoom ran.
 screen_press o
 if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
   && poll_until 10 board_shows "> pause" && screen_press $'\x1b[B' \
-  && poll_until 10 board_shows "> focus"; then
-  ok "the menu offers focus again"
+  && poll_until 10 board_shows "> restart"; then
+  ok "the options menu lists restart straight under pause, with no focus"
 else
-  bad "the menu offers focus again"; board_now | sed 's/^/        /'
+  bad "the options menu lists restart straight under pause, with no focus"; board_now | sed 's/^/        /'
+fi
+if ! board_shows "    focus"; then ok "and nothing named focus"
+else bad "and nothing named focus"; board_now | sed 's/^/        /'; fi
+# `f` is swallowed by an open menu, and the key line draws `[f] focus` under
+# it too, so the menu is waited for to be gone before the next press.
+screen_press $'\x1b'
+if poll_while 10 board_shows "[esc] close"; then ok "esc closes the menu"
+else bad "esc closes the menu"; board_now | sed 's/^/        /'; fi
+
+# A zoom herdr refuses opens the `focus` popup with herdr's own message, not
+# the JSON envelope it came in. The double is told to refuse only once the
+# key line draws `[f] focus` again, so the lane is still found when `f` looks
+# its pane up: what fails is the zoom alone, as when herdr closes the pane
+# after `pane get` found it and before the zoom ran.
+if poll_until 10 board_shows "[f] focus   [o] options"; then
+  ok "the key line draws [f] focus again"
+else
+  bad "the key line draws [f] focus again"; board_now | sed 's/^/        /'
 fi
 printf '%s\n' "$SECOND_PANE" >"$HSTATE/zoom.refused"
-screen_press $'\r'
+screen_press f
 if poll_until 10 board_shows "─ focus ─"; then ok "a refused zoom opens the focus popup"
 else bad "a refused zoom opens the focus popup"; board_now | sed 's/^/        /'; fi
-if board_shows "o: herdr pane zoom $SECOND_PANE --on: no pane $SECOND_PANE"; then
+if board_shows "f: herdr pane zoom $SECOND_PANE --on: no pane $SECOND_PANE"; then
   ok "which names the call and herdr's own message"
 else
   bad "which names the call and herdr's own message"; board_now | sed 's/^/        /'
@@ -266,28 +271,24 @@ rm -f "$HSTATE/zoom.refused"
 
 # A parked task keeps its panes: pausing interrupts the lane but closes
 # nothing, so `kept` stands on `paused` with the first step's kept lane and the
-# second step's lane both open. Its row lists `focus` between `open task` and
-# `restart`, and picking it zooms the pane that started last, the second
-# step's, not the kept first one. `zoomed.index` is emptied first, since the
+# second step's lane both open. Its key line draws `[f] focus` between
+# `[r] resume` and `[o] options`, and `f` zooms the pane that started last,
+# the second step's, not the kept first one. `zoomed.index` is emptied first, since the
 # running row's zoom above wrote the same pane into it.
 must "the task is parked" "$SPOOLWAY" queue pause kept
 if poll_until 10 board_shows "paused"; then ok "the board shows the parked row"
 else bad "the board shows the parked row"; board_now | sed 's/^/        /'; fi
 : >"$HSTATE/zoomed.index"
-screen_press o
-if poll_until 10 board_shows "> open task" && screen_press $'\x1b[B' \
-  && poll_until 10 board_shows "> focus"; then
-  ok "a parked row with panes open lists focus under open task"
+if poll_until 10 board_shows "[r] resume   [f] focus   [o] options"; then
+  ok "a parked row with panes open draws [f] focus after [r] resume"
 else
-  bad "a parked row with panes open lists focus under open task"; board_now | sed 's/^/        /'
+  bad "a parked row with panes open draws [f] focus after [r] resume"; board_now | sed 's/^/        /'
 fi
-if board_shows "    restart"; then ok "and restart under focus"
-else bad "and restart under focus"; board_now | sed 's/^/        /'; fi
-screen_press $'\r'
+screen_press f
 if poll_until 10 zoomed "$SECOND_PANE"; then
-  ok "picking focus on the parked row zooms the task's newest pane"
+  ok "pressing f on the parked row zooms the task's newest pane"
 else
-  bad "picking focus on the parked row zooms the task's newest pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
+  bad "pressing f on the parked row zooms the task's newest pane ($SECOND_PANE): $(cat "$HSTATE/zoomed.index")"
 fi
 if ! zoomed "$FIRST_PANE"; then ok "and not the older kept pane"
 else bad "and not the older kept pane ($FIRST_PANE)"; fi
