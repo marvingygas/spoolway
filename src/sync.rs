@@ -40,7 +40,9 @@
 //! whatever the main checkout happens to have out. `config set` and
 //! `override promote` follow the same rule through
 //! `Repo::tracked_write_root`, which also refuses a dispatcher lane's
-//! worktree and one on a detached HEAD. This command refuses in a worktree whose branch has no
+//! worktree and one on a detached HEAD. Both also refuse in a main checkout
+//! whose setup is read from a `source` folder, since a write there would land
+//! in that folder. This command refuses in a worktree whose branch has no
 //! `.spoolway/` at all. Its setup is the main checkout's, so there is no
 //! branch copy to refresh, and writing one would start a setup the branch
 //! never had. That case is refused, naming the main checkout.
@@ -261,6 +263,15 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
              instead",
             repo.checkout.display(),
             repo.checkout.display(),
+        );
+    }
+
+    // A source folder is the person's own; this run would rewrite its
+    // `config.toml` and pipelines.
+    if let Some(source) = repo.source_in_use() {
+        bail!(
+            "{}",
+            crate::repo::source_write_refusal(&repo.checkout, &source)
         );
     }
 

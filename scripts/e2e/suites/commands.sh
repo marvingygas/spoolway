@@ -1487,6 +1487,13 @@ says "config get reads the source folder's value" "from-the-source" \
 says "pipeline list lists the source folder's pipeline" "sourceflow" \
   "$SPOOLWAY" pipeline list
 has "and the line is still there" "source = " "$HOME_DIR/project.toml"
+SRC_CONFIG_SUM=$(cksum <"$SRC/.spoolway/config.toml")
+says "config set is refused rather than written into the source" "would land in that folder" \
+  "$SPOOLWAY" config set dispatch.visible_lanes 5
+says "and sync is refused the same way" "would land in that folder" "$SPOOLWAY" sync
+if [ "$(cksum <"$SRC/.spoolway/config.toml")" = "$SRC_CONFIG_SUM" ]; then
+  ok "and the source folder is left as it was"
+else bad "and the source folder is left as it was"; fi
 
 must "the branch that carries .spoolway/ is checked out again" git checkout -q plan/live
 must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"

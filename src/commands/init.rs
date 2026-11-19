@@ -1167,6 +1167,9 @@ fn refuse_workspace_only_flags(args: &InitArgs) -> Result<()> {
 }
 
 pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
+    // A project's `source` folder is where a person's setup is read from, not
+    // where `init` writes one; see [`crate::config::IgnoreSource`].
+    let _own_setup_only = crate::config::IgnoreSource::new();
     // Before anything is written or asked, because this is the one command a
     // person runs without knowing yet what they have got hold of.
     print!("{}", crate::status::banner("setting up a project"));
@@ -1864,6 +1867,40 @@ mod tests {
             Pipelines::file_in(&root, "bugfix").exists(),
             "an example whose name has no private clash is still written"
         );
+    }
+
+    /// `init` in a main checkout that has no `.spoolway/` writes its own, even
+    /// while the project's `source` line names a folder that holds one, and
+    /// leaves that folder as it was.
+    #[test]
+    fn init_ignores_the_source_line_and_writes_the_checkout() {
+        let root = scaffold("ignores-source", &confirmed());
+        let home = home_for(&root);
+        let source = root.join("adopt");
+        let source_setup = source.join(crate::config::STATE_DIR);
+        std::fs::create_dir_all(&source_setup).unwrap();
+        std::fs::write(source_setup.join("config.toml"), "# the source's own\n").unwrap();
+        std::fs::remove_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            let record = crate::mux::project_home(&root)
+                .unwrap()
+                .join("project.toml");
+            let mut body = std::fs::read_to_string(&record).unwrap();
+            body.push_str(&format!("source = {:?}\n", source.display().to_string()));
+            std::fs::write(&record, body).unwrap();
+            init(&root, &confirmed()).expect("init");
+        });
+        assert!(
+            root.join(crate::config::STATE_DIR)
+                .join("config.toml")
+                .is_file(),
+            "the checkout got its own setup"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source_setup.join("config.toml")).unwrap(),
+            "# the source's own\n"
+        );
+        assert!(!source_setup.join("pipelines").exists());
     }
 
     /// Acceptance criterion 6: a repo-mode project `init` already set up —

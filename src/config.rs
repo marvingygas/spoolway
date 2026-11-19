@@ -85,7 +85,7 @@ pub const OVERRIDES_DIR: &str = "overrides";
 /// names as `source` answers instead, when that folder holds a `.spoolway/`.
 pub fn setup_dir_in(checkout: &Path) -> PathBuf {
     let own = own_setup_dir_in(checkout);
-    if own.is_dir() {
+    if own.is_dir() || SOURCE_IGNORED.get() {
         return own;
     }
     // Last resort, after the checkout's own setup and a workspace's: the
@@ -96,6 +96,34 @@ pub fn setup_dir_in(checkout: &Path) -> PathBuf {
     match crate::repo::source_of(checkout).map(|folder| tracked_setup_dir_in(&folder)) {
         Some(source) if source.is_dir() => source,
         _ => own,
+    }
+}
+
+thread_local! {
+    /// Set while [`IgnoreSource`] is alive on this thread.
+    static SOURCE_IGNORED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While alive, [`setup_dir_in`] on this thread never answers a project's
+/// `source` folder. `spoolway init` holds one for the whole run: it writes
+/// the setup into the checkout it was run in, and every path it writes
+/// through (`Config::path_in`, `Pipelines::dir_in`, the hooks folder) is built
+/// from `setup_dir_in`. Without it, a run in a main checkout with a `source`
+/// line would write the files into the source folder and leave the checkout
+/// with no `.spoolway/`, which is the remedy the missing-setup refusal names.
+/// A thread-local rather than a global, so a test that holds one cannot
+/// change what a concurrent test reads.
+pub(crate) struct IgnoreSource(bool);
+
+impl IgnoreSource {
+    pub(crate) fn new() -> Self {
+        Self(SOURCE_IGNORED.replace(true))
+    }
+}
+
+impl Drop for IgnoreSource {
+    fn drop(&mut self) {
+        SOURCE_IGNORED.set(self.0);
     }
 }
 
