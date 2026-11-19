@@ -1924,4 +1924,24 @@ works "and removes the line" \
 refuses "and the project refuses again, pointing at the command" "config source <folder>" \
   "$SPOOLWAY" config path
 
+# Two `config source` calls at the same time, each naming its own worktree,
+# take the same edit lock. Either may be refused, but the project.toml they
+# leave holds exactly one source line, and it names one of the two.
+must "a second worktree that holds a setup" \
+  git worktree add -q -b source-wt-2 "$LIVE/source-wt-2"
+SRC_WT2=$(cd "$LIVE/source-wt-2" && pwd -P)
+must "gives it the setup" cp -a "$SRC_WT/.spoolway" "$SRC_WT2/.spoolway"
+( "$SPOOLWAY" config source "$SRC_WT" >"$LIVE/src-par-1.out" 2>&1 ) &
+( "$SPOOLWAY" config source "$SRC_WT2" >"$LIVE/src-par-2.out" 2>&1 ) &
+wait
+SRC_LINES=$(grep -cE '^[[:space:]]*source[[:space:]]*=' "$SPOOLWAY_PROJECT_HOME/project.toml")
+if [ "$SRC_LINES" = 1 ] \
+  && grep -qE "^[[:space:]]*source[[:space:]]*= \"($SRC_WT|$SRC_WT2)\"" "$SPOOLWAY_PROJECT_HOME/project.toml"; then
+  ok "parallel config source leaves one source line naming one of the two folders"
+else
+  bad "parallel config source left $SRC_LINES source lines"
+  sed 's/^/        /' "$SPOOLWAY_PROJECT_HOME/project.toml"
+fi
+must "and the project reads from it" "$SPOOLWAY" config path
+
 finish
