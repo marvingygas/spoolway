@@ -200,9 +200,9 @@ header reads `dispatcher running` and the child's pid, or `dispatcher stopped` w
 it has stopped, next to a count of the steps still working (`3 steps finishing`, `1 step
 finishing` for one, left out once none are). `r` and the `o` options menu work whether or not
 a child is running. `u` asks whichever dispatcher holds the project's lock, the tab's child or
-one started in a terminal, to load every pipeline file and `config.toml` again. It shows
-`updating config…`, then `successfully loaded` for one second, or the refusal in a popup closed
-with `enter`. The key line offers `[u] update config` only while a dispatcher holds the lock and a reload has something to load. See
+one started in a terminal, to load every pipeline file and `config.toml` again. The loading
+spool turns until the dispatcher answers. A good reload then shows `successfully loaded` for one
+second. A refusal opens a popup closed with `enter`. The key line offers `[u] update config` only while a dispatcher holds the lock and a reload has something to load. See
 [Updating the config](dispatcher.md#updating-the-config). `q` or `ctrl-c` quits the whole screen
 and stops dispatching too.
 

@@ -550,7 +550,7 @@ text, and every other pair on the line is dim.
 
 The `enter` pair shows only while `enter` would start or stop dispatching. While a menu, a panel
 or a popup that reads keys is open, such as the stop popup, `enter` answers that instead, so the
-pair leaves the key line until it closes. The `starting dispatcher`, `updating config…` and
+pair leaves the key line until it closes. The `starting dispatcher` and
 `successfully loaded` popups read no keys, so the pair stays under them. Once the dispatcher has
 been asked to stop, `enter` does nothing until it has gone, so the pair is off the key line until
 `[enter] start dispatching` replaces it.
