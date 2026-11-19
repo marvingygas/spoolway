@@ -255,6 +255,37 @@ untouched. The next command in that checkout refuses, because the checkout still
 no home holds. Delete `.git/spoolway-id` too and run `spoolway init` again to mint a fresh id
 and a fresh home.
 
+### The source folder
+
+A project whose main checkout has no `.spoolway/` can read its whole setup from another folder.
+Add a `source` line to the project's own `project.toml`, with the absolute path of a folder that
+holds a `.spoolway/`:
+
+```toml
+source = "/home/you/dev/app-adopt"
+```
+
+| Where | What happens |
+|---|---|
+| The main checkout has no `.spoolway/`, and no workspace lists it | The config, pipelines, prompts, hooks and jobs are read from `<source>/.spoolway/`. |
+| A linked worktree has no `.spoolway/` of its own | It reads the same source. A worktree with its own `.spoolway/` reads that. |
+| The main checkout has a `.spoolway/` | The first command that finds it deletes the `source` line and prints one note on stderr. |
+| The folder is gone or holds no `.spoolway/` | The command refuses, names the folder and tells you to point the line at another one. |
+| The path is relative or starts with `~` | The command refuses and asks for the full path. |
+
+The note reads `note  <checkout> has its own .spoolway/ now; cleared the source <folder>`.
+
+A workspace clone has no `source` line. A project with no line behaves as it always does.
+
+The source folder is never written. While it supplies the setup, these commands refuse in the
+main checkout and say so: `config set`, `sync`, `pipeline promote`, saving or deleting a routine
+or job on the board, and the eval tab's CSV export. Check out a branch that carries
+`.spoolway/`, or run `spoolway init` in the checkout. `spoolway init` writes the checkout's own
+`.spoolway/` and leaves the source alone.
+
+A spoolway binary that does not know the `source` key ignores it. If that binary rewrites
+`project.toml`, the line is dropped and the project refuses again until the line is written back.
+
 ## The overrides layer
 
 `~/.spoolway/<project>/overrides/` patches the tracked pipelines, config and prompts without

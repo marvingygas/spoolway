@@ -50,6 +50,11 @@ workspace lists it, a linked worktree that has its own `.spoolway/` supplies the
 the config, the pipelines, the prompts, the hooks and the jobs. The queue, the home and the
 project's record stay with the main checkout.
 
+A project can also read its whole setup from a folder elsewhere on the machine, named by a
+`source` line in its `project.toml`. This applies while the main checkout has no `.spoolway/`.
+The line is deleted once the main checkout has one. See [The source
+folder](configuration.md#the-source-folder).
+
 There is one project per clone, and its `.spoolway/` sits at the top of the repo. A
 `.spoolway/` anywhere below the top is refused by name, and the refusal says where the setup
 belongs. Spoolway does not move or delete it for you.

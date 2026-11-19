@@ -2172,7 +2172,8 @@ skeletons are never touched.
 It writes the checkout it runs in. In a linked worktree that is the worktree's own files, not
 the main checkout's, and the [`checkout:` line](#the-checkout-line) names which one. In a
 linked worktree whose branch has no `.spoolway/`, `sync` writes nothing and says to run it in
-the main checkout.
+the main checkout. In a main checkout whose setup is read from a [source
+folder](configuration.md#the-source-folder), `sync` writes nothing and refuses.
 
 In a lane's worktree, `sync` refreshes the lane's tracked files and leaves the private overrides
 layer alone. If `overrides/config.toml` holds a retired key, the report names the key and says
