@@ -80,7 +80,30 @@ pub const OVERRIDES_DIR: &str = "overrides";
 /// having to ask; a checkout that does carry a real `.spoolway/` never pays
 /// for the workspace check at all, since [`tracked_setup_dir_in`]'s own
 /// `is_dir` short-circuits it.
+///
+/// While `checkout` has neither, the folder its project's `project.toml`
+/// names as `source` answers instead, when that folder holds a `.spoolway/`.
 pub fn setup_dir_in(checkout: &Path) -> PathBuf {
+    let own = own_setup_dir_in(checkout);
+    if own.is_dir() {
+        return own;
+    }
+    // Last resort, after the checkout's own setup and a workspace's: the
+    // folder the project's `project.toml` names as `source`. A source that
+    // holds no `.spoolway/` is skipped, so the answer stays the checkout's
+    // own missing directory and every caller's refusal reads as it does for
+    // a project with no source at all.
+    match crate::repo::source_of(checkout).map(|folder| tracked_setup_dir_in(&folder)) {
+        Some(source) if source.is_dir() => source,
+        _ => own,
+    }
+}
+
+/// [`setup_dir_in`] without the project's `source` folder: the setup the
+/// checkout itself carries, or its workspace's `config/`. What it answers is
+/// the project's own setup, which a `source` only stands in for until the
+/// main checkout has one.
+pub(crate) fn own_setup_dir_in(checkout: &Path) -> PathBuf {
     let tracked = tracked_setup_dir_in(checkout);
     if tracked.is_dir() {
         return tracked;

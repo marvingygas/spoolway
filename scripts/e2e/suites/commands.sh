@@ -1459,6 +1459,47 @@ must "removing the worktree" git worktree remove --force "$SOLO"
 must "removing its branch" git branch -D task/solo-setup
 must "removing the main checkout's temporary branch" git branch -D e2e-no-setup
 
+# ------------------------------------------- a source folder while main has none
+# A `source` line in the project's own `project.toml`, written by hand, names
+# a folder whose `.spoolway/` the main checkout reads while its branch has
+# none. The first command that finds the checkout's own `.spoolway/` again
+# deletes the line and says so once.
+HOME_DIR=$(dirname "$("$SPOOLWAY" config path | sed -n 's/^plans: *//p')")
+SRC="$LIVE/source-folder"
+must "making a folder that holds the only setup" mkdir -p "$SRC"
+must "giving it a copy of the setup" cp -a .spoolway "$SRC/.spoolway"
+must "and a config value of its own" \
+  sed -i 's|^blocked_agent = .*|blocked_agent = "from-the-source"|' "$SRC/.spoolway/config.toml"
+must "and a pipeline only it has" \
+  cp "$SRC/.spoolway/pipelines/default.yml" "$SRC/.spoolway/pipelines/sourceflow.yml"
+must "keeping the main checkout's setup as it stands" \
+  cp -a .spoolway "$LIVE/setup-aside"
+must "the main checkout leaves the branch that carries .spoolway/" \
+  git checkout -q -b e2e-source-setup
+must "and its branch has no setup" git rm -rqf .spoolway
+must "and its branch has no setup" git commit -qm "e2e: a branch without a setup"
+rm -rf .spoolway
+must "naming the folder in project.toml by hand" \
+  bash -c 'printf "source = \"%s\"\n" "$1" >> "$2/project.toml"' _ "$SRC" "$HOME_DIR"
+
+says "config get reads the source folder's value" "from-the-source" \
+  "$SPOOLWAY" config get unattended.blocked_agent
+says "pipeline list lists the source folder's pipeline" "sourceflow" \
+  "$SPOOLWAY" pipeline list
+has "and the line is still there" "source = " "$HOME_DIR/project.toml"
+
+must "the branch that carries .spoolway/ is checked out again" git checkout -q plan/live
+must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"
+SOURCE_ERR="$LIVE/source-cleared.err"
+"$SPOOLWAY" config get unattended.blocked_agent >/dev/null 2>"$SOURCE_ERR"
+has "the first command there says it cleared the source" \
+    "has its own .spoolway/ now; cleared the source" "$SOURCE_ERR"
+lacks "and the line is gone from project.toml" "source = " "$HOME_DIR/project.toml"
+"$SPOOLWAY" config get unattended.blocked_agent >/dev/null 2>"$SOURCE_ERR"
+lacks "and the next command says nothing of it" "cleared the source" "$SOURCE_ERR"
+rm -rf "$LIVE/setup-aside" "$SRC" "$SOURCE_ERR"
+must "removing the main checkout's temporary branch" git branch -D e2e-source-setup
+
 # --------------------------------------------------------- overrides layer
 # `~/.spoolway/<project>/overrides/` is read by `Pipelines::load`,
 # `Config::load` and `prompt::path_for` through the shared

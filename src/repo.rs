@@ -164,6 +164,7 @@ impl Repo {
         // same home: a first command on a fresh clone has no home until
         // `bind` makes one.
         let home = bind(&root)?;
+        clear_source_once_merged(&root, &home);
         let config = Config::load(&source)?;
         let started_in_lane = started_in_lane(&start, &home);
         Ok(Repo {
@@ -277,6 +278,9 @@ impl Repo {
         let root = Repo::root(&start, main.as_deref())?;
         let (checkout, borrowed) = checkout_for(&start, &root, main.as_deref());
         let (home, home_error) = bind_lenient(&root, mode);
+        if home_error.is_none() {
+            clear_source_once_merged(&root, &home);
+        }
         let started_in_lane = started_in_lane(&start, &home);
         let source = setup_source(&root, &checkout, started_in_lane);
         // `Config::load` reads the overrides layer out of the home that
@@ -327,8 +331,9 @@ impl Repo {
     /// has not already paid for.
     ///
     /// The root is the top of the repo: one project per clone. The main
-    /// checkout's setup wins when it has one, so a linked worktree on a
-    /// branch with none reads it. A `.spoolway/` found anywhere else below
+    /// checkout's setup wins when it has one, or the folder its `source` line
+    /// names stands in for it, so a linked worktree on a branch with none
+    /// reads it. A `.spoolway/` found anywhere else below
     /// the top is refused by name rather than taken as a second root.
     fn root(start: &Path, main: Option<&Path>) -> Result<PathBuf> {
         if let Some(main) = main.filter(|dir| crate::config::setup_dir_in(dir).is_dir()) {
@@ -395,12 +400,24 @@ impl Repo {
             // specific one, so a resolution failure here just falls through
             // to the generic bail rather than replacing it with a different
             // error about a question nobody asked.
-            if let Some(pointer) = crate::mux::project_home(project)
+            let binding = crate::mux::project_home(project)
                 .ok()
-                .and_then(|home| read_binding(&home).ok().flatten())
-                .map(|binding| binding.root)
+                .and_then(|home| read_binding(&home).ok().flatten());
+            let pointer = binding.as_ref().map(|binding| &binding.root);
+            if let Some(pointer) = pointer
                 && (pointer == project || pointer == top)
             {
+                // The line was written by hand, so a folder that has since
+                // moved or lost its `.spoolway/` is named here rather than
+                // met with the generic advice about another branch.
+                if let Some(source) = binding.as_ref().and_then(|binding| binding.source.as_ref()) {
+                    bail!(
+                        "the source {} holds no .spoolway/\n  point it at a folder that does: \
+                         spoolway config source <folder>\n  or clear it: spoolway config source \
+                         --clear",
+                        shorten_home(source),
+                    );
+                }
                 bail!(
                     "{} is a spoolway project, but `.spoolway/` is not on branch `{}` — check \
                      out a branch that carries it, or run `spoolway init` here",
@@ -2324,6 +2341,62 @@ struct Binding {
     /// when the checkout had no commit yet; neither is a reason to refuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     root_commit: Option<String>,
+    /// A folder holding the `.spoolway/` this project reads while its main
+    /// checkout has none, written by hand. [`write_binding`] rewrites the
+    /// whole file from this struct, so a record that dropped the field here
+    /// would lose the line the next time a moved checkout is recorded. An
+    /// older binary does not know the key: it ignores it on reading, and a
+    /// rewrite by it drops the line, which only sends the project back to
+    /// refusing until the line is written again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<PathBuf>,
+}
+
+/// The folder `checkout`'s project names as the place its setup is read from,
+/// if its `project.toml` has a `source` line. Nothing is checked about the
+/// folder: [`crate::config::setup_dir_in`] decides whether it holds a
+/// `.spoolway/`, and [`Repo::root`] refuses when it does not.
+///
+/// A workspace clone never has one, because its home's `project.toml` is the
+/// workspace's own record and has no such line. A checkout that has no
+/// readable home yet answers `None`, the same as one with no line: this is
+/// asked from inside the setup lookup, where an error has nowhere to go.
+pub(crate) fn source_of(checkout: &Path) -> Option<PathBuf> {
+    if workspace_clone(checkout).is_some() {
+        return None;
+    }
+    let home = crate::mux::project_home(checkout).ok()?;
+    read_binding(&home).ok().flatten()?.source
+}
+
+/// Delete the `source` line once the main checkout `root` holds a
+/// `.spoolway/` of its own, and say so once on stderr. A source only bridges
+/// the time before the branch that carries the setup merges; left in place,
+/// it would come back into use the day the main checkout sits on a branch
+/// without one.
+///
+/// The check is [`crate::config::tracked_setup_dir_in`]'s, the one `init` and
+/// `bind` ask: a source or a workspace's `config/` is never mistaken for the
+/// checkout's own setup. Best-effort by design, since the command already
+/// found its setup: a record that cannot be read or written is left for the
+/// next command to try again.
+fn clear_source_once_merged(root: &Path, home: &Path) {
+    if !crate::config::tracked_setup_dir_in(root).is_dir() {
+        return;
+    }
+    let Ok(Some(mut binding)) = read_binding(home) else {
+        return;
+    };
+    let Some(source) = binding.source.take() else {
+        return;
+    };
+    if write_binding(home, &binding).is_ok() {
+        crate::overrides::print_note(&format!(
+            "  note  {} has its own .spoolway/ now; cleared the source {}",
+            shorten_home(root),
+            shorten_home(&source),
+        ));
+    }
 }
 
 /// The binding recorded at `home`, if there is one readable. `Ok(None)` only
@@ -2373,7 +2446,9 @@ fn write_binding(home: &Path, binding: &Binding) -> Result<()> {
          # `.git` is stamped with. Checked against each other on every\n\
          # command — see the `binding-record` task. Updated on its own only\n\
          # to record a checkout that moved (the one it named is gone, or no\n\
-         # longer carries this id).\n{}",
+         # longer carries this id).\n\
+         # `source` names a folder whose .spoolway/ is read while the main\n\
+         # checkout has none; deleted on its own once it has one.\n{}",
         toml::to_string_pretty(binding).context("serialising project.toml")?
     );
     crate::task::write_atomic(&home.join(BINDING_FILE), body)
@@ -2702,6 +2777,7 @@ fn bind_stamped(root: &Path, id: &str, mode: Bind) -> Result<PathBuf> {
             id: id.to_string(),
             root: root.to_path_buf(),
             root_commit: root_commit(root),
+            source: binding.source.clone(),
         },
     )?;
     // The same move left `spoolway-root` naming a folder that is gone, which
@@ -3332,6 +3408,7 @@ fn bind_unstamped(root: &Path, mode: Bind) -> Result<PathBuf> {
                     id,
                     root: root.to_path_buf(),
                     root_commit: root_commit(root),
+                    source: None,
                 },
             )?;
             return Ok(home);
@@ -4734,10 +4811,15 @@ pub(crate) fn checkout_for(start: &Path, root: &Path, main: Option<&Path>) -> (P
 /// main checkout has a setup: there the dispatcher's own reads and a lane's
 /// must not follow a branch, or two branches would disagree about where a
 /// task goes next.
+///
+/// A main checkout's `source` folder is not a setup of its own here
+/// ([`crate::config::own_setup_dir_in`]): a worktree that carries one still
+/// wins over it, and every other command reads `root`, whose
+/// [`crate::config::setup_dir_in`] answers with the source.
 pub(crate) fn setup_source(root: &Path, checkout: &Path, in_lane: bool) -> PathBuf {
     if in_lane
         || checkout == root
-        || crate::config::setup_dir_in(root).is_dir()
+        || crate::config::own_setup_dir_in(root).is_dir()
         || !crate::config::tracked_setup_dir_in(checkout).is_dir()
     {
         return root.to_path_buf();
@@ -7262,6 +7344,7 @@ mod tests {
                     id: "zzzzzz".to_string(),
                     root: work.canonical().unwrap(),
                     root_commit: None,
+                    source: None,
                 },
             )
             .unwrap();
@@ -7340,6 +7423,7 @@ mod tests {
                     id: "bbbbbb".to_string(),
                     root: old_checkout.canonical().unwrap(),
                     root_commit: None,
+                    source: None,
                 },
             )
             .unwrap();
@@ -7731,6 +7815,7 @@ mod tests {
                         id: "abc123".to_string(),
                         root: work.canonical().unwrap(),
                         root_commit: None,
+                        source: None,
                     },
                 )
                 .unwrap();
@@ -8200,6 +8285,104 @@ mod tests {
         std::fs::create_dir_all(root.join(crate::config::STATE_DIR)).unwrap();
         assert_eq!(setup_source(&root, &wt, false), root, "main has one");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The three states a hand-written `source` line meets: it is read while
+    /// the main checkout has no setup, refused by name when its folder holds
+    /// none, and deleted with one note once the main checkout has a setup
+    /// again. A worktree with no setup of its own reads it too.
+    #[test]
+    fn a_source_line_is_read_refused_and_cleared() {
+        let (_origin, work, _base_guard) = fixture("source-line");
+        let (home, _home_guard) = scratch_home("source-line");
+        let source = work.parent().unwrap().join("adopt");
+        std::fs::create_dir_all(source.join(crate::config::STATE_DIR)).unwrap();
+        std::fs::write(
+            source.join(crate::config::STATE_DIR).join("config.toml"),
+            "[unattended]\nblocked_agent = \"from-the-source\"\n",
+        )
+        .unwrap();
+        crate::platform::test_home::with_home(&home, || {
+            let repo = Repo::discover(&work).unwrap();
+            git(&work, &["checkout", "-q", "-b", "bare"]);
+            git(&work, &["rm", "-q", "-r", crate::config::STATE_DIR]);
+            git(&work, &["commit", "-q", "-m", "drop the control plane"]);
+            let plain = work.parent().unwrap().join("plain-wt");
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task/plain",
+                    plain.to_str().unwrap(),
+                ],
+            );
+            let mut binding = read_binding(&repo.home).unwrap().unwrap();
+            let refused = format!("{:#}", Repo::discover(&work).err().unwrap());
+            assert!(refused.contains("is not on branch"), "{refused}");
+
+            binding.source = Some(source.clone());
+            write_binding(&repo.home, &binding).unwrap();
+            for start in [&work, &plain] {
+                let read = Repo::discover(start).unwrap();
+                assert_eq!(
+                    read.config.unattended.blocked_agent,
+                    "from-the-source",
+                    "{}",
+                    start.display()
+                );
+                assert_eq!(read.setup_dir(), source.join(crate::config::STATE_DIR));
+            }
+
+            let gone = work.parent().unwrap().join("gone");
+            binding.source = Some(gone.clone());
+            write_binding(&repo.home, &binding).unwrap();
+            let said = format!("{:#}", Repo::discover(&work).err().unwrap());
+            assert!(
+                said.contains(&format!(
+                    "the source {} holds no .spoolway/",
+                    gone.display()
+                )),
+                "{said}"
+            );
+            assert!(said.contains("spoolway config source --clear"), "{said}");
+
+            binding.source = Some(source.clone());
+            write_binding(&repo.home, &binding).unwrap();
+            git(&work, &["checkout", "-q", "plan/x"]);
+            Repo::discover(&work).unwrap();
+            assert_eq!(read_binding(&repo.home).unwrap().unwrap().source, None);
+        });
+    }
+
+    /// A rewrite of the record for a moved checkout carries the `source`
+    /// line over, because `write_binding` writes the whole file from the
+    /// struct.
+    #[test]
+    fn recording_a_moved_checkout_keeps_the_source_line() {
+        let base = crate::scratch::root("bind-keeps-source");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let before = base.join("before");
+        std::fs::create_dir_all(&before).unwrap();
+        crate::scratch::git_init(&before, &["-b", "plan/demo"]);
+        let (home, _home_guard) = scratch_home("bind-keeps-source");
+
+        crate::platform::test_home::with_home(&home, || {
+            let bound_home = bind(&before).unwrap();
+            let mut binding = read_binding(&bound_home).unwrap().unwrap();
+            binding.source = Some(base.join("adopt"));
+            write_binding(&bound_home, &binding).unwrap();
+            let after = base.join("after");
+            std::fs::rename(&before, &after).unwrap();
+
+            bind(&after).unwrap();
+            let kept = read_binding(&bound_home).unwrap().unwrap();
+            assert_eq!(kept.root, after.canonical().unwrap());
+            assert_eq!(kept.source, Some(base.join("adopt")));
+        });
     }
 
     /// While a dispatcher runs, a lane whose main checkout is on a bare
