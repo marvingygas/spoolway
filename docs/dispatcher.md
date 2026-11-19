@@ -684,13 +684,17 @@ any other Linux uses `xdg-open`. When the page is gone, or the platform's progra
 ### Focus
 
 `f` brings a task's pane in front of you in one key press. `[f] focus` is on the key line only
-while the row under the cursor has a pane to bring forward: a row whose current step is running in
-a herdr pane: an agent step with a live lane, a lane waiting on you included, or a command step
-whose run is going in a pane. A blocked row an unblocker lane is working on counts as running.
-Otherwise, a `paused`, `blocked` or `hook_failed` row whose task still has a pane open: an agent
-lane, a kept one included, or a command step's pane. Never under the headless backend, never on a
-queued row, and never on a running row for a kept pane or a finished step. With no row under the
-cursor, `f` does nothing.
+while the row under the cursor has a pane to bring forward. These rows have one:
+
+- A row whose current step is running in a herdr pane. That is an agent step with a live lane, a
+  lane waiting on you included, or a command step whose run is going in a pane. A blocked row an
+  unblocker lane is working on counts as running.
+- A `paused`, `blocked` or `hook_failed` row whose task still has a pane open. That is an agent
+  lane, a kept one included, or a command step's pane.
+
+`[f] focus` is never drawn under the headless backend, on a queued row, on a running row for a
+kept pane or a finished step, or with no row under the cursor. With no row under the cursor, `f`
+does nothing.
 
 `f` looks the pane up with `herdr pane get <pane>`, then runs `herdr workspace focus <workspace>`,
 `herdr tab focus <tab>` and `herdr pane zoom <pane> --on`, in that order, so your view moves to the
