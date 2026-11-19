@@ -63,7 +63,7 @@ fn render_config_list(entries: &[crate::confkv::Entry]) -> String {
 
 /// Reads `repo.checkout`, not `repo.root`: a lane standing in a linked
 /// worktree is asking about the file beside it, and `repo.config` (loaded
-/// from `root` once, in `Repo::discover`) would answer for a file that is not
+/// from `Repo::setup_source` once, in `Repo::discover`) would answer for a file that is not
 /// the one in front of the command. In the main checkout the two are the same
 /// directory, so this changes nothing there.
 pub fn config_get(repo: &Repo, key: &str) -> Result<()> {

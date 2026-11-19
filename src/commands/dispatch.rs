@@ -644,7 +644,7 @@ impl ConfigWatch {
         let stamp = crate::watch::Stamp::capture(
             &[],
             &[
-                crate::config::Config::path_in(&live.root),
+                crate::config::Config::path_in(&live.setup_source()),
                 crate::overrides::config_patch_path(&live.overrides_dir()),
                 crate::pipeline_snapshot::config_record_path(live),
             ],

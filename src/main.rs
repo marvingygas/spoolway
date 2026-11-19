@@ -221,7 +221,7 @@ fn run() -> Result<()> {
             } else {
                 commands::LiveCheckMode::Default
             };
-            // `config_error` is about `repo.root`'s file — the one
+            // `config_error` is about `Repo::setup_source`'s file — the one
             // `discover_lenient` reads. `doctor` loads `repo.checkout`'s own
             // copy again for everything it checks, and folds this one in as
             // a finding of its own rather than a gate — see its own doc.

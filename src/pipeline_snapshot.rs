@@ -151,7 +151,7 @@ pub fn write(
         lock,
         pipelines: encoded,
         clashes: pipelines.clashes.clone(),
-        sources: sources(&repo.root),
+        sources: sources(&repo.setup_source()),
         blocked: Some(BlockedKeys::of(unattended)),
     };
     let path = path(repo);
@@ -370,7 +370,7 @@ pub fn for_task(repo: &Repo, task: Option<&str>) -> Option<Result<Pipelines>> {
         .filter(|name| {
             loaded.written.pipelines.contains_key(*name)
                 || loaded.written.clashes.contains_key(*name)
-                || !gone_from_disk(&repo.root, name.trim())
+                || !gone_from_disk(&repo.setup_source(), name.trim())
         })
         .into_iter()
         .collect();
@@ -422,7 +422,7 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
             // is drawn held, with the line that says the pipeline is gone.
             if !loaded.written.pipelines.contains_key(name)
                 && !loaded.written.clashes.contains_key(name)
-                && gone_from_disk(&repo.root, name.trim())
+                && gone_from_disk(&repo.setup_source(), name.trim())
             {
                 continue;
             }
@@ -461,7 +461,7 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
 /// they are, and there is no restart to wait on.
 pub fn changed_since_start(repo: &Repo) -> Vec<String> {
     LoadedPipelines::live(repo)
-        .map(|loaded| loaded.changed(&repo.root))
+        .map(|loaded| loaded.changed(&repo.setup_source()))
         .unwrap_or_default()
 }
 

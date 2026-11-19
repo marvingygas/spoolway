@@ -144,8 +144,7 @@ impl Repo {
         let source = setup_source(&root, &checkout, started_in_lane_dir(&start, &root));
         // The folder that supplies the setup carries no `.spoolway/` only
         // when a lane found its project's main checkout on a branch without
-        // it (see `root`), or when the command ran in the main checkout
-        // itself. Everything this command would read from there is the
+        // it (see `root`). Everything this command would read from there is the
         // built-in defaults, which is not the config the run is on, so it
         // stops and says where the directory went. `report` and `stack` take
         // the dispatcher's record instead — see `discover_live`.
@@ -346,8 +345,7 @@ impl Repo {
         // to say: this worktree's setup for a person's command, and nothing
         // for a lane, where `discover` stops on the missing directory and
         // `discover_live` reads the dispatcher's record. The worktree's own
-        // top is what is compared,
-        // not `start`: a subdirectory of the bare main checkout, or a
+        // top is what is compared, not `start`: a subdirectory of the bare main checkout, or a
         // worktree on a branch without `.spoolway/`, gets the refusal below.
         // A worktree nested inside the main checkout is left to the walk as
         // well: `checkout_of` takes everything under the main checkout for
@@ -8113,8 +8111,8 @@ mod tests {
     }
 
     /// A home that an older binary left recording a linked worktree as the
-    /// project is rewritten to the main checkout, with the `now records`
-    /// line, rather than refused for two checkouts sharing the id.
+    /// project is rewritten to the main checkout, rather than refused for two
+    /// checkouts sharing the id.
     #[test]
     fn a_home_recording_a_worktree_of_the_same_clone_moves_to_the_main_checkout() {
         let (_origin, work, _base_guard) = fixture("record-names-worktree");
