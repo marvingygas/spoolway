@@ -1223,8 +1223,10 @@ pub fn init_in(root: &Path, at: &Path, args: &InitArgs) -> Result<()> {
         );
         return Ok(());
     }
-    // Under the `project` row, after the early return: a run that writes
-    // nothing records no source, so it names none.
+    // Under the `project` row, after the early return, which writes nothing
+    // and so has no source to name. Like the `project` row, it names where
+    // this run is headed before the checks below, so a refused run has
+    // written nothing it names.
     if in_worktree {
         println!("{}", report_row("source", &crate::repo::shorten_home(at)));
     }
@@ -1240,6 +1242,16 @@ pub fn init_in(root: &Path, at: &Path, args: &InitArgs) -> Result<()> {
     // there.
     crate::repo::require_utf8_root(root)?;
     crate::repo::require_git_repository(root)?;
+    if in_worktree {
+        // `at` is the top git reported for the worktree, uncanonicalized, so
+        // a path that is not UTF-8 reaches this check; left alone it would
+        // be stamped and written, and only fail at the end, when the record
+        // cannot hold it as the `source`.
+        crate::repo::require_utf8_root(at)?;
+        // Before `bind` stamps anything: a lane that ran `init` in its own
+        // worktree would otherwise repoint the project's source at it.
+        crate::repo::refuse_init_in_lane(at, root, &crate::commands::refusal::INIT)?;
+    }
     let placement = if in_worktree {
         // No menu: the choice is made, since only a repo-mode setup can sit on
         // a branch. The same refusal `choose` makes for a `.spoolway` that is
@@ -1535,7 +1547,7 @@ pub fn init_in(root: &Path, at: &Path, args: &InitArgs) -> Result<()> {
     // `.spoolway/`. Recorded in the main checkout's record, the one `bind`
     // above settled, so the stamp, the record and the source agree.
     if in_worktree {
-        crate::repo::change_source(root, Some(at), &crate::commands::refusal::CONFIG_SOURCE)?;
+        crate::repo::change_source(root, Some(at), &crate::commands::refusal::INIT)?;
     }
 
     // The retired version marker was a tracked file in the setup folder, so
@@ -1928,7 +1940,12 @@ mod tests {
         crate::repo::run(&root, "git", &["config", "user.email", "t@example.com"]).unwrap();
         crate::repo::run(&root, "git", &["config", "user.name", "t"]).unwrap();
         crate::repo::run(&root, "git", &["commit", "-q", "--allow-empty", "-m", "x"]).unwrap();
-        let wt = root.parent().unwrap().join("init-in-worktree-feature");
+        // Named from the root's own, which is unique to this run, so two test
+        // runs at once do not share a worktree.
+        let wt = root.parent().unwrap().join(format!(
+            "{}-feature",
+            root.file_name().unwrap().to_string_lossy()
+        ));
         let _ = std::fs::remove_dir_all(&wt);
         crate::repo::run(
             &root,
@@ -1968,7 +1985,45 @@ mod tests {
                 )),
                 "{record}"
             );
-            assert!(record.contains("root = "), "{record}");
+            assert!(
+                record.contains(&format!(
+                    "root = {:?}",
+                    crate::platform::PathExt::canonical(&*root)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                )),
+                "{record}"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    /// A lane's worktree is refused as the folder `init` writes, and a
+    /// person's own worktree is not. Fails before the change: `init` had no
+    /// such refusal, and its record of the source was made from the main
+    /// checkout, which never saw where `init` ran.
+    #[test]
+    fn init_refuses_a_lane_worktree_and_not_a_persons_own() {
+        let root = scaffold("refuses-lane", &confirmed());
+        crate::platform::test_home::with_home(&home_for(&root), || {
+            let lane = crate::mux::project_home(&root)
+                .unwrap()
+                .join(crate::mux::WORKTREES_DIR)
+                .join("task-x");
+            let err =
+                crate::repo::refuse_init_in_lane(&lane, &root, &crate::commands::refusal::INIT)
+                    .expect_err("a lane does not set the project up");
+            assert!(
+                format!("{err:#}").contains("a lane does not change the project's setup"),
+                "{err:#}"
+            );
+            crate::repo::refuse_init_in_lane(
+                &root.join("elsewhere"),
+                &root,
+                &crate::commands::refusal::INIT,
+            )
+            .expect("a folder outside the lanes is not refused");
         });
     }
 

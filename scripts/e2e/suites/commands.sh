@@ -1976,7 +1976,9 @@ must "the feature branch commits the setup" \
 must "once main has a .spoolway/, init in the worktree acts on main" \
   bash -c 'cp -a "$1/.spoolway" "$2/.spoolway"' _ "$FEATURE" "$MAIN_APP"
 INIT_WT_AGAIN="$LIVE/init-wt-again.out"
-env -C "$FEATURE" "$SPOOLWAY" init --yes >"$INIT_WT_AGAIN" 2>&1
-lacks "so a second run names no source" "  source   " "$INIT_WT_AGAIN"
+works "init --yes in the worktree succeeds again" \
+  bash -c '"$1" -C "$2" init --yes >"$3" 2>&1' _ "$SPOOLWAY" "$FEATURE" "$INIT_WT_AGAIN"
+has "and acts on the main checkout" "  project  $MAIN_APP" "$INIT_WT_AGAIN"
+lacks "so it names no source" "  source   " "$INIT_WT_AGAIN"
 
 finish

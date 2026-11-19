@@ -772,11 +772,12 @@ fn routing_for_task<'a>(
 /// this folder except while the main checkout has no setup.
 ///
 /// A linked worktree's own `git rev-parse --show-toplevel` answers with the
-/// worktree itself, which is never where `init` should write — it would
-/// set up a second, ignored project there and still stamp the shared
-/// `.git`. So a linked worktree asks `repo::main_checkout`, and every other
-/// checkout, whatever the layout of its git directory, takes the toplevel
-/// git reports for it.
+/// worktree itself, which is never the project: a project of its own there
+/// would be a second one, ignored, while the shared `.git` is stamped for the
+/// main checkout. So a linked worktree asks `repo::main_checkout`, and every
+/// other checkout, whatever the layout of its git directory, takes the
+/// toplevel git reports for it. A worktree is only ever where the setup is
+/// written, and [`init_setup_folder`] decides that.
 ///
 /// A linked worktree of a `--separate-git-dir` clone that nothing has
 /// stamped or listed is refused: git has no way to name the main checkout

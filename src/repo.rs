@@ -2223,7 +2223,7 @@ fn read_recorded_root(common: &Path) -> Option<PathBuf> {
 /// repository, or it is a bare one with no checkout to speak of. Anything
 /// else that goes wrong — `git` missing from `PATH`, a permissions problem,
 /// canonicalizing failing — is `Err`, never folded into that same `None`:
-/// [`crate::commands::init::init`] reads `None` as "this is not a checkout"
+/// [`crate::commands::init::init_in`] reads `None` as "this is not a checkout"
 /// (see [`no_checkout_error`]), which would be a lie about a real repository
 /// that merely could not be resolved this time.
 fn common_git_dir(dir: &Path) -> Result<Option<PathBuf>> {
@@ -2355,7 +2355,7 @@ const ID_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// again is idempotent.
 ///
 /// `Ok(None)` only when `dir` has no git repository behind it at all: that
-/// is the one case [`crate::commands::init::init`] turns into a refusal,
+/// is the one case [`crate::commands::init::init_in`] turns into a refusal,
 /// since no home can be named for it. Two callers reach
 /// this now — `init` itself, and [`bind_unstamped`], which mints the same
 /// way when a command finds a checkout that carries no stamp and nothing
@@ -2370,7 +2370,7 @@ const ID_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// The `bool` is whether *this call* is the one that minted the id — read
 /// straight off [`read_or_mint`]'s own atomic result, not a separate
 /// existence check made before or after it that a second racing process
-/// could invalidate. `commands::init::init` uses it to decide whether the
+/// could invalidate. `commands::init::init_in` uses it to decide whether the
 /// mockup's "stamped" line has anything to say: a repeat `init` reads the
 /// same id back and says nothing.
 pub fn stamped_id(dir: &Path) -> Result<Option<(String, bool)>> {
@@ -2418,7 +2418,7 @@ pub fn stamped_id(dir: &Path) -> Result<Option<(String, bool)>> {
 /// the ordinary case. `Ok(None)` under the same condition [`stamped_id`]
 /// answers `Ok(None)`.
 ///
-/// `pub(crate)` for `commands::init::init`'s own report of what it stamped —
+/// `pub(crate)` for `commands::init::init_in`'s own report of what it stamped —
 /// nothing else needs the path itself rather than just the id.
 pub(crate) fn id_file_path(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(common_git_dir(dir)?.map(|common| common.join(ID_FILE)))
@@ -5215,6 +5215,31 @@ fn follow_dispatcher(
         dispatcher_folder(home).unwrap_or_else(|| root.to_path_buf()),
         true,
     )
+}
+
+/// Refuse `spoolway init` started in a lane's worktree of the project whose
+/// main checkout is `project`: it would write the project's setup into the
+/// lane's worktree and record that worktree as the project's `source`, which
+/// is gone once the lane ends.
+///
+/// A project with no home yet has no lane, so a project that cannot be read
+/// without writing is let through, and `init` goes on to the checks of its
+/// own. `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
+/// command asking, for the same reason as in [`Repo::refuse_in_lane`].
+pub(crate) fn refuse_init_in_lane(
+    start: &Path,
+    project: &Path,
+    _command: &crate::commands::LaneRefusal,
+) -> Result<()> {
+    let in_lane = bind_as(project, Bind::Peek).is_ok_and(|home| started_in_lane(start, &home));
+    if in_lane {
+        bail!(
+            "the setup `spoolway init` writes is the project's, not this worktree's.\n  a lane \
+             does not change the project's setup. write the change you wanted into your \
+             report, and a person will make the change."
+        );
+    }
+    Ok(())
 }
 
 /// Whether `start` sits under the worktree folder of the project home `home`.
