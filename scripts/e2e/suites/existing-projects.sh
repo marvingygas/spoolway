@@ -397,9 +397,11 @@ says "and config path names the workspace's config/" "setup:     $WS/config" \
 cd "$MAIN" || exit 2
 
 # ------------------------------- the refusals when the main checkout has no setup
-# The main checkout moves to a branch from before `init`. Three shapes then
-# fail three different ways, and a person is told a different thing to do
-# each time, so each sentence is pinned whole.
+# The main checkout moves to a branch from before `init`. Two shapes then
+# fail two different ways, and a person is told a different thing to do
+# each time, so each sentence is pinned whole. A linked worktree carrying its
+# own setup is no longer refused: with nothing in the main checkout to read,
+# it reads that setup whole.
 must "the main checkout leaves the branch that carries .spoolway/" git checkout -q -b before-init
 must "and its branch has no setup" git rm -rqf .spoolway
 must "and its branch has no setup" git commit -qm "e2e: a branch from before init"
@@ -408,12 +410,11 @@ must "and its branch has no setup" git commit -qm "e2e: a branch from before ini
 rm -rf .spoolway
 
 MAIN_REFUSAL="spoolway: $MAIN is a spoolway project, but \`.spoolway/\` is not on branch \`before-init\` — check out a branch that carries it, or run \`spoolway init\` here"
-OWN_REFUSAL="spoolway: $MAIN/.spoolway/config.toml does not exist because \`.spoolway/\` is not on branch \`before-init\`, the one checked out in $MAIN (check out the branch that carries it)"
 PLAIN_REFUSAL="spoolway: $PLAIN is a spoolway project, but \`.spoolway/\` is not on branch \`task/plain\` — check out a branch that carries it, or run \`spoolway init\` here"
 
 for command in "config get dispatch.lane_quiet" "config path" "pipeline list" "prompt list"; do
   # shellcheck disable=SC2086
-  for shape in "main:$MAIN:$MAIN_REFUSAL" "own:$OWN:$OWN_REFUSAL" "plain:$PLAIN:$PLAIN_REFUSAL"; do
+  for shape in "main:$MAIN:$MAIN_REFUSAL" "plain:$PLAIN:$PLAIN_REFUSAL"; do
     name=${shape%%:*}; rest=${shape#*:}; dir=${rest%%:*}; want=${rest#*:}
     out=$(in_dir "$dir" "$SPOOLWAY" $command 2>&1); status=$?
     if [ "$status" -eq 1 ] && [ "$out" = "$want" ]; then
@@ -424,5 +425,11 @@ for command in "config get dispatch.lane_quiet" "config path" "pipeline list" "p
     fi
   done
 done
+
+is "the own worktree prints its own config value" "22m" "$(lane_quiet_in "$OWN")"
+lists "it lists its own pipeline" "$OWN" ownpipe
+prompt_used_by "prompt list shows its own pipeline's steps" "$OWN" ownpipe
+says "config path names the worktree's .spoolway/" "setup:     $OWN/.spoolway" \
+  in_dir "$OWN" "$SPOOLWAY" config path
 
 finish
