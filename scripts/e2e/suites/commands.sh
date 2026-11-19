@@ -1944,4 +1944,39 @@ else
 fi
 must "and the project reads from it" "$SPOOLWAY" config path
 
+# ------------------------------------- init in a worktree, while main has no setup
+# `init` run in a linked worktree of a repository whose main checkout has no
+# `.spoolway/` writes the setup into that worktree, for a person to commit on
+# their feature branch. The id is still stamped in the shared `.git`, the
+# project is still the main checkout, and the worktree is recorded as the
+# source.
+new_repo "$LIVE/init-wt-app"
+MAIN_APP=$(pwd -P)
+must "a feature worktree of a repository with no setup" \
+  git worktree add -q -b feature/adopt "$LIVE/init-wt-feature"
+FEATURE=$(cd "$LIVE/init-wt-feature" && pwd -P)
+INIT_WT_OUT="$LIVE/init-wt.out"
+env -C "$FEATURE" "$SPOOLWAY" init --yes >"$INIT_WT_OUT" 2>&1 \
+  && ok "init --yes in the worktree succeeds" \
+  || { bad "init --yes in the worktree failed"; sed 's/^/        /' "$INIT_WT_OUT"; }
+works "the setup is written into the worktree" test -f "$FEATURE/.spoolway/config.toml"
+works "and not into the main checkout" test ! -e "$MAIN_APP/.spoolway"
+works "the id is stamped in the shared .git" test -s "$MAIN_APP/.git/spoolway-id"
+has "the project row names the main checkout" "  project  $MAIN_APP" "$INIT_WT_OUT"
+has "and the source row names the worktree" "  source   $FEATURE" "$INIT_WT_OUT"
+project_home_after_init
+has "project.toml records the main checkout as root" "root = \"$MAIN_APP\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+has "and the worktree as the source" "source = \"$FEATURE\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+says "the main checkout reads the worktree's setup" "setup:     $FEATURE/.spoolway" \
+  "$SPOOLWAY" config path
+must "the feature branch commits the setup" \
+  git -C "$FEATURE" add .spoolway
+must "once main has a .spoolway/, init in the worktree acts on main" \
+  bash -c 'cp -a "$1/.spoolway" "$2/.spoolway"' _ "$FEATURE" "$MAIN_APP"
+INIT_WT_AGAIN="$LIVE/init-wt-again.out"
+env -C "$FEATURE" "$SPOOLWAY" init --yes >"$INIT_WT_AGAIN" 2>&1
+lacks "so a second run names no source" "  source   " "$INIT_WT_AGAIN"
+
 finish

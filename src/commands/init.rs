@@ -1166,7 +1166,26 @@ fn refuse_workspace_only_flags(args: &InitArgs) -> Result<()> {
     )
 }
 
+/// `init` that writes where it is run. `main` calls [`init_in`], having
+/// resolved both folders; the tests below set up one folder.
+#[cfg(test)]
 pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
+    init_in(root, root, args)
+}
+
+/// `init` for a project whose main checkout is `root`, writing the setup
+/// into `at`: `root` itself, or a linked worktree of it.
+///
+/// A worktree is only handed in while the main checkout has no `.spoolway/`,
+/// see `init_setup_folder` in `main.rs`. The project is still `root`: the
+/// stamp goes into the shared `.git`, the record is bound there, and the
+/// `project` row names it. Only the files `init` writes land in `at`, and the
+/// worktree is recorded as the project's `source`, which is what lets the main
+/// checkout read the setup before the branch is merged. A worktree is always
+/// set up in repo mode, since a setup in the workspace's folder would belong
+/// to no branch.
+pub fn init_in(root: &Path, at: &Path, args: &InitArgs) -> Result<()> {
+    let in_worktree = at != root;
     // A project's `source` folder is where a person's setup is read from, not
     // where `init` writes one; see [`crate::config::IgnoreSource`].
     let _own_setup_only = crate::config::IgnoreSource::new();
@@ -1204,6 +1223,11 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         );
         return Ok(());
     }
+    // Under the `project` row, after the early return: a run that writes
+    // nothing records no source, so it names none.
+    if in_worktree {
+        println!("{}", report_row("source", &crate::repo::shorten_home(at)));
+    }
 
     // Where the setup lives comes first, because every path below depends on
     // it — but `choose` only decides, it never writes, so working this out
@@ -1216,7 +1240,22 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // there.
     crate::repo::require_utf8_root(root)?;
     crate::repo::require_git_repository(root)?;
-    let placement = Placement::choose(root, args)?;
+    let placement = if in_worktree {
+        // No menu: the choice is made, since only a repo-mode setup can sit on
+        // a branch. The same refusal `choose` makes for a `.spoolway` that is
+        // not a folder, before `bind` stamps anything.
+        let tracked = crate::config::tracked_setup_dir_in(at);
+        if tracked.symlink_metadata().is_ok() && !tracked.is_dir() {
+            bail!(
+                "{} is not a folder, so a repo-mode setup cannot create `.spoolway/` \
+                 there\n  move or delete it and run `spoolway init` again",
+                tracked.display()
+            );
+        }
+        Placement::Repo
+    } else {
+        Placement::choose(at, args)?
+    };
     // Ahead of every question and write below: the agent, example and
     // tracker answers, `place_setup`, the `.gitignore` block, the version
     // marker and the skills all belong to a setup this pick does not want.
@@ -1240,9 +1279,9 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // next `init` then refused. Settling every answer first means a run
     // that fails here has written nothing at all.
     let answers = if joined {
-        Answers::joining(root, args)?
+        Answers::joining(at, args)?
     } else {
-        Answers::gather(root, args, matches!(placement, Placement::Move(None)))?
+        Answers::gather(at, args, matches!(placement, Placement::Move(None)))?
     };
 
     // What the closing lines say about where this checkout went. `bound` is
@@ -1256,7 +1295,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // moved checkout ends up in home mode, which keeps its skills in the user
     // folder.
     crate::install::ensure_installable(
-        root,
+        at,
         answers.provider,
         !matches!(placement, Placement::Repo | Placement::Listed)
             || crate::repo::workspace_clone(root).is_some(),
@@ -1339,7 +1378,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Read after binding rather than off `placement`, so a checkout just
     // joined or taken over through the menu counts as home mode too, and
     // is kept out of its checkout exactly as a fresh one is.
-    let home_mode = crate::repo::workspace_clone(root).is_some();
+    let home_mode = crate::repo::workspace_clone(at).is_some();
 
     // A repeat run is how a project adds another provider's skills. Keep that
     // successful outcome distinct from creating (or deliberately replacing)
@@ -1347,9 +1386,9 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // and after binding, so a home-mode clone just joined or re-attached
     // reads its workspace's existing `config.toml` rather than the
     // checkout's none.
-    let already_initialized = Config::path_in(root).exists() && !args.force;
+    let already_initialized = Config::path_in(at).exists() && !args.force;
 
-    let state = crate::config::setup_dir_in(root);
+    let state = crate::config::setup_dir_in(at);
     let mut config = Config::default();
     let profile = answers.provider.name();
     // A fresh scaffold has one identity, not a menu of hypothetical profiles:
@@ -1372,7 +1411,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     if !answers.tracker_touched
         && args.force
         && !joined
-        && let Ok(existing) = Config::load_tracked(root)
+        && let Ok(existing) = Config::load_tracked(at)
     {
         config.issue_tracking.hook = existing.issue_tracking.hook;
         config.issue_tracking.project_key = existing.issue_tracking.project_key;
@@ -1421,7 +1460,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
                 );
             }
         }
-        wrote_any |= place_setup(root, &state, &config, &answers, &mut placer)?;
+        wrote_any |= place_setup(at, &state, &config, &answers, &mut placer)?;
     }
 
     // `--tracker`, given bare or with a value, answers `[issue_tracking]`
@@ -1435,13 +1474,13 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         let _lock = crate::lock::EditLock::acquire(&crate::lock::EditLock::path_in(
             &crate::mux::project_home(root)?,
         ))?;
-        let existing = Config::load_tracked(root)?;
+        let existing = Config::load_tracked(at)?;
         let updated = crate::confkv::set(
             &existing,
             "issue_tracking.hook",
             &config.issue_tracking.hook,
         )?;
-        updated.save_key(root, "issue_tracking.hook")?;
+        updated.save_key(at, "issue_tracking.hook")?;
         placer.rows.push(report_row(
             "set",
             &format!(
@@ -1453,7 +1492,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         if answers.tracker != Tracker::None {
             let updated =
                 crate::confkv::set(&updated, "issue_tracking.project_key", &answers.project_key)?;
-            updated.save_key(root, "issue_tracking.project_key")?;
+            updated.save_key(at, "issue_tracking.project_key")?;
             placer.rows.push(report_row(
                 "set",
                 &format!(
@@ -1471,11 +1510,11 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     // Not in home mode, which promises to write nothing into the checkout:
     // taking an old block out is still an edit to a tracked file there.
     let mut notes = Vec::new();
-    let ignore_file = relative(root, &crate::gitignore::file(root));
+    let ignore_file = relative(at, &crate::gitignore::file(at));
     let removed = if home_mode {
         crate::gitignore::Removed::Absent
     } else {
-        crate::gitignore::remove(root, false)?
+        crate::gitignore::remove(at, false)?
     };
     match removed {
         crate::gitignore::Removed::Gone => notes.push(format!(
@@ -1492,12 +1531,19 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
 
     crate::usage::registry::register(root);
 
+    // After `place_setup`: `change_source` refuses a folder holding no
+    // `.spoolway/`. Recorded in the main checkout's record, the one `bind`
+    // above settled, so the stamp, the record and the source agree.
+    if in_worktree {
+        crate::repo::change_source(root, Some(at), &crate::commands::refusal::CONFIG_SOURCE)?;
+    }
+
     // The retired version marker was a tracked file in the setup folder, so
     // its removal gets a row among the others, above the `stamped` line that
     // closes them. Home mode's setup lives in the workspace, which
     // `install_user` does not reach, so it is deleted here for both modes;
     // `install` in repo mode then finds it already gone.
-    if let Some(shown) = crate::sync::remove_marker(crate::sync::project_marker(root))? {
+    if let Some(shown) = crate::sync::remove_marker(crate::sync::project_marker(at))? {
         placer.rows.push(report_row("removed", &shown));
     }
 
@@ -1534,7 +1580,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
     let installed = if home_mode {
         crate::install::install_user(answers.provider, args.force)?
     } else {
-        crate::install::install(root, answers.provider, args.force)?
+        crate::install::install(at, answers.provider, args.force)?
     };
     // Folded in before the report consumes `installed`: a repeat run whose
     // scaffold rows all came back `kept` but whose skills were installed for
@@ -1565,7 +1611,7 @@ pub fn init(root: &Path, args: &InitArgs) -> Result<()> {
         if answers.examples {
             println!(
                 "Set model and effort on every agent step in {}/*.yml before dispatching.",
-                shown(root, &Pipelines::dir_in(root))
+                shown(at, &Pipelines::dir_in(at))
             );
         } else {
             // No pipeline exists yet, so there is no step to set anything on:
@@ -1867,6 +1913,63 @@ mod tests {
             Pipelines::file_in(&root, "bugfix").exists(),
             "an example whose name has no private clash is still written"
         );
+    }
+
+    /// `init_in` a linked worktree writes the setup there, stamps and records
+    /// the main checkout, and records the worktree as the `source`. Fails
+    /// before the change: `init` had no folder to write apart from the one
+    /// it bound, so the setup landed in the main checkout.
+    #[test]
+    fn init_in_a_worktree_writes_it_and_records_it_as_the_source() {
+        let root = crate::scratch::root("init-in-worktree");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "main"]);
+        crate::repo::run(&root, "git", &["config", "user.email", "t@example.com"]).unwrap();
+        crate::repo::run(&root, "git", &["config", "user.name", "t"]).unwrap();
+        crate::repo::run(&root, "git", &["commit", "-q", "--allow-empty", "-m", "x"]).unwrap();
+        let wt = root.parent().unwrap().join("init-in-worktree-feature");
+        let _ = std::fs::remove_dir_all(&wt);
+        crate::repo::run(
+            &root,
+            "git",
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                wt.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        crate::platform::test_home::with_home(&home_for(&root), || {
+            init_in(&root, &wt, &confirmed())
+        })
+        .expect("init in a worktree");
+
+        assert!(wt.join(".spoolway/config.toml").is_file());
+        assert!(!root.join(".spoolway").exists());
+        crate::platform::test_home::with_home(&home_for(&root), || {
+            let record = std::fs::read_to_string(
+                crate::mux::project_home(&root)
+                    .unwrap()
+                    .join("project.toml"),
+            )
+            .unwrap();
+            assert!(
+                record.contains(&format!(
+                    "source = {:?}",
+                    crate::platform::PathExt::canonical(&wt)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                )),
+                "{record}"
+            );
+            assert!(record.contains("root = "), "{record}");
+        });
     }
 
     /// `init` in a main checkout that has no `.spoolway/` writes its own, even

@@ -177,7 +177,8 @@ fn run() -> Result<()> {
         // resolves its own root rather than discovering one.
         Command::Init(args) => {
             let root = init_root(&cwd)?;
-            commands::init(&root, args)
+            let at = init_setup_folder(&cwd, &root, args)?;
+            commands::init_in(&root, &at, args)
         }
 
         // Installing a binary is a fact about this machine's `PATH`, not
@@ -765,9 +766,10 @@ fn routing_for_task<'a>(
     }
 }
 
-/// Where `spoolway init` should place `.spoolway/`: the main checkout if
-/// `cwd` is a linked worktree of one, the git toplevel if there is one,
-/// otherwise here.
+/// The project `spoolway init` acts on: the main checkout if `cwd` is a
+/// linked worktree of one, the git toplevel if there is one, otherwise here.
+/// Where the setup files land is [`init_setup_folder`]'s to say, which is
+/// this folder except while the main checkout has no setup.
 ///
 /// A linked worktree's own `git rev-parse --show-toplevel` answers with the
 /// worktree itself, which is never where `init` should write — it would
@@ -813,6 +815,36 @@ fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
     // would be a second project for the same clone, so `init` refuses to add
     // a first one beside it — from a linked worktree as much as from the
     // main checkout.
+    repo::refuse_nested_setup(&top)?;
+    Ok(top)
+}
+
+/// The folder `spoolway init` writes the setup into, for the project whose
+/// main checkout is `project`, as [`init_root`] resolved it.
+///
+/// That is `project` itself, except for one case: `init` run in a linked
+/// worktree while the main checkout has no setup of its own. Then the setup
+/// is written into that worktree, so a person can commit it on the feature
+/// branch that adds it, and `init` records the worktree as the project's
+/// `source` until the branch is merged. Once the main checkout has a
+/// `.spoolway/` or is a home-mode clone, `init` acts on it, as it did before.
+/// `--setup home` and `--workspace` ask for a setup that belongs to no branch,
+/// so they act on the main checkout too.
+///
+/// Called after [`init_root`], which has already refused a worktree whose main
+/// checkout cannot be named, so that refusal stays ahead of this branch.
+fn init_setup_folder(
+    cwd: &std::path::Path,
+    project: &std::path::Path,
+    args: &cli::InitArgs,
+) -> Result<PathBuf> {
+    let home_setup = args.setup == Some(cli::Setup::Home) || args.workspace.is_some();
+    if home_setup || !repo::is_linked_worktree(cwd) || config::own_setup_dir_in(project).is_dir() {
+        return Ok(project.to_path_buf());
+    }
+    let top = repo::toplevel_raw(cwd)?;
+    // The same rule `init_root` applies to the top it resolves: a second
+    // setup further down would be a second project for the same clone.
     repo::refuse_nested_setup(&top)?;
     Ok(top)
 }
@@ -1096,5 +1128,64 @@ mod tests {
 
         std::fs::create_dir_all(work.join(".spoolway")).unwrap();
         init_root(&work).expect("a top that has its setup may run init again");
+    }
+
+    /// A linked worktree and the main checkout it was cut from, in a scratch
+    /// folder of their own.
+    /// The scratch root is handed back too, and removes the folders when it
+    /// drops.
+    fn main_and_worktree(
+        name: &str,
+    ) -> (
+        crate::scratch::ScratchRoot,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let base = crate::scratch::root(name);
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        let wt = base.join("wt");
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "b", wt.to_str().unwrap()],
+        );
+        (base, work, wt)
+    }
+
+    /// While the main checkout has no setup, `init` in a linked worktree
+    /// writes that worktree. Fails before the change: there was no such
+    /// choice, and `init` always wrote the main checkout.
+    #[test]
+    fn init_writes_a_worktree_while_the_main_checkout_has_no_setup() {
+        let (_base, work, wt) = main_and_worktree("init-folder-worktree");
+        let args = cli::InitArgs::default();
+        assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), wt);
+        assert_eq!(init_setup_folder(&work, &work, &args).unwrap(), work);
+    }
+
+    /// Once the main checkout has a `.spoolway/`, or a home-mode setup was
+    /// asked for, `init` in a worktree acts on the main checkout as before.
+    #[test]
+    fn init_acts_on_the_main_checkout_once_it_has_a_setup_or_home_is_asked() {
+        let (_base, work, wt) = main_and_worktree("init-folder-main");
+        let home = cli::InitArgs {
+            setup: Some(cli::Setup::Home),
+            ..cli::InitArgs::default()
+        };
+        assert_eq!(init_setup_folder(&wt, &work, &home).unwrap(), work);
+        let named = cli::InitArgs {
+            workspace: Some("w".into()),
+            ..cli::InitArgs::default()
+        };
+        assert_eq!(init_setup_folder(&wt, &work, &named).unwrap(), work);
+
+        std::fs::create_dir_all(work.join(".spoolway")).unwrap();
+        let args = cli::InitArgs::default();
+        assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), work);
     }
 }
