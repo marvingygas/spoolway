@@ -2,14 +2,14 @@
 //! what each one found.
 //!
 //! Every finding here — not only the checks that read `config.toml` directly
-//! — answers from `repo.checkout`'s own copy, not `repo.root`'s: `doctor`
-//! loads its own [`Config`] from the checkout rather than reading
+//! — answers from `repo.checkout`'s own copy, not the setup source's:
+//! `doctor` loads its own [`Config`] from the checkout rather than reading
 //! `repo.config` (loaded from `Repo::setup_source` back in
-//! `Repo::discover`), because
-//! a task validating its own branch wants an answer about the file it
-//! actually edited. `repo.root`'s copy still matters — it is what the real
-//! dispatcher runs on — so its own parse failure, when there is one, is
-//! reported as a finding of its own rather than silently dropped. See
+//! `Repo::discover`), because a task validating its own branch wants an
+//! answer about the file it actually edited. The setup source's copy
+//! (`Repo::setup_source`) still matters — it is what the real dispatcher runs
+//! on — so its own parse failure, when there is one, is reported as a finding
+//! of its own rather than silently dropped. See
 //! [`doctor`].
 
 use super::*;
@@ -2981,9 +2981,9 @@ fn doctor_sync(repo: &Repo, report: &mut Report) {
     let Ok(outcomes) = crate::sync::scan(repo, &dry) else {
         return;
     };
-    // The scan reads the checkout's copy, so that is the file whose absence
-    // says `init` never ran here. `Repo::setup_source` is the checkout in a
-    // worktree that holds the only setup, and `repo.root` otherwise.
+    // The scan reads the checkout's copy. Its absence is judged against
+    // `Repo::setup_source`, the folder this project's config is read from:
+    // `repo.root`, except in a worktree that holds the only setup.
     let initialised = Config::path_in(&repo.setup_source()).is_file();
     for note in sync_notes(&outcomes, initialised) {
         report.note(note);
