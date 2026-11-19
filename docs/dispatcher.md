@@ -576,28 +576,22 @@ panels are drawn this way, and so is the pause panel on a command step.
 ### Updating the config
 
 `u` writes the same reload request as `spoolway dispatch reload` and waits for the dispatcher's
-answer. See [Reloading](#reloading). A popup titled `update config` covers the board while it
-waits. It names no key.
+answer. See [Reloading](#reloading). The loading spool turns over the dimmed board while the
+reload is asked, the same as for every other key that does work. It shows only once the wait
+passes 200 ms, so a dispatcher that answers sooner goes straight to the answer. Keys typed while
+the spool shows are thrown away. A dispatcher in the middle of a pass answers only once that pass
+ends, so the spool can turn for some seconds.
+
+A good reload opens this popup as soon as the answer lands. It closes by itself after one second:
 
 ```
-╭─ update config ────────────╮
-│                            │
-│  updating config…          │
-│                            │
-╰────────────────────────────╯
+╭─ update config ───────╮
+│  successfully loaded  │
+╰───────────────────────╯
 ```
 
-A good reload replaces it with this popup, which closes by itself after one second:
-
-```
-╭─ update config ────────────╮
-│                            │
-│  successfully loaded       │
-│                            │
-╰────────────────────────────╯
-```
-
-A refusal opens a popup that holds the whole refusal and closes on `enter`. It ends each fix
+Every other answer opens its popup once the spool is down. A refusal opens a popup that holds
+the whole refusal and closes on `enter`. It ends each fix
 with `press u again.`
 
 ```
@@ -617,7 +611,7 @@ with `press u again.`
 
 ```mermaid
 flowchart LR
-  U[u] --> W[updating config…]
+  U[u] --> W[loading spool]
   W -->|loaded| L[successfully loaded, closes after 1 s]
   W -->|refused| R[reload refused, closes on enter]
   W -->|dispatcher stopped| S[stopped before answering, closes on enter]

@@ -344,7 +344,7 @@ rm -f "$SPOOLWAY_PROJECT_HOME/queue/held-gate.md" "$SPOOLWAY_PROJECT_HOME/queue/
 # the run started: with nothing to load, a held lock alone draws no pair.
 # The board names the kind of change on a `config changed:` line above the
 # key line while the edit waits, and drops it once the reload has loaded it.
-# `updating config…` stays up until the answer lands; `successfully loaded`
+# The loading spool turns until the answer lands; `successfully loaded`
 # then shows and closes itself, with no key pressed. Looked for in the whole
 # log since `u`, not in the last frame: it is up for a second, and a poll can
 # land either side of it. The edit is a comment, so the reload loads the same
