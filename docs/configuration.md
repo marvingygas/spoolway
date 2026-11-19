@@ -205,7 +205,7 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 |---|---|
 | The home already records this checkout | The command runs. |
 | The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. Commands started together in a fresh clone agree on one home. |
-| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. A moved checkout, or a moved superproject, finds its queue this way. |
+| The record names a checkout that is gone, one without the id, or a linked worktree of this clone | The record is rewritten to name this checkout. One line says so. A moved checkout, or a moved superproject, finds its queue this way. |
 | `.git/spoolway-label` is missing, and a home's `project.toml` records this id | The label is read from that home and written back. |
 | `.git/spoolway-label` is missing, and no home records this id | The command refuses, names `.git/spoolway-id` and tells you to delete it and run `spoolway init`. |
 | Anything else | The command refuses, naming both files by absolute path. |
@@ -226,7 +226,7 @@ directory need not sit inside the checkout, so its parent is not a reliable way 
 
 Nothing checks `spoolway-root` against anything else. It is a locator, not part of the binding
 above. A linked worktree finds its checkout from the common directory's parent when that parent
-checks out, then from this record, then from the workspace's clone listing. When none of the
+checks out, then from this record when it names no linked worktree, then from the workspace's clone listing. When none of the
 three answers, as in a fresh `--separate-git-dir` clone or submodule with no record, `spoolway
 init` refuses that linked worktree and tells you to run `spoolway init` in the main checkout
 first. Run `spoolway init` there before working from a linked worktree of such a clone.
