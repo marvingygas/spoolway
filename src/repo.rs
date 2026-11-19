@@ -2735,6 +2735,86 @@ pub(crate) fn change_source(
     Ok(SourceChange::Set(folder))
 }
 
+/// The folders bare `spoolway` offers to read its setup from, when it starts
+/// in a main checkout that has nothing to read.
+pub(crate) struct SourceChoice {
+    /// The main checkout, the project the picked folder becomes the source
+    /// of.
+    pub(crate) project: PathBuf,
+    /// Every other worktree of the repository that holds a `.spoolway/`, in
+    /// the order `git worktree list` gives them.
+    pub(crate) folders: Vec<PathBuf>,
+}
+
+/// What bare `spoolway` started in `start` may pick a source from, or `None`
+/// when it should discover the project as every other command does.
+///
+/// `Some` only when `start` is in the main checkout itself, that checkout
+/// has no `.spoolway/`, no workspace lists it, its project record has no
+/// `source` line, and at least one other worktree holds a `.spoolway/`.
+/// Anything else is `None`, so discovery gives the answer it gives today:
+/// a worktree reads its own setup or refuses, a broken source or workspace
+/// file is named by its own refusal, and with no folder to list the
+/// not-on-branch refusal shows instead.
+///
+/// Reads only. Nothing is stamped or written, so a picker left with `esc`
+/// leaves the repository exactly as it found it.
+pub(crate) fn source_choice(start: &Path) -> Option<SourceChoice> {
+    let start = start.canonical().ok()?;
+    let project = main_checkout(&start)?;
+    // In a linked worktree, `--show-toplevel` is that worktree, not the main
+    // checkout, and the worktree's own lookup in `Repo::root` applies.
+    if git_toplevel(&start).ok()? != project {
+        return None;
+    }
+    if crate::config::tracked_setup_dir_in(&project).is_dir() {
+        return None;
+    }
+    // An unreadable workspace file is an error here, and `Repo::root` names
+    // it in a refusal of its own, so it is left to discovery as well.
+    if !matches!(workspace_clone_checked(&project), Ok(None)) {
+        return None;
+    }
+    // A record holding any `source` line, absolute or not, is discovery's:
+    // it reads that folder, or refuses naming it. A record that will not
+    // parse is refused there too. No home or no record means no line.
+    if let Ok(home) = crate::mux::project_home(&project) {
+        match read_binding(&home) {
+            Ok(Some(binding)) if binding.source.is_some() => return None,
+            Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
+    let listing = run(&project, "git", &["worktree", "list", "--porcelain"]).ok()?;
+    let folders: Vec<PathBuf> = listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(git_path)
+        .filter(|folder| {
+            folder.canonical().ok().as_deref() != Some(project.as_path())
+                && crate::config::tracked_setup_dir_in(folder).is_dir()
+        })
+        .collect();
+    (!folders.is_empty()).then_some(SourceChoice { project, folders })
+}
+
+/// Record `folder`, picked in bare `spoolway`, as the `source` of the main
+/// checkout `project`.
+///
+/// A main checkout nobody ran a command in has no stamp and no project
+/// record yet, and [`change_source`] needs a record to hold the line. So the
+/// project is bound first, the same [`bind`] any command run in that
+/// worktree would already have made for it.
+pub(crate) fn record_picked_source(project: &Path, folder: &Path) -> Result<()> {
+    bind(project)?;
+    change_source(
+        project,
+        Some(folder),
+        &crate::commands::refusal::CONFIG_SOURCE,
+    )?;
+    Ok(())
+}
+
 /// The binding recorded at `home`, if there is one readable. `Ok(None)` only
 /// for "nothing written there yet" (a missing file); a file that exists but
 /// will not parse is a real error, never silently treated the same as no

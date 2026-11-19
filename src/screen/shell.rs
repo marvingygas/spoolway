@@ -45,7 +45,7 @@
 //! its own thread never leaks a strip into another test's frame running
 //! beside it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
@@ -121,6 +121,11 @@ thread_local! {
     /// strip is drawn from deep inside each screen, which has no `Repo` to
     /// tell a home-mode project by.
     static HOSTED: Cell<Option<(Tab, &'static [Tab])>> = const { Cell::new(None) };
+
+    /// The row naming the source folder the hosted project reads its setup
+    /// from, while it reads one — see [`setup_row`]. Set and cleared with
+    /// [`HOSTED`], for the same reason the strip's tabs travel with it.
+    static SETUP_ROW: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Marks `tab` as the one open for as long as this lives, and clears it on
@@ -134,12 +139,14 @@ impl Hosting {
     /// from. [`host`] opens each tab on the strip its project draws.
     #[cfg(test)]
     pub(crate) fn open(tab: Tab) -> Hosting {
-        Hosting::open_in(tab, &TABS)
+        Hosting::open_in(tab, &TABS, None)
     }
 
-    /// `tab` open on a strip of `tabs` — see [`tabs_for`].
-    fn open_in(tab: Tab, tabs: &'static [Tab]) -> Hosting {
+    /// `tab` open on a strip of `tabs` — see [`tabs_for`] — with `setup`,
+    /// when the project reads a source, as the row under it.
+    fn open_in(tab: Tab, tabs: &'static [Tab], setup: Option<String>) -> Hosting {
         HOSTED.with(|cell| cell.set(Some((tab, tabs))));
+        SETUP_ROW.with(|cell| *cell.borrow_mut() = setup);
         Hosting
     }
 }
@@ -147,7 +154,21 @@ impl Hosting {
 impl Drop for Hosting {
     fn drop(&mut self) {
         HOSTED.with(|cell| cell.set(None));
+        SETUP_ROW.with(|cell| *cell.borrow_mut() = None);
     }
+}
+
+/// The row naming the folder `repo` reads its setup from while a `source`
+/// line stands in for the main checkout's own — `setup  ~/dev/app-adopt/
+/// .spoolway` — so the person sees which setup a dispatcher started here
+/// would read. `None` while the checkout reads its own setup, which leaves
+/// the strip as it always was.
+fn setup_row(repo: &Repo) -> Option<String> {
+    let source = repo.source_in_use()?;
+    Some(format!(
+        "setup  {}",
+        crate::repo::shorten_home(&crate::config::tracked_setup_dir_in(&source))
+    ))
 }
 
 /// The tab open on this thread, if a shell is hosting one.
@@ -156,13 +177,17 @@ pub(crate) fn hosted() -> Option<Tab> {
 }
 
 /// The rows the strip takes off the top of the terminal: one blank row above
-/// it, the strip's own rows and one blank row under it, as the mockup draws —
-/// always [`strip`]'s own length, since both count the strip's rows with
-/// [`strip_layout`] at the same width. Zero with no shell around the screen,
-/// so a screen drawn by its own CLI command keeps every row it had.
+/// it, the strip's own rows, the setup row while a source is in use and one
+/// blank row under them, as the mockup draws — always [`strip`]'s own
+/// length, since both count the strip's rows with [`strip_layout`] at the
+/// same width. Zero with no shell around the screen, so a screen drawn by
+/// its own CLI command keeps every row it had.
 pub(crate) fn strip_rows() -> usize {
     match HOSTED.with(Cell::get) {
-        Some((_, tabs)) => strip_layout(tabs, strip_width()).1.len() + 2,
+        Some((_, tabs)) => {
+            let setup = SETUP_ROW.with(|cell| cell.borrow().is_some());
+            strip_layout(tabs, strip_width()).1.len() + usize::from(setup) + 2
+        }
         None => 0,
     }
 }
@@ -221,7 +246,10 @@ const NARROW_GAP: &str = "    ";
 /// The strip with one blank row above it and one under it, for a screen to
 /// put above its own frame — or nothing at all with no shell hosting one. The
 /// row above keeps the strip off the terminal's top edge, and the strip's
-/// own rows sit together with no blank row between them.
+/// own rows sit together with no blank row between them. While the project
+/// reads a source, the row naming it sits straight under the strip, centred
+/// as the strip is, and dim, so it reads as a note on the screen rather than
+/// as one more tab.
 ///
 /// As many rows as [`strip_rows`] takes off every tab's height, since both
 /// read the strip's rows from [`strip_layout`]: a line added or dropped here
@@ -230,8 +258,12 @@ const NARROW_GAP: &str = "    ";
 pub(crate) fn strip() -> Vec<String> {
     match HOSTED.with(Cell::get) {
         Some((open, tabs)) => {
+            let width = strip_width();
             let mut rows = vec![String::new()];
-            rows.extend(strip_lines(open, tabs, strip_width()));
+            rows.extend(strip_lines(open, tabs, width));
+            if let Some(setup) = SETUP_ROW.with(|cell| cell.borrow().clone()) {
+                rows.push(centred_dim(&setup, width));
+            }
             rows.push(String::new());
             rows
         }
@@ -359,6 +391,16 @@ fn strip_lines(open: Tab, tabs: &[Tab], width: usize) -> Vec<String> {
         .collect()
 }
 
+/// `text` centred across `width` columns and drawn dim, cut to `width` when
+/// it is wider, so a long folder name never runs past the margin.
+fn centred_dim(text: &str, width: usize) -> String {
+    use crate::status::{DIM, RESET};
+
+    let shown: String = text.chars().take(width).collect();
+    let start = width.saturating_sub(shown.chars().count()) / 2;
+    format!("{}{DIM}{shown}{RESET}", " ".repeat(start))
+}
+
 /// SGR 22, which ends dim. It ends bold too, so the strip writes its bold
 /// again straight after it — see [`strip_lines`].
 const NORMAL_INTENSITY: &str = "\x1b[22m";
@@ -417,6 +459,10 @@ fn host(
     let mut dispatch = DispatchTab::default();
     let mut tab = Tab::Dispatch;
     let tabs = tabs_for(repo);
+    // Read once, when the screen opens, as `repo`'s config was: the row names
+    // the setup this screen read. A `config source` run from another
+    // terminal while it is open shows on the next start.
+    let setup = setup_row(repo);
     // One writer for the whole hosted session, not one per tab, so the idle
     // skip it gives every screen (see `frame_writer`'s own doc) also covers
     // the moment of switching between them: whichever tab is about to
@@ -428,7 +474,7 @@ fn host(
 
     loop {
         let leave = {
-            let _hosting = Hosting::open_in(tab, tabs);
+            let _hosting = Hosting::open_in(tab, tabs, setup.clone());
             // The tab being left's last frame, for the loading spool to turn
             // over while the next one reads its rows, runs git or waits on a
             // reading before its first frame. Nothing on the very first
@@ -1915,7 +1961,7 @@ mod tests {
 
     #[test]
     fn on_a_home_mode_strip_four_opens_eval_and_five_nothing() {
-        let hosting = Hosting::open_in(Tab::Queue, &HOME_TABS);
+        let hosting = Hosting::open_in(Tab::Queue, &HOME_TABS, None);
         let opens = |digit| leave_on(Key::Char(digit));
         assert_eq!(opens('1'), Some(Leave::Open(Tab::Dispatch)));
         assert_eq!(opens('2'), None);
@@ -1923,7 +1969,7 @@ mod tests {
         assert_eq!(opens('4'), Some(Leave::Open(Tab::Eval)));
         assert_eq!(opens('5'), None);
         drop(hosting);
-        let _hosting = Hosting::open_in(Tab::Eval, &HOME_TABS);
+        let _hosting = Hosting::open_in(Tab::Eval, &HOME_TABS, None);
         assert_eq!(opens('2'), Some(Leave::Open(Tab::Queue)));
         assert_eq!(opens('4'), None);
     }

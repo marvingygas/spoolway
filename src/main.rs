@@ -172,6 +172,23 @@ fn run() -> Result<()> {
 
     let cwd = cli.repo.clone().unwrap_or(std::env::current_dir()?);
 
+    // Bare `spoolway` in a main checkout with nothing to read, while another
+    // worktree holds a `.spoolway/`: a picker of those worktrees opens first,
+    // on its own, since discovery would refuse before any screen opened and
+    // nothing the picker draws needs a project. The pick is written as the
+    // `source` line, and the start then goes on exactly as any other: the
+    // ordinary discovery below finds the line and reads that folder. `esc`
+    // leaves with nothing written. With no folder to offer, `source_choice`
+    // is `None` and discovery gives its usual refusal.
+    if matches!(cli.command, Command::Screen)
+        && let Some(choice) = repo::source_choice(&cwd)
+    {
+        let Some(folder) = screen::source_picker::pick(&choice.folders) else {
+            return Ok(());
+        };
+        repo::record_picked_source(&choice.project, &folder)?;
+    }
+
     match &cli.command {
         // `init` is the one command that runs before a project exists, so it
         // resolves its own root rather than discovering one.
