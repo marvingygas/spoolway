@@ -3364,14 +3364,14 @@ pub fn parse_instant(raw: &str, end_of_day: bool) -> Result<jiff::Timestamp> {
         } else {
             date
         };
-        // A midnight that happens twice resolves to the first. One that does
-        // not exist locally, which daylight saving really does produce, has
-        // no earlier instant, and the bound falls back to now, as releases
-        // before the move to `jiff` did.
-        return Ok(jiff::tz::TimeZone::system()
-            .to_ambiguous_zoned(date.at(0, 0, 0, 0))
-            .earlier()
-            .map_or_else(|_| jiff::Timestamp::now(), |local| local.timestamp()));
+        // A midnight that does not exist locally, which daylight saving
+        // really does produce, resolves to the instant after the gap: the
+        // honest bound. A midnight that happens twice resolves to the first.
+        let local = date
+            .at(0, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .context("date out of range")?;
+        return Ok(local.timestamp());
     }
 
     // `YYYY-MM` shaped, so try it as a month before falling to a duration —
