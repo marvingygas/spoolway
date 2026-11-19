@@ -674,6 +674,15 @@ pub(super) fn set_enabled(
     let mut spec = job.spec.clone();
     spec.enabled = enabled;
     let verb = toggle_verb(enabled);
+    // Refused by `jobs::write` as well; asked here first so the refusal is
+    // not wrapped in advice to check the file is writable, which is wrong for
+    // a store inside a source folder.
+    if let (Scope::Project, Some(source)) = (job.scope, repo.source_in_use()) {
+        return Err(Notice::new(
+            verb,
+            crate::repo::source_write_refusal(&repo.checkout, &source),
+        ));
+    }
     jobs::write(repo, job.scope, &job.name, &spec).map_err(|err| {
         Notice::new(
             verb,
@@ -751,6 +760,10 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         base: None,
     };
 
+    // As in the toggle above: the source refusal goes out unwrapped.
+    if let (Scope::Project, Some(source)) = (draft.scope, repo.source_in_use()) {
+        return Err(crate::repo::source_write_refusal(&repo.checkout, &source));
+    }
     jobs::write(repo, draft.scope, &name, &spec).map_err(|err| {
         format!(
             "could not save the job `{name}` to `{}`: {err:#}. check the file is writable and try \

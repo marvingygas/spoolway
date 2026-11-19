@@ -4770,7 +4770,7 @@ fn export(
     let (header, lines, rows) = export_rows(loaded, filters, pipelines, table, &own_project);
     // `.spoolway/evals/` in the main checkout would also make it hold a
     // `.spoolway/`, which ends a `source`: the export is refused instead.
-    if let Some(source) = repo.source_in_use() {
+    if let Some(source) = crate::repo::source_in_use_at(&repo.root) {
         bail!("{}", crate::repo::source_write_refusal(&repo.root, &source));
     }
     let dir = evals_dir(repo);

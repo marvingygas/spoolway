@@ -2008,9 +2008,7 @@ impl Config {
     /// write defaults over the caps the file held.
     pub fn missing_error(root: &Path) -> anyhow::Error {
         let path = Config::path_in(root);
-        if let Some(source) = crate::repo::source_of(root)
-            .filter(|_| !own_setup_dir_in(root).is_dir() && setup_dir_in(root).is_dir())
-        {
+        if let Some(source) = crate::repo::source_in_use_at(root) {
             anyhow::anyhow!(
                 "{} does not exist in the source {}, where this project reads its setup while \
                  the main checkout has none (restore it there, or point the source at a folder \

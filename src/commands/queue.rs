@@ -12486,6 +12486,14 @@ fn save_routine(repo: &Repo, groups: &[Group], group: &GroupKey, name: &str) -> 
     let Some(group) = groups.iter().find(|g| &group_key(g) == group) else {
         return Mode::Browsing;
     };
+    // Routines live under `.spoolway/`, and a source folder is the person's
+    // own, so nothing is written into it.
+    if let Some(source) = repo.source_in_use() {
+        return outcome(
+            "not saved",
+            crate::repo::source_write_refusal(&repo.checkout, &source),
+        );
+    }
     // The name is typed, so it is refused before it is joined onto
     // anything: `join` on a `..` or an absolute path walks straight out of
     // the routines directory, and a name carrying a separator would write a
@@ -12710,6 +12718,14 @@ fn delete_routine_panel(target: &RoutineDelete) -> Vec<String> {
 /// A failure answers the text of the popup that says so: the error, what
 /// was already removed and what is left.
 fn delete_routine(repo: &Repo, target: &RoutineDelete) -> std::result::Result<(), String> {
+    // The folder to remove is inside a `source` folder, the person's own;
+    // refused before any job or file goes.
+    if let Some(source) = repo.source_in_use() {
+        return Err(format!(
+            "{}\n  nothing was removed",
+            crate::repo::source_write_refusal(&repo.checkout, &source)
+        ));
+    }
     let folder = format!(
         "folder {}",
         crate::platform::relative(&repo.checkout, &target.path)

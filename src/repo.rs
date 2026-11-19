@@ -1780,15 +1780,19 @@ impl Repo {
             format!("cannot tell which branch {} is on", self.checkout.display())
         })?;
         let Some(branch) = branch else {
-            let elsewhere = match &source {
-                Some(source) => source_write_refusal(&self.root, source),
-                None => format!("write the main checkout's:\n  {dash_c}"),
-            };
-            bail!(
-                "this worktree is on a detached HEAD, so a change written here would have no \
-                 branch to be committed on. check a branch out here to write its setup, or \
-                 {elsewhere}"
-            );
+            match &source {
+                Some(source) => bail!(
+                    "this worktree is on a detached HEAD, so a change written here would have \
+                     no branch to be committed on. check a branch out here to write its \
+                     setup.\n  {}",
+                    source_write_refusal(&self.root, source)
+                ),
+                None => bail!(
+                    "this worktree is on a detached HEAD, so a change written here would have \
+                     no branch to be committed on. check a branch out here to write its setup, \
+                     or write the main checkout's:\n  {dash_c}"
+                ),
+            }
         };
         Ok(TrackedWrite {
             root: &self.checkout,
@@ -2396,7 +2400,7 @@ struct Binding {
 
 /// [`Repo::source_in_use`] for any checkout: the `source` folder `checkout`
 /// reads its setup from, when it has no setup of its own.
-fn source_in_use_at(checkout: &Path) -> Option<PathBuf> {
+pub(crate) fn source_in_use_at(checkout: &Path) -> Option<PathBuf> {
     if crate::config::own_setup_dir_in(checkout).is_dir() {
         return None;
     }
@@ -2408,8 +2412,8 @@ fn source_in_use_at(checkout: &Path) -> Option<PathBuf> {
 pub(crate) fn source_write_refusal(checkout: &Path, source: &Path) -> String {
     format!(
         "{} has no .spoolway/ of its own, and its setup is read from the source {}, so a change \
-         written here would land in that folder.\n  check out the branch that carries \
-         .spoolway/ to write its setup, or run `spoolway init` here to give this checkout one",
+         written there would land in that folder.\n  check out the branch that carries \
+         .spoolway/ in it to write its setup, or run `spoolway init` in it to give it one",
         checkout.display(),
         shorten_home(source),
     )
@@ -2431,6 +2435,14 @@ pub(crate) fn source_write_refusal(checkout: &Path, source: &Path) -> String {
 /// asked from inside the setup lookup, where an error has nowhere to go.
 pub(crate) fn source_of(checkout: &Path) -> Option<PathBuf> {
     if workspace_clone(checkout).is_some() {
+        return None;
+    }
+    // `setup_dir_in` asks this on every call for a checkout with no setup, and
+    // finding the home costs a git process. A main checkout whose own `.git`
+    // holds no stamp has no home, so it has no `source` line either, and
+    // that answer needs no process.
+    let dot_git = checkout.join(".git");
+    if dot_git.is_dir() && !dot_git.join(ID_FILE).exists() {
         return None;
     }
     let home = crate::mux::project_home(checkout).ok()?;
@@ -8471,19 +8483,39 @@ mod tests {
         );
     }
 
-    /// A main checkout on a bare branch with a `source` folder holding a
-    /// `.spoolway/` but no `config.toml`, and a worktree cut from that branch.
-    /// Every writer other than `config set` stays out of the source, and the
-    /// advice each refusal gives is a command that works.
-    #[test]
-    fn writers_and_advice_around_a_source_folder() {
-        let (_origin, work, _base_guard) = fixture("source-others");
-        let (home, _home_guard) = scratch_home("source-others");
-        let source = work.parent().unwrap().join("adopt");
+    /// A project whose main checkout sits on a bare branch and reads its
+    /// setup from `source`, a folder holding a `.spoolway/` with no
+    /// `config.toml`. `plain` is a worktree cut from the bare branch, so it
+    /// has no setup of its own, and `detached` one cut from the branch that
+    /// carries the setup and left on a detached HEAD, so it has its own.
+    struct SourceProject {
+        work: PathBuf,
+        source: PathBuf,
+        plain: PathBuf,
+        detached: PathBuf,
+        home: PathBuf,
+        _guards: (crate::scratch::ScratchRoot, crate::scratch::ScratchRoot),
+    }
+
+    fn source_project(name: &str) -> SourceProject {
+        let (_origin, work, base_guard) = fixture(name);
+        let (home, home_guard) = scratch_home(name);
+        let base = work.parent().unwrap().to_path_buf();
+        let source = base.join("adopt");
         std::fs::create_dir_all(source.join(crate::config::STATE_DIR)).unwrap();
-        let plain = work.parent().unwrap().join("plain-wt");
+        let (plain, detached) = (base.join("plain-wt"), base.join("detached-wt"));
         crate::platform::test_home::with_home(&home, || {
             let repo = Repo::discover(&work).unwrap();
+            git(
+                &work,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    detached.to_str().unwrap(),
+                ],
+            );
             git(&work, &["checkout", "-q", "-b", "bare"]);
             git(&work, &["rm", "-q", "-r", crate::config::STATE_DIR]);
             git(&work, &["commit", "-q", "-m", "drop the control plane"]);
@@ -8501,26 +8533,46 @@ mod tests {
             let mut binding = read_binding(&repo.home).unwrap().unwrap();
             binding.source = Some(source.clone());
             write_binding(&repo.home, &binding).unwrap();
+        });
+        SourceProject {
+            work,
+            source,
+            plain,
+            detached,
+            home,
+            _guards: (base_guard, home_guard),
+        }
+    }
 
-            // A project-scope job lands in `<source>/.spoolway/jobs.toml`
-            // unless it is refused.
-            let repo = Repo::discover(&work).unwrap();
+    /// A project-scope job would land in `<source>/.spoolway/jobs.toml`.
+    #[test]
+    fn a_project_job_is_refused_while_the_setup_comes_from_a_source() {
+        let project = source_project("source-job");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
             let spec = crate::jobs::JobSpec::neutral();
             let refused = crate::jobs::write(&repo, crate::jobs::Scope::Project, "nightly", &spec);
             assert!(format!("{:#}", refused.unwrap_err()).contains("would land in that folder"));
             let refused = crate::jobs::delete_in(&repo, crate::jobs::Scope::Project, "nightly");
             assert!(refused.is_err());
-            assert!(
-                !source
-                    .join(crate::config::STATE_DIR)
-                    .join("jobs.toml")
-                    .exists()
-            );
+        });
+        assert!(
+            !project
+                .source
+                .join(crate::config::STATE_DIR)
+                .join("jobs.toml")
+                .exists()
+        );
+    }
 
-            // The `-C` line a worktree's refusal gives would be refused in the
-            // main checkout, so the refusal gives the source remedy instead.
-            let in_wt = Repo::discover(&plain).unwrap();
-            let refused = in_wt.tracked_write_root(
+    /// The `-C` line a worktree's refusal gives would be refused in the main
+    /// checkout too, so the refusal gives the source remedy instead.
+    #[test]
+    fn a_borrowed_worktree_refusal_gives_no_dash_c_line_on_a_source() {
+        let project = source_project("source-borrowed");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.plain).unwrap();
+            let refused = repo.tracked_write_root(
                 &crate::commands::refusal::CONFIG_SET,
                 "config",
                 "config set k v",
@@ -8528,19 +8580,59 @@ mod tests {
             let said = format!("{:#}", refused.unwrap_err());
             assert!(said.contains("would land in that folder"), "{said}");
             assert!(!said.contains("spoolway -C"), "{said}");
+        });
+    }
 
-            // A source with a `.spoolway/` and no `config.toml` names the
-            // source, since `sync` and git cannot restore a file there.
-            let said = format!("{:#}", Config::missing_error(&work));
+    /// A detached worktree with its own setup is told to check a branch out
+    /// in one sentence, and what the main checkout's source means in the
+    /// next, with no `-C` line.
+    #[test]
+    fn a_detached_worktree_refusal_names_the_main_checkouts_source_on_its_own_line() {
+        let project = source_project("source-detached");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.detached).unwrap();
+            assert_eq!(repo.source_in_use(), None, "it has a setup of its own");
+            assert!(
+                source_in_use_at(&repo.root).is_some(),
+                "its project reads a source"
+            );
+            let refused = repo.tracked_write_root(
+                &crate::commands::refusal::CONFIG_SET,
+                "config",
+                "config set k v",
+            );
+            let said = format!("{:#}", refused.unwrap_err());
+            assert!(
+                said.contains("check a branch out here to write its setup.\n  "),
+                "{said}"
+            );
+            assert!(said.contains("would land in that folder"), "{said}");
+            assert!(!said.contains("spoolway -C"), "{said}");
+        });
+    }
+
+    /// A source holding a `.spoolway/` but no `config.toml` is named, since
+    /// neither git nor `sync` can restore a file there.
+    #[test]
+    fn a_missing_config_in_a_source_names_the_source() {
+        let project = source_project("source-no-config");
+        crate::platform::test_home::with_home(&project.home, || {
+            let said = format!("{:#}", Config::missing_error(&project.work));
             assert!(said.contains("in the source"), "{said}");
             assert!(!said.contains("spoolway sync"), "{said}");
+        });
+    }
 
-            // `init` refuses a nested setup whether or not a source stands in
-            // for the top's own.
-            let nested = work.join("sub").join(crate::config::STATE_DIR);
+    /// `init` refuses a nested setup whether or not a source stands in for
+    /// the top's own.
+    #[test]
+    fn init_refuses_a_nested_setup_while_a_source_stands_in() {
+        let project = source_project("source-nested");
+        crate::platform::test_home::with_home(&project.home, || {
+            let nested = project.work.join("sub").join(crate::config::STATE_DIR);
             std::fs::create_dir_all(&nested).unwrap();
             std::fs::write(nested.join("config.toml"), "").unwrap();
-            let refused = refuse_nested_setup(&work.canonical().unwrap());
+            let refused = refuse_nested_setup(&project.work.canonical().unwrap());
             assert!(format!("{:#}", refused.unwrap_err()).contains("not at the top"));
         });
     }
