@@ -9433,7 +9433,7 @@ mod tests {
         crate::platform::test_home::with_home(&home, || {
             assert!(!work.join(".git").join(ID_FILE).exists());
             let choice = source_choice(&work).expect("adopt holds a setup");
-            assert_eq!(choice.folders, [adopt.clone()]);
+            assert_eq!(choice.folders, std::slice::from_ref(&adopt));
             record_picked_source(&choice.project, &adopt).unwrap();
             assert!(work.join(".git").join(ID_FILE).exists());
             let picked = adopt.canonicalize().unwrap();
