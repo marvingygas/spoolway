@@ -2637,8 +2637,9 @@ pub(crate) enum SourceChange {
 /// repository, or that is a lane's worktree, is refused rather than stored
 /// for the next command to refuse on. The read and the write of
 /// `project.toml` are made under the edit lock, so two parallel `config
-/// source` runs do not write over each other's line. `config set` never writes `project.toml`; it takes the same
-/// lock for its own file, which a source folder of this repository shares.
+/// source` runs do not write over each other's line. `config set` never
+/// writes `project.toml`; it takes the same lock for its own file, which a
+/// source folder of this repository shares.
 ///
 /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
 /// command asking, for the same reason as in [`Repo::refuse_in_lane`].
@@ -2723,8 +2724,9 @@ pub(crate) fn change_source(
     // folder that is gone.
     if started_in_lane(&folder, &home) {
         bail!(
-            "{} is a worktree spoolway made for a task, and it is deleted when that task is              handed over, so it cannot be the source
-  give the folder of a worktree of your              own that holds a .spoolway/; `git worktree list` shows them",
+            "{} is a worktree spoolway made for a task, and it is deleted when that task is \
+             handed over, so it cannot be the source\n  give the folder of a worktree of your \
+             own that holds a .spoolway/; `git worktree list` shows them",
             shorten_home(&folder)
         );
     }
@@ -9480,11 +9482,16 @@ mod tests {
             let said = change_source(&project.work, Some(&lane), command)
                 .unwrap_err()
                 .to_string();
-            assert!(
-                said.contains("a worktree spoolway made for a task"),
-                "{said}"
+            let lane_shown = shorten_home(&lane.canonical().unwrap());
+            assert_eq!(
+                said,
+                format!(
+                    "{lane_shown} is a worktree spoolway made for a task, and it is deleted \
+                     when that task is handed over, so it cannot be the source\n  give the \
+                     folder of a worktree of your own that holds a .spoolway/; `git worktree \
+                     list` shows them"
+                )
             );
-            assert!(said.contains("git worktree list"), "{said}");
             assert_eq!(source_of(&project.work), Some(project.source.clone()));
         });
     }
