@@ -1049,7 +1049,9 @@ No test asks for a tip per key or setting. One test fails when a tip is too long
 ## The overrides tab
 
 Bare `spoolway`'s tab strip numbers `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES` and `EVAL` from `1`
-to `5`, and `4` opens the overrides tab. The overrides tab sets keys in the private
+to `5`, and `4` opens the overrides tab. While the project reads a
+[source folder](configuration.md#the-source-folder), one dim row under the strip reads
+`setup <folder>/.spoolway`. The overrides tab sets keys in the private
 [overrides layer](configuration.md#the-overrides-layer) from the screen, so a change needs no
 `override` command per key. A home-mode project has no overrides tab: its whole setup already lives privately in its workspace, so there is no
 checked-in file to override. Its strip numbers `DISPATCH`, `QUEUE`, `ROUTINES` and `EVAL` from `1`

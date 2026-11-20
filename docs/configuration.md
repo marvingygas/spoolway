@@ -274,6 +274,40 @@ source = "/home/you/dev/app-adopt"
 `spoolway config source <folder>` changes the folder. `spoolway config source --clear` removes
 the line. See [`config source`](cli-reference.md#spoolway-config-source-folder--clear).
 
+A worktree that spoolway made for a task is refused as a source. It is deleted when its task is
+handed over.
+
+Bare `spoolway` can set the line for you. It starts in a main checkout with no `.spoolway/`, no
+workspace and no `source` line. If another worktree of the repository holds a `.spoolway/`, bare
+`spoolway` opens a picker of those worktrees before any tab. Lane worktrees are not listed.
+
+```
+╭─ read the setup from ──────────────────────╮
+│  search:                                   │
+│  > ~/dev/app-adopt                         │
+│    ~/dev/app-limits                        │
+│                                            │
+│  [enter] confirm   [f] search   [esc] back │
+╰────────────────────────────────────────────╯
+```
+
+| Key | What it does |
+|---|---|
+| `enter` | Writes the highlighted folder as the `source` line and opens the screen |
+| `f` | Searches the list |
+| `esc` | Leaves and writes nothing |
+
+With no worktree to list, bare `spoolway` prints the same refusal as any other command.
+
+While a source is in use, every tab of the screen shows one dim row under the tab strip. It names
+the setup folder the screen reads:
+
+```
+setup  ~/dev/app-adopt/.spoolway
+```
+
+With no source, the row is not drawn.
+
 | Where | What happens |
 |---|---|
 | The main checkout has no `.spoolway/`, and no workspace lists it | The config, pipelines, prompts, hooks and jobs are read from `<source>/.spoolway/`. |

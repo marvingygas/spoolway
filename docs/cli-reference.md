@@ -67,6 +67,15 @@ no overrides tab. See [the overrides tab](dispatcher.md#the-overrides-tab).
 spoolway
 ```
 
+In a main checkout with no `.spoolway/`, no workspace and no `source` line, it first opens a
+picker of the repository's other worktrees that hold a `.spoolway/`. `enter` writes the pick as
+the `source` line and opens the screen. `esc` leaves and writes nothing. With no such worktree it
+prints the same refusal as any other command. See [The source
+folder](configuration.md#the-source-folder).
+
+While a project reads a source, every tab shows a dim row under the tab strip, such as `setup
+~/dev/app-adopt/.spoolway`.
+
 One `spoolway` runs per project at a time. A second bare `spoolway`, or a typed `spoolway
 dispatch`, refuses while this screen is open, or while a dispatcher started from the CLI is
 running, printing the one line and exiting without drawing anything:
@@ -1860,7 +1869,8 @@ $ spoolway config source --clear
 
 The command refuses when the main checkout has a `.spoolway/` of its own, when the folder does not
 exist or holds no `.spoolway/`, when the folder is not a checkout or worktree of this
-repository, and in a workspace clone. It is refused in a dispatcher lane's worktree. It has no
+repository, when the folder is a worktree spoolway made for a task, and in a workspace clone. It
+is refused in a dispatcher lane's worktree. It has no
 `--json` form. Parallel calls run one after another.
 
 ### `spoolway config override [--set <key>=<value>]`
