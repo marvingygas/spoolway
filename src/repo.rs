@@ -2633,11 +2633,11 @@ pub(crate) enum SourceChange {
 /// person to it: [`Repo::discover`] would refuse before the command ran. A
 /// folder is stored as its canonical absolute path, since a relative one would
 /// name a different place from every other directory, and a folder that holds
-/// no `.spoolway/`, or that is not a checkout or worktree of the same
-/// repository, is refused rather than stored for the next command to refuse
-/// on. The read and the write of `project.toml` are made under the edit
-/// lock, so two parallel `config source` runs do not write over each
-/// other's line. `config set` never writes `project.toml`; it takes the same
+/// no `.spoolway/`, that is not a checkout or worktree of the same
+/// repository, or that is a lane's worktree, is refused rather than stored
+/// for the next command to refuse on. The read and the write of
+/// `project.toml` are made under the edit lock, so two parallel `config
+/// source` runs do not write over each other's line. `config set` never writes `project.toml`; it takes the same
 /// lock for its own file, which a source folder of this repository shares.
 ///
 /// `_command` is the entry in [`crate::commands::LANE_REFUSALS`] for the
@@ -2717,6 +2717,17 @@ pub(crate) fn change_source(
             shorten_home(&folder)
         );
     }
+    // A lane's worktree is this repository's and carries a `.spoolway/`, so
+    // every check above passes for it. Handover deletes it with its task, and
+    // a source naming it would leave the project refusing every command on a
+    // folder that is gone.
+    if started_in_lane(&folder, &home) {
+        bail!(
+            "{} is a worktree spoolway made for a task, and it is deleted when that task is              handed over, so it cannot be the source
+  give the folder of a worktree of your              own that holds a .spoolway/; `git worktree list` shows them",
+            shorten_home(&folder)
+        );
+    }
     // Overrides, the lock and every note are keyed off the git repository of
     // the folder a write lands in. A folder of another repository, or none,
     // would write this project's setup under another project's state.
@@ -2741,8 +2752,9 @@ pub(crate) struct SourceChoice {
     /// The main checkout, the project the picked folder becomes the source
     /// of.
     pub(crate) project: PathBuf,
-    /// Every other worktree of the repository that holds a `.spoolway/`, in
-    /// the order `git worktree list` gives them.
+    /// Every other worktree of the repository that holds a `.spoolway/`,
+    /// lanes' worktrees left out, in the order `git worktree list` gives
+    /// them.
     pub(crate) folders: Vec<PathBuf>,
 }
 
@@ -2751,7 +2763,8 @@ pub(crate) struct SourceChoice {
 ///
 /// `Some` only when `start` is in the main checkout itself, that checkout
 /// has no `.spoolway/`, no workspace lists it, its project record has no
-/// `source` line, and at least one other worktree holds a `.spoolway/`.
+/// `source` line, and at least one other worktree that is not a lane's holds
+/// a `.spoolway/`.
 /// Anything else is `None`, so discovery gives the answer it gives today:
 /// a worktree reads its own setup or refuses, a broken source or workspace
 /// file is named by its own refusal, and with no folder to list the
@@ -2778,8 +2791,9 @@ pub(crate) fn source_choice(start: &Path) -> Option<SourceChoice> {
     // A record holding any `source` line, absolute or not, is discovery's:
     // it reads that folder, or refuses naming it. A record that will not
     // parse is refused there too. No home or no record means no line.
-    if let Ok(home) = crate::mux::project_home(&project) {
-        match read_binding(&home) {
+    let home = crate::mux::project_home(&project).ok();
+    if let Some(home) = &home {
+        match read_binding(home) {
             Ok(Some(binding)) if binding.source.is_some() => return None,
             Err(_) => return None,
             Ok(_) => {}
@@ -2790,9 +2804,17 @@ pub(crate) fn source_choice(start: &Path) -> Option<SourceChoice> {
         .lines()
         .filter_map(|line| line.strip_prefix("worktree "))
         .map(git_path)
+        // A lane's worktree is left out: it carries a `.spoolway/` from its
+        // base, but handover deletes it with its task, and a source naming it
+        // would then leave every command here refusing a folder that is gone.
+        // `change_source` refuses one for the same reason. With no home there
+        // are no lanes.
         .filter(|folder| {
             folder.canonical().ok().as_deref() != Some(project.as_path())
                 && crate::config::tracked_setup_dir_in(folder).is_dir()
+                && !home
+                    .as_deref()
+                    .is_some_and(|home| started_in_lane(folder, home))
         })
         .collect();
     (!folders.is_empty()).then_some(SourceChoice { project, folders })
@@ -9296,10 +9318,33 @@ mod tests {
         });
     }
 
+    /// A worktree under the project home's worktrees folder, as a lane's is
+    /// cut, on the commit `like` has out, so it carries the same setup.
+    fn lane_worktree(work: &Path, like: &Path, name: &str) -> PathBuf {
+        let lane = crate::mux::project_home(work)
+            .unwrap()
+            .join(crate::mux::WORKTREES_DIR)
+            .join(name);
+        let commit = git(like, &["rev-parse", "HEAD"]);
+        git(
+            work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                lane.to_str().unwrap(),
+                commit.trim(),
+            ],
+        );
+        lane
+    }
+
     /// Bare `spoolway` is offered a picker only in the main checkout, only
     /// while its record has no `source` line, and only over the worktrees
-    /// that hold a `.spoolway/`. With no such worktree there is nothing to
-    /// offer, and discovery refuses as it does for every other command.
+    /// that hold a `.spoolway/` and are not a lane's. With no such worktree
+    /// there is nothing to offer, and discovery refuses as it does for every
+    /// other command.
     #[test]
     fn source_choice_lists_the_worktrees_with_a_setup_while_main_reads_none() {
         let project = source_project("source-choice");
@@ -9307,6 +9352,8 @@ mod tests {
             assert!(source_choice(&project.work).is_none(), "a source is set");
             let command = &crate::commands::refusal::CONFIG_SOURCE;
             change_source(&project.work, None, command).unwrap();
+            let lane = lane_worktree(&project.work, &project.detached, "task-x");
+            assert!(lane.join(crate::config::STATE_DIR).is_dir());
 
             let choice = source_choice(&project.work).expect("nothing to read");
             assert_eq!(choice.project, project.work.canonicalize().unwrap());
@@ -9314,7 +9361,7 @@ mod tests {
             listed.sort();
             let mut holding = vec![project.source.clone(), project.detached.clone()];
             holding.sort();
-            assert_eq!(listed, holding, "plain-wt holds no setup");
+            assert_eq!(listed, holding, "plain-wt holds no setup, task-x is a lane");
 
             // A worktree reads its own setup, or refuses, as it does today.
             assert!(source_choice(&project.plain).is_none());
@@ -9343,6 +9390,102 @@ mod tests {
             let repo = Repo::discover(&project.work).unwrap();
             assert_eq!(repo.source_in_use(), Some(picked));
             assert!(source_choice(&project.work).is_none());
+        });
+    }
+
+    /// A main checkout on `main` with no `.spoolway/`, no stamp and no
+    /// project record, since no command has ever run in it, and `adopt`, a
+    /// worktree beside it on a branch that commits one.
+    fn unregistered_with_adopt(name: &str) -> (PathBuf, PathBuf, crate::scratch::ScratchRoot) {
+        let base = crate::scratch::root(&format!("repo-test-{name}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        let adopt = base.join("adopt");
+        std::fs::create_dir_all(&work).unwrap();
+        crate::scratch::git_init(&work, &["-b", "main"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "adopt",
+                adopt.to_str().unwrap(),
+            ],
+        );
+        let setup = adopt.join(crate::config::STATE_DIR);
+        std::fs::create_dir_all(&setup).unwrap();
+        std::fs::write(setup.join("config.toml"), "").unwrap();
+        git(&adopt, &["add", "-A"]);
+        git(&adopt, &["commit", "-q", "-m", "the setup"]);
+        (work, adopt, base)
+    }
+
+    /// A pick in a main checkout no command has run in binds it first, so
+    /// the record that holds the `source` line exists, and discovery from
+    /// the main checkout then reads the picked folder.
+    #[test]
+    fn a_pick_in_an_unregistered_main_checkout_writes_its_record() {
+        let (work, adopt, _guard) = unregistered_with_adopt("source-pick-unregistered");
+        let (home, _home_guard) = scratch_home("source-pick-unregistered");
+        crate::platform::test_home::with_home(&home, || {
+            assert!(!work.join(".git").join(ID_FILE).exists());
+            let choice = source_choice(&work).expect("adopt holds a setup");
+            assert_eq!(choice.folders, [adopt.clone()]);
+            record_picked_source(&choice.project, &adopt).unwrap();
+            assert!(work.join(".git").join(ID_FILE).exists());
+            let picked = adopt.canonicalize().unwrap();
+            let record = read_binding(&crate::mux::project_home(&work).unwrap())
+                .unwrap()
+                .expect("the pick wrote a record");
+            assert_eq!(record.root, work.canonicalize().unwrap());
+            assert_eq!(record.source, Some(picked.clone()));
+            let repo = Repo::discover(&work).unwrap();
+            assert_eq!(repo.source_in_use(), Some(picked));
+        });
+    }
+
+    /// No picker for a main checkout with a `.spoolway/` of its own, which
+    /// it reads, or for one a workspace lists, which reads the workspace's
+    /// `config/` and never a source.
+    #[test]
+    fn source_choice_is_none_for_a_main_checkout_with_a_setup_or_a_workspace() {
+        let (work, _adopt, _guard) = unregistered_with_adopt("source-choice-guards");
+        let (home, _home_guard) = scratch_home("source-choice-guards");
+        crate::platform::test_home::with_home(&home, || {
+            assert!(source_choice(&work).is_some());
+            let own = work.join(crate::config::STATE_DIR);
+            std::fs::create_dir_all(&own).unwrap();
+            assert!(source_choice(&work).is_none(), "main has its own setup");
+            std::fs::remove_dir_all(&own).unwrap();
+        });
+        let canon = work.canonicalize().unwrap();
+        let (listed, _listed_guard) = workspace_fixture("source-choice-guards", &canon, "api");
+        crate::platform::test_home::with_home(&listed, || {
+            assert!(source_choice(&work).is_none(), "a workspace lists main");
+        });
+    }
+
+    /// A lane's worktree holds a `.spoolway/` and belongs to the repository,
+    /// but it goes with its task, so `config source` refuses it by name and
+    /// leaves the line alone.
+    #[test]
+    fn change_source_refuses_a_lanes_worktree() {
+        let project = source_project("source-change-lane");
+        crate::platform::test_home::with_home(&project.home, || {
+            let lane = lane_worktree(&project.work, &project.detached, "task-y");
+            let command = &crate::commands::refusal::CONFIG_SOURCE;
+            let said = change_source(&project.work, Some(&lane), command)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                said.contains("a worktree spoolway made for a task"),
+                "{said}"
+            );
+            assert!(said.contains("git worktree list"), "{said}");
+            assert_eq!(source_of(&project.work), Some(project.source.clone()));
         });
     }
 
