@@ -9296,6 +9296,56 @@ mod tests {
         });
     }
 
+    /// Bare `spoolway` is offered a picker only in the main checkout, only
+    /// while its record has no `source` line, and only over the worktrees
+    /// that hold a `.spoolway/`. With no such worktree there is nothing to
+    /// offer, and discovery refuses as it does for every other command.
+    #[test]
+    fn source_choice_lists_the_worktrees_with_a_setup_while_main_reads_none() {
+        let project = source_project("source-choice");
+        crate::platform::test_home::with_home(&project.home, || {
+            assert!(source_choice(&project.work).is_none(), "a source is set");
+            let command = &crate::commands::refusal::CONFIG_SOURCE;
+            change_source(&project.work, None, command).unwrap();
+
+            let choice = source_choice(&project.work).expect("nothing to read");
+            assert_eq!(choice.project, project.work.canonicalize().unwrap());
+            let mut listed = choice.folders.clone();
+            listed.sort();
+            let mut holding = vec![project.source.clone(), project.detached.clone()];
+            holding.sort();
+            assert_eq!(listed, holding, "plain-wt holds no setup");
+
+            // A worktree reads its own setup, or refuses, as it does today.
+            assert!(source_choice(&project.plain).is_none());
+
+            for folder in [&project.source, &project.detached] {
+                std::fs::remove_dir_all(folder.join(crate::config::STATE_DIR)).unwrap();
+            }
+            assert!(source_choice(&project.work).is_none());
+            let refused = format!("{:#}", Repo::discover(&project.work).err().unwrap());
+            assert!(refused.contains("is not on branch"), "{refused}");
+        });
+    }
+
+    /// The folder picked in bare `spoolway` is written as the `source` line,
+    /// and discovery from the main checkout then reads it.
+    #[test]
+    fn a_picked_source_is_written_and_read_by_the_next_discovery() {
+        let project = source_project("source-picked");
+        crate::platform::test_home::with_home(&project.home, || {
+            let command = &crate::commands::refusal::CONFIG_SOURCE;
+            change_source(&project.work, None, command).unwrap();
+            let choice = source_choice(&project.work).unwrap();
+            record_picked_source(&choice.project, &project.detached).unwrap();
+            let picked = project.detached.canonicalize().unwrap();
+            assert_eq!(source_of(&project.work), Some(picked.clone()));
+            let repo = Repo::discover(&project.work).unwrap();
+            assert_eq!(repo.source_in_use(), Some(picked));
+            assert!(source_choice(&project.work).is_none());
+        });
+    }
+
     /// A folder with no `.spoolway/` is refused, and the line is left alone.
     #[test]
     fn change_source_refuses_a_folder_without_a_setup() {

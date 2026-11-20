@@ -2271,6 +2271,56 @@ mod tests {
         }
     }
 
+    /// Every tab of a project reading a `source` folder draws the row naming
+    /// that folder straight under the strip, and takes it off its body: the
+    /// key line still ends above the last two blank rows. [`strip_rows`]
+    /// counts the row, so it is [`strip`]'s own length.
+    #[test]
+    fn every_tab_takes_the_setup_row_off_its_body_while_a_source_is_in_use() {
+        let project = crate::repo::source_project("shell-host-setup-row");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            let setup = setup_row(&repo).expect("the project reads a source");
+            assert_eq!(
+                setup,
+                format!(
+                    "setup  {}",
+                    crate::repo::shorten_home(
+                        &project
+                            .source
+                            .canonicalize()
+                            .unwrap()
+                            .join(crate::config::STATE_DIR)
+                    )
+                )
+            );
+            {
+                let _hosting = Hosting::open_in(Tab::Queue, &TABS, Some(setup.clone()));
+                assert_eq!(strip_rows(), strip().len());
+                assert_eq!(strip_rows(), 4);
+            }
+            let (width, height) = (100, 24);
+            let _terminal = crate::screen::test_terminal((width, height));
+            let frames = drive_host_raw_frames(&repo, "12345");
+            assert_eq!(frames.len(), 6, "{frames:?}");
+            for frame in &frames {
+                let mut parser = crate::screen::frame_writer::test_parser((width, height));
+                parser.process(&crate::screen::frame_writer::as_terminal_would_receive(
+                    frame.as_bytes(),
+                ));
+                let shown = parser.screen().contents();
+                let rows: Vec<&str> = shown.split('\n').collect();
+                let row = |at: usize| rows.get(at).map_or("", |row| row.trim());
+                assert!(row(1).starts_with("[1] DISPATCH"), "{shown}");
+                assert_eq!(row(2), setup, "{shown}");
+                assert_eq!(row(3), "", "{shown}");
+                assert!(row(height - 3).contains("[q] quit"), "{shown}");
+                assert_eq!(row(height - 2), "", "{shown}");
+                assert_eq!(row(height - 1), "", "{shown}");
+            }
+        });
+    }
+
     /// [`draw_board`] with a fresh board and dispatch tab over `repo`, and
     /// a fixed pane size so a test can hold it steady or change it on
     /// purpose rather than depending on whatever terminal `cargo test`
