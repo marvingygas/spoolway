@@ -19,8 +19,9 @@ use super::{PollableRead, RawStdin};
 /// The box's title, as the mockup words it.
 const TITLE: &str = "read the setup from";
 
-/// How the list is drawn: the width and keys of every other pick-one list,
-/// so this popup reads as one of them.
+/// How the list is drawn: the width of the queue tab's edit pickers, which
+/// is the box the mockup draws, and the keys every pick-one list shows. A
+/// folder path longer than the width widens the box to fit it.
 const LOOK: Look = Look {
     width: 44,
     column: 30,
@@ -70,10 +71,11 @@ fn choose(
 }
 
 /// One blank row, then the popup. The list is cut to the terminal's height:
-/// [`Picker::popup`] draws a box two rows taller than the rows it is given,
-/// and the blank row above it and the row the cursor's last newline leaves
-/// at the foot take one each, so it is given three fewer than the terminal
-/// has. With no terminal to measure it draws its usual number of rows.
+/// [`Picker::popup`] draws a popup one row taller than the rows it is given,
+/// and the blank row above it and the terminal's last row, which the
+/// cursor's last newline leaves blank, take one each, so it is given three
+/// fewer than the terminal has. With no terminal to measure it draws its
+/// usual number of rows.
 fn frame(picker: &Picker<PathBuf>) -> Vec<String> {
     let rows = super::drawing_area().map(|(_, height)| height.saturating_sub(3));
     let mut frame = vec![String::new()];

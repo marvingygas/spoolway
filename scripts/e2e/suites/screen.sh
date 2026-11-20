@@ -34,7 +34,10 @@
 # keeps its key line. The dispatch tab's box ends on a tip row, `tip:`, a
 # section label and a `·` before the tip, on the empty board and the full one
 # alike, and `dispatch.tips = false` draws none. Off a
-# terminal, bare `spoolway` still prints the grouped help.
+# terminal, bare `spoolway` still prints the grouped help. In a main checkout
+# with no setup and no source line, it opens a picker of the worktrees that
+# hold a `.spoolway/` first; `esc` writes nothing, and `enter` writes the
+# source line and opens the screen with a row naming the setup it reads.
 #
 # covers: dispatch.tips — set to false, the full board draws no tip row and keeps its table
 #
@@ -981,5 +984,55 @@ has "the layer keeps the promoted entry" "effort: low" "$PATCHES/bugfix.yml"
 HELP="$LIVE/help.txt"
 "$SPOOLWAY" 2>"$HELP" | cat >/dev/null
 has "spoolway | cat still prints the grouped help" "Your work:" "$HELP"
+
+# ------------------------------------------- pick a source folder at the start
+# Bare `spoolway` in a main checkout with no `.spoolway/` and no source line,
+# while a worktree of the repository holds one, opens a picker of those
+# worktrees before any tab. `esc` leaves with nothing written. `enter` writes
+# the worktree as the `source` line and opens the screen on it, with one row
+# under the strip naming the setup folder it reads. Last in the suite: the
+# fixture is a repository of its own, and `new_repo` moves into it.
+new_repo "$LIVE/pick-app"
+must "a feature worktree of a repository with no setup" \
+  git worktree add -q -b feature/adopt "$LIVE/pick-adopt"
+ADOPT=$(cd "$LIVE/pick-adopt" && pwd -P)
+must "init in the worktree sets it up" env -C "$ADOPT" "$SPOOLWAY" init --yes
+must "and its source line is cleared" "$SPOOLWAY" config source --clear
+"$SPOOLWAY" -C "$ADOPT" sync >/dev/null 2>&1 || true
+project_home_after_init
+# The picker and the row name a folder under home by its `~` form.
+case "$ADOPT" in
+  "$HOME"/*) ADOPT_SHORT="~/${ADOPT#"$HOME"/}" ;;
+  *) ADOPT_SHORT=$ADOPT ;;
+esac
+
+PICK_ESC="$LIVE/pick-esc.txt"
+works "bare spoolway with nothing to read ends on esc" \
+  script -qec "stty cols 100; printf '\033' | '$SPOOLWAY'" "$PICK_ESC"
+sed 's/\x1b\[[0-9;]*m//g' "$PICK_ESC" >"$PICK_ESC.plain"
+has "it opens the picker" "╭─ read the setup from ─" "$PICK_ESC.plain"
+has "listing the worktree that holds a .spoolway/" "│  > $ADOPT_SHORT " "$PICK_ESC.plain"
+# The box widens to fit a long path, so the key row is matched unpadded.
+has "under the pick-one keys" "│  [enter] confirm   [f] search   [esc] back" \
+  "$PICK_ESC.plain"
+# The file's own comments name `source`, so the line itself is matched.
+works "esc writes no source line" \
+  bash -c '! grep -qE "^[[:space:]]*source[[:space:]]*=" "$1"' _ "$SPOOLWAY_PROJECT_HOME/project.toml"
+
+PICK_ENTER="$LIVE/pick-enter.txt"
+works "enter picks the worktree and opens the screen" \
+  script -qec "stty cols 100; printf '\r' | '$SPOOLWAY'" "$PICK_ENTER"
+sed 's/\x1b\[[0-9;]*m//g' "$PICK_ENTER" >"$PICK_ENTER.plain"
+has "the pick is written as the source line" "source = \"$ADOPT\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+has "the screen opens on the dispatch tab" "dispatcher stopped" "$PICK_ENTER.plain"
+has "with the row naming the setup it reads" "setup  $ADOPT_SHORT/.spoolway" \
+  "$PICK_ENTER.plain"
+PICK_AGAIN="$LIVE/pick-again.txt"
+works "the next start opens the screen straight away" \
+  script -qec "stty cols 100; printf '' | '$SPOOLWAY'" "$PICK_AGAIN"
+sed 's/\x1b\[[0-9;]*m//g' "$PICK_AGAIN" >"$PICK_AGAIN.plain"
+lacks "with no picker" "read the setup from" "$PICK_AGAIN.plain"
+has "and the row still there" "setup  $ADOPT_SHORT/.spoolway" "$PICK_AGAIN.plain"
 
 finish
