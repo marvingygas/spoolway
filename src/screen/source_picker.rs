@@ -23,7 +23,7 @@ const TITLE: &str = "read the setup from";
 /// is the box the mockup draws, and the keys every pick-one list shows. A
 /// folder path longer than the width widens the box to fit it.
 const LOOK: Look = Look {
-    width: 44,
+    width: crate::commands::EDIT_PICK_TEXT,
     column: 30,
     keys: &[("enter", "confirm"), ("f", "search"), ("esc", "back")],
     noun: ("folder", "folders"),

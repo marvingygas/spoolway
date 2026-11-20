@@ -998,7 +998,6 @@ must "a feature worktree of a repository with no setup" \
 ADOPT=$(cd "$LIVE/pick-adopt" && pwd -P)
 must "init in the worktree sets it up" env -C "$ADOPT" "$SPOOLWAY" init --yes
 must "and its source line is cleared" "$SPOOLWAY" config source --clear
-"$SPOOLWAY" -C "$ADOPT" sync >/dev/null 2>&1 || true
 project_home_after_init
 # The picker and the row name a folder under home by its `~` form.
 case "$ADOPT" in

@@ -5179,10 +5179,11 @@ impl std::fmt::Debug for PipelinePick {
 const EDIT_PICK_KEYS: &[(&str, &str)] = &[("enter", "confirm"), ("f", "search"), ("esc", "back")];
 
 /// The columns of text in the edit pipeline, edit lands in and edit depends
-/// on pickers, between their margins. Pipeline names are short, so this is
+/// on pickers, between their margins, and in the source picker bare
+/// `spoolway` opens before any tab. Pipeline names are short, so this is
 /// narrower than the promote picker's branch list; a name longer than it
 /// widens the popup rather than being cut.
-const EDIT_PICK_TEXT: usize = 44;
+pub(crate) const EDIT_PICK_TEXT: usize = 44;
 
 /// The column `origin` starts at on the edit lands in picker's row for a
 /// branch only `origin` has, counted from the cursor mark. It leaves room
