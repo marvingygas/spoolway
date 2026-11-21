@@ -30097,8 +30097,15 @@ mod tests {
         /// A hook that answers a slug renames every branch after validation
         /// has asked about the `task/<id>` ones. The leftover check of the
         /// renamed ones reads the listing validation made, so `queue add`
-        /// and a job's firing each put one `git ls-remote` to `origin`, not
-        /// a second after the hook.
+        /// and each pass of a job's firing put one `git ls-remote` to
+        /// `origin`, not a second after the hook.
+        ///
+        /// The firing is counted a pass at a time. It does not wait on its
+        /// hook, and on a loaded machine the hook can still be running when
+        /// the first pass looks, so the firing settles on a later pass. Each
+        /// pass is a submission of its own and lists `origin` afresh, so the
+        /// total grows with the number of passes; what each pass lists does
+        /// not.
         #[test]
         fn a_renamed_batch_asks_origin_once_for_queue_add_and_for_a_firing() {
             let (mut repo, _root_guard) = fixture("open-prefix-origin-once");
@@ -30144,20 +30151,31 @@ mod tests {
                 ),
             );
             let folder = repo.routines_dir().join("nightly");
-            routine_settled(
-                &repo,
-                &Pipelines::builtin(),
-                Some("plan/demo"),
-                &folder,
-                "bugfix",
-            )
-            .unwrap();
-
-            assert_eq!(
-                origin_calls(&calls),
-                2,
-                "the firing added one listing of its own"
-            );
+            for pass in 1..=400 {
+                let before = origin_calls(&calls);
+                let fired = queue_routine_target(
+                    &repo,
+                    &Pipelines::builtin(),
+                    Some("plan/demo"),
+                    &folder,
+                    "bugfix",
+                );
+                assert_eq!(
+                    origin_calls(&calls) - before,
+                    1,
+                    "pass {pass} of the firing added one listing of its own"
+                );
+                match fired {
+                    Err(err) if err.downcast_ref::<crate::tracking::OpenPending>().is_some() => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    settled => {
+                        settled.unwrap();
+                        return;
+                    }
+                }
+            }
+            panic!("the open hook never settled");
         }
 
         /// A task that has already been through the queue once —
