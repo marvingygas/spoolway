@@ -59,7 +59,7 @@ as JSON.
 | `labels` | you | Plain words for a hook to put on this task's own tracker issue and its group's. A label may hold no whitespace and no comma. |
 | `complexity` | the planner, or you | Experimental. The planner's estimate of how complex the task is, a whole number from 1 to 100, where 100 is extremely complex. Every ledger line the task banks carries it, and `spoolway eval --by task` shows it. Optional. See [A complexity outside 1 to 100](#a-complexity-outside-1-to-100). |
 | `epic`, `ticket` | the `open` hook, or you | Tracker references. A task that sets `ticket:` itself skips the hook. See [Issue tracking](configuration.md#open--a-fifth-event-run-by-queue-add-itself). |
-| `tracking` | the queue screen's checklist, `queue add --no-tracking`, or you | `off` is the only value accepted. Fires no `[issue_tracking]` hook event for this task and never holds it waiting on one. See [Issue tracking](configuration.md#issue_tracking--a-hook-fired-on-four-task-events). |
+| `tracking` | the queue screen's checklist, `queue add --no-tracking`, or you | `off` is the only value accepted. Fires no `[issue_tracking]` hook event for this task and never holds it waiting on one. See [Issue tracking](configuration.md#issue_tracking--a-hook-fired-on-task-events). |
 | `stage` | the pipeline | The step the task is on. |
 | `routine` | the routines tab, or a job | The `id:` of the routine file this task is a queued copy of. The board and the `queued` popup show it in place of the numbered id. See [Routines](planning.md#routines). |
 | `branch` | the dispatcher | `task/<id>`, or `task/<slug>-<id>` with `issue_tracking.key_in_names`. A group whose every task in the batch sets `tracking: off` keeps `task/<id>`. |
@@ -424,7 +424,7 @@ step. A step with no `on_fail` sends the task to `blocked`. To wave the failure 
 instead, pick the step's `on_pass` step in the picker. To close the task instead, pick the
 `done` row. See [Closing a stuck task](#closing-a-stuck-task).
 
-A failing [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-four-task-events)
+A failing [issue-tracking hook](configuration.md#issue_tracking--a-hook-fired-on-task-events)
 also stops the task, on `queued`, on `started` or on `done`. The task moves to `hook_failed`,
 and no hook event fires for that stage. `spoolway resume` forgets the hook's failed run, so the
 hook fires again. A task stopped by its `queued` or `started` hook resumes back to `queued`. A

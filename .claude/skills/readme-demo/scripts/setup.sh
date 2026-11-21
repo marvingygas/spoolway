@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the "shop" demo project the README GIF records: a small Node app at
 # ~/demo/shop, the impl / impl_fast / impl_tdd pipelines, the cart and checkout
-# groups in pending (not queued), three routines and two jobs.
+# groups in pending (not queued), three routines, two jobs, and three weeks
+# of made-up runs in the ledger for the eval tab.
 #
 # Usage: setup.sh            Refuses to run if ~/demo already exists.
 # Prints the project's home directory (~/.spoolway/shop-<id>) on the last line.
@@ -730,6 +731,10 @@ A shopper whose order is paid gets a plain-text receipt by email.
 - `src/checkout.js` — where the order is paid.
 EOF
 "$SPOOLWAY" task contract --from "$P" >/dev/null
+
+# Three weeks of made-up runs in the ledger, so the eval tab has a table to
+# show. Live runs during the recording land on top of them.
+python3 "$HERE/fake-eval.py" "$HOME_DIR" >/dev/null
 
 # Trust the checkout in Claude Code, or every lane stops on the trust dialog.
 python3 "$HERE/claude-trust.py" add "$REPO"

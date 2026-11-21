@@ -83,7 +83,7 @@ names each such file once per matching minute.
 
 A job never waits on a key. If the issue hook names a tool that is missing or too old, the
 dispatcher names the tool once for that minute and queues the job's tasks with `tracking: off`.
-See [Configuration](configuration.md#issue_tracking--a-hook-fired-on-four-task-events).
+See [Configuration](configuration.md#issue_tracking--a-hook-fired-on-task-events).
 
 A job table may only hold the keys in the example under [Where a job lives](#where-a-job-lives).
 A job whose table holds any other key, such as `enable = false`, never fires. The dispatcher

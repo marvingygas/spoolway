@@ -23,9 +23,11 @@ fi
 # usual look. Not `wt.exe -p Ubuntu`: that profile has a different font.
 # An interactive zsh, because herdr's PATH entry lives in ~/.zshrc.
 # Detached: cmd.exe does not exit after `start`, and waiting on it hangs this
-# script while the window itself is already up.
+# script while the window itself is already up. The redirect sits outside the
+# subshell so the background job does not hold this script's stdout open
+# either; otherwise a caller piping it (`open.sh | tail`) waits forever.
 (cd /mnt/c && cmd.exe /c start "" "C:\Program Files\WSL\wsl.exe" -d "$WSL_DISTRO_NAME" \
-  --cd "$REPO" -- /usr/bin/zsh -ic "herdr --session $SESSION" </dev/null >/dev/null 2>&1 &)
+  --cd "$REPO" -- /usr/bin/zsh -ic "herdr --session $SESSION" &) </dev/null >/dev/null 2>&1
 
 for _ in $(seq 1 40); do session_running && break; sleep 0.5; done
 session_running || { echo "herdr session '$SESSION' did not start" >&2; exit 1; }
