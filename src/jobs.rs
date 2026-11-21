@@ -466,6 +466,18 @@ fn store_path(repo: &Repo, scope: Scope) -> PathBuf {
     }
 }
 
+/// Refuse a write to the project's own store while that store is inside a
+/// `source` folder, the person's own and not this project's to change.
+fn refuse_source_store(repo: &Repo, scope: Scope) -> Result<()> {
+    if let (Scope::Project, Some(source)) = (scope, repo.source_in_use()) {
+        bail!(
+            "{}",
+            crate::repo::source_write_refusal(&repo.checkout, &source)
+        );
+    }
+    Ok(())
+}
+
 /// A store file's text, or `None` when the file is simply not there. Any
 /// other read failure — a permission wall, an I/O error — is returned with
 /// the path, so a caller never mistakes it for an empty store and overwrites
@@ -487,6 +499,7 @@ fn read_store_text(path: &Path) -> Result<Option<String>> {
 /// since absent means enabled (see [`JobSpec::enabled`]) — so activating a job
 /// removes the key rather than writing the default.
 pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()> {
+    refuse_source_store(repo, scope)?;
     let path = store_path(repo, scope);
     let text = read_store_text(&path)?.unwrap_or_default();
     let mut doc: DocumentMut = text
@@ -542,6 +555,7 @@ pub fn write(repo: &Repo, scope: Scope, name: &str, spec: &JobSpec) -> Result<()
 /// store holds the job, and a store it never needed cannot fail it after the
 /// removal landed.
 pub fn delete_in(repo: &Repo, scope: Scope, name: &str) -> Result<()> {
+    refuse_source_store(repo, scope)?;
     let path = store_path(repo, scope);
     let Some(text) = read_store_text(&path)? else {
         return Ok(());

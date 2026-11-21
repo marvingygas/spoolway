@@ -672,6 +672,15 @@ pub(super) fn set_enabled(
     let mut spec = job.spec.clone();
     spec.enabled = enabled;
     let verb = toggle_verb(enabled);
+    // Refused by `jobs::write` as well; asked here first so the refusal is
+    // not wrapped in advice to check the file is writable, which is wrong for
+    // a store inside a source folder.
+    if let (Scope::Project, Some(source)) = (job.scope, repo.source_in_use()) {
+        return Err(Notice::new(
+            verb,
+            crate::repo::source_write_refusal(&repo.checkout, &source),
+        ));
+    }
     jobs::write(repo, job.scope, &job.name, &spec).map_err(|err| {
         Notice::new(
             verb,
@@ -749,6 +758,10 @@ fn commit_draft(repo: &Repo, draft: Draft) -> std::result::Result<String, String
         base: None,
     };
 
+    // As in the toggle above: the source refusal goes out unwrapped.
+    if let (Scope::Project, Some(source)) = (draft.scope, repo.source_in_use()) {
+        return Err(crate::repo::source_write_refusal(&repo.checkout, &source));
+    }
     jobs::write(repo, draft.scope, &name, &spec).map_err(|err| {
         format!(
             "could not save the job `{name}` to `{}`: {err:#}. check the file is writable and try \
@@ -1128,6 +1141,48 @@ mod tests {
                 "1 job, 0 active.",
             ],
             "{text}"
+        );
+    }
+
+    /// On a source, toggling or saving a project job answers the source
+    /// refusal itself, not wrapped in advice to check the file is writable.
+    #[test]
+    fn a_project_job_on_a_source_answers_the_source_refusal_unwrapped() {
+        let project = crate::repo::source_project("jobs-on-a-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            let job = Job {
+                name: "nightly".to_string(),
+                scope: Scope::Project,
+                spec: JobSpec {
+                    routine: "nightly".to_string(),
+                    ..JobSpec::neutral()
+                },
+                source: repo.jobs_file(),
+                unknown_keys: Vec::new(),
+            };
+            let notice = set_enabled(&repo, &job, false).unwrap_err();
+            assert!(
+                notice.text.contains("would land in that folder"),
+                "{}",
+                notice.text
+            );
+            assert!(!notice.text.contains("writable"), "{}", notice.text);
+
+            let mut draft = Draft::new(&Pipelines::builtin());
+            draft.routine = "nightly".to_string();
+            draft.schedule = "@daily".to_string();
+            draft.scope = Scope::Project;
+            let refusal = commit_draft(&repo, draft).unwrap_err();
+            assert!(refusal.contains("would land in that folder"), "{refusal}");
+            assert!(!refusal.contains("writable"), "{refusal}");
+        });
+        assert!(
+            !project
+                .source
+                .join(crate::config::STATE_DIR)
+                .join("jobs.toml")
+                .exists()
         );
     }
 

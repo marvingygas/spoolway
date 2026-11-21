@@ -26,6 +26,10 @@
 //! the same lock, for a lane's `report` and a `spoolway stack` step to run
 //! on when `config.toml` breaks or goes missing — see [`recorded_config`].
 //!
+//! It also names the folder the dispatcher read its setup from, so a lane
+//! whose own worktree carries no setup, or another one, reads the dispatcher's
+//! — see [`live_setup_folder`].
+//!
 //! Read only while the lock names a live dispatcher, and only when that lock
 //! is the one this snapshot was written under — see [`LoadedPipelines::live`].
 //! A snapshot a crashed dispatcher left behind is never current, and with
@@ -69,6 +73,16 @@ struct Written {
     clashes: BTreeMap<String, crate::pipeline::Clash>,
     /// Every pipeline source file the load could have read, label to text.
     sources: BTreeMap<String, String>,
+    /// The folder `sources` was read from: the dispatcher's own
+    /// [`Repo::setup_source`]. A reader compares against this folder rather
+    /// than its own, which differs for a lane and for a second worktree that
+    /// carries a setup of its own. A lane whose project's main checkout has
+    /// no setup reads from it too: see [`live_setup_folder`]. A snapshot from
+    /// before this existed has
+    /// none, which reads as the project's root, where every dispatcher read
+    /// then.
+    #[serde(default)]
+    source: Option<PathBuf>,
     /// The `unattended.blocked_*` values the `blocked` steps above were filled
     /// in from. A snapshot from before this existed has none, which names no
     /// key as changed.
@@ -151,7 +165,8 @@ pub fn write(
         lock,
         pipelines: encoded,
         clashes: pipelines.clashes.clone(),
-        sources: sources(&repo.root),
+        sources: sources(&repo.setup_source()),
+        source: Some(repo.setup_source()),
         blocked: Some(BlockedKeys::of(unattended)),
     };
     let path = path(repo);
@@ -238,6 +253,30 @@ pub fn recorded_config(repo: &Repo) -> Result<Option<crate::config::Config>> {
     Ok(Some(config))
 }
 
+/// The snapshot in project home `home` and its path, when it was written by
+/// the dispatcher holding that home's lock now. A home, not a [`Repo`]: a lane
+/// asks before it has one, to find which folder its project's setup is in.
+fn read_live(home: &Path) -> Option<(Written, PathBuf)> {
+    let lock_file = home.join(crate::lock::LOCK_FILE);
+    crate::lock::Lock::holder(&lock_file).ok().flatten()?;
+    let lock = std::fs::read_to_string(&lock_file).ok()?;
+    let path = home.join(SNAPSHOT_FILE);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let written: Written = serde_json::from_str(&raw).ok()?;
+    (written.lock == lock).then_some((written, path))
+}
+
+/// The folder whose setup the dispatcher running in project home `home` reads:
+/// its own [`Repo::setup_source`], as it recorded it with the snapshot.
+///
+/// `None` when no dispatcher is running, when the snapshot is not its own, or
+/// when it predates the field. A lane reads this on every command, and a
+/// reload rewrites the snapshot, so a lane follows the dispatcher to wherever
+/// a reload moved it.
+pub fn live_setup_folder(home: &Path) -> Option<PathBuf> {
+    read_live(home)?.0.source
+}
+
 /// A snapshot whose writer is the dispatcher running now.
 #[derive(Debug)]
 pub struct LoadedPipelines {
@@ -255,13 +294,9 @@ impl LoadedPipelines {
     /// files rather than refuse, since the files are what every command
     /// routed on before the snapshot existed.
     pub fn live(repo: &Repo) -> Option<LoadedPipelines> {
-        let lock_file = repo.lock_file();
-        crate::lock::Lock::holder(&lock_file).ok().flatten()?;
-        let lock = std::fs::read_to_string(&lock_file).ok()?;
-        let path = path(repo);
-        let raw = std::fs::read_to_string(&path).ok()?;
-        let written: Written = serde_json::from_str(&raw).ok()?;
-        (written.lock == lock).then_some(LoadedPipelines { written, path })
+        let home = repo.home();
+        let (written, path) = read_live(home)?;
+        Some(LoadedPipelines { written, path })
     }
 
     /// The dispatcher's pid, off the lock text's first line.
@@ -333,8 +368,17 @@ impl LoadedPipelines {
     /// Every pipeline source file whose text differs from what the
     /// dispatcher loaded — edited, added or removed since — by label,
     /// sorted.
-    pub fn changed(&self, root: &Path) -> Vec<String> {
-        changed_between(&self.written.sources, &sources(root))
+    pub fn changed(&self, repo: &Repo) -> Vec<String> {
+        changed_between(&self.written.sources, &sources(&self.source(repo)))
+    }
+
+    /// The folder the dispatcher read its pipelines from, which `sources`
+    /// was recorded against and so the one to compare it with.
+    fn source(&self, repo: &Repo) -> PathBuf {
+        self.written
+            .source
+            .clone()
+            .unwrap_or_else(|| repo.root.clone())
     }
 }
 
@@ -370,7 +414,7 @@ pub fn for_task(repo: &Repo, task: Option<&str>) -> Option<Result<Pipelines>> {
         .filter(|name| {
             loaded.written.pipelines.contains_key(*name)
                 || loaded.written.clashes.contains_key(*name)
-                || !gone_from_disk(&repo.root, name.trim())
+                || !gone_from_disk(&loaded.source(repo), name.trim())
         })
         .into_iter()
         .collect();
@@ -422,7 +466,7 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
             // is drawn held, with the line that says the pipeline is gone.
             if !loaded.written.pipelines.contains_key(name)
                 && !loaded.written.clashes.contains_key(name)
-                && gone_from_disk(&repo.root, name.trim())
+                && gone_from_disk(&loaded.source(repo), name.trim())
             {
                 continue;
             }
@@ -461,7 +505,7 @@ pub fn for_tasks(repo: &Repo, tasks: &[Task]) -> Option<Routed> {
 /// they are, and there is no restart to wait on.
 pub fn changed_since_start(repo: &Repo) -> Vec<String> {
     LoadedPipelines::live(repo)
-        .map(|loaded| loaded.changed(&repo.root))
+        .map(|loaded| loaded.changed(repo))
         .unwrap_or_default()
 }
 
@@ -478,7 +522,7 @@ pub fn config_changed_since_start(repo: &Repo) -> Vec<String> {
     let Some(loaded) = LoadedPipelines::live(repo) else {
         return Vec::new();
     };
-    let Ok(config) = crate::config::Config::load_present(&repo.root) else {
+    let Ok(config) = crate::config::Config::load_present(&repo.setup_source()) else {
         return Vec::new();
     };
     let mut changed = Vec::new();
@@ -806,6 +850,39 @@ mod tests {
         assert!(gone_from_disk(&repo.root, "retired"));
         assert!(!gone_from_disk(&repo.root, "added"));
         assert!(loaded.pipelines(&["retired"]).is_err());
+    }
+
+    /// A reader compares the files with the folder the dispatcher read them
+    /// from, not with its own: a lane's folder is the project's and a second
+    /// worktree's is its own, and neither is where the run loaded from. A
+    /// snapshot with no recorded folder is compared against the project's
+    /// root, where a dispatcher read before the folder was recorded.
+    #[test]
+    fn a_snapshot_is_compared_with_the_folder_the_dispatcher_read() {
+        let (repo, root, pipelines) = project("snapshot-source");
+        let _lock = crate::lock::Lock::acquire(&repo.lock_file(), false, None).unwrap();
+        write(&repo, &pipelines, &repo.config.unattended).unwrap();
+
+        // The dispatcher read a folder of its own, which still holds the file
+        // as loaded.
+        let other = root.join("dispatcher-setup");
+        let dir = Pipelines::dir_in(&other);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(Pipelines::file_in(&repo.root, "t"), dir.join("t.yml")).unwrap();
+        let path = path(&repo);
+        let mut written: Written =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        written.sources = sources(&other);
+        written.source = Some(other);
+        std::fs::write(&path, serde_json::to_string(&written).unwrap()).unwrap();
+
+        // The reader's own folder was edited, which is no news about the run.
+        std::fs::write(Pipelines::file_in(&repo.root, "t"), "# edited\n").unwrap();
+        assert_eq!(changed_since_start(&repo), Vec::<String>::new());
+
+        written.source = None;
+        std::fs::write(&path, serde_json::to_string(&written).unwrap()).unwrap();
+        assert_eq!(changed_since_start(&repo), vec!["t.yml".to_string()]);
     }
 
     #[test]

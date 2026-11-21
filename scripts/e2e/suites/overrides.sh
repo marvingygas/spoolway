@@ -798,4 +798,30 @@ works "a directory not on the retired list is untouched" \
 works "and the renamed skill itself is installed" \
   test -f .claude/skills/spoolway-config/SKILL.md
 
+# ------------------------------------------- config set lands in the source
+# A main checkout with no `.spoolway/` reads the setup in the folder its
+# `source` line names, so that is the file `config set` has to change, and the
+# note after it names the folder rather than a branch.
+must "a worktree that will hold the setup" \
+  git worktree add -q -b source-wt "$LIVE/source-wt"
+SRC_WT=$(cd "$LIVE/source-wt" && pwd -P)
+must "gives it the setup" cp -a .spoolway "$SRC_WT/.spoolway"
+must "and takes the main checkout's own away" rm -rf .spoolway
+must "reading the setup from it" "$SPOOLWAY" config source "$SRC_WT"
+SET_OUT=$("$SPOOLWAY" config set dispatch.visible_lanes 5 2>&1)
+if grep -qxF "  spoolway uses $SRC_WT as its setup" <<<"$SET_OUT"; then
+  ok "config set in the main checkout names the source folder"
+else
+  bad "config set in the main checkout names the source folder"; sed 's/^/        /' <<<"$SET_OUT"
+fi
+has "and wrote the source's config.toml" "visible_lanes = 5" "$SRC_WT/.spoolway/config.toml"
+works "and wrote no setup into the main checkout" test ! -e .spoolway
+says "the value is the one the project reads" "5" "$SPOOLWAY" config get dispatch.visible_lanes
+refuses "a pipeline write the source does not follow still refuses" "would land in that folder" \
+  "$SPOOLWAY" pipeline promote nothing
+must "an override to promote" "$SPOOLWAY" config override --set dispatch.lane_quiet=7m
+says "override promote writes the source and names it" \
+  "  spoolway uses $SRC_WT as its setup" "$SPOOLWAY" override promote config.toml
+has "its config.toml carries the promoted key" "7m" "$SRC_WT/.spoolway/config.toml"
+
 finish

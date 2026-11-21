@@ -14,7 +14,9 @@
 //! strip, one terminal guard and one quit — and [`dispatcher`] is the
 //! `spoolway dispatch` child its dispatch tab starts and stops. [`picker`] is
 //! the searchable list any of them opens a popup over, and [`spool`] the
-//! loading spool turned over a tab while a key's work runs.
+//! loading spool turned over a tab while a key's work runs. [`source_picker`]
+//! is the one list bare `spoolway` opens before any tab, to pick the folder
+//! a main checkout with no setup reads it from.
 
 pub(crate) mod dispatcher;
 pub(crate) mod frame_writer;
@@ -22,6 +24,7 @@ pub(crate) mod overrides;
 pub(crate) mod pane;
 pub(crate) mod picker;
 pub(crate) mod shell;
+pub(crate) mod source_picker;
 pub(crate) mod spool;
 
 /// One key a screen reads, decoded from however many bytes it took.

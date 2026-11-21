@@ -655,4 +655,70 @@ else
 fi
 rm -f "$SPOOLWAY_PROJECT_HOME/queue/stuck-pause.md" "$SPOOLWAY_PROJECT_HOME/queue/stuck-block.md"
 
+# ------------------------------------- a task run under a source folder's setup
+# Adopting a project: the main checkout carries no `.spoolway/`, a `source`
+# line in the project's `project.toml` names a folder that does, and a task is
+# cut from a base that has none either. The lane's worktree then has no setup
+# to read, so `report` and every step's own commands depend on the lane
+# reading the setup its dispatcher runs on.
+dispatcher_stop
+ADOPT_SRC="$LIVE/adopt-source"
+ADOPT_ASIDE="$LIVE/adopt-aside"
+must "keeping the main checkout's setup as it stands" cp -a .spoolway "$ADOPT_ASIDE"
+must "making a folder that holds the only setup" mkdir -p "$ADOPT_SRC"
+must "giving it a copy of the setup" cp -a .spoolway "$ADOPT_SRC/.spoolway"
+# A step the source's pipeline runs after `implement`, in the lane's worktree:
+# it gives that worktree a `.spoolway/` of its own with another config value,
+# as a task whose branch edits the setup has, and prints what `config get`
+# answers there. The lane must read the dispatcher's setup, not that copy.
+ADOPT_PROBE="$LIVE/adopt-probe.txt"
+cat > "$LIVE/adopt-probe.sh" <<PROBE_SH
+#!/usr/bin/env bash
+mkdir -p .spoolway
+printf '[dispatch]\nlane_quiet = "77m"\n' > .spoolway/config.toml
+echo "config: \$("$SPOOLWAY" config get dispatch.lane_quiet 2>&1 | grep -v '^checkout: ')" > "$ADOPT_PROBE"
+rm -rf .spoolway
+PROBE_SH
+chmod +x "$LIVE/adopt-probe.sh"
+sed -i "0,/^    on_pass: review\$/s//    on_pass: probe/" "$ADOPT_SRC/.spoolway/pipelines/default.yml"
+cat >> "$ADOPT_SRC/.spoolway/pipelines/default.yml" <<YML
+
+  - id: probe
+    description: Prints what a lane reads once its worktree carries a setup of its own.
+    run: $LIVE/adopt-probe.sh
+    on_pass: review
+YML
+must "the main checkout leaves the branch that carries .spoolway/" \
+  git checkout -q -f -b adopt-base "$(git rev-list --max-parents=0 HEAD | tail -1)"
+rm -rf .spoolway
+must "the base is pushed, as the pull request's target" git push -q -u origin adopt-base
+if git ls-tree --name-only adopt-base | grep -qx '.spoolway'; then
+  bad "the task's base carries no .spoolway/"
+else ok "the task's base carries no .spoolway/"; fi
+must "naming the folder in project.toml by hand" \
+  bash -c 'printf "source = \"%s\"\n" "$1" >> "$2/project.toml"' _ "$ADOPT_SRC" "$SPOOLWAY_PROJECT_HOME"
+
+task_doc "$LIVE/adopt.md" adopt "$BODY" "group: adopt"
+must "the task queues" "$SPOOLWAY" queue add --from "$LIVE/adopt.md"
+if drive adopt gone; then
+  ok "a task runs queued -> ... -> done under a source folder's setup, from a base with no .spoolway/"
+else
+  bad "a task runs queued -> ... -> done under a source folder's setup, from a base with no .spoolway/ (stuck at \`$(stage_of adopt)\`)"
+fi
+dispatcher_stop
+has "its journey is in the status log" "→ \`create-pr\`" $SPOOLWAY_PROJECT_HOME/archive/adopt.md
+has "a lane whose worktree carries its own setup still reads the dispatcher's" "config: 1s" "$ADOPT_PROBE"
+if handed_over adopt; then ok "and the change is handed over as a pushed branch and a pull request"
+else bad "and the change is handed over as a pushed branch and a pull request"; fi
+if stacked_on adopt adopt-base; then ok "and its pull request targets the base it was cut from"
+else bad "and its pull request targets the base it was cut from"; fi
+if [ -e .spoolway ]; then bad "the main checkout still has no .spoolway/ of its own"
+else ok "the main checkout still has no .spoolway/ of its own"; fi
+
+# Forced: the sections above leave `.spoolway/` edited and uncommitted, and the
+# copies taken just above are what carry those edits back.
+must "the branch that carries .spoolway/ is checked out again" git checkout -q -f plan/live
+must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$ADOPT_ASIDE"
+rm -rf "$ADOPT_ASIDE" "$ADOPT_SRC"
+
 finish

@@ -173,12 +173,30 @@ fn run() -> Result<()> {
 
     let cwd = cli.repo.clone().unwrap_or(std::env::current_dir()?);
 
+    // Bare `spoolway` in a main checkout with nothing to read, while another
+    // worktree holds a `.spoolway/`: a picker of those worktrees opens first,
+    // on its own, since discovery would refuse before any screen opened and
+    // nothing the picker draws needs a project. The pick is written as the
+    // `source` line, and the start then goes on exactly as any other: the
+    // ordinary discovery below finds the line and reads that folder. `esc`
+    // leaves with nothing written. With no folder to offer, `source_choice`
+    // is `None` and discovery gives its usual refusal.
+    if matches!(cli.command, Command::Screen)
+        && let Some(choice) = repo::source_choice(&cwd)
+    {
+        let Some(folder) = screen::source_picker::pick(&choice.folders) else {
+            return Ok(());
+        };
+        repo::record_picked_source(&choice.project, &folder)?;
+    }
+
     match &cli.command {
         // `init` is the one command that runs before a project exists, so it
         // resolves its own root rather than discovering one.
         Command::Init(args) => {
             let root = init_root(&cwd)?;
-            commands::init(&root, args)
+            let at = init_setup_folder(&cwd, &root, args)?;
+            commands::init_in(&root, &at, args)
         }
 
         // Installing a binary is a fact about this machine's `PATH`, not
@@ -222,7 +240,7 @@ fn run() -> Result<()> {
             } else {
                 commands::LiveCheckMode::Default
             };
-            // `config_error` is about `repo.root`'s file — the one
+            // `config_error` is about `Repo::setup_source`'s file — the one
             // `discover_lenient` reads. `doctor` loads `repo.checkout`'s own
             // copy again for everything it checks, and folds this one in as
             // a finding of its own rather than a gate — see its own doc.
@@ -269,10 +287,11 @@ fn run() -> Result<()> {
         // Every read below is against `repo.checkout`, not `repo.root`: a
         // command answers about the file actually in front of it. `set` and
         // `override promote` write `repo.checkout` too, through
-        // `Repo::tracked_write_root`: in a worktree on its own branch that
+        // `Repo::source_write_root`: in a worktree on its own branch that
         // is the worktree's copy, which the dispatcher does not read until
         // the branch merges. A borrowed, lane or detached-HEAD worktree is
-        // refused.
+        // refused. In a main checkout whose setup is a `source` folder they
+        // write that folder's files.
         // `sync`, further down, writes against `repo.checkout` as well — see
         // its own module doc — and refuses only in a worktree that reads the
         // main checkout's setup. `update` writes no project file at all any
@@ -300,6 +319,13 @@ fn run() -> Result<()> {
         }
         Command::Config(ConfigCommand::Set { key, value }) => {
             commands::config_set(&Repo::discover(&cwd)?, key, value)
+        }
+        // Before a project is discovered: the refusal for a source that is
+        // gone or holds no `.spoolway/` names this command as the way out,
+        // and `Repo::discover` would stop on that same source first.
+        Command::Config(ConfigCommand::Source { folder, .. }) => {
+            commands::refuse_json("config source", cli.json)?;
+            commands::config_source(&cwd, folder.as_deref())
         }
         // Lenient on purpose: a config that no longer parses is exactly when
         // you want to open it.
@@ -397,8 +423,12 @@ fn run() -> Result<()> {
             }
 
             // The graph that *routes* the queue is the project's, read from
-            // `repo.root` — never the checkout's. A lane reports from inside
-            // its own worktree, and a worktree's committed pipelines are not
+            // `repo.setup_source()` — `repo.root`, and never the checkout's,
+            // unless the main checkout has no setup and the command runs in
+            // a worktree that carries the only one. A lane of such a project
+            // reads the folder its dispatcher runs on, whatever its own
+            // worktree carries. A lane reports from inside its own worktree,
+            // and a worktree's committed pipelines are not
             // the graph the dispatcher and the queue agree on: letting a
             // report route off them lets two branches disagree about where a
             // task goes next, and loses any pipeline edit the project has not
@@ -419,7 +449,7 @@ fn run() -> Result<()> {
             // config commands above run ahead of this at all. Nothing is more
             // certain to break every one of those at once than a rename
             // landing in a worktree before the project has it.
-            let graph = Pipelines::load(&repo.root, &repo.config);
+            let graph = Pipelines::load(&repo.setup_source(), &repo.config);
 
             match command {
                 Command::Init(_)
@@ -754,16 +784,18 @@ fn routing_for_task<'a>(
     }
 }
 
-/// Where `spoolway init` should place `.spoolway/`: the main checkout if
-/// `cwd` is a linked worktree of one, the git toplevel if there is one,
-/// otherwise here.
+/// The project `spoolway init` acts on: the main checkout if `cwd` is a
+/// linked worktree of one, the git toplevel if there is one, otherwise here.
+/// Where the setup files land is [`init_setup_folder`]'s to say, which is
+/// this folder except while the main checkout has no setup.
 ///
 /// A linked worktree's own `git rev-parse --show-toplevel` answers with the
-/// worktree itself, which is never where `init` should write — it would
-/// set up a second, ignored project there and still stamp the shared
-/// `.git`. So a linked worktree asks `repo::main_checkout`, and every other
-/// checkout, whatever the layout of its git directory, takes the toplevel
-/// git reports for it.
+/// worktree itself, which is never the project: a project of its own there
+/// would be a second one, ignored, while the shared `.git` is stamped for the
+/// main checkout. So a linked worktree asks `repo::main_checkout`, and every
+/// other checkout, whatever the layout of its git directory, takes the
+/// toplevel git reports for it. A worktree is only ever where the setup is
+/// written, and [`init_setup_folder`] decides that.
 ///
 /// A linked worktree of a `--separate-git-dir` clone that nothing has
 /// stamped or listed is refused: git has no way to name the main checkout
@@ -802,6 +834,44 @@ fn init_root(cwd: &std::path::Path) -> Result<PathBuf> {
     // would be a second project for the same clone, so `init` refuses to add
     // a first one beside it — from a linked worktree as much as from the
     // main checkout.
+    repo::refuse_nested_setup(&top)?;
+    Ok(top)
+}
+
+/// The folder `spoolway init` writes the setup into, for the project whose
+/// main checkout is `project`, as [`init_root`] resolved it.
+///
+/// That is `project` itself, except for one case: `init` run in a linked
+/// worktree while the main checkout has no setup of its own. Then the setup
+/// is written into that worktree, so a person can commit it on the feature
+/// branch that adds it, and `init` records the worktree as the project's
+/// `source` until the branch is merged. Once the main checkout has a
+/// `.spoolway/` or is a home-mode clone, `init` acts on it, as it did before.
+/// `--setup home` and `--workspace` ask for a setup that belongs to no branch,
+/// so they act on the main checkout too.
+///
+/// Called after [`init_root`], which has already refused a worktree whose main
+/// checkout cannot be named, so that refusal stays ahead of this branch.
+fn init_setup_folder(
+    cwd: &std::path::Path,
+    project: &std::path::Path,
+    args: &cli::InitArgs,
+) -> Result<PathBuf> {
+    let home_setup = args.setup == Some(cli::Setup::Home) || args.workspace.is_some();
+    // A main checkout listed as a workspace clone is a project with a setup
+    // already chosen, even when its `config/` is missing or the workspace file
+    // will not read. Asked the strict way, so that case still reaches the
+    // refusal `init` makes for it on the main checkout, with nothing written.
+    if home_setup
+        || !repo::is_linked_worktree(cwd)
+        || repo::workspace_clone_checked(project)?.is_some()
+        || config::own_setup_dir_in(project).is_dir()
+    {
+        return Ok(project.to_path_buf());
+    }
+    let top = repo::toplevel_raw(cwd)?;
+    // The same rule `init_root` applies to the top it resolves: a second
+    // setup further down would be a second project for the same clone.
     repo::refuse_nested_setup(&top)?;
     Ok(top)
 }
@@ -1085,5 +1155,81 @@ mod tests {
 
         std::fs::create_dir_all(work.join(".spoolway")).unwrap();
         init_root(&work).expect("a top that has its setup may run init again");
+    }
+
+    /// A linked worktree and the main checkout it was cut from, in a scratch
+    /// folder of their own.
+    /// The scratch root is handed back too, and removes the folders when it
+    /// drops.
+    fn main_and_worktree(
+        name: &str,
+    ) -> (
+        crate::scratch::ScratchRoot,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let base = crate::scratch::root(name);
+        let _ = std::fs::remove_dir_all(&base);
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@example.com"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        let wt = base.join("wt");
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "b", wt.to_str().unwrap()],
+        );
+        (base, work, wt)
+    }
+
+    /// While the main checkout has no setup, `init` in a linked worktree
+    /// writes that worktree. Fails before the change: there was no such
+    /// choice, and `init` always wrote the main checkout.
+    #[test]
+    fn init_writes_a_worktree_while_the_main_checkout_has_no_setup() {
+        let (_base, work, wt) = main_and_worktree("init-folder-worktree");
+        let args = cli::InitArgs::default();
+        assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), wt);
+        assert_eq!(init_setup_folder(&work, &work, &args).unwrap(), work);
+    }
+
+    /// A main checkout listed as a workspace clone is acted on, not its
+    /// worktree, whether or not its `config/` is still there. Fails before the
+    /// change: the lenient read of the clone let the worktree branch write
+    /// first, and refuse only afterwards.
+    #[test]
+    fn init_acts_on_a_main_checkout_listed_in_a_workspace() {
+        let (_base, work, wt) = main_and_worktree("init-folder-listed");
+        let home = _base.join("home");
+        crate::platform::test_home::with_home(&home, || {
+            let clone = repo::create_workspace(&work).unwrap();
+            let args = cli::InitArgs::default();
+            assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), work);
+            std::fs::remove_dir_all(clone.config_dir()).unwrap();
+            assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), work);
+        });
+    }
+
+    /// Once the main checkout has a `.spoolway/`, or a home-mode setup was
+    /// asked for, `init` in a worktree acts on the main checkout as before.
+    #[test]
+    fn init_acts_on_the_main_checkout_once_it_has_a_setup_or_home_is_asked() {
+        let (_base, work, wt) = main_and_worktree("init-folder-main");
+        let home = cli::InitArgs {
+            setup: Some(cli::Setup::Home),
+            ..cli::InitArgs::default()
+        };
+        assert_eq!(init_setup_folder(&wt, &work, &home).unwrap(), work);
+        let named = cli::InitArgs {
+            workspace: Some("w".into()),
+            ..cli::InitArgs::default()
+        };
+        assert_eq!(init_setup_folder(&wt, &work, &named).unwrap(), work);
+
+        std::fs::create_dir_all(work.join(".spoolway")).unwrap();
+        let args = cli::InitArgs::default();
+        assert_eq!(init_setup_folder(&wt, &work, &args).unwrap(), work);
     }
 }

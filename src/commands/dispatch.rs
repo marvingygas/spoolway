@@ -644,7 +644,7 @@ impl ConfigWatch {
         let stamp = crate::watch::Stamp::capture(
             &[],
             &[
-                crate::config::Config::path_in(&live.root),
+                crate::config::Config::path_in(&live.setup_source()),
                 crate::overrides::config_patch_path(&live.overrides_dir()),
                 crate::pipeline_snapshot::config_record_path(live),
             ],
@@ -695,7 +695,7 @@ fn reload_config(
     reported: &mut Option<String>,
     record_reported: &mut Option<String>,
 ) {
-    match crate::config::Config::load_present(&live.root) {
+    match crate::config::Config::load_present(&live.setup_source()) {
         Ok(config) => {
             match crate::pipeline_snapshot::record_config(live, &config) {
                 Ok(()) => *record_reported = None,

@@ -205,7 +205,7 @@ The binding is two files that must agree: the stamp at `.git/spoolway-id`, and t
 |---|---|
 | The home already records this checkout | The command runs. |
 | The checkout has no stamp and no home records it | It stamps itself and writes the record. A fresh clone needs no `init` first. Commands started together in a fresh clone agree on one home. |
-| The record names a checkout that is gone, or one without the id | The record is rewritten to name this checkout. One line says so. A moved checkout, or a moved superproject, finds its queue this way. |
+| The record names a checkout that is gone, one without the id, or a linked worktree of this clone | The record is rewritten to name this checkout. One line says so. A moved checkout, or a moved superproject, finds its queue this way. |
 | `.git/spoolway-label` is missing, and a home's `project.toml` records this id | The label is read from that home and written back. |
 | `.git/spoolway-label` is missing, and no home records this id | The command refuses, names `.git/spoolway-id` and tells you to delete it and run `spoolway init`. |
 | Anything else | The command refuses, naming both files by absolute path. |
@@ -226,7 +226,7 @@ directory need not sit inside the checkout, so its parent is not a reliable way 
 
 Nothing checks `spoolway-root` against anything else. It is a locator, not part of the binding
 above. A linked worktree finds its checkout from the common directory's parent when that parent
-checks out, then from this record, then from the workspace's clone listing. When none of the
+checks out, then from this record when it names no linked worktree, then from the workspace's clone listing. When none of the
 three answers, as in a fresh `--separate-git-dir` clone or submodule with no record, `spoolway
 init` refuses that linked worktree and tells you to run `spoolway init` in the main checkout
 first. Run `spoolway init` there before working from a linked worktree of such a clone.
@@ -254,6 +254,110 @@ Delete `~/.spoolway/<label>-<id>/` to forget every task, plan and lane. The chec
 untouched. The next command in that checkout refuses, because the checkout still carries a stamp
 no home holds. Delete `.git/spoolway-id` too and run `spoolway init` again to mint a fresh id
 and a fresh home.
+
+### The source folder
+
+A project whose main checkout has no `.spoolway/` can read its whole setup from another folder.
+Set it with `spoolway config source <folder>`. The folder is a checkout or worktree of this
+repository that holds a `.spoolway/`. The command stores the folder's absolute path as the
+`source` line in the project's own `project.toml`:
+
+```
+$ spoolway config source ~/dev/app-adopt
+  spoolway uses ~/dev/app-adopt as its setup
+```
+
+```toml
+source = "/home/you/dev/app-adopt"
+```
+
+`spoolway config source <folder>` changes the folder. `spoolway config source --clear` removes
+the line. See [`config source`](cli-reference.md#spoolway-config-source-folder--clear).
+
+A worktree that spoolway made for a task is refused as a source. It is deleted when its task is
+handed over.
+
+Bare `spoolway` can set the line for you. It starts in a main checkout with no `.spoolway/`, no
+workspace and no `source` line. If another worktree of the repository holds a `.spoolway/`, bare
+`spoolway` opens a picker of those worktrees before any tab. Lane worktrees are not listed.
+
+```
+╭─ read the setup from ──────────────────────╮
+│  search:                                   │
+│  > ~/dev/app-adopt                         │
+│    ~/dev/app-limits                        │
+│                                            │
+│  [enter] confirm   [f] search   [esc] back │
+╰────────────────────────────────────────────╯
+```
+
+| Key | What it does |
+|---|---|
+| `enter` | Writes the highlighted folder as the `source` line and opens the screen |
+| `f` | Searches the list |
+| `esc` | Leaves and writes nothing |
+
+With no worktree to list, bare `spoolway` prints the same refusal as any other command.
+
+While a source is in use, every tab of the screen shows one dim row under the tab strip. It names
+the setup folder the screen reads:
+
+```
+setup  ~/dev/app-adopt/.spoolway
+```
+
+With no source, the row is not drawn.
+
+| Where | What happens |
+|---|---|
+| The main checkout has no `.spoolway/`, and no workspace lists it | The config, pipelines, prompts, hooks and jobs are read from `<source>/.spoolway/`. |
+| A linked worktree has no `.spoolway/` of its own | It reads the same source. A worktree with its own `.spoolway/` reads that. |
+| A dispatcher lane's worktree | It reads the same source, whatever `.spoolway/` the lane's own worktree carries. `spoolway report`, `config get` and `prompt show` there print the dispatcher's setup. |
+| The main checkout has a `.spoolway/` | The first command that finds it deletes the `source` line and prints one note on stderr. |
+| The folder is gone or holds no `.spoolway/` | The command refuses, names the folder and tells you to point the line at another one. |
+| The path is relative or starts with `~` | The command refuses and asks for the full path. |
+
+`config source` accepts a relative folder and stores it as an absolute path.
+
+The note reads `note  <checkout> has its own .spoolway/ now; cleared the source <folder>`.
+
+A workspace clone has no `source` line. A project with no line behaves as it always does.
+
+While the source supplies the setup, these commands run in the main checkout and write the
+source folder's files:
+
+| Command | What it prints |
+|---|---|
+| `config set` | The new value, then `  spoolway uses <folder> as its setup` |
+| `override promote` | The promoted keys, then the same line |
+| `sync` | The [`checkout:` line](cli-reference.md#the-checkout-line) naming the folder, then the report |
+
+`config path` and the `checkout:` line name the source folder:
+
+```
+$ spoolway config path
+checkout: ~/dev/app-adopt
+mode:      repo
+setup:     /home/you/dev/app-adopt/.spoolway
+```
+
+A source that is not a checkout or worktree of this repository is refused by these three
+commands. The refusal says to run `spoolway config source <folder>` or `spoolway config source
+--clear`.
+
+While the source supplies the setup, these commands refuse in the main checkout and say so:
+`pipeline promote`, saving or deleting a routine or job on the board, and the eval tab's CSV
+export. Check out a branch that carries `.spoolway/`, or run `spoolway init` in the checkout.
+`spoolway init` in the main checkout writes its own `.spoolway/` and leaves the source alone.
+`spoolway init` in a linked worktree, while the main checkout has no `.spoolway/`, writes the
+worktree's `.spoolway/` and records the worktree as the source. See
+[`init`](cli-reference.md#spoolway-init).
+
+A linked worktree with no `.spoolway/` of its own refuses `config set` and `sync`. The refusal
+gives a `-C` line, or a `sync` command, that names the source folder.
+
+A spoolway binary that does not know the `source` key ignores it. If that binary rewrites
+`project.toml`, the line is dropped and the project refuses again until the line is written back.
 
 ## The overrides layer
 

@@ -2,13 +2,16 @@
 //! what each one found.
 //!
 //! Every finding here — not only the checks that read `config.toml` directly
-//! — answers from `repo.checkout`'s own copy, not `repo.root`'s: `doctor`
-//! loads its own [`Config`] from the checkout rather than reading
-//! `repo.config` (loaded from `repo.root` back in `Repo::discover`), because
-//! a task validating its own branch wants an answer about the file it
-//! actually edited. `repo.root`'s copy still matters — it is what the real
-//! dispatcher runs on — so its own parse failure, when there is one, is
-//! reported as a finding of its own rather than silently dropped. See
+//! — answers from `repo.checkout`'s own copy, not the setup source's:
+//! `doctor` loads its own [`Config`] from the checkout rather than reading
+//! `repo.config` (loaded from `Repo::setup_source` back in
+//! `Repo::discover`), because a task validating its own branch wants an
+//! answer about the file it actually edited. A lane of a project whose main
+//! checkout has no setup is the exception: its `checkout` is the folder its
+//! dispatcher reads, so it is that setup that gets checked. The setup source's copy
+//! (`Repo::setup_source`) still matters — it is what the real dispatcher runs
+//! on — so its own parse failure, when there is one, is reported as a finding
+//! of its own rather than silently dropped. See
 //! [`doctor`].
 
 use super::*;
@@ -420,7 +423,7 @@ pub enum LiveCheckMode {
 /// Check that everything the configured pipeline needs is actually present,
 /// before a dispatch pass discovers it the hard way.
 ///
-/// `config_error` is why `repo.root`'s `config.toml` could not be read, when
+/// `config_error` is why `Repo::setup_source`'s `config.toml` could not be read, when
 /// it could not — the lenient discovery that built `repo` already folded that
 /// into `repo.config` falling back to defaults. It no longer gates whether
 /// the rest of this can run: every finding below is against a fresh load of
@@ -662,7 +665,7 @@ fn home_unavailable_findings(
     if let Some(err) = config_error {
         findings.push(Finding::Check(
             "the project's own config parses".into(),
-            Err(err.context(Config::path_in(&repo.root).display().to_string())),
+            Err(err.context(Config::path_in(&repo.setup_source()).display().to_string())),
         ));
     }
     match Config::load_tracked(&repo.checkout) {
@@ -1007,7 +1010,7 @@ fn config_checks(
     if let Some(err) = config_error {
         findings.push(Finding::Check(
             "the project's own config parses".into(),
-            Err(err.context(Config::path_in(&repo.root).display().to_string())),
+            Err(err.context(Config::path_in(&repo.setup_source()).display().to_string())),
         ));
     }
     findings.extend(unknown_key_notes(&repo.checkout));
@@ -2980,9 +2983,10 @@ fn doctor_sync(repo: &Repo, report: &mut Report) {
     let Ok(outcomes) = crate::sync::scan(repo, &dry) else {
         return;
     };
-    // The scan reads `repo.root`'s copy, so that is the file whose absence
-    // says `init` never ran here.
-    let initialised = Config::path_in(&repo.root).is_file();
+    // The scan reads the checkout's copy. Its absence is judged against
+    // `Repo::setup_source`, the folder this project's config is read from:
+    // `repo.root`, except in a worktree that holds the only setup.
+    let initialised = Config::path_in(&repo.setup_source()).is_file();
     for note in sync_notes(&outcomes, initialised) {
         report.note(note);
     }
@@ -3078,7 +3082,7 @@ fn sync_notes(outcomes: &[crate::sync::Outcome], initialised: bool) -> Vec<Strin
 /// `config` is the checkout's own loaded copy — the same one `doctor` checks
 /// everything else against — so `[models]`'s rates are resolved from the same
 /// file the retired keys below were parsed out of, rather than from
-/// `repo.config`'s (`repo.root`'s) copy, which can disagree with it.
+/// `repo.config`'s (`Repo::setup_source`'s) copy, which can disagree with it.
 fn warmth_notes(repo: &Repo, pipelines: &Pipelines, config: &Config, report: &mut Report) {
     let Ok(raw) = std::fs::read_to_string(Config::path_in(&repo.checkout)) else {
         return;

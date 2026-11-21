@@ -1415,6 +1415,128 @@ else bad "and the project's own config is left untouched"; fi
 must "removing the worktree" git worktree remove --force "$WT"
 must "removing its branch" git branch -D task/config-diff
 
+# ----------------------------------- a worktree's setup while main has none
+# The project is the main checkout, and a linked worktree that carries the
+# only `.spoolway/` supplies every file while the main checkout's branch has
+# none. The queue, the home and the project's record stay with the main
+# checkout, so a worktree command reaches the same queue a command run there
+# did.
+MAIN_PLANS=$("$SPOOLWAY" config path | sed -n 's/^plans: *//p')
+SOLO="$LIVE/worktrees/solo-setup"
+must "cutting a worktree that will hold the only setup" \
+  git worktree add -q -b task/solo-setup "$SOLO" plan/live
+must "giving it a config value of its own" \
+  sed -i 's|^blocked_agent = .*|blocked_agent = "from-the-only-setup"|' "$SOLO/.spoolway/config.toml"
+must "and a pipeline only it has" \
+  cp "$SOLO/.spoolway/pipelines/default.yml" "$SOLO/.spoolway/pipelines/soloflow.yml"
+must "committing its setup" git -C "$SOLO" add -A
+must "committing its setup" git -C "$SOLO" commit -qm "e2e: the only setup"
+# What the sections above left in `.spoolway/`, committed or not, is put back
+# below: later sections read it as it was.
+must "keeping the main checkout's setup as it stands" \
+  cp -a .spoolway "$LIVE/setup-aside"
+must "the main checkout leaves the branch that carries .spoolway/" \
+  git checkout -q -b e2e-no-setup
+must "and its branch has no setup" git rm -rqf .spoolway
+must "and its branch has no setup" git commit -qm "e2e: a branch without a setup"
+rm -rf .spoolway
+
+says "config get in the worktree prints the worktree's value" "from-the-only-setup" \
+  "$SPOOLWAY" -C "$SOLO" config get unattended.blocked_agent
+says "pipeline list in the worktree lists the worktree's pipeline" "soloflow" \
+  "$SPOOLWAY" -C "$SOLO" pipeline list
+works "queue list in the worktree reaches the queue" \
+  "$SPOOLWAY" -C "$SOLO" queue list
+SOLO_PLANS=$("$SPOOLWAY" -C "$SOLO" config path | sed -n 's/^plans: *//p')
+if [ -n "$MAIN_PLANS" ] && [ "$SOLO_PLANS" = "$MAIN_PLANS" ]; then
+  ok "and the plans folder is the main checkout's project home"
+else bad "and the plans folder is the main checkout's project home ($SOLO_PLANS)"; fi
+
+must "putting the main checkout back on its branch" git checkout -q plan/live
+must "and its setup back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"
+rm -rf "$LIVE/setup-aside"
+must "removing the worktree" git worktree remove --force "$SOLO"
+must "removing its branch" git branch -D task/solo-setup
+must "removing the main checkout's temporary branch" git branch -D e2e-no-setup
+
+# ------------------------------------------- a source folder while main has none
+# A `source` line in the project's own `project.toml`, written by hand here,
+# names a worktree of the same repository whose `.spoolway/` the main checkout
+# reads while its branch has none, and the commands that follow it write that
+# worktree. The first command that finds the checkout's own `.spoolway/` again
+# deletes the line and says so once.
+HOME_DIR=$(dirname "$("$SPOOLWAY" config path | sed -n 's/^plans: *//p')")
+SRC="$LIVE/source-folder"
+must "making a worktree that holds the only setup" git worktree add -q --detach "$SRC"
+must "and a config value of its own" \
+  sed -i 's|^blocked_agent = .*|blocked_agent = "from-the-source"|' "$SRC/.spoolway/config.toml"
+must "and a pipeline only it has" \
+  cp "$SRC/.spoolway/pipelines/default.yml" "$SRC/.spoolway/pipelines/sourceflow.yml"
+must "keeping the main checkout's setup as it stands" \
+  cp -a .spoolway "$LIVE/setup-aside"
+must "the main checkout leaves the branch that carries .spoolway/" \
+  git checkout -q -b e2e-source-setup
+must "and its branch has no setup" git rm -rqf .spoolway
+must "and its branch has no setup" git commit -qm "e2e: a branch without a setup"
+rm -rf .spoolway
+must "naming the folder in project.toml by hand" \
+  bash -c 'printf "source = \"%s\"\n" "$1" >> "$2/project.toml"' _ "$SRC" "$HOME_DIR"
+
+says "config get reads the source folder's value" "from-the-source" \
+  "$SPOOLWAY" config get unattended.blocked_agent
+says "pipeline list lists the source folder's pipeline" "sourceflow" \
+  "$SPOOLWAY" pipeline list
+has "and the line is still there" "source = " "$HOME_DIR/project.toml"
+says "config set writes the source folder and names it" "  spoolway uses $SRC as its setup" \
+  "$SPOOLWAY" config set dispatch.visible_lanes 5
+has "and the source folder's config.toml holds the value" "visible_lanes = 5" \
+  "$SRC/.spoolway/config.toml"
+# `sync` removes spoolway's marked block from a tracked `.gitignore`. It stands
+# in the main checkout and in the source, so the one that loses it says which
+# of them the run wrote.
+for ignore in .gitignore "$SRC/.gitignore"; do
+  must "a marked block in $ignore" bash -c \
+    'printf "# >>> spoolway >>>\n/.spoolway/\n# <<< spoolway <<<\n" >>"$1"' _ "$ignore"
+  has "which now holds it" "# >>> spoolway >>>" "$ignore"
+done
+says "sync reads and writes the source folder, and says so" "checkout: $SRC" "$SPOOLWAY" sync
+lacks "and the source's .gitignore lost the block" "# >>> spoolway >>>" "$SRC/.gitignore"
+has "and the main checkout's kept it" "# >>> spoolway >>>" .gitignore
+if [ ! -e .spoolway ]; then ok "and the main checkout has no .spoolway/ of its own"
+else bad "and the main checkout has no .spoolway/ of its own"; fi
+must "the main checkout's .gitignore is removed again" rm -f .gitignore
+refuses "a pipeline write is still refused rather than written into the source" \
+  "would land in that folder" "$SPOOLWAY" pipeline promote nothing
+
+# A line written by hand can name a folder of another repository, whose
+# overrides and notes a write would be keyed off. The refusal sends a person
+# to `config source <folder>`, which repairs the line.
+STRANGER="$LIVE/stranger-folder"
+must "a folder of no repository that holds a .spoolway/" mkdir -p "$STRANGER/.spoolway"
+must "named as the source by hand" \
+  sed -i "s|^source = .*|source = \"$STRANGER\"|" "$HOME_DIR/project.toml"
+refuses "config set refuses a source of another repository" \
+  "is not a checkout or worktree of" "$SPOOLWAY" config set dispatch.visible_lanes 6
+refuses "and so does sync" "is not a checkout or worktree of" "$SPOOLWAY" sync
+works "config source puts the worktree back, as the refusal says" \
+  "$SPOOLWAY" config source "$SRC"
+says "and config set writes it again" "  spoolway uses $SRC as its setup" \
+  "$SPOOLWAY" config set dispatch.visible_lanes 5
+rm -rf "$STRANGER"
+
+must "the branch that carries .spoolway/ is checked out again" git checkout -q plan/live
+must "and its setup is back as it was" bash -c 'rm -rf .spoolway && cp -a "$1" .spoolway' _ "$LIVE/setup-aside"
+SOURCE_ERR="$LIVE/source-cleared.err"
+"$SPOOLWAY" config get unattended.blocked_agent >/dev/null 2>"$SOURCE_ERR"
+has "the first command there says it cleared the source" \
+    "has its own .spoolway/ now; cleared the source" "$SOURCE_ERR"
+lacks "and the line is gone from project.toml" "source = " "$HOME_DIR/project.toml"
+"$SPOOLWAY" config get unattended.blocked_agent >/dev/null 2>"$SOURCE_ERR"
+lacks "and the next command says nothing of it" "cleared the source" "$SOURCE_ERR"
+rm -rf "$LIVE/setup-aside" "$SOURCE_ERR"
+must "removing the source worktree" git worktree remove --force "$SRC"
+must "removing the main checkout's temporary branch" git branch -D e2e-source-setup
+
 # --------------------------------------------------------- overrides layer
 # `~/.spoolway/<project>/overrides/` is read by `Pipelines::load`,
 # `Config::load` and `prompt::path_for` through the shared
@@ -1763,5 +1885,100 @@ has   "sync's panel reaches the terminal" \
       "new version installed, apply updates" "$SYNC_OUT"
 lacks "and sync never enters the alternate screen" $'\033[?1049h' "$SYNC_OUT"
 has   "esc under it writes nothing" "Nothing was changed." "$SYNC_OUT"
+
+# -------------------------------------------- config source, and where it reads
+# A main checkout with no `.spoolway/` reads the one in a worktree named by
+# the `source` line of its project.toml. `config source` writes and clears
+# that line, and `config path` names the folder it reads.
+new_repo "$LIVE/source-app"
+configure_project plan/live
+must "a worktree that will hold the setup" \
+  git worktree add -q -b source-wt "$LIVE/source-wt"
+SRC_WT=$(cd "$LIVE/source-wt" && pwd -P)
+must "gives it the setup" cp -a .spoolway "$SRC_WT/.spoolway"
+must "and takes the main checkout's own away" rm -rf .spoolway
+refuses "a main checkout with no setup and no source refuses" "config source <folder>" \
+  "$SPOOLWAY" config path
+says "config source takes a relative folder and prints the line it wrote" \
+  "  spoolway uses $SRC_WT as its setup" \
+  "$SPOOLWAY" config source ../source-wt
+has "and stores the absolute, canonical path" "source = \"$SRC_WT\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+says "config path names the source folder on the checkout: line" \
+  "checkout: $SRC_WT" "$SPOOLWAY" config path
+says "and its setup: line" "setup:     $SRC_WT/.spoolway" "$SPOOLWAY" config path
+silent_about "and names no branch for it" "($(git -C "$SRC_WT" branch --show-current))" \
+  "$SPOOLWAY" config path
+refuses "a folder with no .spoolway/ is refused" "holds no .spoolway/" \
+  "$SPOOLWAY" config source "$LIVE/source-app"
+refuses "a folder that does not exist is refused" "does not exist" \
+  "$SPOOLWAY" config source "$LIVE/no-such-folder"
+refuses "a folder and --clear together are refused" "cannot be used with" \
+  "$SPOOLWAY" config source "$SRC_WT" --clear
+has "and the line is left as it was" "source = \"$SRC_WT\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+says "config source --clear says which folder it stopped reading" \
+  "  cleared the source $SRC_WT" "$SPOOLWAY" config source --clear
+works "and removes the line" \
+  bash -c '! grep -qE "^[[:space:]]*source[[:space:]]*=" "$1"' _ "$SPOOLWAY_PROJECT_HOME/project.toml"
+refuses "and the project refuses again, pointing at the command" "config source <folder>" \
+  "$SPOOLWAY" config path
+
+# Two `config source` calls at the same time, each naming its own worktree,
+# take the same edit lock. Either may be refused, but the project.toml they
+# leave holds exactly one source line, and it names one of the two.
+must "a second worktree that holds a setup" \
+  git worktree add -q -b source-wt-2 "$LIVE/source-wt-2"
+SRC_WT2=$(cd "$LIVE/source-wt-2" && pwd -P)
+must "gives it the setup" cp -a "$SRC_WT/.spoolway" "$SRC_WT2/.spoolway"
+( "$SPOOLWAY" config source "$SRC_WT" >"$LIVE/src-par-1.out" 2>&1 ) &
+( "$SPOOLWAY" config source "$SRC_WT2" >"$LIVE/src-par-2.out" 2>&1 ) &
+wait
+SRC_LINES=$(grep -cE '^[[:space:]]*source[[:space:]]*=' "$SPOOLWAY_PROJECT_HOME/project.toml")
+if [ "$SRC_LINES" = 1 ] \
+  && grep -qE "^[[:space:]]*source[[:space:]]*= \"($SRC_WT|$SRC_WT2)\"" "$SPOOLWAY_PROJECT_HOME/project.toml"; then
+  ok "parallel config source leaves one source line naming one of the two folders"
+else
+  bad "parallel config source left $SRC_LINES source lines"
+  sed 's/^/        /' "$SPOOLWAY_PROJECT_HOME/project.toml"
+fi
+must "and the project reads from it" "$SPOOLWAY" config path
+
+# ------------------------------------- init in a worktree, while main has no setup
+# `init` run in a linked worktree of a repository whose main checkout has no
+# `.spoolway/` writes the setup into that worktree, for a person to commit on
+# their feature branch. The id is still stamped in the shared `.git`, the
+# project is still the main checkout, and the worktree is recorded as the
+# source.
+new_repo "$LIVE/init-wt-app"
+MAIN_APP=$(pwd -P)
+must "a feature worktree of a repository with no setup" \
+  git worktree add -q -b feature/adopt "$LIVE/init-wt-feature"
+FEATURE=$(cd "$LIVE/init-wt-feature" && pwd -P)
+INIT_WT_OUT="$LIVE/init-wt.out"
+env -C "$FEATURE" "$SPOOLWAY" init --yes >"$INIT_WT_OUT" 2>&1 \
+  && ok "init --yes in the worktree succeeds" \
+  || { bad "init --yes in the worktree failed"; sed 's/^/        /' "$INIT_WT_OUT"; }
+works "the setup is written into the worktree" test -f "$FEATURE/.spoolway/config.toml"
+works "and not into the main checkout" test ! -e "$MAIN_APP/.spoolway"
+works "the id is stamped in the shared .git" test -s "$MAIN_APP/.git/spoolway-id"
+has "the project row names the main checkout" "  project  $MAIN_APP" "$INIT_WT_OUT"
+has "and the source row names the worktree" "  source   $FEATURE" "$INIT_WT_OUT"
+project_home_after_init
+has "project.toml records the main checkout as root" "root = \"$MAIN_APP\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+has "and the worktree as the source" "source = \"$FEATURE\"" \
+  "$SPOOLWAY_PROJECT_HOME/project.toml"
+says "the main checkout reads the worktree's setup" "setup:     $FEATURE/.spoolway" \
+  "$SPOOLWAY" config path
+must "the feature branch commits the setup" \
+  git -C "$FEATURE" add .spoolway
+must "once main has a .spoolway/, init in the worktree acts on main" \
+  bash -c 'cp -a "$1/.spoolway" "$2/.spoolway"' _ "$FEATURE" "$MAIN_APP"
+INIT_WT_AGAIN="$LIVE/init-wt-again.out"
+works "init --yes in the worktree succeeds again" \
+  bash -c '"$1" -C "$2" init --yes >"$3" 2>&1' _ "$SPOOLWAY" "$FEATURE" "$INIT_WT_AGAIN"
+has "and acts on the main checkout" "  project  $MAIN_APP" "$INIT_WT_AGAIN"
+lacks "so it names no source" "  source   " "$INIT_WT_AGAIN"
 
 finish

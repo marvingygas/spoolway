@@ -63,7 +63,7 @@ fn render_config_list(entries: &[crate::confkv::Entry]) -> String {
 
 /// Reads `repo.checkout`, not `repo.root`: a lane standing in a linked
 /// worktree is asking about the file beside it, and `repo.config` (loaded
-/// from `root` once, in `Repo::discover`) would answer for a file that is not
+/// from `Repo::setup_source` once, in `Repo::discover`) would answer for a file that is not
 /// the one in front of the command. In the main checkout the two are the same
 /// directory, so this changes nothing there.
 pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
@@ -77,21 +77,23 @@ pub fn config_get(repo: &Repo, key: &str) -> Result<()> {
 
 /// Write one key into the setup's own config.
 ///
-/// [`Repo::tracked_write_root`] decides where. The main checkout writes its
-/// own file. A worktree on its own branch writes the worktree's copy, so the
-/// change can ride that branch into a pull request; the dispatcher keeps
-/// reading the main checkout's until the branch merges. A worktree that
+/// [`Repo::source_write_root`] decides where. The main checkout writes its
+/// own file, or the `source` folder's while its setup is read from one, and
+/// the note after the write names that folder. A worktree on its own branch
+/// writes the worktree's copy, so the change can ride that branch into a pull
+/// request; the dispatcher keeps reading the main checkout's until the branch
+/// merges. A worktree that
 /// borrows the main checkout's setup, or that is on a detached HEAD, is
 /// refused with the `-C` invocation that lands in the file the dispatcher
 /// reads. A dispatcher lane's worktree is refused too, but without that
 /// line: the lane is told to put the setting in its report instead.
 pub fn config_set(repo: &Repo, key: &str, value: &str) -> Result<()> {
-    let write = repo.tracked_write_root(
+    let write = repo.source_write_root(
         &crate::commands::refusal::CONFIG_SET,
         "config",
         &format!("config set {key} {value}"),
     )?;
-    let write_root = write.root;
+    let write_root: &Path = &write.root;
     crate::confkv::check_typed(key, value)?;
     // Held from the load to the save: a config loaded before the lock was
     // taken is the one a parallel `config set` has since changed, and saving
@@ -212,6 +214,26 @@ fn shadow_note(
          included, into the tracked file.",
         path.display()
     )))
+}
+
+/// `spoolway config source <folder>` and `config source --clear`: set, change
+/// or remove the `source` line of the project `cwd` belongs to.
+///
+/// Takes the working directory, not a `Repo`: a `Repo` cannot be discovered
+/// while the source is missing or holds no `.spoolway/`, and that refusal is
+/// what sends a person to this command.
+pub fn config_source(cwd: &Path, folder: Option<&Path>) -> Result<()> {
+    match crate::repo::change_source(cwd, folder, &crate::commands::refusal::CONFIG_SOURCE)? {
+        crate::repo::SourceChange::Set(folder) => println!(
+            "  spoolway uses {} as its setup",
+            crate::repo::shorten_home(&folder)
+        ),
+        crate::repo::SourceChange::Cleared(old) => {
+            println!("  cleared the source {}", crate::repo::shorten_home(&old))
+        }
+        crate::repo::SourceChange::NothingSet => println!("  no source is set, so nothing changed"),
+    }
+    Ok(())
 }
 
 /// `spoolway config path`: every place this project's own setup lives — the

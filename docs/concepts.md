@@ -45,6 +45,25 @@ checkout, the command prints a [`checkout:` line](cli-reference.md#the-checkout-
 A linked worktree on a branch with no `.spoolway/` reads the main checkout's instead, and the
 line names the main checkout. `spoolway sync` refuses to write a setup into such a worktree.
 
+The project is always the main checkout. When the main checkout has no `.spoolway/` and no
+workspace lists it, a linked worktree that has its own `.spoolway/` supplies the whole setup:
+the config, the pipelines, the prompts, the hooks and the jobs. The queue, the home and the
+project's record stay with the main checkout.
+
+A project can also read its whole setup from a folder elsewhere on the machine, named by a
+`source` line in its `project.toml`, which `spoolway config source <folder>` writes. This applies
+while the main checkout has no `.spoolway/`. Writes from the main checkout land in that folder.
+Bare `spoolway` offers the repository's other worktrees that hold a `.spoolway/` in a picker and
+writes the pick as the line.
+The line is deleted once the main checkout has one. See [The source
+folder](configuration.md#the-source-folder).
+
+While the main checkout has no `.spoolway/`, a command run in a lane's worktree reads the setup
+its dispatcher runs on. That is the source folder, or the linked worktree the dispatcher was
+started in. It makes no difference what `.spoolway/` the lane's own worktree carries, so a task
+cut from a base with no `.spoolway/` can still run `spoolway report`. When the main checkout has
+a `.spoolway/`, a lane reads the one on its own branch.
+
 There is one project per clone, and its `.spoolway/` sits at the top of the repo. A
 `.spoolway/` anywhere below the top is refused by name, and the refusal says where the setup
 belongs. Spoolway does not move or delete it for you.

@@ -56,7 +56,8 @@ steps:
   name a pipeline that exists.
 - Every step runs for every task, in order. There is no condition key. A step that should only
   run sometimes belongs in a second pipeline file.
-- A lane reads the pipelines on its own branch. See [Project](concepts.md#project).
+- A lane reads the pipelines on its own branch. While the main checkout has no `.spoolway/`, it
+  reads the pipelines its dispatcher runs on. See [Project](concepts.md#project).
 - While a dispatcher runs, `report`, `resume` and `queue add` route on the pipelines it loaded
   at start. An edit to a pipeline file is used after the dispatcher restarts. See [Editing a
   pipeline while it runs](dispatcher.md#editing-a-pipeline-while-it-runs).

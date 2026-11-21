@@ -203,6 +203,16 @@ pub(super) struct Promotion {
     layout: PathBuf,
 }
 
+/// What a refusal for `targets` tells a person to type: one `override promote`
+/// per file, each after `spoolway -C <reads>`, where `reads` is the folder the
+/// project reads. The first line's own prefix is `tracked_write_root`'s.
+fn promote_commands<'a>(targets: impl Iterator<Item = &'a str>, reads: &Path) -> String {
+    targets
+        .map(|target| format!("override promote {target}"))
+        .collect::<Vec<_>>()
+        .join(&format!("\n  spoolway -C {} ", reads.display()))
+}
+
 impl Promotion {
     /// The promote of `files` onto `branch`, written wherever git has it
     /// out, or into a new worktree at [`worktree_path`] when nowhere does.
@@ -332,15 +342,14 @@ impl Promotion {
     fn write(&self, repo: &Repo) -> std::result::Result<Notice, Notice> {
         let refused = |err: anyhow::Error| Notice::new("not promoted", format!("{err:#}"));
         // `tracked_write_root` puts what it is given after `spoolway -C
-        // <root>` on its refusal's last line. `override promote` takes one
-        // file, so each further file gets a line of its own, spelled in full
-        // in the same indent, and pasting the lines promotes every file.
-        let typed = self
-            .files
-            .iter()
-            .map(|file| format!("override promote {}", file.target))
-            .collect::<Vec<_>>()
-            .join(&format!("\n  spoolway -C {} ", repo.root.display()));
+        // <folder>` on its refusal's last line, where the folder is the one
+        // the project reads: the main checkout, or its `source` folder while
+        // it has one. `override promote` takes one file, so each further file
+        // gets a line of its own, spelled in full in the same indent and
+        // naming the same folder, and pasting the lines promotes every file.
+        let reads = crate::repo::source_in_use_at(&repo.root);
+        let reads = reads.as_deref().unwrap_or(&repo.root);
+        let typed = promote_commands(self.files.iter().map(|file| file.target.as_str()), reads);
         match &self.place {
             Place::Checkout(path) => self.still_out(repo, path)?,
             Place::New(path) => {
@@ -385,7 +394,7 @@ impl Promotion {
             (Ok(a), Ok(b)) => a == b,
             _ => a == b,
         };
-        if !same(write.root, checkout) {
+        if !same(&write.root, checkout) {
             return Err(Notice::new(
                 "not promoted",
                 format!(
@@ -402,7 +411,8 @@ impl Promotion {
             ));
         }
         for (at, file) in self.files.iter().enumerate() {
-            let Err(err) = crate::commands::promote_override(repo, write.root, &file.target) else {
+            let Err(err) = crate::commands::promote_override(repo, &write.root, &file.target)
+            else {
                 continue;
             };
             let names = |files: &[Promoted]| {
@@ -440,10 +450,10 @@ impl Promotion {
              until you delete them.",
             self.files
                 .iter()
-                .map(|file| tracked_name(write.root, &file.target))
+                .map(|file| tracked_name(&write.root, &file.target))
                 .collect::<Vec<_>>()
                 .join(", "),
-            crate::repo::shorten_home(write.root),
+            crate::repo::shorten_home(&write.root),
             self.branch.name
         );
         if let Some(note) = write.note() {
@@ -617,6 +627,7 @@ fn tracked_name(checkout: &Path, target: &str) -> String {
 mod tests {
     use super::super::tests::key_line;
     use super::super::{Section, State};
+    use super::promote_commands;
     use crate::pipeline::Pipelines;
     use crate::repo::Repo;
     use crate::screen::shell;
@@ -1161,6 +1172,19 @@ mod tests {
         assert_eq!(left, ["notes.txt"]);
         assert_eq!(tracked(&repo.root), IMPL);
         assert_eq!(layered(&repo), PATCH);
+    }
+
+    // A refusal for several files gives every line the same folder, so a
+    // project reading a source folder is never sent to its main checkout for
+    // the second file.
+    #[test]
+    fn every_line_of_a_refusal_names_the_folder_the_project_reads() {
+        let reads = Path::new("/work/adopt");
+        let typed = promote_commands(["config", "pipelines/impl.yml"].into_iter(), reads);
+        assert_eq!(
+            typed,
+            "override promote config\n  spoolway -C /work/adopt override promote pipelines/impl.yml"
+        );
     }
 
     // A branch with no `.spoolway/` is refused in `tracked_write_root`'s

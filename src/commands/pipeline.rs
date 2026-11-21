@@ -2421,7 +2421,7 @@ pub fn pipeline_promote(repo: &Repo, name: &str, json: bool) -> Result<()> {
         "pipelines",
         &format!("pipeline promote {name}"),
     )?;
-    let write_root = write.root;
+    let write_root: &Path = &write.root;
     if !crate::local::is_repo_mode(&repo.checkout) {
         bail!(
             "this setup is already private — there is nothing for `pipeline promote` to move \

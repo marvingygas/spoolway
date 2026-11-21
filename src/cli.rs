@@ -1844,6 +1844,23 @@ pub enum ConfigCommand {
     /// Write one value, e.g. `models.claude-opus-5.input 5.0`.
     Set { key: String, value: String },
 
+    /// Read the setup from another folder while this checkout has no
+    /// `.spoolway/` of its own, or stop doing so with `--clear`.
+    ///
+    /// The folder is the checkout or worktree that holds the `.spoolway/`,
+    /// as `~/dev/app-adopt`. It is stored as an absolute path. Once this
+    /// checkout has its own `.spoolway/`, the line is deleted on its own.
+    Source {
+        /// The folder that holds the `.spoolway/` to read.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        folder: Option<PathBuf>,
+
+        /// Remove the source, so the project reads this checkout's own setup
+        /// again.
+        #[arg(long)]
+        clear: bool,
+    },
+
     /// Open the config file in `$VISUAL`, else `$EDITOR`, else `vim`, and
     /// re-validate it on save.
     ///
@@ -2419,6 +2436,31 @@ mod tests {
                 .command,
             Command::Config(ConfigCommand::Override { set: None })
         ));
+    }
+
+    #[test]
+    fn config_source_takes_a_folder_or_clear_and_not_both() {
+        let parse = |args: &[&str]| {
+            let mut full = vec!["spoolway", "config", "source"];
+            full.extend_from_slice(args);
+            Cli::try_parse_from(full)
+        };
+        match parse(&["../adopt"]).unwrap().command {
+            Command::Config(ConfigCommand::Source { folder, clear }) => {
+                assert_eq!(folder, Some(PathBuf::from("../adopt")));
+                assert!(!clear);
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["--clear"]).unwrap().command {
+            Command::Config(ConfigCommand::Source { folder, clear }) => {
+                assert_eq!(folder, None);
+                assert!(clear);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&[]).is_err(), "a bare `config source` names nothing");
+        assert!(parse(&["../adopt", "--clear"]).is_err());
     }
 
     #[test]

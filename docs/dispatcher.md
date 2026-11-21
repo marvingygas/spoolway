@@ -1064,7 +1064,9 @@ No test asks for a tip per key or setting. One test fails when a tip is too long
 ## The overrides tab
 
 Bare `spoolway`'s tab strip numbers `DISPATCH`, `QUEUE`, `ROUTINES`, `OVERRIDES` and `EVAL` from `1`
-to `5`, and `4` opens the overrides tab. The overrides tab sets keys in the private
+to `5`, and `4` opens the overrides tab. While the project reads a
+[source folder](configuration.md#the-source-folder), one dim row under the strip reads
+`setup <folder>/.spoolway`. The overrides tab sets keys in the private
 [overrides layer](configuration.md#the-overrides-layer) from the screen, so a change needs no
 `override` command per key. A home-mode project has no overrides tab: its whole setup already lives privately in its workspace, so there is no
 checked-in file to override. Its strip numbers `DISPATCH`, `QUEUE`, `ROUTINES` and `EVAL` from `1`
@@ -1635,7 +1637,9 @@ The dispatcher reads the pipelines when it starts and when a [reload](#reloading
 Configuration is reloaded whenever its files change, with a few exceptions; see the end of this
 section. Right after it takes the project's lock, and after each good reload, it writes a copy of
 what it loaded to `<home>/dispatch-pipelines.json`. The copy also records the run's
-`unattended.blocked_*` values. A dispatcher that starts later replaces that copy.
+`unattended.blocked_*` values and the folder the setup was read from. A lane whose project's main
+checkout has no `.spoolway/` reads its setup from that folder, so a reload moves the lane with
+the dispatcher. A dispatcher that starts later replaces that copy.
 
 While a dispatcher is running, these commands route a task on that copy and not on the files:
 

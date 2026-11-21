@@ -8,10 +8,11 @@
 //! never `repo.checkout` — because the layer is a sibling of `queue/`, one
 //! per project, not one per worktree; see [`crate::overrides`]'s own doc.
 //! `override promote` is the one exception that also touches a *tracked*
-//! file. It writes into [`Repo::tracked_write_root`], the same place
+//! file. It writes into [`Repo::source_write_root`], the same place
 //! [`crate::commands::config_set`] does: this checkout's own `.spoolway/`,
 //! which in a worktree of its own is a copy the dispatcher does not read
-//! until the branch merges.
+//! until the branch merges, or the `source` folder's while the main checkout
+//! reads its setup from one.
 
 use super::*;
 
@@ -501,13 +502,12 @@ pub fn override_list(repo: &Repo, json: bool) -> Result<()> {
 
 /// `spoolway override promote <target>`.
 pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
-    let write = repo.tracked_write_root(
+    let write = repo.source_write_root(
         &crate::commands::refusal::OVERRIDE_PROMOTE,
         "tracked files",
         &format!("override promote {target}"),
     )?;
-    let write_root = write.root;
-    let lines = promote_override(repo, write_root, target)?;
+    let lines = promote_override(repo, &write.root, target)?;
     for line in lines {
         println!("{line}");
     }
@@ -522,8 +522,9 @@ pub fn override_promote(repo: &Repo, target: &str) -> Result<()> {
 /// layer.
 ///
 /// `override promote` prints these lines; the OVERRIDES tab shows them in a
-/// screen of its own. `write_root` comes from [`Repo::tracked_write_root`],
-/// which is also what refuses a lane.
+/// screen of its own. `write_root` comes from [`Repo::source_write_root`] for
+/// the command and from [`Repo::tracked_write_root`] for the tab, and both
+/// refuse a lane.
 pub(crate) fn promote_override(
     repo: &Repo,
     write_root: &Path,
@@ -1656,7 +1657,7 @@ mod tests {
                         "test",
                     )
                     .unwrap();
-                let lines = promote_override(repo, write.root, target).unwrap();
+                let lines = promote_override(repo, &write.root, target).unwrap();
                 assert_eq!(
                     lines.last().unwrap(),
                     &format!("  kept {file} in the layer until you drop it")

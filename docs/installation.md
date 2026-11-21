@@ -255,6 +255,11 @@ checkout still carries a stamp no home holds. Delete `.git/spoolway-id` too and 
 init` again to mint a fresh id and a fresh home. See [Runtime
 state](configuration.md#runtime-state).
 
+Run in a linked worktree while the main checkout has no `.spoolway/`, `init` writes the setup
+into that worktree and records the worktree as the project's source folder. Commit the setup on
+the worktree's branch. See [`init`](cli-reference.md#spoolway-init) and
+[The source folder](configuration.md#the-source-folder).
+
 `init` does not write to `.gitignore`. `spoolway sync` removes the marked block an older
 version wrote there, outside home mode. A home-mode checkout keeps its `.gitignore`
 untouched, matching home mode's own promise to write nothing into the checkout.
@@ -529,7 +534,9 @@ spoolway sync               # apply it
 checkout it runs in. In a linked worktree that is the worktree's own tracked files, and the
 [`checkout:` line](cli-reference.md#the-checkout-line) names it first. A linked worktree whose
 branch has no `.spoolway/` reads the main checkout's setup, so `sync` refuses there and names
-the main checkout.
+the main checkout. In the main checkout of a project that reads a [source
+folder](configuration.md#the-source-folder), `sync` writes the source folder's files, and the
+`checkout:` line names the folder.
 
 What `sync` replaces, file by file:
 

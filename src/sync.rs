@@ -35,15 +35,20 @@
 //!
 //! Everything below writes `repo.checkout`, never `repo.root`: the control
 //! plane this command refreshes is tracked, so a lane running in a linked
-//! worktree has its own branch's copies, and a sync taken there has to
-//! land on that branch — where it is reviewed and merged — rather than on
+//! worktree has its own branch's copies where the main checkout has a setup
+//! too, and a sync taken there has to land on that branch — where it is reviewed and merged — rather than on
 //! whatever the main checkout happens to have out. `config set` and
 //! `override promote` follow the same rule through
-//! `Repo::tracked_write_root`, which also refuses a dispatcher lane's
-//! worktree and one on a detached HEAD. This command refuses in a worktree whose branch has no
-//! `.spoolway/` at all. Its setup is the main checkout's, so there is no
+//! `Repo::source_write_root`, which also refuses a dispatcher lane's
+//! worktree and one on a detached HEAD. In a main checkout whose setup is
+//! read from a `source` folder, all three write that folder's files, which
+//! are the ones the dispatcher reads. This command refuses in a worktree
+//! whose branch has no `.spoolway/` at all. Its setup is the main checkout's,
+//! or the main checkout's `source` folder while it has one, so there is no
 //! branch copy to refresh, and writing one would start a setup the branch
-//! never had. That case is refused, naming the main checkout.
+//! never had. That case is refused, naming the folder the worktree reads. A
+//! lane in such a worktree is refused too, without that advice: the folder it
+//! reads is the dispatcher's, where a lane does not write.
 //!
 //! The private override layer and, in a home-mode clone, the plan pages,
 //! `plans-since` and the `plan:` lines of pending and queued tasks are this
@@ -254,15 +259,41 @@ fn closing(
 }
 
 pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
+    // Ahead of the borrowed refusal, which advises running `sync` in the
+    // folder the lane reads. That is no remedy for a lane: a lane does not
+    // change the project's setup, and in an adoption the folder is the
+    // person's own worktree that the dispatcher runs in. A lane also has a
+    // worktree that may carry its own `.spoolway/`, so the refusal cannot say
+    // the branch has none.
+    if repo.borrowed && repo.in_lane_worktree() {
+        bail!(
+            "this lane reads the setup its dispatcher runs on, not its own worktree's, so \
+             `sync` has no setup of this worktree's to refresh.\n  a lane does not change the \
+             project's setup. write the change you wanted into your report, and a person will \
+             make the change."
+        );
+    }
+
     if repo.borrowed {
+        // While the main checkout's setup is a `source` folder, that folder
+        // is the setup this worktree reads, so it is the one to name:
+        // `config path` here prints it as the `checkout:` line.
+        let reads = crate::repo::source_in_use_at(&repo.root);
+        let reads = reads.as_deref().unwrap_or(&repo.checkout);
         bail!(
             "this linked worktree has no `.spoolway/` on its branch, so it reads the setup of {} \
              — `sync` would start a second setup in the worktree\n  run `spoolway sync` in {} \
              instead",
-            repo.checkout.display(),
-            repo.checkout.display(),
+            reads.display(),
+            reads.display(),
         );
     }
+
+    // The note is about the checkout the command ran in, so it is asked of
+    // `repo` before this run moves on to the source folder it writes.
+    let note = repo.checkout_note()?;
+    let on_source = repo.on_source()?;
+    let repo = on_source.as_ref().unwrap_or(repo);
 
     // Held from the first read of the tracked files to the last write, and
     // taken here once: `scan` reads the config and `config set` rewrites it,
@@ -280,7 +311,7 @@ pub fn run(repo: &Repo, args: &SyncArgs) -> Result<()> {
     // Printed here, not below: this project's own files are what the note is
     // about, and a lane running in a linked worktree needs to know which
     // checkout is about to be rewritten before it reads the report.
-    if let Some(note) = repo.checkout_note()? {
+    if let Some(note) = note {
         note.print(false)?;
         println!();
     }
@@ -536,7 +567,9 @@ fn run_asking_with(
         dry_run: true,
         replace: Vec::new(),
     };
-    let outcomes = scan(repo, &dry)?;
+    // The folder `run` writes, so the panel lists the files it will change.
+    let on_source = repo.on_source()?;
+    let outcomes = scan(on_source.as_ref().unwrap_or(repo), &dry)?;
     let (wrote, removed) = dedup_paths(&outcomes);
     if wrote.is_empty() && removed.is_empty() {
         return run(repo, args);
@@ -1212,11 +1245,11 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             // The shipped default, not `repo.config`: `repo.config` is
-            // `Config::load(&repo.root)` (see `Repo::discover`), and once
-            // `checkout` and `root` can diverge that is a different branch's
-            // values, not this one's — the same reason `templates` below
-            // seeds a missing skeleton from `skeleton.shipped` rather than
-            // from anything read out of the main checkout.
+            // `Config::load` of `Repo::setup_source` (see `Repo::discover`),
+            // and once `checkout` and `root` can diverge that is a different
+            // branch's values, not this one's — the same reason `templates`
+            // below seeds a missing skeleton from `skeleton.shipped` rather
+            // than from anything read out of the main checkout.
             let shipped = crate::config::Config::default();
             acts.push(Act::write(
                 crate::config::write_target(&path),
@@ -1245,7 +1278,7 @@ fn config(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> Resu
 
     // Read from the file rather than taken from `repo`, so that what is
     // written back is what this document says. Not the same config as
-    // `repo.config`: that is `Config::load(&repo.root)`, and in a linked
+    // `repo.config`: that is `Config::load` of `Repo::setup_source`, and in a linked
     // worktree — the run this command now exists for — `root` and
     // `checkout` can hold two different files. `current` is always the
     // checkout's own, so a rewrite is sourced from the file it replaces.
@@ -2437,7 +2470,8 @@ fn pipelines(repo: &Repo, outcomes: &mut Vec<Outcome>, acts: &mut Vec<Act>) -> R
     // `checkout`, not `root`: the pipelines are as tracked as the prompts
     // and the task skeletons `shipped_for` above already reads from there,
     // and a lane running in a linked worktree brings its own branch's copies
-    // forward, not the main checkout's.
+    // forward, not the main checkout's. A lane of a project whose main
+    // checkout has no setup never gets here: `run` refuses it.
     let dir = crate::pipeline::Pipelines::dir_in(&repo.checkout);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -3466,6 +3500,99 @@ mod tests {
         assert!(
             said.contains("no `.spoolway/` on its branch")
                 && said.contains(&root.display().to_string()),
+            "{said}"
+        );
+        assert!(
+            !root.join(".spoolway/config.toml").exists(),
+            "nothing may be written before the refusal"
+        );
+    }
+
+    /// While the main checkout's setup is a `source` folder, the worktree
+    /// that borrows it reads that folder, so the refusal names it, in the
+    /// sentence and in the remedy, and not the main checkout it does not read.
+    #[test]
+    fn sync_refusal_in_a_borrowing_worktree_names_the_source_folder() {
+        let project = crate::repo::source_project("sync-borrowed-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.plain).unwrap();
+            assert!(repo.borrowed);
+
+            let err = run(&repo, &args()).expect_err("a borrowed setup is not this worktree's");
+            let said = format!("{err:#}");
+            let source = project.source.display().to_string();
+            let work = project.work.display().to_string();
+            assert!(
+                said.contains(&format!("so it reads the setup of {source} "))
+                    && said.contains(&format!("run `spoolway sync` in {source} instead")),
+                "{said}"
+            );
+            assert!(!said.contains(&work), "{said}");
+        });
+    }
+
+    /// In a main checkout whose setup is read from a `source` folder, `sync`
+    /// refreshes that folder's files and leaves the main checkout's own alone.
+    /// An older installed skill stands in both, so the one that is rewritten
+    /// says which checkout the run wrote.
+    #[test]
+    fn sync_in_the_main_checkout_writes_the_source_and_not_the_checkout() {
+        let project = crate::repo::source_project("sync-writes-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+            let provider = crate::cli::Provider::Codex;
+            let older = crate::known_copies::older::skill(provider, "spoolway-plan");
+            let skill = |checkout: &Path| {
+                let first = provider.plan(checkout).into_iter().next().unwrap();
+                std::fs::create_dir_all(first.path.parent().unwrap()).unwrap();
+                std::fs::write(&first.path, older).unwrap();
+                first
+            };
+            let (in_work, in_source) = (skill(&project.work), skill(&project.source));
+
+            run(&repo, &args()).unwrap();
+
+            assert!(Config::path_in(&project.source).is_file());
+            assert_eq!(
+                std::fs::read_to_string(&in_source.path).unwrap(),
+                in_source.contents
+            );
+            assert_eq!(std::fs::read_to_string(&in_work.path).unwrap(), older);
+            assert!(!project.work.join(".spoolway").exists());
+        });
+    }
+
+    /// The confirm panel scans the folder `run` writes, so it lists the
+    /// source's files, and pressing enter writes them there and nowhere else.
+    #[test]
+    fn asking_sync_in_the_main_checkout_scans_and_writes_the_source() {
+        let project = crate::repo::source_project("ask-writes-source");
+        crate::platform::test_home::with_home(&project.home, || {
+            let repo = Repo::discover(&project.work).unwrap();
+
+            let drawn = ask(&repo, &args(), false, true, "\r");
+
+            assert!(drawn.contains("config.toml"), "{drawn}");
+            assert!(Config::path_in(&project.source).is_file());
+            assert!(!project.work.join(".spoolway").exists());
+        });
+    }
+
+    /// A lane that reads its dispatcher's setup has no setup of its own to
+    /// refresh. Its refusal must not say the branch has no `.spoolway/`, which
+    /// a lane's may, nor send it to run `sync` in the folder it reads.
+    #[test]
+    fn sync_refuses_in_a_lane_that_reads_its_dispatchers_setup() {
+        let (mut repo, root) = fixture("borrowed-lane");
+        repo.borrowed = true;
+        repo.started_in_lane = true;
+
+        let err = run(&repo, &args()).expect_err("a lane does not change the project's setup");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("a lane does not change the project's setup")
+                && !said.contains("no `.spoolway/` on its branch")
+                && !said.contains("run `spoolway sync`"),
             "{said}"
         );
         assert!(
