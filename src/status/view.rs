@@ -1326,13 +1326,13 @@ pub(super) fn jobs_ledger(jobs: &[crate::jobs::ActiveJob], name_w: usize) -> Vec
         .max()
         .unwrap_or(0);
     let indent = format!("{:name_w$}{GUTTER}", "");
-    let now = chrono::Local::now();
+    let now = jiff::Timestamp::now();
     for job in jobs {
-        let when = match job.next {
+        let when = match &job.next {
             Some(at) => format!(
                 "{}{GUTTER}({})",
-                at.format("%a %-d %b %H:%M"),
-                crate::jobs::until(at - now)
+                at.strftime("%a %-d %b %H:%M"),
+                crate::jobs::until(at.timestamp().duration_since(now))
             ),
             // The same fact `doctor`'s own "schedule fires" check names —
             // a job whose expression parses but never comes round — kept
@@ -4455,10 +4455,12 @@ mod tests {
     /// 1d 11h from now, each with half a minute to spare so `until` reads the
     /// same however long the test takes to reach it.
     fn two_jobs() -> Vec<crate::jobs::ActiveJob> {
-        let now = chrono::Local::now();
+        let now = jiff::Zoned::now();
         let job = |name: &str, mins: i64| crate::jobs::ActiveJob {
             name: name.to_string(),
-            next: Some(now + chrono::TimeDelta::minutes(mins) - chrono::TimeDelta::seconds(30)),
+            next: Some(
+                &now + jiff::SignedDuration::from_mins(mins) - jiff::SignedDuration::from_secs(30),
+            ),
         };
         vec![
             job("nightly-audit", 5 * 60 + 12),
@@ -4475,7 +4477,14 @@ mod tests {
         let jobs = two_jobs();
         let ledger = jobs_ledger(&jobs, 0);
         let block = greeting_screen("Good evening, Marvin.", 70, Some(14), &ledger, 0);
-        let at = |i: usize| jobs[i].next.unwrap().format("%a %-d %b %H:%M");
+        let at = |i: usize| {
+            jobs[i]
+                .next
+                .as_ref()
+                .unwrap()
+                .strftime("%a %-d %b %H:%M")
+                .to_string()
+        };
         // The block's margin follows its widest line, and that line holds a
         // date whose day of the month is one digit or two, depending on when
         // the test runs. So the margin is taken from the ledger as rendered,
@@ -5315,11 +5324,11 @@ mod tests {
             "no ledger without an enabled job: {quiet:#?}"
         );
 
-        let soon = chrono::Local::now() + chrono::TimeDelta::hours(6);
+        let soon = jiff::Zoned::now() + jiff::SignedDuration::from_hours(6);
         let jobs = [
             crate::jobs::ActiveJob {
                 name: "nightly-audit".to_string(),
-                next: Some(soon),
+                next: Some(soon.clone()),
             },
             crate::jobs::ActiveJob {
                 name: "broken".to_string(),
@@ -5351,7 +5360,7 @@ mod tests {
         assert_eq!(lines[at - 1], "", "a blank line separates it: {lines:#?}");
         assert!(
             lines[at + 1].contains("nightly-audit")
-                && lines[at + 1].contains(&soon.format("%a %-d %b %H:%M").to_string()),
+                && lines[at + 1].contains(&soon.strftime("%a %-d %b %H:%M").to_string()),
             "the first row names the job and its next firing: {lines:#?}"
         );
         assert!(

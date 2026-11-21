@@ -13,8 +13,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
-
 use super::queue::clip as clip_to;
 use super::*;
 use crate::jobs::{self, Job, JobSpec, Scope};
@@ -28,8 +26,7 @@ pub fn jobs_list(repo: &Repo, json: bool) -> Result<()> {
     }
 
     let jobs = jobs::load(repo)?;
-    let now = Local::now();
-    let now_epoch = now.timestamp();
+    let now_epoch = jiff::Timestamp::now().as_second();
 
     if json {
         let rows: Vec<Row> = jobs.iter().map(|job| Row::build(repo, job)).collect();
@@ -276,7 +273,8 @@ impl Row {
             unknown_keys: job.unknown_keys.clone(),
             source: store_label(repo, &job.source),
             next: match job.spec.enabled {
-                true => jobs::next_fire(&job.spec.schedule).map(|when| when.to_rfc3339()),
+                true => jobs::next_fire(&job.spec.schedule)
+                    .map(|when| crate::clock::rfc3339_local(&when)),
                 false => None,
             },
             last_fired: jobs::last_fired(repo, &job.name),
@@ -298,13 +296,13 @@ fn next_cell(job: &Job) -> String {
     let Some(when) = jobs::next_fire(&job.spec.schedule) else {
         return "never".to_string();
     };
-    let delta = when - Local::now();
-    if delta <= chrono::TimeDelta::days(1) {
+    let delta = when.timestamp().duration_since(jiff::Timestamp::now());
+    if delta <= jiff::SignedDuration::from_hours(24) {
         jobs::until(delta)
-    } else if delta <= chrono::TimeDelta::days(7) {
-        when.format("%a %H:%M").to_string()
+    } else if delta <= jiff::SignedDuration::from_hours(24 * 7) {
+        when.strftime("%a %H:%M").to_string()
     } else {
-        when.format("%a %-d %b %H:%M").to_string()
+        when.strftime("%a %-d %b %H:%M").to_string()
     }
 }
 
@@ -629,7 +627,7 @@ pub(super) fn saved_notice(draft: &Draft) -> Notice {
         Err(_) => format!("on `{schedule}`"),
     };
     let next = match jobs::next_fire(schedule) {
-        Some(at) => at.format(FIRING_TIME).to_string(),
+        Some(at) => at.strftime(FIRING_TIME).to_string(),
         None => "never".to_string(),
     };
     // Edit schedule keeps an inactive job inactive, and its routine's menu then
@@ -826,7 +824,7 @@ pub(super) fn detail_next(job: &Job) -> String {
         return "will not parse".to_string();
     }
     match jobs::next_fire(&job.spec.schedule) {
-        Some(when) => when.format(FIRING_TIME).to_string(),
+        Some(when) => when.strftime(FIRING_TIME).to_string(),
         None => "never".to_string(),
     }
 }
@@ -834,9 +832,13 @@ pub(super) fn detail_next(job: &Job) -> String {
 /// The `last:` value on the routines tab's details pane.
 pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
     match jobs::last_fired(repo, name) {
-        Some(epoch) => match chrono::DateTime::from_timestamp(epoch, 0) {
-            Some(when) => format!("{}  ok", when.with_timezone(&Local).format(FIRING_TIME)),
-            None => "never".to_string(),
+        Some(epoch) => match jiff::Timestamp::from_second(epoch) {
+            Ok(when) => format!(
+                "{}  ok",
+                when.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime(FIRING_TIME)
+            ),
+            Err(_) => "never".to_string(),
         },
         None => "never".to_string(),
     }
@@ -886,7 +888,7 @@ fn schedule_panel(draft: &Draft) -> Vec<String> {
                 }
                 for (index, when) in fires.iter().enumerate() {
                     let label = if index == 0 { "  next   " } else { "         " };
-                    body.push(format!("{label}{}", when.format("%a %e %b  %H:%M")));
+                    body.push(format!("{label}{}", when.strftime("%a %e %b  %H:%M")));
                 }
             }
             Err(err) => body.push(clip(&format!("  won't parse — {err}"))),
@@ -1115,7 +1117,7 @@ mod tests {
         .unwrap();
         let jobs = jobs::load(&repo).unwrap();
 
-        let text = render_jobs_list(&repo, &jobs, Local::now().timestamp());
+        let text = render_jobs_list(&repo, &jobs, jiff::Timestamp::now().as_second());
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines[..4],

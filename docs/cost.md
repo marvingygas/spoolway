@@ -1,6 +1,6 @@
 ---
 domain: cost
-covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.json"]
+covers: ["src/usage.rs", "src/spend.rs", "src/models.rs", "assets/model-prices.json", "src/clock.rs"]
 ---
 
 # Cost accounting
@@ -9,6 +9,10 @@ spoolway records what every lane spent: tokens, cost, wall time and outcome. The
 the ledger, in `~/.spoolway/<project>/usage.jsonl`. It holds one line per lane and one line per
 command step run. A command step line carries no tokens and no cost. See
 [The command steps table](eval.md#the-command-steps-table).
+
+Each line carries `ts`, the time it was written, in UTC with a `+00:00` offset, such as
+`2026-08-04T06:14:15+00:00`. A fraction of a second, when there is one, has three, six or nine
+digits. spoolway reads a `ts` with a `Z` or any other offset as well.
 
 A line written for a copy of a routine carries `routine`, the routine's id. A line for any other
 task leaves it out.

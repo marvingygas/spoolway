@@ -2799,7 +2799,7 @@ fn live_aborts(
         // The same clock `build_rows` reads for a live row's own TIME column
         // — the round in flight's own launch, not banked yet.
         let elapsed = task.front.launched_at.map(|launched| {
-            Duration::from_secs((chrono::Utc::now().timestamp() - launched).max(0) as u64)
+            Duration::from_secs((jiff::Timestamp::now().as_second() - launched).max(0) as u64)
         });
         out.push(Abort {
             task: task.id().to_string(),
@@ -4255,7 +4255,7 @@ fn build(
     // The ticker sees the queue move: a stage that changed, or a task that
     // left the queue finished. A task entering the queue is already a new row
     // on the table above, so it earns no line here too.
-    let now = chrono::Local::now().format("%H:%M").to_string();
+    let now = jiff::Zoned::now().strftime("%H:%M").to_string();
     let mut current: BTreeMap<String, String> = BTreeMap::new();
     for task in &tasks {
         current.insert(task.id().to_string(), task.stage().to_string());
@@ -5159,7 +5159,7 @@ fn paint_empty(
         true => height.saturating_sub(3 + last_rows),
         false => height.saturating_sub(4 + last_rows),
     });
-    let hour = chrono::Timelike::hour(&chrono::Local::now());
+    let hour = jiff::Zoned::now().hour() as u32;
     // No profile names to line "jobs" up with here, so the ledger takes
     // only the column its own label needs.
     let ledger = jobs_ledger(jobs, 0);
@@ -6283,7 +6283,7 @@ fn rows_on(
             true => task
                 .front
                 .launched_at
-                .map(|launched| (chrono::Utc::now().timestamp() - launched).max(0)),
+                .map(|launched| (jiff::Timestamp::now().as_second() - launched).max(0)),
             false => None,
         };
         // Live goes by whether the lane itself is open, not by whether a
@@ -7722,7 +7722,9 @@ pub fn run_start(repo: &Repo) -> Option<String> {
     let modified = std::fs::metadata(repo.lock_file())
         .and_then(|meta| meta.modified())
         .ok()?;
-    Some(chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339())
+    Some(crate::clock::rfc3339(
+        jiff::Timestamp::try_from(modified).ok()?,
+    ))
 }
 
 #[cfg(test)]
@@ -9794,7 +9796,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let record = |unanswered: bool, last_model_turn: Option<i64>| {
             let mut fields = serde_json::json!({
                 "started_at": now - 7200,
@@ -9908,7 +9910,7 @@ mod tests {
         add(&repo, "login", &[], Some("implement"));
         let tasks = repo.tasks().unwrap();
         let graph = Graph::build(&tasks, &repo.archive_dir());
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let write_record = |kept: bool| {
             let records = serde_json::json!({ "login · implement": {
                 "started_at": now - 7200,
@@ -9945,7 +9947,7 @@ mod tests {
 
     /// Writes a `lanes.json` holding one record for `name`, `kept` as given.
     fn write_kept_record(repo: &Repo, name: &str, kept: bool) {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let records = serde_json::json!({ name: {
             "started_at": now - 7200,
             "last_progress": now - 600,
@@ -10125,7 +10127,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
-        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 90);
+        task.front.launched_at = Some(jiff::Timestamp::now().as_second() - 90);
         task.save().unwrap();
 
         let mut settled = lane("login · implement", &repo.root);
@@ -10157,7 +10159,7 @@ mod tests {
         // Later frames: the launch now reads ten minutes back, which a live
         // clock would count from. The finished row keeps its first figure.
         let mut task = repo.task("login").unwrap();
-        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 600);
+        task.front.launched_at = Some(jiff::Timestamp::now().as_second() - 600);
         task.save().unwrap();
         let (_, later) = frame(&mut frozen, &lanes);
         assert!(matches!(later.state, State::Finished));
@@ -10686,7 +10688,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
-        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 90);
+        task.front.launched_at = Some(jiff::Timestamp::now().as_second() - 90);
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
@@ -10802,7 +10804,7 @@ mod tests {
         task.front.pipeline = Some("bugfix".to_string());
         task.save().unwrap();
         let mut task = repo.task("b-agent").unwrap();
-        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 90);
+        task.front.launched_at = Some(jiff::Timestamp::now().as_second() - 90);
         task.save().unwrap();
 
         let tasks = repo.tasks().unwrap();
@@ -11078,7 +11080,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
-        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 90);
+        task.front.launched_at = Some(jiff::Timestamp::now().as_second() - 90);
         task.front.attempts = 1;
         // What the busy-lane branch in `Dispatcher::pass` does the first pass
         // that sees the lane working: forgive the counter, nothing else.
@@ -12458,12 +12460,12 @@ mod tests {
         let routed =
             crate::commands::route(&mut task, &pipeline, &current, outcome, false, None, 0)
                 .unwrap();
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let mut report = crate::task::LastReport::neutral();
         report.step = current;
         report.outcome = outcome.as_str().to_string();
-        report.at = now.timestamp();
-        report.at_ms = now.timestamp_millis();
+        report.at = now.as_second();
+        report.at_ms = now.as_millisecond();
         report.blocked = routed.destination == crate::pipeline::BLOCKED;
         task.front.last_report = Some(report);
         task.set_stage(&routed.destination, routed.pause_note.as_deref());
@@ -12837,7 +12839,7 @@ mod tests {
                 task.front.last_report = Some(crate::task::LastReport {
                     step: crate::pipeline::BLOCKED.into(),
                     outcome: Outcome::Pass.as_str().into(),
-                    at: chrono::Utc::now().timestamp(),
+                    at: jiff::Timestamp::now().as_second(),
                     ..crate::task::LastReport::neutral()
                 });
                 task.set_stage(&routed.destination, routed.pause_note.as_deref());
@@ -13845,7 +13847,7 @@ mod tests {
         hooked.set_stage(crate::pipeline::HOOK_FAILED, Some("hook failed"));
         hooked.save().unwrap();
 
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         write_lane_records(
             &repo,
             &[
@@ -13953,7 +13955,7 @@ mod tests {
         stuck.front.blocked_from = Some("implement".into());
         stuck.set_stage(crate::pipeline::BLOCKED, Some("blocked by hand"));
         stuck.save().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         write_lane_records(
             &repo,
             &[
@@ -16077,7 +16079,7 @@ mod tests {
         let pipelines = Pipelines::builtin();
         add(&repo, "login", &[], Some("implement"));
         let mut task = repo.task("login").unwrap();
-        task.front.launched_at = Some(chrono::Utc::now().timestamp() - 260);
+        task.front.launched_at = Some(jiff::Timestamp::now().as_second() - 260);
         task.save().unwrap();
         let before = std::fs::read_to_string(&task.path).unwrap();
 
@@ -19640,10 +19642,10 @@ mod tests {
                 })
             })
             .collect();
-        let soon = chrono::Local::now() + chrono::TimeDelta::hours(6);
+        let soon = jiff::Zoned::now() + jiff::SignedDuration::from_hours(6);
         let job = |name: &str| crate::jobs::ActiveJob {
             name: name.to_string(),
-            next: Some(soon),
+            next: Some(soon.clone()),
         };
         Snapshot {
             rows,

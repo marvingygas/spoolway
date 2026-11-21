@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::ModelsRefreshArgs;
@@ -50,7 +50,7 @@ const BUILTIN_JSON: &str = include_str!("../assets/model-prices.json");
 struct BuiltinFile {
     source: String,
     license: String,
-    generated: NaiveDate,
+    generated: Date,
     models: BTreeMap<String, ModelPrice>,
 }
 
@@ -234,7 +234,7 @@ pub fn refresh(repo: &Repo, args: &ModelsRefreshArgs) -> Result<()> {
     let file = BuiltinFile {
         source: SOURCE_PAGE.to_string(),
         license: SOURCE_LICENSE.to_string(),
-        generated: chrono::Utc::now().date_naive(),
+        generated: crate::clock::utc_today(),
         models,
     };
     let mut contents = serde_json::to_vec_pretty(&file).context("encoding the distilled table")?;
@@ -569,22 +569,24 @@ fn refreshed_price(model: &str) -> Option<ModelPrice> {
 /// describe different layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PriceTableAge {
-    pub generated: NaiveDate,
+    pub generated: Date,
     pub days: u64,
 }
 
 pub(crate) fn price_table_age() -> PriceTableAge {
-    price_table_age_at(chrono::Utc::now().date_naive())
+    price_table_age_at(crate::clock::utc_today())
 }
 
-fn price_table_age_at(today: NaiveDate) -> PriceTableAge {
+fn price_table_age_at(today: Date) -> PriceTableAge {
     let generated = refreshed_file()
         .map(|file| file.generated)
         .unwrap_or_else(|| builtin_file().generated);
     // A future date can only come from a hand-written refreshed file or a
     // clock correction. It is not an old table, so report zero rather than a
     // negative age that would read as stale arithmetic.
-    let days = today.signed_duration_since(generated).num_days().max(0) as u64;
+    let days = today
+        .since(generated)
+        .map_or(0, |span| span.get_days().max(0)) as u64;
     PriceTableAge { generated, days }
 }
 
@@ -1485,6 +1487,8 @@ mod tests {
 
     #[test]
     fn table_age_uses_the_refreshed_date_and_falls_back_as_a_whole_file() {
+        use jiff::ToSpan;
+
         let home = fixture_home("models-table-age");
         crate::platform::test_home::with_home(&home, || {
             // Read off the vendored table rather than written in: that file
@@ -1492,7 +1496,7 @@ mod tests {
             // would fail every time it was — the behaviour under test is the
             // fallback, not which day the fallback happens to name.
             let vendored = builtin_file().generated;
-            let today = vendored + chrono::Duration::days(32);
+            let today = vendored + 32.days();
             assert_eq!(
                 price_table_age_at(today),
                 PriceTableAge {
@@ -1501,12 +1505,8 @@ mod tests {
                 }
             );
 
-            let refreshed = today - chrono::Duration::days(9);
-            write_refreshed_generated(
-                &home,
-                &refreshed.format("%Y-%m-%d").to_string(),
-                serde_json::json!({}),
-            );
+            let refreshed = today - 9.days();
+            write_refreshed_generated(&home, &refreshed.to_string(), serde_json::json!({}));
             assert_eq!(
                 price_table_age_at(today),
                 PriceTableAge {
@@ -1526,7 +1526,7 @@ mod tests {
     #[test]
     fn table_footer_names_the_date_age_and_explicit_refresh() {
         let age = PriceTableAge {
-            generated: NaiveDate::from_ymd_opt(2026, 8, 9).unwrap(),
+            generated: jiff::civil::date(2026, 8, 9),
             days: 31,
         };
         assert_eq!(

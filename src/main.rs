@@ -12,6 +12,7 @@ mod assets;
 mod browser;
 mod claim;
 mod cli;
+mod clock;
 mod command_step;
 mod commands;
 mod compose;

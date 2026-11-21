@@ -32,7 +32,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::{Duration, Local, NaiveDateTime, TimeZone};
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Span, Timestamp, Zoned};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table};
 
@@ -651,7 +653,7 @@ fn run_id() -> &'static str {
 }
 
 /// How far back a pass looks for a window it was not awake for.
-const CATCH_UP_LIMIT: Duration = Duration::hours(1);
+const CATCH_UP_LIMIT: SignedDuration = SignedDuration::from_hours(1);
 
 /// The latest minute `cron` fires on, out of the current one and every
 /// minute since `checked` — the minute the previous pass looked at, back at
@@ -667,10 +669,13 @@ const CATCH_UP_LIMIT: Duration = Duration::hours(1);
 /// other night, and nothing said so (jobs review finding 2). The latest match rather than
 /// all of them: one run per pass is what a job gets, and the previous run
 /// still being queued would skip the rest anyway.
-fn due_minute(cron: &Cron, checked: Option<&str>, now: NaiveDateTime) -> Option<NaiveDateTime> {
+fn due_minute(cron: &Cron, checked: Option<&str>, now: DateTime) -> Option<DateTime> {
     let start = checked
-        .and_then(|minute| NaiveDateTime::parse_from_str(minute, MINUTE_FMT).ok())
-        .map(|minute| minute + Duration::minutes(1))
+        .and_then(|minute| DateTime::strptime(MINUTE_FMT, minute).ok())
+        // `checked_add`: the state file is hand-editable, and a minute at the
+        // end of year 9999 must fall back to `now` like any unreadable one,
+        // not panic the dispatcher's pass.
+        .and_then(|minute| minute.checked_add(SignedDuration::from_mins(1)).ok())
         .unwrap_or(now)
         .max(now - CATCH_UP_LIMIT)
         .min(now);
@@ -679,7 +684,7 @@ fn due_minute(cron: &Cron, checked: Option<&str>, now: NaiveDateTime) -> Option<
         if cron.matches(&at) {
             return Some(at);
         }
-        at -= Duration::minutes(1);
+        at -= SignedDuration::from_mins(1);
     }
     None
 }
@@ -970,8 +975,8 @@ pub fn fire_due(
         return;
     }
 
-    let now = Local::now().naive_local();
-    let minute = now.format(MINUTE_FMT).to_string();
+    let now = Zoned::now().datetime();
+    let minute = now.strftime(MINUTE_FMT).to_string();
     // Only a pass with an enabled job reads the queue; a project whose jobs
     // are all off would otherwise pay for it every pass.
     let any_enabled = jobs.iter().any(|job| job.spec.enabled);
@@ -1096,7 +1101,7 @@ pub fn fire_due(
         }
         let due = waiting
             .as_deref()
-            .and_then(|window| NaiveDateTime::parse_from_str(window, MINUTE_FMT).ok())
+            .and_then(|window| DateTime::strptime(MINUTE_FMT, window).ok())
             .or_else(|| due_minute(&cron, looked.as_deref(), now));
         *dirty |= note_look(record, shared, &path, &job.name, &minute);
         let Some(due) = due else {
@@ -1106,13 +1111,14 @@ pub fn fire_due(
         // that clone can see: this window is taken until it settles, or the
         // claim is too old to be a live dispatcher's.
         if record.opening.as_ref().is_some_and(|held| {
-            held.clone != me && Local::now().timestamp().saturating_sub(held.at) < OPENING_HELD_SECS
+            held.clone != me
+                && Timestamp::now().as_second().saturating_sub(held.at) < OPENING_HELD_SECS
         }) {
             continue;
         }
         // The window's own minute, not the pass's: a job that fired late is
         // recorded — and deduplicated — against the minute it was due.
-        let minute = due.format(MINUTE_FMT).to_string();
+        let minute = due.strftime(MINUTE_FMT).to_string();
         if record.fired_minute.as_deref() == Some(minute.as_str())
             || record.skipped_minute.as_deref() == Some(minute.as_str())
         {
@@ -1191,7 +1197,7 @@ pub fn fire_due(
             Ok(tasks) => {
                 let ids: Vec<String> = tasks.iter().map(|task| task.id().to_string()).collect();
                 record.fired_minute = Some(minute.clone());
-                record.fired_at = Some(Local::now().timestamp());
+                record.fired_at = Some(Timestamp::now().as_second());
                 record.queued_ids = ids.clone();
                 record.clone = shared.then(|| repo.workspace_dispatcher()).flatten();
                 record.skipped_minute = None;
@@ -1221,7 +1227,7 @@ pub fn fire_due(
                         // the claim outlives any one hook's limit.
                         record.opening = Some(Opening {
                             clone: me.clone(),
-                            at: Local::now().timestamp(),
+                            at: Timestamp::now().as_second(),
                         });
                         *dirty = true;
                     }
@@ -1311,7 +1317,7 @@ pub fn last_fired(repo: &Repo, name: &str) -> Option<i64> {
 pub struct StayingUp {
     /// The enabled job that fires soonest, and when — `None` if none is
     /// enabled or none will ever fire.
-    pub next: Option<(String, chrono::DateTime<Local>)>,
+    pub next: Option<(String, Zoned)>,
 }
 
 /// One row of the dispatcher board's job ledger: an enabled job's name and
@@ -1320,7 +1326,7 @@ pub struct StayingUp {
 #[derive(Debug, Clone)]
 pub struct ActiveJob {
     pub name: String,
-    pub next: Option<chrono::DateTime<Local>>,
+    pub next: Option<Zoned>,
 }
 
 /// A caller-held memo for [`active_jobs`]. The status board asks on every
@@ -1367,7 +1373,7 @@ pub fn active_jobs(repo: &Repo) -> Vec<ActiveJob> {
         .collect();
     // `None` sorts after every `Some`, so a job that will never fire always
     // lands at the end rather than scattered among ones that will.
-    active.sort_by_key(|job| (job.next.is_none(), job.next));
+    active.sort_by_key(|job| (job.next.is_none(), job.next.as_ref().map(Zoned::timestamp)));
     active
 }
 
@@ -1376,7 +1382,7 @@ pub fn active_jobs(repo: &Repo) -> Vec<ActiveJob> {
 /// caller pays the calendar scan at most once a minute, and at once when a
 /// store is edited.
 pub fn active_jobs_cached(repo: &Repo, memo: &mut Option<ActiveJobsMemo>) -> Vec<ActiveJob> {
-    let minute = Local::now().timestamp().div_euclid(60);
+    let minute = Timestamp::now().as_second().div_euclid(60);
     let stores = [
         store_mtime(&repo.user_jobs_file()),
         store_mtime(&repo.jobs_file()),
@@ -1410,7 +1416,7 @@ pub fn staying_up(repo: &Repo) -> StayingUp {
     let active = active_jobs(repo);
     let next = active
         .first()
-        .and_then(|job| job.next.map(|when| (job.name.clone(), when)));
+        .and_then(|job| job.next.clone().map(|when| (job.name.clone(), when)));
     StayingUp { next }
 }
 
@@ -1425,8 +1431,8 @@ pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
     let next_line = match &jobs.next {
         Some((name, when)) => format!(
             "next: {name}, {}  ({})",
-            when.format("%a %-d %b %H:%M"),
-            until(*when - Local::now()),
+            when.strftime("%a %-d %b %H:%M"),
+            until(when.timestamp().duration_since(Timestamp::now())),
         ),
         None => "next: no job will fire — run `spoolway doctor`".to_string(),
     };
@@ -1436,22 +1442,39 @@ pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
 /// The next local instant an expression fires, from now. `None` if it will
 /// not parse, or never comes round within one full Gregorian cycle in a
 /// form this machine's timezone actually has.
-pub fn next_fire(schedule: &str) -> Option<chrono::DateTime<Local>> {
+pub fn next_fire(schedule: &str) -> Option<Zoned> {
     let cron = Cron::parse(schedule).ok()?;
-    let now = Local::now();
+    let zone = TimeZone::system();
+    let now = Zoned::now();
     let at = next_real_fire(
         &cron,
-        now.naive_local(),
-        now.timestamp(),
-        |naive| match Local.from_local_datetime(naive) {
-            chrono::LocalResult::None => Wall::Skipped,
-            chrono::LocalResult::Single(when) => Wall::Once(when.timestamp()),
-            chrono::LocalResult::Ambiguous(earlier, later) => {
-                Wall::Twice(earlier.timestamp(), later.timestamp())
-            }
-        },
+        now.datetime(),
+        now.timestamp().as_second(),
+        |naive| resolve_wall(naive, &zone),
     )?;
-    Some(chrono::DateTime::from_timestamp(at, 0)?.with_timezone(&Local))
+    Some(Timestamp::from_second(at).ok()?.to_zoned(zone))
+}
+
+/// How `naive` lands in `zone`: once, never (a spring-forward gap) or twice
+/// (a fall-back repeat), each occurrence as UTC seconds.
+///
+/// `to_ambiguous_timestamp` rather than `DateTime::to_zoned`, which silently
+/// picks one occurrence of a repeated minute and moves a skipped one forward
+/// by the gap's length — both of which [`next_real_fire`] has to tell apart.
+/// An instant outside the range a timestamp holds counts as skipped.
+fn resolve_wall(naive: &DateTime, zone: &TimeZone) -> Wall {
+    use jiff::tz::AmbiguousOffset;
+    let at = |offset: jiff::tz::Offset| offset.to_timestamp(*naive).map(|t| t.as_second());
+    match zone.to_ambiguous_timestamp(*naive).offset() {
+        AmbiguousOffset::Unambiguous { offset } => at(offset).map_or(Wall::Skipped, Wall::Once),
+        AmbiguousOffset::Gap { .. } => Wall::Skipped,
+        // `before` is the offset in force before the clocks went back, which
+        // reaches the repeated minute first.
+        AmbiguousOffset::Fold { before, after } => match (at(before), at(after)) {
+            (Ok(earlier), Ok(later)) => Wall::Twice(earlier, later),
+            _ => Wall::Skipped,
+        },
+    }
 }
 
 /// The next `count` local firings of `schedule` from now, for the jobs
@@ -1461,22 +1484,26 @@ pub fn next_fire(schedule: &str) -> Option<chrono::DateTime<Local>> {
 ///
 /// A minute that a spring-forward gap skips is stepped over — the scan simply
 /// moves to the next matching minute — the same way [`next_fire`] treats one.
-pub fn next_fires(schedule: &str, count: usize) -> Vec<chrono::DateTime<Local>> {
+pub fn next_fires(schedule: &str, count: usize) -> Vec<Zoned> {
     let Ok(cron) = Cron::parse(schedule) else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(count);
-    let mut cursor = Local::now().naive_local();
+    let zone = TimeZone::system();
+    let mut cursor = Zoned::now().datetime();
     while out.len() < count {
         let Some(next) = cron.next_after(cursor) else {
             break;
         };
         cursor = next;
-        match Local.from_local_datetime(&next) {
-            chrono::LocalResult::Single(when) | chrono::LocalResult::Ambiguous(when, _) => {
-                out.push(when)
+        // A repeated minute is listed at its first occurrence only.
+        match resolve_wall(&next, &zone) {
+            Wall::Once(at) | Wall::Twice(at, _) => {
+                if let Ok(at) = Timestamp::from_second(at) {
+                    out.push(at.to_zoned(zone.clone()));
+                }
             }
-            chrono::LocalResult::None => continue,
+            Wall::Skipped => continue,
         }
     }
     out
@@ -1486,14 +1513,15 @@ pub fn next_fires(schedule: &str, count: usize) -> Vec<chrono::DateTime<Local>> 
 /// that a fall-back window which repeats a wall label is not missed.
 ///
 /// A candidate instant `t` later than `now` carries a wall label
-/// `t + offset(t)`. `chrono` clamps every UTC offset to the open interval
-/// `(-24h, +24h)`, and `after` is itself `now + offset(now)`, so any such
-/// label is greater than `now - 48h`, hence greater than `after - 48h`.
+/// `t + offset(t)`. `jiff` clamps every UTC offset to the closed interval
+/// `[-25:59:59, +25:59:59]`, and `after` is itself `now + offset(now)`, so
+/// any such label is greater than `now - 26h`, and `now` is at least
+/// `after - 26h`, hence any label is greater than `after - 52h`.
 /// Deriving the window from the offset range this way, not from a table of
 /// how far known zones roll back, is the whole point: date-line moves have
 /// shifted a zone by nearly a full day (Pacific/Kwajalein lost 23 hours in
 /// 1969), so any fixed few-hour guess would be a latent bug.
-const LOOKBACK_HOURS: i64 = 48;
+const LOOKBACK_HOURS: i64 = 52;
 
 /// How one naive wall-clock minute lands in a real timezone.
 enum Wall {
@@ -1531,14 +1559,14 @@ enum Wall {
 /// whether or not any candidate ever landed on a real future instant.
 fn next_real_fire(
     cron: &Cron,
-    after: NaiveDateTime,
+    after: DateTime,
     now: i64,
-    resolve: impl Fn(&NaiveDateTime) -> Wall,
+    resolve: impl Fn(&DateTime) -> Wall,
 ) -> Option<i64> {
     let deadline = after
-        .checked_add_signed(Duration::days(crate::cron::SEARCH_LIMIT_DAYS))
-        .unwrap_or(NaiveDateTime::MAX);
-    let mut cursor = after - Duration::hours(LOOKBACK_HOURS);
+        .checked_add(Span::new().days(crate::cron::SEARCH_LIMIT_DAYS))
+        .unwrap_or(DateTime::MAX);
+    let mut cursor = after - SignedDuration::from_hours(LOOKBACK_HOURS);
     loop {
         let candidate = cron.next_after(cursor)?;
         if candidate > deadline {
@@ -1558,8 +1586,8 @@ fn next_real_fire(
 
 /// A rough "in 5h 48m" for a future delta, for the dispatcher's "next:" line
 /// and `jobs list`'s NEXT column. Past or within the minute is "now".
-pub fn until(delta: chrono::TimeDelta) -> String {
-    let secs = delta.num_seconds();
+pub fn until(delta: SignedDuration) -> String {
+    let secs = delta.as_secs();
     if secs <= 30 {
         return "now".to_string();
     }
@@ -1640,11 +1668,17 @@ mod tests {
     }
 
     /// A naive local minute, for the timezone-resolution tests.
-    fn naive(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
-        chrono::NaiveDate::from_ymd_opt(year, month, day)
+    fn naive(year: i16, month: i8, day: i8, hour: i8, minute: i8) -> DateTime {
+        jiff::civil::date(year, month, day).at(hour, minute, 0, 0)
+    }
+
+    /// The UTC-seconds instant a naive minute names if read as UTC.
+    fn utc_secs(naive: &DateTime) -> i64 {
+        naive
+            .to_zoned(TimeZone::UTC)
             .unwrap()
-            .and_hms_opt(hour, minute, 0)
-            .unwrap()
+            .timestamp()
+            .as_second()
     }
 
     fn write_user_store(repo: &Repo, body: &str) {
@@ -1903,9 +1937,9 @@ mod tests {
         let fires = next_fires("*/30 * * * *", 3);
         assert_eq!(fires.len(), 3);
         assert!(fires[0] < fires[1] && fires[1] < fires[2]);
-        assert!(fires[0] > Local::now());
+        assert!(fires[0] > Zoned::now());
         for when in &fires {
-            let minute = when.format("%M").to_string();
+            let minute = when.strftime("%M").to_string();
             assert!(minute == "00" || minute == "30", "on the half hour: {when}");
         }
     }
@@ -1917,10 +1951,10 @@ mod tests {
 
     #[test]
     fn until_reads_roughly() {
-        assert_eq!(until(chrono::TimeDelta::seconds(10)), "now");
-        assert_eq!(until(chrono::TimeDelta::minutes(5)), "in 5m");
-        assert_eq!(until(chrono::TimeDelta::minutes(60 * 5 + 48)), "in 5h 48m");
-        assert_eq!(until(chrono::TimeDelta::hours(72)), "in 3d");
+        assert_eq!(until(SignedDuration::from_secs(10)), "now");
+        assert_eq!(until(SignedDuration::from_mins(5)), "in 5m");
+        assert_eq!(until(SignedDuration::from_mins(60 * 5 + 48)), "in 5h 48m");
+        assert_eq!(until(SignedDuration::from_hours(72)), "in 3d");
     }
 
     #[test]
@@ -1931,18 +1965,90 @@ mod tests {
         let cron = Cron::parse("0 2 * * *").unwrap();
         let gap = naive(2027, 3, 14, 2, 0);
         let after = naive(2027, 3, 13, 12, 0);
-        let now = after.and_utc().timestamp();
+        let now = utc_secs(&after);
 
         let at = next_real_fire(&cron, after, now, |when| {
             if *when == gap {
                 Wall::Skipped
             } else {
-                Wall::Once(when.and_utc().timestamp())
+                Wall::Once(utc_secs(when))
             }
         })
         .unwrap();
 
-        assert_eq!(at, naive(2027, 3, 15, 2, 0).and_utc().timestamp());
+        assert_eq!(at, utc_secs(&naive(2027, 3, 15, 2, 0)));
+    }
+
+    /// Central European time, spelled as a POSIX rule so the test needs no
+    /// zone database on the machine: clocks go 02:00 to 03:00 on the last
+    /// Sunday of March and 03:00 back to 02:00 on the last Sunday of October.
+    fn berlin() -> TimeZone {
+        TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").unwrap()
+    }
+
+    /// The state file can be edited by hand, so a `checked_minute` at the end
+    /// of the last year a date holds must read as unusable, not panic when a
+    /// minute is added to it.
+    #[test]
+    fn a_checked_minute_at_the_end_of_time_falls_back_to_the_current_minute() {
+        let cron = Cron::parse("* * * * *").unwrap();
+        let now = naive(2027, 3, 15, 2, 0);
+        assert_eq!(due_minute(&cron, Some("9999-12-31T23:59"), now), Some(now));
+    }
+
+    #[test]
+    fn a_wall_minute_a_spring_forward_skips_resolves_to_skipped() {
+        // 2027-03-28 02:30 never happens in Berlin: 02:00 jumps to 03:00.
+        assert!(matches!(
+            resolve_wall(&naive(2027, 3, 28, 2, 30), &berlin()),
+            Wall::Skipped
+        ));
+        // The minutes either side of the gap are ordinary.
+        assert!(matches!(
+            resolve_wall(&naive(2027, 3, 28, 1, 59), &berlin()),
+            Wall::Once(_)
+        ));
+        assert!(matches!(
+            resolve_wall(&naive(2027, 3, 28, 3, 0), &berlin()),
+            Wall::Once(_)
+        ));
+    }
+
+    #[test]
+    fn a_wall_minute_a_fall_back_repeats_resolves_to_both_occurrences() {
+        // 2027-10-31 02:30 happens twice in Berlin: at 00:30 UTC on summer
+        // time, then at 01:30 UTC on winter time.
+        let Wall::Twice(earlier, later) = resolve_wall(&naive(2027, 10, 31, 2, 30), &berlin())
+        else {
+            panic!("02:30 on the night the clocks go back is a repeated minute");
+        };
+        assert_eq!(earlier, utc_secs(&naive(2027, 10, 31, 0, 30)));
+        assert_eq!(later, utc_secs(&naive(2027, 10, 31, 1, 30)));
+    }
+
+    #[test]
+    fn a_job_fires_once_in_the_repeated_hour_and_not_in_the_skipped_one() {
+        let zone = berlin();
+        let resolve = |when: &DateTime| resolve_wall(when, &zone);
+        // A 02:30 job the evening before a spring-forward: the next real
+        // firing is the following day's, not a fabricated one in the gap.
+        let cron = Cron::parse("30 2 * * *").unwrap();
+        let after = naive(2027, 3, 27, 12, 0);
+        let at = next_real_fire(&cron, after, utc_secs(&naive(2027, 3, 27, 11, 0)), resolve);
+        assert_eq!(at, Some(utc_secs(&naive(2027, 3, 29, 0, 30))));
+        // The same job the evening before a fall-back fires at the first
+        // 02:30, and once `now` is past it, at the second.
+        let after = naive(2027, 10, 30, 12, 0);
+        let first = utc_secs(&naive(2027, 10, 31, 0, 30));
+        let second = utc_secs(&naive(2027, 10, 31, 1, 30));
+        assert_eq!(
+            next_real_fire(&cron, after, utc_secs(&naive(2027, 10, 30, 11, 0)), resolve),
+            Some(first)
+        );
+        assert_eq!(
+            next_real_fire(&cron, naive(2027, 10, 31, 2, 40), first + 600, resolve),
+            Some(second)
+        );
     }
 
     #[test]
@@ -1956,20 +2062,20 @@ mod tests {
         let gap_start = naive(2027, 3, 27, 1, 0);
         let gap_end = naive(2027, 3, 27, 3, 0);
         let after = naive(2027, 3, 27, 0, 59);
-        let now = after.and_utc().timestamp();
+        let now = utc_secs(&after);
 
         let at = next_real_fire(&cron, after, now, |when| {
             if *when >= gap_start && *when < gap_end {
                 Wall::Skipped
             } else {
-                Wall::Once(when.and_utc().timestamp())
+                Wall::Once(utc_secs(when))
             }
         })
         .unwrap();
 
         assert_eq!(
             at,
-            gap_end.and_utc().timestamp(),
+            utc_secs(&gap_end),
             "03:00, the first minute past the two-hour gap"
         );
     }
@@ -1981,13 +2087,13 @@ mod tests {
         // stand in for a real zone's offsets.
         let cron = Cron::parse("30 1 * * *").unwrap();
         let dup = naive(2027, 11, 7, 1, 30);
-        let first = naive(2027, 11, 7, 5, 30).and_utc().timestamp();
-        let second = naive(2027, 11, 7, 6, 30).and_utc().timestamp();
-        let resolve = move |when: &NaiveDateTime| {
+        let first = utc_secs(&naive(2027, 11, 7, 5, 30));
+        let second = utc_secs(&naive(2027, 11, 7, 6, 30));
+        let resolve = move |when: &DateTime| {
             if *when == dup {
                 Wall::Twice(first, second)
             } else {
-                Wall::Once(when.and_utc().timestamp())
+                Wall::Once(utc_secs(when))
             }
         };
 
@@ -2010,7 +2116,7 @@ mod tests {
         // day's 01:30.
         assert_eq!(
             next_real_fire(&cron, naive(2027, 11, 7, 1, 40), second + 600, resolve).unwrap(),
-            naive(2027, 11, 8, 1, 30).and_utc().timestamp()
+            utc_secs(&naive(2027, 11, 8, 1, 30))
         );
     }
 
@@ -2023,13 +2129,13 @@ mod tests {
         // 00:30 label and jump to tomorrow.
         let cron = Cron::parse("30 0 * * *").unwrap();
         let dup = naive(2027, 3, 9, 0, 30);
-        let first = naive(2027, 3, 9, 16, 30).and_utc().timestamp();
+        let first = utc_secs(&naive(2027, 3, 9, 16, 30));
         let second = first + 3 * 3600;
-        let resolve = move |when: &NaiveDateTime| {
+        let resolve = move |when: &DateTime| {
             if *when == dup {
                 Wall::Twice(first, second)
             } else {
-                Wall::Once(when.and_utc().timestamp())
+                Wall::Once(utc_secs(when))
             }
         };
 
@@ -2054,7 +2160,7 @@ mod tests {
         let cron = Cron::parse("0 0 1 1 *").unwrap();
         let after = naive(2027, 1, 1, 0, 0);
         assert_eq!(
-            next_real_fire(&cron, after, after.and_utc().timestamp(), |_| Wall::Skipped),
+            next_real_fire(&cron, after, utc_secs(&after), |_| Wall::Skipped),
             None
         );
     }
@@ -2140,10 +2246,9 @@ mod tests {
     /// field existed included, only the current minute is asked about.
     #[test]
     fn a_window_that_fell_between_two_passes_still_fires() {
-        use chrono::Timelike;
         let (repo, _root_guard) = fixture("jobs-missed-window");
         let now = settled_now();
-        let due = now - Duration::minutes(30);
+        let due = now - SignedDuration::from_mins(30);
         scheduled_job(
             &repo,
             "nightly",
@@ -2163,14 +2268,18 @@ mod tests {
         );
         assert_eq!(
             read_state(&repo)["nightly"].checked_minute.as_deref(),
-            Some(now.format(MINUTE_FMT).to_string().as_str())
+            Some(now.strftime(MINUTE_FMT).to_string().as_str())
         );
 
         let mut state = read_state(&repo);
         state
             .entry("nightly".to_string())
             .or_default()
-            .checked_minute = Some((now - Duration::minutes(45)).format(MINUTE_FMT).to_string());
+            .checked_minute = Some(
+            (now - SignedDuration::from_mins(45))
+                .strftime(MINUTE_FMT)
+                .to_string(),
+        );
         write_state(&repo, &state).unwrap();
 
         let (actions, problems) = fire(&repo);
@@ -2183,7 +2292,7 @@ mod tests {
         );
         assert_eq!(
             read_state(&repo)["nightly"].fired_minute.as_deref(),
-            Some(due.format(MINUTE_FMT).to_string().as_str()),
+            Some(due.strftime(MINUTE_FMT).to_string().as_str()),
             "recorded against the minute it was due"
         );
 
@@ -2200,23 +2309,21 @@ mod tests {
     /// moment later. Read at 19:04:59, the two land a minute apart and the test
     /// fails on nothing but timing, so the last few seconds of a minute are
     /// waited out first.
-    fn settled_now() -> chrono::NaiveDateTime {
-        use chrono::Timelike;
-        let now = Local::now();
+    fn settled_now() -> DateTime {
+        let now = Zoned::now();
         if now.second() >= 55 {
-            let left = 60 - u64::from(now.second());
+            let left = 60 - now.second() as u64;
             std::thread::sleep(std::time::Duration::from_millis(left * 1000 + 100));
         }
-        Local::now().naive_local()
+        Zoned::now().datetime()
     }
 
     /// A job's schedule at a single minute `ago` minutes back, as a cron
     /// expression, with the job's saved `checked_minute` set `looked` minutes
     /// back — the last time any dispatcher pass looked at it.
     fn job_due_between(repo: &Repo, ago: i64, looked: i64) {
-        use chrono::Timelike;
         let now = settled_now();
-        let due = now - Duration::minutes(ago);
+        let due = now - SignedDuration::from_mins(ago);
         scheduled_job(
             repo,
             "nightly",
@@ -2228,8 +2335,8 @@ mod tests {
             "nightly".to_string(),
             FireRecord {
                 checked_minute: Some(
-                    (now - Duration::minutes(looked))
-                        .format(MINUTE_FMT)
+                    (now - SignedDuration::from_mins(looked))
+                        .strftime(MINUTE_FMT)
                         .to_string(),
                 ),
                 ..Default::default()
@@ -2737,10 +2844,9 @@ mod tests {
     /// workspace's shared record needs no field for it.
     #[test]
     fn a_pending_window_is_asked_again_after_its_minute_has_passed() {
-        use chrono::Timelike;
         let (mut repo, _root_guard) = fixture("jobs-open-late");
         let starts = job_with_a_hanging_open_hook(&mut repo);
-        let window = settled_now() - Duration::minutes(30);
+        let window = settled_now() - SignedDuration::from_mins(30);
         scheduled_job(
             &repo,
             "nightly",
@@ -2753,7 +2859,7 @@ mod tests {
              group_description: nightly audit\n---\n## Goal\n\nDo it.\n",
         )
         .unwrap();
-        let window = window.format(MINUTE_FMT).to_string();
+        let window = window.strftime(MINUTE_FMT).to_string();
         write_opening(&repo, Scope::User, "nightly", &window, "audit-1");
 
         let (actions, problems) = fire(&repo);
@@ -3414,7 +3520,7 @@ mod tests {
             let state: State =
                 serde_json::from_str(&std::fs::read_to_string(&shared).unwrap()).unwrap();
             let held = state["nightly"].opening.as_ref().unwrap();
-            renewed |= Local::now().timestamp() - held.at < 30;
+            renewed |= Timestamp::now().as_second() - held.at < 30;
             if renewed {
                 std::fs::write(&release, "").unwrap();
             }
@@ -3453,7 +3559,7 @@ mod tests {
             FireRecord {
                 opening: Some(Opening {
                     clone: Some("a".to_string()),
-                    at: Local::now().timestamp() - OPENING_HELD_SECS - 5,
+                    at: Timestamp::now().as_second() - OPENING_HELD_SECS - 5,
                 }),
                 ..Default::default()
             },
@@ -3512,8 +3618,10 @@ mod tests {
         let (first, second, _guards) = two_clones("jobs-ws-seed");
         shared_job(&first);
         let now = settled_now();
-        let minute = now.format(MINUTE_FMT).to_string();
-        let earlier = (now - Duration::minutes(30)).format(MINUTE_FMT).to_string();
+        let minute = now.strftime(MINUTE_FMT).to_string();
+        let earlier = (now - SignedDuration::from_mins(30))
+            .strftime(MINUTE_FMT)
+            .to_string();
         // Clone `b` fired this minute; clone `a`, which sorts first, fired
         // long ago but looked this minute.
         let clone_file = |repo: &Repo, record: FireRecord| {
@@ -3532,7 +3640,7 @@ mod tests {
             &first,
             FireRecord {
                 fired_minute: Some(earlier),
-                checked_minute: Some(now.format(MINUTE_FMT).to_string()),
+                checked_minute: Some(now.strftime(MINUTE_FMT).to_string()),
                 ..Default::default()
             },
         );
@@ -3558,7 +3666,7 @@ mod tests {
         let path = first.jobs_state_file();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let fired = FireRecord {
-            fired_minute: Some(now.format(MINUTE_FMT).to_string()),
+            fired_minute: Some(now.strftime(MINUTE_FMT).to_string()),
             ..Default::default()
         };
         super::write_state(&path, &State::from([("userjob".to_string(), fired)])).unwrap();
