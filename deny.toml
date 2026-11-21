@@ -1,4 +1,2 @@
 [advisories]
-ignore = [
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained and has no safe upgrade; migration to jiff/time is tracked separately" },
-]
+ignore = []
