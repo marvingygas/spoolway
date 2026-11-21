@@ -393,7 +393,7 @@ pub struct Board {
     /// pressed. `None` again only once the board has nothing left to show at
     /// all.
     cursor: Option<String>,
-    /// What an `o`, `r` or `k` keypress is waiting on, if anything — see
+    /// What an `o`, `r`, `f` or `k` keypress is waiting on, if anything — see
     /// [`BoardMode`]. `Browsing` on every other key, including the plain
     /// cursor moves, which never open a panel at all.
     mode: BoardMode,
@@ -937,14 +937,14 @@ impl Board {
 
     /// Whether [`Board::on_key`] does work on `key` in the mode the board is
     /// in now: reads the queue, asks the multiplexer, writes a task, or opens
-    /// an editor or a browser. Browsing, that is `o`, `r` and `k`. In a menu,
+    /// an editor or a browser. Browsing, that is `o`, `r`, `f` and `k`. In a menu,
     /// picker or confirm panel it is `enter`, which runs the answer under the
     /// cursor. Every other key only moves a cursor or closes what is open, and
     /// a refusal's popup does nothing on `enter` but close.
     fn key_works(&self, key: crate::screen::Key) -> bool {
         use crate::screen::Key;
         match &self.mode {
-            BoardMode::Browsing => matches!(key, Key::Char('o' | 'r' | 'k')),
+            BoardMode::Browsing => matches!(key, Key::Char('o' | 'r' | 'f' | 'k')),
             BoardMode::Outcome(_) => false,
             BoardMode::Options(_)
             | BoardMode::ConfirmPause(_)
@@ -970,6 +970,7 @@ impl Board {
             Key::Down => self.cursor = shift_cursor(&self.drawn, self.cursor.as_deref(), 1),
             Key::Char('o') => self.open_options(repo, pipelines)?,
             Key::Char('r') => self.resume_cursor(repo, pipelines)?,
+            Key::Char('f') => self.focus_cursor(repo, pipelines)?,
             Key::Char('k') => self.begin_skip_hook(repo, pipelines)?,
             _ => {}
         }
@@ -1001,6 +1002,20 @@ impl Board {
         Ok(())
     }
 
+    /// `f`: bring the cursor's task's pane forward — see [`focus_step`]. A
+    /// no-op with no cursor, and with no pane to find, which a row the
+    /// footer drew `[f] focus` for may have lost since the last reading.
+    fn focus_cursor(&mut self, repo: &Repo, pipelines: &Pipelines) -> Result<()> {
+        let Some(id) = self.cursor.clone() else {
+            return Ok(());
+        };
+        let mux = crate::mux::backend(repo)?;
+        if let Some(notice) = focus_step(repo, pipelines, &id, &*mux) {
+            self.mode = BoardMode::Outcome(notice);
+        }
+        Ok(())
+    }
+
     fn on_key_options(
         &mut self,
         repo: &Repo,
@@ -1029,12 +1044,6 @@ impl Board {
                     }
                 }
                 Some(RowAction::Pause) => self.begin_pause(repo, pipelines, menu.id)?,
-                Some(RowAction::Focus) => {
-                    let mux = crate::mux::backend(repo)?;
-                    if let Some(notice) = focus_step(repo, pipelines, &menu.id, &*mux) {
-                        self.mode = BoardMode::Outcome(notice);
-                    }
-                }
                 Some(RowAction::Restart) => self.begin_restart(repo, pipelines, menu.id)?,
                 Some(RowAction::Unqueue) => self.begin_unqueue(repo, pipelines, menu.id)?,
                 // An empty menu offers nothing to confirm; it stays open
@@ -1773,19 +1782,19 @@ fn plan_page(task: &crate::task::Task) -> Option<&str> {
     (!plan.is_empty()).then_some(plan)
 }
 
-/// The options menu's `focus`: bring the pane [`focus_target`] finds for
+/// The board's `f`: bring the pane [`focus_target`] finds for
 /// task `id` in front of the person, maximized, through
 /// [`crate::mux::Mux::focus_pane`]. Nothing unzooms it again; that stays the
 /// person's, in herdr.
 ///
-/// The pane is looked up again here rather than trusted from when the menu
-/// opened: the lane or the run can end in between, and a step with no pane
-/// left gets nothing done and no popup, the same as every other item asks
-/// its own check again. A herdr refusal comes back as the popup
-/// [`BoardMode::Outcome`] draws, for the reason [`open_task`] gives. For the
-/// pane of a running step it says what to do about it: a pane that is gone
-/// most likely went with the step, and `restart` is the item that starts the
-/// step again in a new one. For a pane [`stopped_pane`] found it ends after
+/// The pane is looked up again here rather than trusted from the reading
+/// that drew `[f] focus`: the lane or the run can end in between, and a step
+/// with no pane left gets nothing done and no popup.
+///
+/// A herdr refusal comes back as the popup [`BoardMode::Outcome`] draws, for
+/// the reason [`open_task`] gives. For the pane of a running step it says
+/// what to do about it: a pane that is gone most likely went with the step,
+/// and `restart` is the item that starts the step again in a new one. For a pane [`stopped_pane`] found it ends after
 /// saying the pane may have been closed: nothing is running there to start
 /// again, and what resumes a stopped task is the person's call, not advice
 /// this popup can give. The text follows which lookup found the pane, not
@@ -1798,16 +1807,16 @@ fn focus_step(
     mux: &dyn crate::mux::Mux,
 ) -> Option<crate::screen::Notice> {
     let tasks = repo.tasks().ok()?;
-    let (pane, found) = focus_target(repo, pipelines, &tasks, id, mux)?;
+    let (pane, found) = focus_target(repo, pipelines, &tasks, id, mux, &|| mux.list_lanes().ok())?;
     mux.focus_pane(&pane).err().map(|err| {
         let advice = match found {
             FoundBy::Stopped => "The step's pane may have been closed.",
             FoundBy::Step => {
-                "The step's pane may have been closed. restart in this menu \
+                "The step's pane may have been closed. restart in the options menu \
                  starts the step again in a new pane."
             }
         };
-        crate::screen::Notice::new("focus", format!("o: {err:#}\n\n{advice}"))
+        crate::screen::Notice::new("focus", format!("f: {err:#}\n\n{advice}"))
     })
 }
 
@@ -1824,17 +1833,24 @@ fn stopped(task: &crate::task::Task) -> bool {
     .contains(&task.stage())
 }
 
-/// The pane `focus` brings forward for task `id`, when `mux` can bring one
-/// forward: whether the options menu lists `focus`. [`focus_target`] finds
-/// it, and says which lookup did.
-fn step_pane(
+/// The ids among `ids` that [`focus_target`] finds a pane for, which is what
+/// the footer's `[f] focus` is drawn from. `lanes` is the reading's own lane
+/// list, handed to every lookup instead of each one asking `mux` again: a
+/// board of many rows on agent steps would otherwise make a herdr call per
+/// row on every reading.
+fn focusable_ids<'a>(
     repo: &Repo,
     pipelines: &Pipelines,
     tasks: &[crate::task::Task],
-    id: &str,
+    ids: impl Iterator<Item = &'a str>,
     mux: &dyn crate::mux::Mux,
-) -> Option<String> {
-    focus_target(repo, pipelines, tasks, id, mux).map(|(pane, _)| pane)
+    lanes: &[crate::mux::Lane],
+) -> BTreeSet<String> {
+    ids.filter(|id| {
+        focus_target(repo, pipelines, tasks, id, mux, &|| Some(lanes.to_vec())).is_some()
+    })
+    .map(str::to_string)
+    .collect()
 }
 
 /// Which lookup [`focus_target`] found its pane by, which decides the advice
@@ -1860,28 +1876,30 @@ enum FoundBy {
 /// [`stopped`] row fall back to its newest open pane, through
 /// [`stopped_pane`].
 ///
-/// The capability check comes first, and the lane list is only read for a
-/// task on an agent step or a stopped one, so headless and every other row
-/// cost no multiplexer call when the menu opens.
+/// The capability check comes first, and `lanes` is only called for a task
+/// on an agent step or a stopped one, so headless and every other row cost no
+/// lane list. `lanes` is where the list comes from: [`focus_step`] asks `mux`
+/// afresh, and [`focusable_ids`] hands every row one list read once.
 fn focus_target(
     repo: &Repo,
     pipelines: &Pipelines,
     tasks: &[crate::task::Task],
     id: &str,
     mux: &dyn crate::mux::Mux,
+    lanes: &dyn Fn() -> Option<Vec<crate::mux::Lane>>,
 ) -> Option<(String, FoundBy)> {
     if !mux.can_focus_pane() {
         return None;
     }
     let i = tasks.iter().position(|t| t.id() == id)?;
     let task = &tasks[i];
-    if let Some(pane) = running_step_pane(repo, pipelines, tasks, i, mux) {
+    if let Some(pane) = running_step_pane(repo, pipelines, tasks, i, lanes) {
         return Some((pane, FoundBy::Step));
     }
     if !stopped(task) {
         return None;
     }
-    stopped_pane(repo, tasks, task, mux).map(|pane| (pane, FoundBy::Stopped))
+    stopped_pane(repo, tasks, task, lanes).map(|pane| (pane, FoundBy::Stopped))
 }
 
 /// The pane of the step `tasks[i]` is running right now: the first lookup
@@ -1891,13 +1909,13 @@ fn running_step_pane(
     pipelines: &Pipelines,
     tasks: &[crate::task::Task],
     i: usize,
-    mux: &dyn crate::mux::Mux,
+    lanes: &dyn Fn() -> Option<Vec<crate::mux::Lane>>,
 ) -> Option<String> {
     let task = &tasks[i];
     let step = pipelines.for_task(task).ok()?.step(task.stage())?;
     match step.kind() {
         crate::pipeline::StepKind::Agent => {
-            let lanes = mux.list_lanes().ok()?;
+            let lanes = lanes()?;
             live_agent_lanes(repo, tasks, pipelines, &lanes)
                 .into_iter()
                 .find(|(at, _)| *at == i)
@@ -1940,9 +1958,9 @@ fn stopped_pane(
     repo: &Repo,
     tasks: &[crate::task::Task],
     task: &crate::task::Task,
-    mux: &dyn crate::mux::Mux,
+    lanes: &dyn Fn() -> Option<Vec<crate::mux::Lane>>,
 ) -> Option<String> {
-    let lanes = mux.list_lanes().ok()?;
+    let lanes = lanes()?;
     let mine = crate::dispatch::our_checkouts(repo, tasks);
     let records = crate::dispatch::peek_lane_records(repo);
     // A lane with no record — one this dispatcher never started — sorts as
@@ -1966,9 +1984,9 @@ fn stopped_pane(
         .map(|(_, pane)| pane)
 }
 
-/// What an `o`, `r` or `k` keypress is waiting to be answered — a menu or panel
-/// drawn over the table, and the one thing standing between an accidental
-/// press and the run it would otherwise change. Every panel here is
+/// What an `o`, `r`, `f` or `k` keypress is waiting to be answered — a menu
+/// or panel drawn over the table, and the one thing standing between an
+/// accidental press and the run it would otherwise change. Every panel here is
 /// answered the same way: `enter` runs its answer, and `esc` closes it with
 /// nothing changed. A panel with two or more answers lists them, and the
 /// arrows move its cursor to the one `enter` runs; one with a single
@@ -2005,10 +2023,10 @@ enum BoardMode {
     /// hook the way `spoolway resume --skip-hook` does, and `esc` leaves the
     /// task held.
     ConfirmSkipHook(SkipHookConfirm),
-    /// The options menu's `open task`, `open plan` or `focus` was refused —
-    /// see [`open_task`], [`open_plan`] and [`focus_step`]. Held until `enter`
-    /// closes it, with no other answer to pick. The pass loop keeps running
-    /// under it, as it does under every panel here.
+    /// The options menu's `open task` or `open plan`, or the board's `f`,
+    /// was refused — see [`open_task`], [`open_plan`] and [`focus_step`]. Held
+    /// until `enter` closes it, with no other answer to pick. The pass loop
+    /// keeps running under it, as it does under every panel here.
     Outcome(crate::screen::Notice),
 }
 
@@ -2062,7 +2080,6 @@ enum RowAction {
     Open,
     OpenPlan,
     Pause,
-    Focus,
     Restart,
     Unqueue,
 }
@@ -2075,7 +2092,6 @@ impl RowAction {
             RowAction::Open => "open task",
             RowAction::OpenPlan => "open plan",
             RowAction::Pause => "pause",
-            RowAction::Focus => "focus",
             RowAction::Restart => "restart",
             RowAction::Unqueue => "unqueue",
         }
@@ -2095,17 +2111,14 @@ fn options_panel(menu: &OptionsMenu) -> Vec<String> {
 /// `open task` reads the task from the queue or the archive, as
 /// [`open_task`] does; `open plan` needs [`plan_page`] to find a `plan:` on
 /// it, as [`open_plan`] does; `pause` needs it in the queue and
-/// [`pausable`]; `focus` needs [`step_pane`] to find a pane to bring
-/// forward, the running step's or a stopped task's newest, as [`focus_step`]
-/// does; `restart` needs [`restartable_step`] to accept it on
+/// [`pausable`]; `restart` needs [`restartable_step`] to accept it on
 /// [`restart_graph`]'s graph, the one [`Board::begin_restart`] opens its
 /// panel on; `unqueue` needs it in the queue and either [`not_started`] or
 /// [`stopped_for_unqueue`], as [`unqueue_confirm`] does, so a started task
 /// is not offered it while the lanes cannot be listed. Resume is never
-/// listed: it stays on the board's `r`.
+/// listed: it stays on the board's `r`, and so does focus, on `f`.
 ///
-/// `mux` is the backend `focus` would go through, asked here so a backend
-/// that cannot focus a pane — headless — never lists it.
+/// `mux` is the backend `unqueue` asks for the lane list.
 fn row_actions(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -2119,7 +2132,6 @@ fn row_actions(
         RowAction::Open => task.is_some(),
         RowAction::OpenPlan => task.as_ref().and_then(plan_page).is_some(),
         RowAction::Pause => queued.is_some_and(pausable),
-        RowAction::Focus => step_pane(repo, pipelines, &tasks, id, mux).is_some(),
         RowAction::Restart => task.as_ref().is_some_and(|task| {
             restartable_step(task, &restart_graph(repo, pipelines, id).0).is_ok()
         }),
@@ -2134,7 +2146,6 @@ fn row_actions(
         RowAction::Open,
         RowAction::OpenPlan,
         RowAction::Pause,
-        RowAction::Focus,
         RowAction::Restart,
         RowAction::Unqueue,
     ]
@@ -2324,7 +2335,6 @@ pub(crate) fn asking_panels() -> Vec<(&'static str, Vec<String>)> {
                     RowAction::Open,
                     RowAction::OpenPlan,
                     RowAction::Pause,
-                    RowAction::Focus,
                     RowAction::Restart,
                 ],
                 cursor: 0,
@@ -3927,8 +3937,8 @@ pub(crate) fn live_agent_lane_tasks(
 }
 
 /// [`live_agent_lane_tasks`], with the lane each task was found by: the one
-/// rule both answer on, so the options menu's `focus` on a running row brings
-/// forward exactly the lane `pause` would interrupt — see [`step_pane`]. A
+/// rule both answer on, so the board's `f` on a running row brings
+/// forward exactly the lane `pause` would interrupt — see [`focus_target`]. A
 /// stopped row with no step running finds its pane through [`stopped_pane`]
 /// instead.
 fn live_agent_lanes<'a>(
@@ -4137,6 +4147,11 @@ struct Snapshot {
     /// thread, rather than while painting, since it reads every pipeline
     /// file and `config.toml`.
     waiting: Waiting,
+    /// The ids of the rows [`focus_target`] finds a pane for, which is what
+    /// decides the footer's `[f] focus`. Read here, off the key thread,
+    /// because the check can list the multiplexer's lanes, and a herdr call
+    /// on every redraw would slow the board.
+    focusable: BTreeSet<String>,
     recent: VecDeque<RecentEvent>,
 }
 
@@ -4157,6 +4172,7 @@ impl Snapshot {
             held: BTreeMap::new(),
             active_jobs: Vec::new(),
             waiting: Waiting::default(),
+            focusable: BTreeSet::new(),
             recent: VecDeque::new(),
         }
     }
@@ -4388,6 +4404,14 @@ fn build(
         pipelines: crate::pipeline_snapshot::changed_since_start(repo),
         keys: crate::pipeline_snapshot::config_changed_since_start(repo),
     };
+    let focusable = focusable_ids(
+        repo,
+        pipelines,
+        &tasks,
+        rows.iter().map(|row| row.id.as_str()),
+        &*mux,
+        &lanes,
+    );
 
     // Taken before the clear below, which must not erase the very news this
     // reading is handing back — see `Memory::adopted`.
@@ -4409,6 +4433,7 @@ fn build(
         held,
         active_jobs,
         waiting,
+        focusable,
         recent,
     })
 }
@@ -4903,12 +4928,14 @@ fn paint_at(
     // blank row either way — see [`last_row`].
     let hosted = crate::screen::shell::hosted().is_some();
     let last = last_row(&snapshot.waiting, tip, hosted);
-    // The key hint, last of all. Every row action but resume sits behind
-    // `[o] options`, drawn whenever the board has a row: the menu itself
-    // lists what that row can do. `[r] resume` is drawn only while the
+    // The key hint, last of all. Every row action but resume and focus sits
+    // behind `[o] options`, drawn whenever the board has a row: the menu
+    // itself lists what that row can do. `[r] resume` is drawn only while the
     // cursor's row is `resumable`, the same flag `r` checks before it acts,
-    // so it shows exactly where the key would do something. A board with
-    // no row drops both in `paint_empty`.
+    // so it shows exactly where the key would do something. `[f] focus` is
+    // drawn only while the cursor's row is in [`Snapshot::focusable`], the
+    // reading's answer to the check `f` makes again before it acts. A board
+    // with no row drops all three in `paint_empty`.
     //
     // Built by `crate::screen::key_hint_lit`, `crate::screen::key_hint` with
     // the `u` pair out of the dim — see `key_hint`'s own doc comment for why
@@ -4932,10 +4959,16 @@ fn paint_at(
         true => &[("r", "resume")],
         false => &[],
     };
+    let focusable = cursor.is_some_and(|id| snapshot.focusable.contains(id));
+    let focus: &[(&str, &str)] = match focusable {
+        true => &[("f", "focus")],
+        false => &[],
+    };
     let enter = enter_hint(phase, takes_enter);
     let keys = [
         enter.as_slice(),
         resume,
+        focus,
         &[("o", "options")],
         update_hint(phase, &snapshot.waiting),
         crate::screen::shell::quit_hint(),
@@ -13571,6 +13604,7 @@ mod tests {
         lanes: Vec<crate::mux::Lane>,
         refuse: Option<&'static str>,
         focused: std::sync::Mutex<Vec<String>>,
+        listed: std::sync::atomic::AtomicUsize,
     }
 
     impl FocusMux {
@@ -13600,6 +13634,8 @@ mod tests {
             true
         }
         fn list_lanes(&self) -> Result<Vec<crate::mux::Lane>> {
+            self.listed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(self.lanes.clone())
         }
         fn can_focus_pane(&self) -> bool {
@@ -13670,6 +13706,18 @@ mod tests {
         }
     }
 
+    /// The pane [`focus_target`] finds for `id`, listing lanes through `mux`.
+    fn step_pane(
+        repo: &Repo,
+        pipelines: &Pipelines,
+        tasks: &[crate::task::Task],
+        id: &str,
+        mux: &dyn crate::mux::Mux,
+    ) -> Option<String> {
+        focus_target(repo, pipelines, tasks, id, mux, &|| mux.list_lanes().ok())
+            .map(|(pane, _)| pane)
+    }
+
     /// Task `id`'s live lane on step `step`, in pane `pane`, in a checkout
     /// of ours: the lane [`live_agent_lane_tasks`] counts.
     fn lane_in(repo: &Repo, id: &str, step: &str, pane: &str) -> crate::mux::Lane {
@@ -13679,11 +13727,11 @@ mod tests {
         }
     }
 
-    /// `focus` is labelled as such and sits between `pause` and `restart`
-    /// on a running agent row whose lane is live, and picks out that lane's
-    /// pane, not another task's beside it.
+    /// A running agent row whose lane is live has a pane to focus, and it is
+    /// that lane's, not another task's beside it. The options menu no longer
+    /// lists `focus`: `f` does it.
     #[test]
-    fn the_options_menu_lists_focus_on_a_live_agent_row() {
+    fn a_live_agent_row_has_its_own_lanes_pane_to_focus() {
         let (repo, _root_guard) = fixture("options-focus-agent");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "running", &[], Some("implement"), Some("running"));
@@ -13693,15 +13741,9 @@ mod tests {
             lane_in(&repo, "running", "implement", "w2:p3"),
         ]);
 
-        assert_eq!(RowAction::Focus.label(), "focus");
         assert_eq!(
             row_actions(&repo, &pipelines, "running", &mux).unwrap(),
-            [
-                RowAction::Open,
-                RowAction::Pause,
-                RowAction::Focus,
-                RowAction::Restart
-            ]
+            [RowAction::Open, RowAction::Pause, RowAction::Restart]
         );
         let tasks = repo.tasks().unwrap();
         assert_eq!(
@@ -13710,13 +13752,13 @@ mod tests {
         );
     }
 
-    /// `focus` is left off wherever it would bring nothing forward: a
+    /// A row has no pane to focus wherever `f` would bring nothing forward: a
     /// backend that cannot focus a pane, headless included, a running row's
     /// kept lane, a lane left on a step the task has since moved past, a
     /// paused row with no pane open and a queued one. A paused row whose lane
-    /// is still open lists it, on every backend that can focus a pane.
+    /// is still open has one, on every backend that can focus a pane.
     #[test]
-    fn the_options_menu_lists_focus_only_with_a_pane_to_bring_forward() {
+    fn a_row_has_a_pane_to_focus_only_when_one_can_be_brought_forward() {
         let (repo, _root_guard) = fixture("options-focus-none");
         let pipelines = Pipelines::builtin();
         add_to(&repo, "running", &[], Some("implement"), Some("running"));
@@ -13735,9 +13777,8 @@ mod tests {
             lane_in(&repo, "held", "implement", "w2:p5"),
         ];
         let lists = |mux: &dyn crate::mux::Mux, id: &str| {
-            row_actions(&repo, &pipelines, id, mux)
-                .unwrap()
-                .contains(&RowAction::Focus)
+            let tasks = repo.tasks().unwrap();
+            step_pane(&repo, &pipelines, &tasks, id, mux).is_some()
         };
 
         let cannot = FocusMux {
@@ -13763,12 +13804,12 @@ mod tests {
         assert!(!lists(&mux, "running"), "a kept lane");
     }
 
-    /// A command step's row lists `focus` while its run is going and
+    /// A command step's row has a pane to focus while its run is going and
     /// recorded the pane it landed in, and focuses that pane. A run that
-    /// never landed in a pane lists no `focus`, and neither does a run that
-    /// has ended with its pane still on record.
+    /// never landed in a pane has none, and neither does a run that has
+    /// ended with its pane still on record.
     #[test]
-    fn the_options_menu_lists_focus_on_a_paned_command_row() {
+    fn a_paned_command_row_has_its_runs_pane_to_focus() {
         let (repo, _root_guard) = fixture("options-focus-command");
         let pipelines = Pipelines::builtin();
         // `handover` is the default pipeline's command step.
@@ -13784,9 +13825,8 @@ mod tests {
         runs.record_pane(&paned, "w4:p2").unwrap();
         let mux = FocusMux::with(Vec::new());
         let lists = |id: &str| {
-            row_actions(&repo, &pipelines, id, &mux)
-                .unwrap()
-                .contains(&RowAction::Focus)
+            let tasks = repo.tasks().unwrap();
+            step_pane(&repo, &pipelines, &tasks, id, &mux).is_some()
         };
 
         assert!(lists("paned"));
@@ -13822,10 +13862,11 @@ mod tests {
         .unwrap();
     }
 
-    /// A paused, blocked or hook_failed row lists `focus` in its usual place
-    /// and zooms the task's open pane that started last, counting kept agent
-    /// lanes and recorded command panes alike. Another task's newer lane, and
-    /// one of this task's outside every checkout of ours, are never picked.
+    /// A paused, blocked or hook_failed row has a pane to focus, and
+    /// `focus_step` zooms the task's open pane that started last, counting
+    /// kept agent lanes and recorded command panes alike. Another task's
+    /// newer lane, and one of this task's outside every checkout of ours, are
+    /// never picked.
     /// `pause`'s own lookup still finds the running task's lane alone.
     #[test]
     fn a_stopped_row_focuses_its_newest_open_pane() {
@@ -13879,12 +13920,7 @@ mod tests {
 
         assert_eq!(
             row_actions(&repo, &pipelines, "parked", &mux).unwrap(),
-            [
-                RowAction::Open,
-                RowAction::Focus,
-                RowAction::Restart,
-                RowAction::Unqueue
-            ]
+            [RowAction::Open, RowAction::Restart, RowAction::Unqueue]
         );
         assert_eq!(pane("parked").as_deref(), Some("w2:p4"));
         assert_eq!(pane("stuck").as_deref(), Some("w3:p1"));
@@ -13937,7 +13973,7 @@ mod tests {
         assert_eq!(notice.title, "focus");
         assert_eq!(
             notice.text,
-            "o: herdr pane zoom w2:p3 --on: no pane w2:p3\n\n\
+            "f: herdr pane zoom w2:p3 --on: no pane w2:p3\n\n\
              The step's pane may have been closed."
         );
     }
@@ -13983,16 +14019,17 @@ mod tests {
         assert_eq!(refusing.focused(), ["w2:p5"]);
         assert_eq!(
             notice.text,
-            "o: herdr pane zoom w2:p5 --on: no pane w2:p5\n\n\
-             The step's pane may have been closed. restart in this menu \
-             starts the step again in a new pane."
+            "f: herdr pane zoom w2:p5 --on: no pane w2:p5\n\n\
+             The step's pane may have been closed. restart in the options \
+             menu starts the step again in a new pane."
         );
     }
 
-    /// The menu on a running row with a `plan:` and a live lane draws
-    /// `focus` straight under `pause` and over `restart`.
+    /// The menu on a running row with a `plan:` and a live lane draws no
+    /// `focus`: `pause` sits straight over `restart`. Fails before the
+    /// change: `focus` was drawn between them.
     #[test]
-    fn the_options_menu_draws_focus_between_pause_and_restart() {
+    fn the_options_menu_on_a_live_row_draws_no_focus() {
         let (repo, _root_guard) = fixture("options-focus-drawn");
         let pipelines = Pipelines::builtin();
         add_to(
@@ -14026,7 +14063,6 @@ mod tests {
                 "│  > open task".to_string(),
                 "│    open plan".to_string(),
                 "│    pause".to_string(),
-                "│    focus".to_string(),
                 "│    restart".to_string(),
                 "│".to_string(),
                 "│  [enter] confirm   [esc] close".to_string(),
@@ -14036,8 +14072,8 @@ mod tests {
     }
 
     /// A herdr refusal of the zoom comes back as a popup titled `focus`:
-    /// the error on an `o:` line, then what to do instead. A lane that has
-    /// ended since the menu opened gets nothing focused and no popup.
+    /// the error on an `f:` line, then what to do instead. A lane that has
+    /// ended since the last reading gets nothing focused and no popup.
     #[test]
     fn a_refused_focus_names_the_error_and_restart() {
         let (repo, _root_guard) = fixture("focus-refused");
@@ -14055,9 +14091,9 @@ mod tests {
         assert_eq!(notice.title, "focus");
         assert_eq!(
             notice.text,
-            "o: herdr pane zoom w2:p3 --on: no pane w2:p3\n\n\
-             The step's pane may have been closed. restart in this menu \
-             starts the step again in a new pane."
+            "f: herdr pane zoom w2:p3 --on: no pane w2:p3\n\n\
+             The step's pane may have been closed. restart in the options \
+             menu starts the step again in a new pane."
         );
 
         let gone = FocusMux::with(Vec::new());
@@ -14065,28 +14101,103 @@ mod tests {
         assert!(gone.focused().is_empty());
     }
 
-    /// `enter` on `focus` closes the menu, and asks for the pane again
-    /// rather than trusting the menu's list: with nothing found — here
-    /// headless, which has no pane to focus — it does nothing more and opens
-    /// no popup.
+    /// The footer's set of focusable rows is worked out from one lane list
+    /// the reading already holds: with several agent and stopped rows on the
+    /// board, the multiplexer is asked for no lanes at all. Fails before the
+    /// change: each row listed lanes again.
     #[test]
-    fn focus_with_no_pane_found_closes_the_menu_and_does_nothing() {
+    fn the_focusable_rows_are_worked_out_from_the_readings_own_lanes() {
+        let (repo, _root_guard) = fixture("focusable-one-list");
+        let pipelines = Pipelines::builtin();
+        for id in ["a", "b", "c"] {
+            add_to(&repo, id, &[], Some("implement"), Some(id));
+        }
+        add_to(&repo, "held", &[], Some("implement"), Some("held"));
+        let mut held = repo.task("held").unwrap();
+        held.front.parked_from = Some("implement".into());
+        held.set_stage(crate::pipeline::PAUSED, Some("parked by hand"));
+        held.save().unwrap();
+        let lanes = vec![
+            lane_in(&repo, "a", "implement", "w2:p1"),
+            lane_in(&repo, "c", "implement", "w2:p3"),
+            lane_in(&repo, "held", "implement", "w2:p4"),
+        ];
+        let mux = FocusMux::with(Vec::new());
+        let tasks = repo.tasks().unwrap();
+
+        let found = focusable_ids(
+            &repo,
+            &pipelines,
+            &tasks,
+            ["a", "b", "c", "held"].into_iter(),
+            &mux,
+            &lanes,
+        );
+        assert_eq!(found, BTreeSet::from(["a", "c", "held"].map(String::from)));
+        assert_eq!(mux.listed.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// `f` on a row with no pane to find does nothing and opens no popup —
+    /// here headless, which has no pane to focus — and so does `f` with no
+    /// cursor. The pane is asked for again when the key is pressed, not
+    /// trusted from the reading that drew the footer.
+    #[test]
+    fn f_with_no_pane_found_does_nothing() {
         let (repo, _root_guard) = fixture("focus-nothing-found");
         crate::mux::force_headless_for_test();
         let pipelines = Pipelines::builtin();
         add_to(&repo, "running", &[], Some("implement"), Some("running"));
 
         let mut board = Board::for_test();
-        board.mode = BoardMode::Options(OptionsMenu {
-            id: "running".to_string(),
-            name: "running".to_string(),
-            items: vec![RowAction::Focus],
-            cursor: 0,
-        });
         board
-            .on_key(&repo, &pipelines, crate::screen::Key::Enter)
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('f'))
+            .unwrap();
+        assert!(matches!(board.mode, BoardMode::Browsing), "no cursor");
+        board.cursor = Some("running".to_string());
+        board
+            .on_key(&repo, &pipelines, crate::screen::Key::Char('f'))
             .unwrap();
         assert!(matches!(board.mode, BoardMode::Browsing));
+    }
+
+    /// `[f] focus` is drawn between `[r] resume` and `[o] options` while the
+    /// cursor's row is in the reading's `focusable` set, and never with no
+    /// cursor or on a row outside it. Painting reads that stored answer and
+    /// asks no multiplexer: the repo here is headless, which cannot focus
+    /// anything and would never have answered yes. Fails before the change:
+    /// the board had no `f` pair.
+    #[test]
+    fn the_key_hint_draws_focus_only_for_a_focusable_cursor_row() {
+        let (repo, _root_guard) = fixture("key-hint-focus");
+        crate::mux::force_headless_for_test();
+        let pipelines = Pipelines::builtin();
+        let _terminal = crate::screen::test_terminal((100, 30));
+        let mut snapshot = full_board();
+        let id = snapshot.rows[0].id.clone();
+        let other = snapshot.rows[1].id.clone();
+        snapshot.focusable.insert(id.clone());
+        let keys = |cursor: Option<&str>| {
+            let frame = strip(&paint(
+                &repo,
+                &pipelines,
+                true,
+                true,
+                &snapshot,
+                cursor,
+                &VecDeque::new(),
+                None,
+                None,
+            ));
+            frame.lines().last().unwrap().trim().to_string()
+        };
+
+        let focus = keys(Some(&id));
+        assert!(
+            focus.contains("[f] focus   [o] options"),
+            "focus sits just before options: {focus}"
+        );
+        assert!(!keys(Some(&other)).contains("[f] focus"));
+        assert!(!keys(None).contains("[f] focus"));
     }
 
     /// The menu is a popup titled with the task's id, its items named by
@@ -15037,7 +15148,7 @@ mod tests {
     }
 
     /// Which board keys go under the spool. Moving a cursor, in a menu, a
-    /// picker or a panel, and closing one never do; `o`, `r` and `k`, and
+    /// picker or a panel, and closing one never do; `o`, `r`, `f` and `k`, and
     /// `enter` on whatever is open, do. A refusal's popup does nothing on
     /// `enter` but close.
     #[test]
@@ -15045,7 +15156,12 @@ mod tests {
         use crate::screen::Key;
 
         let mut board = Board::for_test();
-        for key in [Key::Char('o'), Key::Char('r'), Key::Char('k')] {
+        for key in [
+            Key::Char('o'),
+            Key::Char('r'),
+            Key::Char('f'),
+            Key::Char('k'),
+        ] {
             assert!(board.key_works(key), "{key:?} browsing");
         }
         for key in [Key::Up, Key::Down, Key::Esc, Key::Enter, Key::Char('j')] {
@@ -15074,7 +15190,7 @@ mod tests {
             assert!(!board.key_works(key), "{key:?} on the panel");
         }
 
-        board.mode = BoardMode::Outcome(crate::screen::Notice::new("focus", "o: refused"));
+        board.mode = BoardMode::Outcome(crate::screen::Notice::new("focus", "f: refused"));
         assert!(!board.key_works(Key::Enter));
     }
 

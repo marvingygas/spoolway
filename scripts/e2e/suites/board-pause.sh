@@ -14,8 +14,8 @@
 # unit test can stand up — the last section covers it.
 #
 # Row actions are reached through `o`, which opens a menu of what the
-# cursor's row can take: open task, open plan, pause, focus, restart,
-# unqueue. The menu runs the action's own check again on `enter`, so each
+# cursor's row can take: open task, open plan, pause, restart, unqueue. The
+# menu runs the action's own check again on `enter`, so each
 # section picks its item and then answers the panel it opens. `p`, `s`, `u`
 # and `U` are no longer board keys; `U` gets one pass that proves it does
 # nothing, and `spoolway queue unqueue <task>` does its job.
@@ -472,9 +472,8 @@ draws "the board draws the run" "mid-turn"
 # The cursor starts on the first row on its own now — mid-turn is the only
 # row here — so the menu reaches it with no `down` needed first. It lists
 # open task, open plan, pause and restart for a running row with a `plan:`,
-# with the cursor on open task. It never lists focus here: headless has no
-# pane to bring forward, so the item is left off rather than offered and
-# refused. Picking it on a real pane is `kept-panes.sh`'s, against the herdr
+# with the cursor on open task. It never lists focus, which is the board's
+# `f` key. Pressing it on a real pane is `kept-panes.sh`'s, against the herdr
 # double.
 press o
 draws "\`o\` over a live lane opens a menu titled with the task" "╭─ mid-turn ─"
@@ -485,8 +484,8 @@ draws "then restart" "  restart"
 draws "under the shared key row" "[enter] confirm   [esc] close"
 MENU_FRAME=$(frame_showing "[enter] confirm   [esc] close")
 if grep -qE -- '│ +(> )?focus ' <<<"$MENU_FRAME"; then
-  bad "and no focus, with no pane to bring forward"; sed 's/^/        /' <<<"$MENU_FRAME"
-else ok "and no focus, with no pane to bring forward"; fi
+  bad "and no focus, which is the \`f\` key now"; sed 's/^/        /' <<<"$MENU_FRAME"
+else ok "and no focus, which is the \`f\` key now"; fi
 stage_stays "the task file is untouched while the menu is open" mid-turn implement
 press $'\x1b'
 stops_drawing "esc closes the menu" "╭─ mid-turn ─"
