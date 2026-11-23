@@ -7050,6 +7050,8 @@ fn run_screen_from(
                 // `under_spool` alone would leave in place: the result popup
                 // takes `enter` only once it is on screen, never an `enter`
                 // pressed while the hook was running.
+                // The job stores are read under the spool too, for a result
+                // over the routines pane, as every other spooled key does.
                 Key::Enter => {
                     let then = then.clone();
                     let tracking = Tracking::Open(checklist.ticked.clone());
@@ -7062,7 +7064,9 @@ fn run_screen_from(
                     };
                     draw_bare(&groups, &panes, &state, writer, out);
                     state.mode = crate::screen::spool::under_spool(writer, out, input, || {
-                        resume(&at, &then, tracking, &mut groups, &mut state)
+                        let mode = resume(&at, &then, tracking, &mut groups, &mut state);
+                        read_jobs_for(repo, &mode, &mut state);
+                        mode
                     });
                     known_reading = known_reading.max(reader.started_count());
                     input.discard_typed();
@@ -30963,9 +30967,14 @@ group_description: search
             /// is still unread when asked to throw typed keys away, as a
             /// terminal's flush does, and keeps what it threw for the test
             /// to read. The in-memory keyboard keeps every byte instead.
+            ///
+            /// `on_flush` runs at the first throw, for a test that needs
+            /// something done once the work under the spool has returned and
+            /// before the screen's next pass.
             struct Flushed {
                 keys: std::io::Cursor<Vec<u8>>,
                 thrown: Vec<u8>,
+                on_flush: Option<Box<dyn FnOnce()>>,
             }
 
             impl Flushed {
@@ -30973,6 +30982,7 @@ group_description: search
                     Flushed {
                         keys: keys(script),
                         thrown: Vec::new(),
+                        on_flush: None,
                     }
                 }
             }
@@ -30990,6 +31000,9 @@ group_description: search
 
                 fn discard_typed(&mut self) {
                     std::io::Read::read_to_end(&mut self.keys, &mut self.thrown).unwrap();
+                    if let Some(on_flush) = self.on_flush.take() {
+                        on_flush();
+                    }
                 }
             }
 
@@ -31074,6 +31087,77 @@ group_description: search
                     "hook executed successfully"
                 );
                 assert_eq!(input.thrown, b"\r", "the enter typed during the hook");
+            }
+
+            /// The routines tab's question reads the job stores under the
+            /// spool, with the hook, rather than on the pass after it. A job
+            /// written once the work has returned, at the throw of typed keys
+            /// that follows it, is not on the frame that pass draws, which
+            /// draws from the read already made. Read on that pass instead,
+            /// the job shows, as a row for its routine `gone`, which no
+            /// folder holds.
+            #[test]
+            fn a_routines_question_reads_the_job_stores_under_the_spool() {
+                let (repo, _root_guard) = cart("issue-question-routine-jobs");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let routines = super::super::super::routines::list_routines(&repo).unwrap();
+                let mut nav = RoutineNav::new();
+                nav.selected.insert(routines[0].path.clone());
+                let base = crate::repo::branch_at(&repo.root).unwrap();
+                let mut state = ScreenState::new();
+                state.mode = begin_routine_queue(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &base,
+                    &routines,
+                    &nav,
+                    Tracking::Ask,
+                );
+                assert!(
+                    matches!(state.mode, Mode::IssueQuestion { .. }),
+                    "{:?}",
+                    state.mode
+                );
+                let mut input = Flushed::new("\r");
+                let store = repo.clone();
+                input.on_flush = Some(Box::new(move || {
+                    write_job(&store, crate::jobs::Scope::User, "late-job", "gone");
+                }));
+                let mut out = Vec::new();
+
+                run_screen_from(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &repo.root,
+                    (Vec::new(), routines),
+                    state,
+                    &mut crate::screen::frame_writer::FrameWriter::new(),
+                    &mut input,
+                    &mut out,
+                )
+                .unwrap();
+
+                let drawn = String::from_utf8(out).unwrap();
+                let tabs = crate::screen::spool::testutil::tab_frames(&drawn);
+                let after = tabs
+                    .iter()
+                    .find(|frame| frame.contains("hook executed successfully"))
+                    .expect("no queued popup");
+                assert!(after.contains("─ [routines]"), "{after}");
+                // An orphan job's row is named after its routine, the one
+                // part of it the popup leaves uncovered.
+                assert!(!after.contains("gone"), "{after}");
             }
 
             /// A key typed while the hook runs is thrown away when it
@@ -31478,10 +31562,10 @@ depends_on: [search-old]
                 assert!(frame.contains("[x] cart"), "still selected: {frame}");
             }
 
-            /// `enter` runs the hook and queues. While it runs, nothing
-            /// counts the calls; once it is done the screen says the hook
-            /// ran above the usual `queued` popup, with no ticket row and no
-            /// key row, since it closes itself.
+            /// `enter` runs the hook and queues. While it runs, no call count
+            /// is drawn; once it is done the screen says the hook ran above
+            /// the usual `queued` popup, with no ticket row and no key row,
+            /// since it closes itself.
             #[test]
             fn enter_runs_the_hook_and_queues() {
                 let (repo, _root_guard) = cart("issue-question-enter");
