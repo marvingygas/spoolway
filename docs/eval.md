@@ -35,14 +35,14 @@ cycles through them, lanes to directories to trials and back, and `←` cycles t
 A table with no rows shows the single line `no data.`, whatever left it empty. The directory
 table shows it under both `by dir` and `by session`.
 
-Opening the tab, pressing `[r]`, or applying the filter panel shows a small `loading…` popup
-while spoolway rereads the ledger. It reads a session's transcript again only if the
+Opening the tab, pressing `[r]`, or applying the filter panel turns the loading spool over the
+tab while spoolway rereads the ledger. It reads a session's transcript again only if the
 transcript's size or modification time changed since the last read. The same read prices every
 model once from the price table. The screen keeps those prices until the next read, so a price
 table refreshed meanwhile shows after `[r]`. On first opening the tab,
-the popup sits over an empty frame. On `[r]` or the filter panel, it sits over the table
-already on screen. It closes by itself when the read finishes, and only a tab's digit and `[q]`
-work while it shows.
+the spool sits over an empty frame. On `[r]` or the filter panel, it sits over the table
+already on screen, drawn dim. It goes by itself when the read finishes, and only a tab's digit
+and `[q]` work while it turns.
 
 | Key | What it does |
 |---|---|
@@ -57,8 +57,8 @@ work while it shows.
 | `[q]` | Quit |
 
 The key line names a key only while it would act. While the filter panel, the sort popup or the
-calendar is open, that popup reads every key but `[q]`. While the `loading…` popup shows, only a
-tab's digit and `[q]` work. In each case the key line reads `[q] quit` alone.
+calendar is open, that popup reads every key but `[q]`. While the spool turns, only a tab's
+digit and `[q]` work. In each case the key line reads `[q] quit` alone.
 
 The cursor stops at the last row of the table, so one `[↑]` always moves it up. When a read, a
 filter or `[t]` leaves fewer rows than the cursor's position, the cursor moves to the new last

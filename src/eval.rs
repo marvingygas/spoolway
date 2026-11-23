@@ -5416,7 +5416,7 @@ enum Mode {
         since: std::time::Instant,
         spool: Option<usize>,
         shown: Option<std::time::Duration>,
-        landed: Option<Result<Loaded>>,
+        landed: Option<Box<Result<Loaded>>>,
     },
     /// The sort popup `a` (ascending) or `d` (descending) opens: `default
     /// order`, then every column the table on screen draws — `columns`, as
@@ -5652,14 +5652,14 @@ impl ScreenState {
             return false;
         };
         if landed.is_none() {
-            *landed = Some(match pending.try_recv() {
+            *landed = Some(Box::new(match pending.try_recv() {
                 Ok(result) => result,
                 Err(std::sync::mpsc::TryRecvError::Empty) => return false,
                 // The thread ended without sending: `load` panicked.
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     Err(anyhow::anyhow!("the load stopped before it finished"))
                 }
-            });
+            }));
         }
         // A spool that has shown stays up out to its hold, so a load landing
         // just after it appeared does not flicker it on and straight off.
@@ -5677,7 +5677,7 @@ impl ScreenState {
         else {
             unreachable!("matched as loading, with its result landed, above");
         };
-        match result {
+        match *result {
             Ok(fresh) => {
                 let replaced = loaded.replace(fresh).is_some();
                 // The table this one replaces was freed just now, after the
@@ -5812,6 +5812,7 @@ fn run_screen_with(
 
     'frames: loop {
         state.settle_clamped(&mut loaded, &mut failed, pipelines);
+        state.turn_spool();
         match &failed {
             Some(message) => crate::screen::shell::message_frame(message, writer, out),
             None => draw(pipelines, loaded.as_ref(), &state, writer, out),
@@ -5820,20 +5821,34 @@ fn run_screen_with(
         // this wait too, and a blocking read never sees one — see
         // `crate::screen::shell::wait_key`. `spoolway eval` on its own installs
         // no handler, so there nothing is ever caught. The idle slices are
-        // where a load running behind the popup is noticed landing.
+        // where a load running under the spool is noticed landing, and where
+        // the spool is turned: while loading, the wait ends on the spool's
+        // own clock rather than the shell's once-a-second tick, which would
+        // flip a mark meant to flip every 250 ms once a second at best.
+        //
+        // A `Cell`, because the wait asks `next` how long to sleep while
+        // `idle` holds `state` mutably; `idle` leaves the answer here for it.
+        let wake = std::cell::Cell::new(state.wake_in());
         let mut key = match held_back.take() {
             Some(key) => key,
             None => {
-                let Some(key) = crate::screen::shell::wait_key(input, || {
-                    if state.settle_clamped(&mut loaded, &mut failed, pipelines) {
-                        match &failed {
-                            Some(message) => {
-                                crate::screen::shell::message_frame(message, writer, out)
+                let Some(key) = crate::screen::shell::wait_key_woken(
+                    input,
+                    None,
+                    || wake.get(),
+                    || {
+                        let settled = state.settle_clamped(&mut loaded, &mut failed, pipelines);
+                        if state.turn_spool() || settled {
+                            match &failed {
+                                Some(message) => {
+                                    crate::screen::shell::message_frame(message, writer, out)
+                                }
+                                None => draw(pipelines, loaded.as_ref(), &state, writer, out),
                             }
-                            None => draw(pipelines, loaded.as_ref(), &state, writer, out),
                         }
-                    }
-                }) else {
+                        wake.set(state.wake_in());
+                    },
+                ) else {
                     break;
                 };
                 key
@@ -9085,7 +9100,7 @@ pub(crate) fn tui_screens() -> Vec<(String, Vec<String>)> {
 mod screen_tests {
     use super::*;
     use crate::commands::testutil::fixture;
-    use crate::screen::corner::{BOTTOM_LEFT, BOTTOM_RIGHT, TOP_LEFT, TOP_RIGHT};
+    use crate::screen::corner::{BOTTOM_LEFT, TOP_LEFT, TOP_RIGHT};
 
     fn keys(s: &str) -> std::io::Cursor<Vec<u8>> {
         std::io::Cursor::new(s.as_bytes().to_vec())
@@ -9413,17 +9428,11 @@ mod screen_tests {
         text.split("\x1b[?2026h\x1b[H").skip(1).collect()
     }
 
-    /// Whether `frame` carries the loading popup, exactly as the mockup
-    /// draws it, read with the codes `overlay` paints its border in taken
-    /// out.
-    fn shows_loading(frame: &str) -> bool {
-        let frame = &crate::screen::shell::plain(frame);
-        let loading = [
-            format!("{TOP_LEFT}─ eval ─────{TOP_RIGHT}"),
-            "│  loading…  │".to_string(),
-            format!("{BOTTOM_LEFT}────────────{BOTTOM_RIGHT}"),
-        ];
-        loading.iter().all(|line| frame.contains(line.as_str()))
+    /// Whether `frame` carries the loading spool: drawn as
+    /// [`crate::screen::spool::testutil::tab_frames`] tells a spool frame
+    /// from a tab's own, by the mark in bright white.
+    fn shows_spool(frame: &str) -> bool {
+        crate::screen::spool::testutil::tab_frames(&format!("\x1b[?2026h\x1b[H{frame}")).is_empty()
     }
 
     type Senders = std::rc::Rc<std::cell::RefCell<Vec<std::sync::mpsc::Sender<Result<Loaded>>>>>;
@@ -9436,12 +9445,13 @@ mod screen_tests {
         rx
     }
 
-    /// Hosted, switching to eval draws the strip, the eval frame and the
-    /// keyless loading popup before the load lands. While it shows, `f` and
-    /// `→` are not read and a tab's digit still leaves, and leaving drops the
-    /// receiver, so the thread's late result goes nowhere.
+    /// Hosted, switching to eval draws the strip and the eval frame before
+    /// the load lands, with no `loading…` box over it and, this soon, no
+    /// spool either. Meanwhile `f` and `→` are not read and a tab's digit
+    /// still leaves, and leaving drops the receiver, so the thread's late
+    /// result goes nowhere.
     #[test]
-    fn the_first_frame_is_drawn_under_the_loading_popup_before_the_load_lands() {
+    fn the_first_frame_is_drawn_before_the_load_lands() {
         use crate::screen::shell::{Hosting, Leave, Tab};
         let (repo, _root_guard) = fixture_with_one_run("screen-loading-first");
         let _hosting = Hosting::open(Tab::Eval);
@@ -9471,7 +9481,8 @@ mod screen_tests {
         for frame in &all {
             assert!(frame.contains("DISPATCH"), "under the strip: {frame}");
             assert!(has_top(frame, TableKind::Lanes, "by pipeline "), "{frame}");
-            assert!(shows_loading(frame), "{frame}");
+            assert!(!frame.contains("loading…"), "{frame}");
+            assert!(!shows_spool(frame), "{frame}");
             assert!(!frame.contains("PIPELINE"), "no table yet: {frame}");
             assert!(
                 !frame.contains(&format!("{TOP_LEFT}─ filters")),
@@ -9664,13 +9675,14 @@ mod screen_tests {
     }
 
     /// A scripted input that reports no key pending on its first poll, and
-    /// answers the load in flight right then — so the result lands in
-    /// `wait_key`'s idle slice, behind a frame already drawn, the way a slow
-    /// load's does.
+    /// answers the load in flight `after` into that poll — so the result
+    /// lands in the wait's idle slice, behind a frame already drawn, the
+    /// way a slow load's does.
     struct LandsWhileIdle {
         keys: std::io::Cursor<Vec<u8>>,
         senders: Senders,
         result: std::cell::RefCell<Option<Result<Loaded>>>,
+        after: std::time::Duration,
     }
 
     impl std::io::Read for LandsWhileIdle {
@@ -9683,6 +9695,7 @@ mod screen_tests {
         fn byte_pending(&self, _timeout: std::time::Duration) -> bool {
             match self.result.borrow_mut().take() {
                 Some(result) => {
+                    std::thread::sleep(self.after);
                     let senders = self.senders.borrow();
                     senders.last().unwrap().send(result).unwrap();
                     false
@@ -9692,16 +9705,18 @@ mod screen_tests {
         }
     }
 
-    /// Standalone, the late result closes the popup by itself and the table
-    /// is drawn on the idle slice it landed in, with no key pressed.
+    /// Standalone, a result landing 100 ms into the load, inside the
+    /// spool's 200 ms delay, draws the table on the idle slice it landed
+    /// in, with no key pressed and no spool ever drawn.
     #[test]
-    fn a_result_landing_while_idle_closes_the_popup_and_draws_the_table() {
+    fn a_result_landing_within_the_delay_draws_the_table_and_no_spool() {
         let (repo, _root_guard) = fixture_with_one_run("screen-loading-late");
         let senders = Senders::default();
         let mut input = LandsWhileIdle {
             keys: keys("q"),
             senders: senders.clone(),
             result: std::cell::RefCell::new(Some(load(&repo, &no_filters()))),
+            after: std::time::Duration::from_millis(100),
         };
         let mut out = Vec::new();
         run_screen_with(
@@ -9718,23 +9733,130 @@ mod screen_tests {
         let drawn = String::from_utf8(out).unwrap();
         let all = frames(&drawn);
         assert_eq!(all.len(), 2, "the loading frame, then the landed one");
-        assert!(shows_loading(all[0]), "{}", all[0]);
+        assert!(all.iter().all(|f| !shows_spool(f)), "{drawn}");
+        assert!(!drawn.contains("loading…"), "{drawn}");
         assert!(!all[0].contains("PIPELINE"), "{}", all[0]);
-        assert!(!all[1].contains("loading…"), "{}", all[1]);
         assert!(all[1].contains("│ PIPELINE"), "{}", all[1]);
         assert!(all[1].contains("│>default"), "{}", all[1]);
     }
 
-    /// `r` and the filter panel's `enter` each reload under the same popup,
-    /// over the table already shown rather than an empty frame.
+    /// What [`UnderSpool`] does once the spool has drawn what it waits for.
+    enum Then {
+        /// Answer the load in flight with this result, then wait out every
+        /// wait until the tab asks for the shell's whole tick, as it does
+        /// once nothing is loading any more, and end the input there.
+        Land(Box<Result<Loaded>>),
+        /// Type the rest of the script.
+        Type,
+    }
+
+    /// A terminal the eval loop waits on in real time while a reload runs
+    /// under the spool: the first `at_once` bytes of `keys` are typed at
+    /// once, and after that each wait sleeps the whole time it was asked
+    /// for, as a quiet keyboard would, until the screen has drawn every
+    /// frame of the mark in `until`. Then it does what `then` says. Every
+    /// wait it was asked for is kept in `waits`, with whether the spool had
+    /// drawn every frame in `until` yet.
+    struct UnderSpool {
+        keys: std::io::Cursor<Vec<u8>>,
+        at_once: u64,
+        seen: std::sync::mpsc::Receiver<usize>,
+        drawn: std::cell::RefCell<std::collections::BTreeSet<usize>>,
+        until: Vec<usize>,
+        senders: Senders,
+        then: std::cell::RefCell<Option<Then>>,
+        waits: std::cell::RefCell<Vec<(std::time::Duration, bool)>>,
+        started: std::time::Instant,
+    }
+
+    impl UnderSpool {
+        fn new(
+            script: &str,
+            at_once: usize,
+            seen: std::sync::mpsc::Receiver<usize>,
+            until: &[usize],
+            senders: &Senders,
+            then: Then,
+        ) -> Self {
+            UnderSpool {
+                keys: keys(script),
+                at_once: at_once as u64,
+                seen,
+                drawn: Default::default(),
+                until: until.to_vec(),
+                senders: senders.clone(),
+                then: std::cell::RefCell::new(Some(then)),
+                waits: Default::default(),
+                started: std::time::Instant::now(),
+            }
+        }
+    }
+
+    impl std::io::Read for UnderSpool {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.keys.read(buf)
+        }
+    }
+
+    impl PollableRead for UnderSpool {
+        fn byte_pending(&self, timeout: std::time::Duration) -> bool {
+            if self.keys.position() < self.at_once {
+                return true;
+            }
+            assert!(
+                self.started.elapsed() < crate::screen::spool::testutil::BACKSTOP,
+                "the spool never drew {:?}: it drew {:?}",
+                self.until,
+                self.drawn.borrow()
+            );
+            self.drawn.borrow_mut().extend(self.seen.try_iter());
+            let ready = self.until.iter().all(|f| self.drawn.borrow().contains(f));
+            self.waits.borrow_mut().push((timeout, ready));
+            if ready {
+                match self.then.borrow_mut().take() {
+                    Some(Then::Land(result)) => {
+                        let senders = self.senders.borrow();
+                        senders.last().unwrap().send(*result).unwrap();
+                        return false;
+                    }
+                    Some(Then::Type) | None
+                        if self.keys.position() < self.keys.get_ref().len() as u64 =>
+                    {
+                        return true;
+                    }
+                    _ if timeout >= crate::status::POLL => return true,
+                    _ => {}
+                }
+            }
+            std::thread::sleep(timeout);
+            false
+        }
+    }
+
+    /// `r` and the filter panel's `enter` each reload under the loading
+    /// spool, over the table already shown rather than an empty frame, and
+    /// the `loading…` box is never drawn. A reload still running past the
+    /// spool's delay draws both frames of the mark, the loop waking on the
+    /// spool's own clock to flip it rather than on the shell's
+    /// once-a-second tick. Once the result lands the table is drawn without
+    /// the spool.
     #[test]
-    fn a_reload_shows_the_popup_over_the_table_already_shown() {
+    fn a_reload_turns_the_spool_over_the_table_already_shown() {
+        use crate::screen::spool::{DELAY, FLIP, testutil::watched};
+
         let (repo, _root_guard) = fixture_with_one_run("screen-loading-reload");
         for script in ["r", "f\r"] {
             let senders = Senders::default();
             let mut first = true;
-            let mut input = keys(script);
-            let mut out = Vec::new();
+            let (mut out, seen) = watched();
+            let mut input = UnderSpool::new(
+                script,
+                script.len(),
+                seen,
+                &[0, 1],
+                &senders,
+                Then::Land(Box::new(load(&repo, &no_filters()))),
+            );
             run_screen_with(
                 &repo,
                 &Pipelines::builtin(),
@@ -9752,16 +9874,128 @@ mod screen_tests {
             )
             .unwrap();
 
-            let drawn = String::from_utf8(out).unwrap();
-            let last = last_frame(&drawn);
-            assert!(shows_loading(last), "{script:?}: {last}");
-            assert!(last.contains("│ PIPELINE"), "{script:?}: {last}");
-            assert!(
-                !last.contains(&format!("{TOP_LEFT}─ filters")),
-                "{script:?}: {last}"
-            );
             assert_eq!(senders.borrow().len(), 1, "{script:?}: one reload");
+            // Every wait while the spool still had a frame to draw ended in
+            // time for it: a frame of the mark lasts `FLIP`, and nothing
+            // shows before `DELAY`.
+            let waits = input.waits.borrow();
+            let turning: Vec<_> = waits.iter().filter(|(_, ready)| !ready).collect();
+            assert!(!turning.is_empty(), "{script:?}");
+            assert!(
+                turning.iter().all(|(wait, _)| *wait <= DELAY.max(FLIP)),
+                "{script:?}: woke on the spool's clock: {waits:?}"
+            );
+
+            let drawn = String::from_utf8(out.bytes).unwrap();
+            assert!(!drawn.contains("loading…"), "{script:?}: {drawn}");
+            let all = frames(&drawn);
+            let spooled: Vec<_> = all.iter().filter(|f| shows_spool(f)).collect();
+            assert!(spooled.len() >= 2, "{script:?}: {drawn}");
+            for frame in &spooled {
+                // Over the table already shown, drawn dim, and not over the
+                // filter panel its `enter` closed.
+                let plain = crate::screen::shell::plain(frame);
+                assert!(plain.contains("│ PIPELINE"), "{script:?}: {plain}");
+                assert!(frame.contains(crate::status::DIM), "{script:?}: {frame}");
+                assert!(
+                    !plain.contains(&format!("{TOP_LEFT}─ filters")),
+                    "{script:?}: {plain}"
+                );
+            }
+            let last = last_frame(&drawn);
+            assert!(!shows_spool(last), "{script:?}: {last}");
+            assert!(last.contains("│>default"), "{script:?}: {last}");
         }
+    }
+
+    /// A tab's digit and `q` still act while the spool turns: typed only
+    /// once the spool has drawn, the digit leaves the tab and `q` ends the
+    /// screen with the reload still running.
+    #[test]
+    fn a_digit_and_q_act_while_the_spool_turns() {
+        use crate::screen::shell::{Hosting, Leave, Tab};
+        use crate::screen::spool::testutil::watched;
+
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-keys");
+        let _hosting = Hosting::open(Tab::Eval);
+        for (script, leaves) in [("r3", Leave::Open(Tab::Routines)), ("rq", Leave::Quit)] {
+            let senders = Senders::default();
+            let mut first = true;
+            let (mut out, seen) = watched();
+            let mut input = UnderSpool::new(script, 1, seen, &[0], &senders, Then::Type);
+            let leave = run_screen_with(
+                &repo,
+                &Pipelines::builtin(),
+                &no_args(),
+                |filters| {
+                    if std::mem::take(&mut first) {
+                        load_now(&repo, filters)
+                    } else {
+                        held(&senders)
+                    }
+                },
+                &mut crate::screen::frame_writer::FrameWriter::new(),
+                &mut input,
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(leave, leaves, "{script:?}");
+            assert!(out.drew_spool(), "{script:?}");
+            assert_eq!(input.keys.position(), 2, "{script:?}: the key was read");
+            assert!(
+                senders.borrow()[0].send(Ok(loaded(Vec::new()))).is_err(),
+                "{script:?}: the reload was still running, and its result goes nowhere"
+            );
+        }
+    }
+
+    /// A result that lands while the spool has been up for less than its
+    /// hold is kept back until the hold runs out, and the loop is woken for
+    /// that moment; past the hold it lands at once.
+    #[test]
+    fn a_result_landing_just_after_the_spool_shows_waits_out_its_hold() {
+        use crate::screen::spool::HOLD;
+        use std::time::{Duration, Instant};
+
+        let pipelines = Pipelines::builtin();
+        let loading = |shown_ago: Duration| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(Ok(loaded(Vec::new()))).unwrap();
+            let mut state = ScreenState::new(&no_args());
+            let started = Duration::from_millis(1000);
+            state.mode = Mode::Loading {
+                pending: rx,
+                filters: no_filters(),
+                reset_cursor: false,
+                since: Instant::now() - started,
+                spool: Some(0),
+                shown: Some(started - shown_ago),
+                landed: None,
+            };
+            state
+        };
+
+        let mut state = loading(Duration::from_millis(50));
+        let (mut loaded, mut failed) = (None, None);
+        assert!(!state.settle_clamped(&mut loaded, &mut failed, &pipelines));
+        assert!(loaded.is_none(), "held back while the spool is up");
+        assert!(matches!(
+            state.mode,
+            Mode::Loading {
+                landed: Some(_),
+                ..
+            }
+        ));
+        let wake = state.wake_in();
+        assert!(
+            wake <= HOLD - Duration::from_millis(50),
+            "woken when the hold runs out: {wake:?}"
+        );
+
+        let mut state = loading(HOLD);
+        assert!(state.settle_clamped(&mut loaded, &mut failed, &pipelines));
+        assert!(loaded.is_some(), "the hold had run out");
+        assert!(matches!(state.mode, Mode::Browsing));
     }
 
     /// The acceptance criterion this task exists for: the eval tab's own
@@ -10439,6 +10673,10 @@ mod screen_tests {
                     pending: std::sync::mpsc::channel().1,
                     filters: no_filters(),
                     reset_cursor: false,
+                    since: std::time::Instant::now(),
+                    spool: Some(0),
+                    shown: None,
+                    landed: None,
                 },
             ];
             for mode in &modes {
@@ -10683,10 +10921,10 @@ mod screen_tests {
     }
 
     /// `e` exports under the loading spool: held back until the spool has
-    /// drawn, the file is still written. The load runs behind eval's own
-    /// `loading…` box, never under the spool, so `e` is the one key that
-    /// takes the hold. Without the export going under the spool, nothing is
-    /// drawn and the hold is never taken.
+    /// drawn, the file is still written. The load here lands at once, inside
+    /// the spool's delay, so its own spool never draws and `e` is the one
+    /// key that takes the hold. Without the export going under the spool,
+    /// nothing is drawn and the hold is never taken.
     #[test]
     fn e_turns_the_spool_while_it_exports() {
         use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
@@ -11869,8 +12107,7 @@ mod screen_tests {
                     || has_top(f, TableKind::Lanes, "by step ")
             })
             .filter(|f| {
-                !shows_loading(f)
-                    && !f.contains(&format!("{TOP_LEFT}─ filters"))
+                !f.contains(&format!("{TOP_LEFT}─ filters"))
                     && !f.contains(&format!("{TOP_LEFT}─ sort "))
             })
             .collect();
