@@ -157,7 +157,7 @@ pub const REFERENCE: &[Reference] = &[
     Reference {
         key: "housekeeping.archive_retention_days",
         values: "days",
-        sentence: "Delete finished tasks from the archive after this many days. 0 = keep forever.",
+        sentence: "Delete finished tasks from the archive after this many days, and the plan pages only they named. 0 = keep forever.",
     },
     Reference {
         key: "watch.dirs",

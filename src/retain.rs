@@ -3,8 +3,7 @@
 //!
 //! A spoolway home mixes two kinds of directory. `queue/`, `pending/`,
 //! `worktrees/`, `plans/` (in home mode it sits in the workspace,
-//! outside any home; the sweep deletes a page there only as the archive
-//! paragraph below says) and `overrides/` hold work in flight — losing an entry there loses work,
+//! outside any home) and `overrides/` hold work in flight — losing an entry there loses work,
 //! and a patch under `overrides/` swept after
 //! `retention.days` would silently change how a project runs rather than
 //! merely lose a record of one. `system-prompts/`, `commands/`, `tracking/`,
@@ -20,7 +19,8 @@
 //! ever prunes. This
 //! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
-//! whatever its age — see [`crate::repo::Repo::byproduct_dirs`] for where
+//! whatever its age, except a plan page the archive sweep deletes once no
+//! task names it, as the archive paragraph below says — see [`crate::repo::Repo::byproduct_dirs`] for where
 //! that split is written down. One folder is swept that it does not list,
 //! because it sits outside the home: the kept logs below.
 //!
@@ -231,15 +231,18 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     let Some(spared) = depended_on_files(repo) else {
         return 0;
     };
-    let guard = crate::archive_index::lock(repo);
-    let was_current = guard.is_some() && crate::archive_index::is_current(repo);
-    // Read before the sweep, since the files that go cannot be asked
-    // afterwards. The sweep does not say which it removed, so each one's plan
-    // is matched back by its `<id>.md` name.
+    // Read before the lock is taken and before the sweep. A reader that finds
+    // the index stale rebuilds it under that same lock, which is not
+    // reentrant: taking it first would make this wait out its own hold for
+    // seconds on every command. The files that go cannot be asked afterwards,
+    // and the sweep does not say which it removed, so each one's plan is
+    // matched back by its `<id>.md` name.
     let plans: Vec<(String, String)> = crate::archive_index::read(repo)
         .into_iter()
         .filter_map(|entry| Some((format!("{}.md", entry.id), entry.plan?)))
         .collect();
+    let guard = crate::archive_index::lock(repo);
+    let was_current = guard.is_some() && crate::archive_index::is_current(repo);
     let removed = sweep_dir(&repo.archive_dir(), max_age, limit, Some(&spared));
     if removed > 0
         && let Some(guard) = &guard
@@ -247,7 +250,7 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         crate::archive_index::forget_missing(repo, guard, was_current);
     }
     drop(guard);
-    if removed > 0 {
+    if removed > 0 && plan_listing_is_complete(repo) {
         let swept: BTreeSet<&str> = plans
             .iter()
             .filter(|(file, _)| !repo.archive_dir().join(file).exists())
@@ -260,6 +263,25 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         }
     }
     removed
+}
+
+/// Whether every pending and queued task, here and in other clones, was read
+/// when deciding if a plan page is still named.
+///
+/// [`delete_plan`] passes over a task file that will not read or parse, so a
+/// page that file names looks unnamed. A person deleting by hand sees the
+/// list; this sweep has no one looking, so it leaves every candidate page
+/// alone, as [`depended_on_files`] skips the pass on one unparseable queue
+/// file. The next pass tries again once the file is repaired. A listing
+/// that errors counts as incomplete.
+fn plan_listing_is_complete(repo: &Repo) -> bool {
+    matches!(
+        crate::commands::pending::list_groups_and_skipped(repo),
+        Ok((_, skipped)) if skipped.is_empty()
+    ) && matches!(
+        crate::commands::pending::unreadable_tasks_in_other_clones(repo),
+        Ok(0)
+    )
 }
 
 /// The `archive/` file names the queue still needs: each one a task in
@@ -1129,5 +1151,73 @@ mod tests {
 
         assert!(repo.archive_dir().join("a.md").exists());
         assert!(page.exists());
+    }
+
+    /// A task file that will not parse may still name the page, so a pass
+    /// that removed an archived task leaves every candidate page alone while
+    /// one sits in this clone's `pending/` or another clone's.
+    #[test]
+    fn the_archive_sweep_keeps_plan_pages_while_a_task_file_will_not_parse() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-plan-broken");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let page = plan_page(&repo, "broken.html");
+        archive_old(&repo, "a", Some(&page), 60);
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        let broken = repo.pending_dir().join("b1.md");
+        std::fs::write(&broken, format!("---\nid: [b1\nplan: {}\n", page.display())).unwrap();
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(page.exists(), "a pending file that will not parse names it");
+
+        std::fs::remove_file(&broken).unwrap();
+        archive_old(&repo, "c", Some(&page), 60);
+        sweep_now(&repo);
+        assert!(!page.exists(), "once the file is gone the page is free");
+    }
+
+    /// The same, for a file in another clone's `queue/`.
+    #[test]
+    fn the_archive_sweep_keeps_plan_pages_while_another_clones_file_will_not_parse() {
+        let (shop, mut shop_2, _root) =
+            crate::commands::testutil::two_clones("retain-plan-clone-broken");
+        shop_2.config.housekeeping.archive_retention_days = 30;
+        let page = plan_page(&shop, "search.html");
+        std::fs::create_dir_all(shop.queue_dir()).unwrap();
+        std::fs::write(
+            shop.queue_dir().join("s1.md"),
+            format!("---\nid: [s1\nplan: {}\n", page.display()),
+        )
+        .unwrap();
+        archive_old(&shop_2, "a", Some(&page), 60);
+
+        sweep_now(&shop_2);
+
+        assert!(!shop_2.archive_dir().join("a.md").exists());
+        assert!(page.exists(), "another clone's broken file may name it");
+    }
+
+    /// A stale index is rebuilt by the read that starts the pass, before the
+    /// lock is taken. Read under the lock instead, it would wait out its own
+    /// hold for `READ_WAIT` on every command until something else repaired
+    /// the index.
+    #[test]
+    fn the_archive_sweep_does_not_wait_on_its_own_lock_for_a_stale_index() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-plan-stale");
+        repo.config.housekeeping.archive_retention_days = 30;
+        // Written by hand, so no index line covers it.
+        let file = repo.archive_dir().join("old.md");
+        std::fs::write(&file, "---\nid: old\nstage: done\ngroup: g\n---\n").unwrap();
+        age(&file, 60 * SECS_PER_DAY);
+
+        let started = std::time::Instant::now();
+        sweep_now(&repo);
+
+        assert!(!file.exists());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the sweep waited on the lock it holds"
+        );
     }
 }

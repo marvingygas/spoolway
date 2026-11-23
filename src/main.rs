@@ -404,7 +404,8 @@ fn run() -> Result<()> {
             // tasks older than `housekeeping.archive_retention_days` when that
             // is set, go, once per process — see `retain` for the fixed split
             // between those and the directories a task's own work lives in,
-            // which this never touches. Here rather than behind `init`, `doctor` or the
+            // which this never touches, bar a plan page that the swept
+            // tasks named once no task names it. Here rather than behind `init`, `doctor` or the
             // `[config]` commands above: those exist to work on a project
             // whose config or layout is in question, and a sweep run ahead
             // of them would be one more thing to rule out.
