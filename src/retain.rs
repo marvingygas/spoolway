@@ -19,8 +19,9 @@
 //! ever prunes. This
 //! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
-//! whatever its age, except a plan page the archive sweep deletes once no
-//! task names it, as the archive paragraph below says — see
+//! whatever its age, except a plan page or mockup folder the archive sweep
+//! deletes once no task names or links it, as the archive paragraph below
+//! says — see
 //! [`crate::repo::Repo::byproduct_dirs`] for where that split is written
 //! down. One folder is swept that it does not list,
 //! because it sits outside the home: the kept logs below.
@@ -85,7 +86,10 @@
 //! and never sweeps that file itself — see [`crate::archive_index`]. It also
 //! deletes each plan page a swept task named, once no task in any clone's
 //! `pending/`, `queue/` or `archive/` names it; no other page in `plans/` is
-//! ever looked at, and no folder there is touched.
+//! ever looked at. It also deletes each folder directly under `plans/` that
+//! a swept task's text linked into by path, once no task left in this
+//! clone's `pending/`, `queue/` or `archive/`, or another clone's `pending/`
+//! or `queue/`, links into it. No other folder there is touched.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -226,6 +230,10 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
 /// pending, queued or archived task, in any clone, still names. That check
 /// runs after the swept files and their index lines are gone, with the lock
 /// released, because it reads the archive through the index itself.
+///
+/// The mockup folders those tasks linked to go too, once no task left links
+/// into them. A swept task's text is read as it goes, so a pass that sweeps
+/// no linking task reads no other task; see [`delete_unlinked_folders`].
 fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     // Without a trustworthy read of the queue the pass is skipped, not run
     // unguarded: see [`depended_on_files`].
@@ -244,7 +252,19 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         .collect();
     let guard = crate::archive_index::lock(repo);
     let was_current = guard.is_some() && crate::archive_index::is_current(repo);
-    let removed = sweep_dir(&repo.archive_dir(), max_age, limit, Some(&spared));
+    let plans_prefix = format!("{}/", repo.plans_dir().display());
+    let mut linked: BTreeSet<String> = BTreeSet::new();
+    let removed = sweep_dir_observing(
+        &repo.archive_dir(),
+        max_age,
+        limit,
+        Some(&spared),
+        &mut |path| {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                linked.extend(linked_folders(&text, &plans_prefix));
+            }
+        },
+    );
     if removed > 0
         && let Some(guard) = &guard
     {
@@ -263,7 +283,80 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
             let _ = delete_plan(repo, Path::new(plan));
         }
     }
+    if !linked.is_empty() {
+        delete_unlinked_folders(repo, &plans_prefix, &linked);
+    }
     removed
+}
+
+/// The folders directly under `plans/` that `text` links into, in the form
+/// `<plans_prefix><folder>/`, where `plans_prefix` is `plans/` with a
+/// trailing slash.
+///
+/// The folder name runs to the next `/`, so `plans/board-focus-key/` never
+/// reads as a link into `plans/board-focus/`. A link needs a name and a
+/// slash after it: a bare `plans/x.html` is a plan page, not a folder. A
+/// match preceded by a path character is the tail of a longer path, such as
+/// another checkout's copy, and does not count.
+fn linked_folders(text: &str, plans_prefix: &str) -> BTreeSet<String> {
+    let mut folders = BTreeSet::new();
+    for (at, _) in text.match_indices(plans_prefix) {
+        let before = text[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || "/._-~".contains(c)) {
+            continue;
+        }
+        let rest = &text[at + plans_prefix.len()..];
+        let name_len = rest
+            .find(|c: char| c == '/' || c.is_whitespace() || "\"'`()[]<>".contains(c))
+            .unwrap_or(rest.len());
+        if rest[name_len..].starts_with('/') && !matches!(&rest[..name_len], "" | "." | "..") {
+            folders.insert(rest[..name_len].to_string());
+        }
+    }
+    folders
+}
+
+/// Delete each folder in `candidates` from `plans/` unless a task that is
+/// left still links into it.
+///
+/// Every remaining task file's raw text is read, not its parsed front
+/// matter, because a link sits in the body: this clone's `pending/`,
+/// `queue/` and `archive/`, and in home mode every other clone's `pending/`
+/// and `queue/`. Anything that cannot be listed or read keeps every
+/// candidate, as the rest of the sweep fails toward keeping. Only a real
+/// folder is removed, never a symlink's target or a page.
+fn delete_unlinked_folders(repo: &Repo, plans_prefix: &str, candidates: &BTreeSet<String>) {
+    let mut dirs = vec![repo.pending_dir(), repo.queue_dir(), repo.archive_dir()];
+    let Ok(others) = repo.other_clone_homes() else {
+        return;
+    };
+    for home in others {
+        dirs.push(home.join(crate::config::PENDING_DIR));
+        dirs.push(home.join(crate::config::QUEUE_DIR));
+    }
+    let mut keep: BTreeSet<String> = BTreeSet::new();
+    for dir in dirs {
+        match dir.try_exists() {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => return,
+        }
+        let Ok(files) = crate::commands::pending::md_files(&dir) else {
+            return;
+        };
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                return;
+            };
+            keep.extend(linked_folders(&text, plans_prefix));
+        }
+    }
+    for folder in candidates.difference(&keep) {
+        let path = Path::new(plans_prefix).join(folder);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Whether every pending task here, and every pending and queued task in
@@ -348,6 +441,19 @@ fn sweep_dir(
     limit: usize,
     spared: Option<&BTreeSet<String>>,
 ) -> usize {
+    sweep_dir_observing(dir, max_age, limit, spared, &mut |_| {})
+}
+
+/// [`sweep_dir`], calling `before_delete` with each path it is about to
+/// remove. The archive sweep reads a task's text there, since the file is
+/// gone once the pass moves on.
+fn sweep_dir_observing(
+    dir: &Path,
+    max_age: Duration,
+    limit: usize,
+    spared: Option<&BTreeSet<String>>,
+    before_delete: &mut dyn FnMut(&Path),
+) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -399,6 +505,7 @@ fn sweep_dir(
             continue;
         }
         let path = entry.path();
+        before_delete(&path);
         // Counted whether or not the removal succeeded: a directory that
         // cannot be deleted is exactly the one a retry would spend the rest
         // of the budget on, the same reasoning `scratch::sweep_dir` uses.
@@ -1221,5 +1328,176 @@ mod tests {
             crate::archive_index::is_current(&repo),
             "the sweep read the index under its own lock and left it stale"
         );
+    }
+
+    /// A mockup folder under `plans/` holding one image, as a task links it.
+    fn mockup_folder(repo: &Repo, name: &str) -> std::path::PathBuf {
+        let folder = repo.plans_dir().join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("shot.png"), "png").unwrap();
+        folder
+    }
+
+    /// Archive `id` as an aged task whose text links to a file in `folder`.
+    fn archive_linking(repo: &Repo, id: &str, folder: &Path, days: u64) {
+        let front = format!("group: g\nnote: see {}/shot.png\n", folder.display());
+        crate::archive_index::testutil::archive(repo, id, &front);
+        age(
+            &repo.archive_dir().join(format!("{id}.md")),
+            days * SECS_PER_DAY,
+        );
+    }
+
+    /// A folder whose only linking task was swept goes in the same pass, one
+    /// a task still archived links to stays until that goes too, and one no
+    /// swept task linked to stays whatever its age, as does a plan page.
+    #[test]
+    fn the_archive_sweep_deletes_a_mockup_folder_once_its_last_task_goes() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-last");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let sole = mockup_folder(&repo, "sole");
+        let shared = mockup_folder(&repo, "shared");
+        let unlinked = mockup_folder(&repo, "unlinked");
+        age(&unlinked, 90 * SECS_PER_DAY);
+        let page = plan_page(&repo, "page.html");
+        age(&page, 90 * SECS_PER_DAY);
+        archive_linking(&repo, "a", &sole, 60);
+        archive_linking(&repo, "b", &shared, 60);
+        archive_linking(&repo, "c", &shared, 1);
+
+        sweep_now(&repo);
+
+        assert!(!sole.exists(), "the last task linking it was swept");
+        assert!(shared.exists(), "a task linking it is still archived");
+        assert!(unlinked.exists(), "no swept task linked it");
+        assert!(page.exists(), "no swept task named it");
+
+        age(&repo.archive_dir().join("c.md"), 60 * SECS_PER_DAY);
+        sweep_now(&repo);
+        assert!(!shared.exists(), "its last task went in this pass");
+        assert!(unlinked.exists());
+    }
+
+    /// A pending or queued task's text linking into the folder keeps it,
+    /// though every archived task linking to it is swept.
+    #[test]
+    fn the_archive_sweep_keeps_a_mockup_folder_a_live_task_links() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-live");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let pending = mockup_folder(&repo, "pending");
+        let queued = mockup_folder(&repo, "queued");
+        for (dir, id, folder) in [
+            (repo.pending_dir(), "p1", &pending),
+            (repo.queue_dir(), "q1", &queued),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntitle: {id}\ngroup: g\nstage: queued\n---\n\n\
+                     ![shot]({}/shot.png)\n",
+                    folder.display()
+                ),
+            )
+            .unwrap();
+        }
+        archive_linking(&repo, "a", &pending, 60);
+        archive_linking(&repo, "b", &queued, 60);
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(pending.exists(), "a pending task links it");
+        assert!(queued.exists(), "a queued task links it");
+    }
+
+    /// In a workspace, another clone's pending or queued task keeps it.
+    #[test]
+    fn the_archive_sweep_keeps_a_mockup_folder_another_clone_links() {
+        let (shop, mut shop_2, _root) = crate::commands::testutil::two_clones("retain-mock-clones");
+        shop_2.config.housekeeping.archive_retention_days = 30;
+        let folder = mockup_folder(&shop, "search");
+        std::fs::create_dir_all(shop.pending_dir()).unwrap();
+        std::fs::write(
+            shop.pending_dir().join("s1.md"),
+            format!(
+                "---\nid: s1\ntitle: s1\ngroup: g\n---\n{}/shot.png\n",
+                folder.display()
+            ),
+        )
+        .unwrap();
+        archive_linking(&shop_2, "a", &folder, 60);
+
+        sweep_now(&shop_2);
+
+        assert!(!shop_2.archive_dir().join("a.md").exists());
+        assert!(folder.exists(), "another clone's pending task links it");
+    }
+
+    /// A link into `board-focus-key/` is not a link into `board-focus/`, in
+    /// a swept task or a remaining one.
+    #[test]
+    fn a_link_into_a_longer_folder_name_is_not_a_link_into_the_shorter() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-prefix");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let short = mockup_folder(&repo, "board-focus");
+        let long = mockup_folder(&repo, "board-focus-key");
+        std::fs::create_dir_all(repo.queue_dir()).unwrap();
+        std::fs::write(
+            repo.queue_dir().join("q1.md"),
+            format!(
+                "---\nid: q1\ntitle: q1\ngroup: g\nstage: queued\n---\n{}/shot.png\n",
+                long.display()
+            ),
+        )
+        .unwrap();
+        archive_linking(&repo, "a", &short, 60);
+        archive_linking(&repo, "b", &long, 60);
+
+        sweep_now(&repo);
+
+        assert!(!short.exists(), "only the longer name is linked by a task");
+        assert!(long.exists(), "a queued task links it");
+    }
+
+    /// Retention zero sweeps nothing, so no folder goes.
+    #[test]
+    fn archive_retention_zero_deletes_no_mockup_folder() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-zero");
+        repo.config.housekeeping.archive_retention_days = 0;
+        let folder = mockup_folder(&repo, "old");
+        archive_linking(&repo, "a", &folder, 400);
+
+        sweep_now(&repo);
+
+        assert!(folder.exists());
+    }
+
+    /// A folder is kept while a remaining task file will not read, since its
+    /// text may link into the folder.
+    #[test]
+    fn the_archive_sweep_keeps_a_mockup_folder_while_a_task_file_will_not_read() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-broken");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let folder = mockup_folder(&repo, "broken");
+        archive_linking(&repo, "a", &folder, 60);
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(repo.pending_dir().join("bad.md"), [0xff, 0xfe, 0xfd]).unwrap();
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(folder.exists(), "a task that will not read may link it");
+    }
+
+    /// `linked_folders` reads a name up to its slash, and only after a
+    /// boundary.
+    #[test]
+    fn linked_folders_reads_whole_names_only() {
+        let prefix = "/h/plans/";
+        let text = "![a](/h/plans/one/x.png) \"/h/plans/two/\" /h/plans/page.html \
+                    /h/plans/ /h/plans/../x /other/h/plans/three/y /h/plans/four";
+        let found: Vec<_> = linked_folders(text, prefix).into_iter().collect();
+        assert_eq!(found, ["one", "two"]);
     }
 }
