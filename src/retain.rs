@@ -2,9 +2,9 @@
 //! nobody reads.
 //!
 //! A spoolway home mixes two kinds of directory. `queue/`, `pending/`,
-//! `worktrees/`, `plans/` (in home mode it sits in the workspace,
-//! outside any home) and `overrides/` hold work in flight — losing an entry there loses work,
-//! and a patch under `overrides/` swept after
+//! `worktrees/`, `plans/` (in home mode it sits in the workspace, outside
+//! any home) and `overrides/` hold work in flight — losing an entry there
+//! loses work, and a patch under `overrides/` swept after
 //! `retention.days` would silently change how a project runs rather than
 //! merely lose a record of one. `system-prompts/`, `commands/`, `tracking/`,
 //! `headless/` and `scratch/` hold what a pass left behind — a composed
@@ -20,8 +20,9 @@
 //! module ages out whatever remains under
 //! `housekeeping.retention_days`; the first kind this never touches,
 //! whatever its age, except a plan page the archive sweep deletes once no
-//! task names it, as the archive paragraph below says — see [`crate::repo::Repo::byproduct_dirs`] for where
-//! that split is written down. One folder is swept that it does not list,
+//! task names it, as the archive paragraph below says — see
+//! [`crate::repo::Repo::byproduct_dirs`] for where that split is written
+//! down. One folder is swept that it does not list,
 //! because it sits outside the home: the kept logs below.
 //!
 //! The copies of failed command steps' logs, in `logs/<home's name>/` beside
@@ -265,8 +266,9 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     removed
 }
 
-/// Whether every pending and queued task, here and in other clones, was read
-/// when deciding if a plan page is still named.
+/// Whether every pending task here, and every pending and queued task in
+/// other clones, was read when deciding if a plan page is still named. This
+/// clone's `queue/` was already read in full by [`depended_on_files`].
 ///
 /// [`delete_plan`] passes over a task file that will not read or parse, so a
 /// page that file names looks unnamed. A person deleting by hand sees the
@@ -1199,9 +1201,10 @@ mod tests {
     }
 
     /// A stale index is rebuilt by the read that starts the pass, before the
-    /// lock is taken. Read under the lock instead, it would wait out its own
-    /// hold for `READ_WAIT` on every command until something else repaired
-    /// the index.
+    /// lock is taken, so the index is current once the pass ends. Read under
+    /// the lock instead, the read cannot take it, falls back to the files
+    /// without writing, and leaves the index stale after waiting out its own
+    /// hold for `READ_WAIT`.
     #[test]
     fn the_archive_sweep_does_not_wait_on_its_own_lock_for_a_stale_index() {
         let (mut repo, _root) = crate::commands::testutil::fixture("retain-plan-stale");
@@ -1211,13 +1214,12 @@ mod tests {
         std::fs::write(&file, "---\nid: old\nstage: done\ngroup: g\n---\n").unwrap();
         age(&file, 60 * SECS_PER_DAY);
 
-        let started = std::time::Instant::now();
         sweep_now(&repo);
 
         assert!(!file.exists());
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the sweep waited on the lock it holds"
+            crate::archive_index::is_current(&repo),
+            "the sweep read the index under its own lock and left it stale"
         );
     }
 }
