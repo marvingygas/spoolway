@@ -261,7 +261,7 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         Some(&spared),
         &mut |path| {
             if let Ok(text) = std::fs::read_to_string(path) {
-                linked.extend(linked_folders(&text, &plans_prefix, true));
+                linked.extend(linked_folders(&text, &plans_prefix));
             }
         },
     );
@@ -297,17 +297,15 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
 /// reads as a link into `plans/board-focus/`. A link needs a name and a
 /// slash after it: a bare `plans/x.html` is a plan page, not a folder.
 ///
-/// With `boundary`, a match preceded by a path character is the tail of a
-/// longer path, such as another checkout's copy, and does not count. The
-/// swept tasks are read this way, since fewer candidates only keeps more.
-/// The remaining tasks are read without it, because any text that spells
-/// the path keeps its folder: `file://<plans>/<folder>/shot.png` has a `/`
-/// before the path and is still a live link.
-fn linked_folders(text: &str, plans_prefix: &str, boundary: bool) -> BTreeSet<String> {
+/// A match preceded by a path character is the tail of a longer path, such
+/// as another checkout's copy, and does not count. That only reads fewer
+/// candidates, which keeps more. The tasks that remain are read by
+/// [`names_folder`], which is looser.
+fn linked_folders(text: &str, plans_prefix: &str) -> BTreeSet<String> {
     let mut folders = BTreeSet::new();
     for (at, _) in text.match_indices(plans_prefix) {
         let before = text[..at].chars().next_back();
-        if boundary && before.is_some_and(|c| c.is_alphanumeric() || "/._-~".contains(c)) {
+        if before.is_some_and(|c| c.is_alphanumeric() || "/._-~".contains(c)) {
             continue;
         }
         let rest = &text[at + plans_prefix.len()..];
@@ -321,13 +319,32 @@ fn linked_folders(text: &str, plans_prefix: &str, boundary: bool) -> BTreeSet<St
     folders
 }
 
+/// Whether `text` spells the path `<plans_prefix><folder>`, whatever comes
+/// before it and whatever follows it that cannot continue the folder's name.
+///
+/// This is the test for a task that is left, and it is never stricter than
+/// the one that picked the candidates: `file://<plans>/<folder>/x.png`, a
+/// bare `<plans>/<folder>` at the end of a line and `(<plans>/<folder>).`
+/// all keep the folder. A name that goes on with a letter, digit, `-` or `_`
+/// is another folder, so `board-focus-key` does not keep `board-focus`.
+fn names_folder(text: &str, plans_prefix: &str, folder: &str) -> bool {
+    let path = format!("{plans_prefix}{folder}");
+    text.match_indices(&path).any(|(at, _)| {
+        text[at + path.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
+}
+
 /// Delete each folder in `candidates` from `plans/` unless a task that is
 /// left still links into it.
 ///
 /// Every remaining task file's raw text is read, not its parsed front
 /// matter, because a link sits in the body: this clone's `pending/`,
 /// `queue/` and `archive/`, and in home mode every other clone's `pending/`
-/// and `queue/`. Anything that cannot be listed or read keeps every
+/// and `queue/`. A task that names a folder in any way [`names_folder`]
+/// accepts keeps it. Anything that cannot be listed or read keeps every
 /// candidate, as the rest of the sweep fails toward keeping. Only a real
 /// folder is removed, never a symlink's target or a page.
 fn delete_unlinked_folders(repo: &Repo, plans_prefix: &str, candidates: &BTreeSet<String>) {
@@ -339,7 +356,7 @@ fn delete_unlinked_folders(repo: &Repo, plans_prefix: &str, candidates: &BTreeSe
         dirs.push(home.join(crate::config::PENDING_DIR));
         dirs.push(home.join(crate::config::QUEUE_DIR));
     }
-    let mut keep: BTreeSet<String> = BTreeSet::new();
+    let mut unlinked = candidates.clone();
     for dir in dirs {
         match dir.try_exists() {
             Ok(true) => {}
@@ -353,10 +370,10 @@ fn delete_unlinked_folders(repo: &Repo, plans_prefix: &str, candidates: &BTreeSe
             let Ok(text) = std::fs::read_to_string(&file) else {
                 return;
             };
-            keep.extend(linked_folders(&text, plans_prefix, false));
+            unlinked.retain(|folder| !names_folder(&text, plans_prefix, folder));
         }
     }
-    for folder in candidates.difference(&keep) {
+    for folder in &unlinked {
         let path = Path::new(plans_prefix).join(folder);
         if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
             let _ = std::fs::remove_dir_all(&path);
@@ -1431,11 +1448,14 @@ mod tests {
             ),
         )
         .unwrap();
+        let control = mockup_folder(&shop, "control");
         archive_linking(&shop_2, "a", &folder, 60);
+        archive_linking(&shop_2, "z", &control, 60);
 
         sweep_now(&shop_2);
 
         assert!(!shop_2.archive_dir().join("a.md").exists());
+        assert!(!control.exists(), "only a swept task linked it");
         assert!(folder.exists(), "another clone's pending task links it");
     }
 
@@ -1487,12 +1507,18 @@ mod tests {
         let folder = mockup_folder(&repo, "broken");
         archive_linking(&repo, "a", &folder, 60);
         std::fs::create_dir_all(repo.pending_dir()).unwrap();
-        std::fs::write(repo.pending_dir().join("bad.md"), [0xff, 0xfe, 0xfd]).unwrap();
+        let bad = repo.pending_dir().join("bad.md");
+        std::fs::write(&bad, [0xff, 0xfe, 0xfd]).unwrap();
 
         sweep_now(&repo);
 
         assert!(!repo.archive_dir().join("a.md").exists());
         assert!(folder.exists(), "a task that will not read may link it");
+
+        std::fs::remove_file(&bad).unwrap();
+        archive_linking(&repo, "c", &folder, 60);
+        sweep_now(&repo);
+        assert!(!folder.exists(), "once the file is gone the folder is free");
     }
 
     /// A remaining task's `file://` link keeps the folder, though the path
@@ -1511,24 +1537,102 @@ mod tests {
             ),
         )
         .unwrap();
+        let control = mockup_folder(&repo, "control");
         archive_linking(&repo, "a", &folder, 60);
+        archive_linking(&repo, "z", &control, 60);
 
         sweep_now(&repo);
 
         assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(!control.exists(), "only a swept task linked it");
         assert!(folder.exists(), "a pending task links it by file:// URL");
     }
 
-    /// `linked_folders` reads a name up to its slash, and with `boundary`
-    /// only after a non-path character.
+    /// A remaining task that names the folder with no slash after it, at a
+    /// line end or before a full stop, keeps it.
+    #[test]
+    fn the_archive_sweep_keeps_a_mockup_folder_a_task_names_without_a_slash() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-bare");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let ending = mockup_folder(&repo, "ending");
+        let stopped = mockup_folder(&repo, "stopped");
+        let control = mockup_folder(&repo, "control");
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(
+            repo.pending_dir().join("p1.md"),
+            format!(
+                "---\nid: p1\ntitle: p1\ngroup: g\n---\nmockups in {}\nand {}.\n",
+                ending.display(),
+                stopped.display()
+            ),
+        )
+        .unwrap();
+        archive_linking(&repo, "a", &ending, 60);
+        archive_linking(&repo, "b", &stopped, 60);
+        archive_linking(&repo, "z", &control, 60);
+
+        sweep_now(&repo);
+
+        assert!(!control.exists(), "only a swept task linked it");
+        assert!(ending.exists(), "a pending task names it at a line end");
+        assert!(
+            stopped.exists(),
+            "a pending task names it before a full stop"
+        );
+    }
+
+    /// A candidate that is a symlink to a folder is not followed: the target
+    /// and its file survive.
+    #[cfg(unix)]
+    #[test]
+    fn the_archive_sweep_never_deletes_through_a_symlinked_folder() {
+        let (mut repo, root) = crate::commands::testutil::fixture("retain-mock-symlink");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let target = root.join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.png"), "png").unwrap();
+        let link = repo.plans_dir().join("linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        archive_linking(&repo, "a", &link, 60);
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(target.join("keep.png").exists(), "the target was followed");
+    }
+
+    /// `names_folder` accepts a path that ends the text, a sentence or a
+    /// bracket, and any prefix, but not a longer folder name.
+    #[test]
+    fn names_folder_stops_at_a_name_that_goes_on() {
+        let prefix = "/h/plans/";
+        for text in [
+            "see /h/plans/one",
+            "see /h/plans/one.",
+            "(/h/plans/one)",
+            "file:///h/plans/one/x.png",
+            "/h/plans/one\n",
+        ] {
+            assert!(names_folder(text, prefix, "one"), "{text}");
+        }
+        for text in [
+            "/h/plans/one-key/x",
+            "/h/plans/ones",
+            "/h/plans/one_2",
+            "/h/plans/",
+        ] {
+            assert!(!names_folder(text, prefix, "one"), "{text}");
+        }
+    }
+
+    /// `linked_folders` reads a name up to its slash, and only after a
+    /// non-path character.
     #[test]
     fn linked_folders_reads_whole_names_only() {
         let prefix = "/h/plans/";
         let text = "![a](/h/plans/one/x.png) \"/h/plans/two/\" /h/plans/page.html \
                     /h/plans/ /h/plans/../x /other/h/plans/three/y /h/plans/four";
-        let found: Vec<_> = linked_folders(text, prefix, true).into_iter().collect();
+        let found: Vec<_> = linked_folders(text, prefix).into_iter().collect();
         assert_eq!(found, ["one", "two"]);
-        let found: Vec<_> = linked_folders(text, prefix, false).into_iter().collect();
-        assert_eq!(found, ["one", "three", "two"]);
     }
 }
