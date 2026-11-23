@@ -1577,12 +1577,12 @@ impl Pipeline {
                     );
                 }
                 // The five keys above route or gate the step, which `blocked` never does. These
-                // four are not wrong the way those are — a command, a slot opt-out, a loop
-                // bound and a folder list all mean something on an ordinary step — but `blocked` is materialised
-                // from `[unattended]`'s own keys, and a pipeline's override is only the five
-                // `Pipelines::assemble` actually merges: `agent`, `model`, `effort`, `session`,
-                // `prompt`. Anything else here would silently do nothing once assembled, which
-                // is worse than refusing it by name.
+                // four are not wrong the way those are — a command, a slot opt-out, a loop bound and
+                // a folder list all mean something on an ordinary step — but `blocked` is
+                // materialised from `[unattended]`'s own keys, and a pipeline's override is only
+                // the five `Pipelines::assemble` actually merges: `agent`, `model`, `effort`,
+                // `session`, `prompt`. Anything else here would silently do nothing once
+                // assembled, which is worse than refusing it by name.
                 //
                 // `description:` belongs on this same list — it is not one of the five either —
                 // but it cannot be checked here: `assemble` writes the canonical description
