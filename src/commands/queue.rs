@@ -31165,7 +31165,11 @@ group_description: audit
                     assert!(!frame.contains("issue tracking"), "{frame}");
                 }
                 assert_no_bar(&drawn);
-                assert_eq!(hook_calls(&repo).len(), 1, "one call for the routine's task");
+                assert_eq!(
+                    hook_calls(&repo).len(),
+                    1,
+                    "one call for the routine's task"
+                );
                 assert_eq!(
                     popup_rows(last_frame(&drawn), "queued")[1],
                     "hook executed successfully"

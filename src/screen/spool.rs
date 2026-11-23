@@ -190,11 +190,12 @@ fn turn(
 ///
 /// The spool shows only once `work` has run for [`DELAY`]; until then, and
 /// for a key that never takes that long, nothing is drawn. Once it has
-/// shown, every key typed during the work is thrown away when it ends, the
-/// way the issue-hook progress pop-up already throws them away: a person who
-/// pressed `enter` again because nothing seemed to happen meant it for this
-/// screen, not for whatever the work hands back. A spool that never showed
-/// leaves typed keys exactly where they were.
+/// shown, every key typed during the work is thrown away when it ends: a
+/// person who pressed `enter` again because nothing seemed to happen meant
+/// it for this screen, not for whatever the work hands back. A spool that
+/// never showed leaves typed keys exactly where they were; a caller that
+/// wants them gone either way, as the queue screen's issue question does,
+/// throws them away itself once this returns.
 ///
 /// `work` must not write to the terminal itself — it is handed neither
 /// `writer` nor `out`, which belong to the drawing thread until it returns.
