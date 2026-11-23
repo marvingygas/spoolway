@@ -261,7 +261,7 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
         Some(&spared),
         &mut |path| {
             if let Ok(text) = std::fs::read_to_string(path) {
-                linked.extend(linked_folders(&text, &plans_prefix));
+                linked.extend(linked_folders(&text, &plans_prefix, true));
             }
         },
     );
@@ -295,14 +295,19 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
 ///
 /// The folder name runs to the next `/`, so `plans/board-focus-key/` never
 /// reads as a link into `plans/board-focus/`. A link needs a name and a
-/// slash after it: a bare `plans/x.html` is a plan page, not a folder. A
-/// match preceded by a path character is the tail of a longer path, such as
-/// another checkout's copy, and does not count.
-fn linked_folders(text: &str, plans_prefix: &str) -> BTreeSet<String> {
+/// slash after it: a bare `plans/x.html` is a plan page, not a folder.
+///
+/// With `boundary`, a match preceded by a path character is the tail of a
+/// longer path, such as another checkout's copy, and does not count. The
+/// swept tasks are read this way, since fewer candidates only keeps more.
+/// The remaining tasks are read without it, because any text that spells
+/// the path keeps its folder: `file://<plans>/<folder>/shot.png` has a `/`
+/// before the path and is still a live link.
+fn linked_folders(text: &str, plans_prefix: &str, boundary: bool) -> BTreeSet<String> {
     let mut folders = BTreeSet::new();
     for (at, _) in text.match_indices(plans_prefix) {
         let before = text[..at].chars().next_back();
-        if before.is_some_and(|c| c.is_alphanumeric() || "/._-~".contains(c)) {
+        if boundary && before.is_some_and(|c| c.is_alphanumeric() || "/._-~".contains(c)) {
             continue;
         }
         let rest = &text[at + plans_prefix.len()..];
@@ -348,7 +353,7 @@ fn delete_unlinked_folders(repo: &Repo, plans_prefix: &str, candidates: &BTreeSe
             let Ok(text) = std::fs::read_to_string(&file) else {
                 return;
             };
-            keep.extend(linked_folders(&text, plans_prefix));
+            keep.extend(linked_folders(&text, plans_prefix, false));
         }
     }
     for folder in candidates.difference(&keep) {
@@ -1490,14 +1495,40 @@ mod tests {
         assert!(folder.exists(), "a task that will not read may link it");
     }
 
-    /// `linked_folders` reads a name up to its slash, and only after a
-    /// boundary.
+    /// A remaining task's `file://` link keeps the folder, though the path
+    /// follows a `/` and would not count as a link in a swept task.
+    #[test]
+    fn the_archive_sweep_keeps_a_mockup_folder_a_file_url_links() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-mock-url");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let folder = mockup_folder(&repo, "viaurl");
+        std::fs::create_dir_all(repo.pending_dir()).unwrap();
+        std::fs::write(
+            repo.pending_dir().join("p1.md"),
+            format!(
+                "---\nid: p1\ntitle: p1\ngroup: g\n---\n![today](file://{}/shot.png)\n",
+                folder.display()
+            ),
+        )
+        .unwrap();
+        archive_linking(&repo, "a", &folder, 60);
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(folder.exists(), "a pending task links it by file:// URL");
+    }
+
+    /// `linked_folders` reads a name up to its slash, and with `boundary`
+    /// only after a non-path character.
     #[test]
     fn linked_folders_reads_whole_names_only() {
         let prefix = "/h/plans/";
         let text = "![a](/h/plans/one/x.png) \"/h/plans/two/\" /h/plans/page.html \
                     /h/plans/ /h/plans/../x /other/h/plans/three/y /h/plans/four";
-        let found: Vec<_> = linked_folders(text, prefix).into_iter().collect();
+        let found: Vec<_> = linked_folders(text, prefix, true).into_iter().collect();
         assert_eq!(found, ["one", "two"]);
+        let found: Vec<_> = linked_folders(text, prefix, false).into_iter().collect();
+        assert_eq!(found, ["one", "three", "two"]);
     }
 }
