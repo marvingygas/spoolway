@@ -11,7 +11,7 @@
 
 use jiff::civil::Date;
 use jiff::tz::TimeZone;
-use jiff::{Timestamp, Zoned};
+use jiff::{Timestamp, ZonedDateTime};
 
 /// Format `at` as `to_rfc3339` of a UTC `chrono::DateTime` did: a `+00:00`
 /// offset and a fraction of none, three, six or nine digits.
@@ -21,14 +21,17 @@ pub fn rfc3339(at: Timestamp) -> String {
     // `Timestamp::subsec_nanosecond` is negative before 1970, while the
     // seconds printed above are floored, so using it would name the wrong
     // instant.
-    push_fraction(&mut out, at.to_zoned(TimeZone::UTC).subsec_nanosecond());
+    push_fraction(
+        &mut out,
+        at.to_zoned_datetime(TimeZone::UTC).subsec_nanosecond(),
+    );
     out.push_str("+00:00");
     out
 }
 
 /// Format `at` as `to_rfc3339` of a local `chrono::DateTime` did: the zone's
 /// own offset after the same fraction [`rfc3339`] writes.
-pub fn rfc3339_local(at: &Zoned) -> String {
+pub fn rfc3339_local(at: &ZonedDateTime) -> String {
     let mut out = at.strftime("%Y-%m-%dT%H:%M:%S").to_string();
     push_fraction(&mut out, at.subsec_nanosecond());
     out.push_str(&at.strftime("%:z").to_string());
@@ -44,13 +47,17 @@ pub fn parse_rfc3339(raw: &str) -> Option<Timestamp> {
 /// the `strftime` pattern `fmt`, or `None` when it does not parse.
 pub fn format_local(raw: &str, fmt: &str) -> Option<String> {
     let at = parse_rfc3339(raw)?;
-    Some(at.to_zoned(TimeZone::system()).strftime(fmt).to_string())
+    Some(
+        at.to_zoned_datetime(TimeZone::system())
+            .strftime(fmt)
+            .to_string(),
+    )
 }
 
 /// Today's date in UTC, the calendar the price table's `generated` day is
 /// written in.
 pub fn utc_today() -> Date {
-    Timestamp::now().to_zoned(TimeZone::UTC).date()
+    Timestamp::now().to_zoned_datetime(TimeZone::UTC).date()
 }
 
 /// Append `.fff`, `.ffffff` or `.fffffffff` for the shortest of the three
@@ -125,7 +132,7 @@ mod tests {
     #[test]
     fn rfc3339_round_trips_in_both_offset_spellings() {
         let at: Timestamp = "2026-11-19T20:34:59.250Z".parse().unwrap();
-        let zoned = at.to_zoned(TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").unwrap());
+        let zoned = at.to_zoned_datetime(TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3").unwrap());
         assert_eq!(rfc3339_local(&zoned), "2026-11-19T21:34:59.250+01:00");
         assert_eq!(parse_rfc3339(&rfc3339_local(&zoned)), Some(at));
         assert_eq!(parse_rfc3339(&rfc3339(at)), Some(at));

@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
-use jiff::{SignedDuration, Span, Timestamp, Zoned};
+use jiff::{SignedDuration, Span, Timestamp, ZonedDateTime};
 use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table};
 
@@ -989,7 +989,7 @@ pub fn fire_due(
         return;
     }
 
-    let now = Zoned::now().datetime();
+    let now = ZonedDateTime::now().datetime();
     let minute = now.strftime(MINUTE_FMT).to_string();
     // Only a pass with an enabled job reads the queue; a project whose jobs
     // are all off would otherwise pay for it every pass.
@@ -1331,7 +1331,7 @@ pub fn last_fired(repo: &Repo, name: &str) -> Option<i64> {
 pub struct StayingUp {
     /// The enabled job that fires soonest, and when — `None` if none is
     /// enabled or none will ever fire.
-    pub next: Option<(String, Zoned)>,
+    pub next: Option<(String, ZonedDateTime)>,
 }
 
 /// One row of the dispatcher board's job ledger: an enabled job's name and
@@ -1340,7 +1340,7 @@ pub struct StayingUp {
 #[derive(Debug, Clone)]
 pub struct ActiveJob {
     pub name: String,
-    pub next: Option<Zoned>,
+    pub next: Option<ZonedDateTime>,
 }
 
 /// A caller-held memo for [`active_jobs`]. The status board asks on every
@@ -1387,7 +1387,12 @@ pub fn active_jobs(repo: &Repo) -> Vec<ActiveJob> {
         .collect();
     // `None` sorts after every `Some`, so a job that will never fire always
     // lands at the end rather than scattered among ones that will.
-    active.sort_by_key(|job| (job.next.is_none(), job.next.as_ref().map(Zoned::timestamp)));
+    active.sort_by_key(|job| {
+        (
+            job.next.is_none(),
+            job.next.as_ref().map(ZonedDateTime::timestamp),
+        )
+    });
     active
 }
 
@@ -1456,23 +1461,23 @@ pub fn staying_up_lines(jobs: &StayingUp) -> Vec<String> {
 /// The next local instant an expression fires, from now. `None` if it will
 /// not parse, or never comes round within one full Gregorian cycle in a
 /// form this machine's timezone actually has.
-pub fn next_fire(schedule: &str) -> Option<Zoned> {
+pub fn next_fire(schedule: &str) -> Option<ZonedDateTime> {
     let cron = Cron::parse(schedule).ok()?;
     let zone = TimeZone::system();
-    let now = Zoned::now();
+    let now = ZonedDateTime::now();
     let at = next_real_fire(
         &cron,
         now.datetime(),
         now.timestamp().as_second(),
         |naive| resolve_wall(naive, &zone),
     )?;
-    Some(Timestamp::from_second(at).ok()?.to_zoned(zone))
+    Some(Timestamp::from_second(at).ok()?.to_zoned_datetime(zone))
 }
 
 /// How `naive` lands in `zone`: once, never (a spring-forward gap) or twice
 /// (a fall-back repeat), each occurrence as UTC seconds.
 ///
-/// `to_ambiguous_timestamp` rather than `DateTime::to_zoned`, which silently
+/// `to_ambiguous_timestamp` rather than `DateTime::to_zoned_datetime`, which silently
 /// picks one occurrence of a repeated minute and moves a skipped one forward
 /// by the gap's length — both of which [`next_real_fire`] has to tell apart.
 /// An instant outside the range a timestamp holds counts as skipped.
@@ -1498,13 +1503,13 @@ fn resolve_wall(naive: &DateTime, zone: &TimeZone) -> Wall {
 ///
 /// A minute that a spring-forward gap skips is stepped over — the scan simply
 /// moves to the next matching minute — the same way [`next_fire`] treats one.
-pub fn next_fires(schedule: &str, count: usize) -> Vec<Zoned> {
+pub fn next_fires(schedule: &str, count: usize) -> Vec<ZonedDateTime> {
     let Ok(cron) = Cron::parse(schedule) else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(count);
     let zone = TimeZone::system();
-    let mut cursor = Zoned::now().datetime();
+    let mut cursor = ZonedDateTime::now().datetime();
     while out.len() < count {
         let Some(next) = cron.next_after(cursor) else {
             break;
@@ -1514,7 +1519,7 @@ pub fn next_fires(schedule: &str, count: usize) -> Vec<Zoned> {
         match resolve_wall(&next, &zone) {
             Wall::Once(at) | Wall::Twice(at, _) => {
                 if let Ok(at) = Timestamp::from_second(at) {
-                    out.push(at.to_zoned(zone.clone()));
+                    out.push(at.to_zoned_datetime(zone.clone()));
                 }
             }
             Wall::Skipped => continue,
@@ -1689,7 +1694,7 @@ mod tests {
     /// The UTC-seconds instant a naive minute names if read as UTC.
     fn utc_secs(naive: &DateTime) -> i64 {
         naive
-            .to_zoned(TimeZone::UTC)
+            .to_zoned_datetime(TimeZone::UTC)
             .unwrap()
             .timestamp()
             .as_second()
@@ -1951,7 +1956,7 @@ mod tests {
         let fires = next_fires("*/30 * * * *", 3);
         assert_eq!(fires.len(), 3);
         assert!(fires[0] < fires[1] && fires[1] < fires[2]);
-        assert!(fires[0] > Zoned::now());
+        assert!(fires[0] > ZonedDateTime::now());
         for when in &fires {
             let minute = when.strftime("%M").to_string();
             assert!(minute == "00" || minute == "30", "on the half hour: {when}");
@@ -2324,12 +2329,12 @@ mod tests {
     /// fails on nothing but timing, so the last few seconds of a minute are
     /// waited out first.
     fn settled_now() -> DateTime {
-        let now = Zoned::now();
+        let now = ZonedDateTime::now();
         if now.second() >= 55 {
             let left = 60 - now.second() as u64;
             std::thread::sleep(std::time::Duration::from_millis(left * 1000 + 100));
         }
-        Zoned::now().datetime()
+        ZonedDateTime::now().datetime()
     }
 
     /// A job's schedule at a single minute `ago` minutes back, as a cron

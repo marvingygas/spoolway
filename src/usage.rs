@@ -1574,10 +1574,14 @@ pub fn session_age(kind: &str, session: &str) -> Option<(std::time::Duration, Ag
 
 fn session_age_at(kind: &str, path: &Path) -> Option<(std::time::Duration, AgeReading)> {
     let now = std::time::SystemTime::now();
-    if let Some(at) = last_turn_at(kind, path).and_then(|turn| turn.at) {
-        let age = now
-            .duration_since(std::time::SystemTime::from(at))
-            .unwrap_or_default();
+    // jiff 1.0 made the Timestamp to SystemTime conversion fallible. A stamp
+    // too far out to represent is no usable reading, so it falls through to
+    // the modified time like a transcript with no timestamp.
+    let last_reply = last_turn_at(kind, path)
+        .and_then(|turn| turn.at)
+        .and_then(|at| std::time::SystemTime::try_from(at).ok());
+    if let Some(at) = last_reply {
+        let age = now.duration_since(at).unwrap_or_default();
         return Some((age, AgeReading::LastReply));
     }
     let age = now.duration_since(touched_at(path)?).unwrap_or_default();
@@ -3369,7 +3373,7 @@ pub fn parse_instant(raw: &str, end_of_day: bool) -> Result<jiff::Timestamp> {
         // honest bound. A midnight that happens twice resolves to the first.
         let local = date
             .at(0, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::system())
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
             .context("date out of range")?;
         return Ok(local.timestamp());
     }
@@ -7341,7 +7345,7 @@ mod tests {
     fn at(wall: &str) -> String {
         let naive = jiff::civil::DateTime::strptime("%Y-%m-%dT%H:%M:%S", wall)
             .expect("a wall clock reading is YYYY-MM-DDTHH:MM:SS");
-        let ambiguous = jiff::tz::TimeZone::system().to_ambiguous_zoned(naive);
+        let ambiguous = jiff::tz::TimeZone::system().to_ambiguous_zoned_datetime(naive);
         // `earlier` does not fail on a gap: it reads the wall time with the
         // offset after it, an hour early, so the gap is refused here.
         assert!(
@@ -8829,7 +8833,8 @@ mod tests {
         };
         append(&repo, &banked).unwrap();
         std::fs::write(&path, transcript(&[("", 10), ("", 5)])).unwrap();
-        let at = std::time::SystemTime::from(crate::clock::parse_rfc3339(&banked.ts).unwrap());
+        let at = std::time::SystemTime::try_from(crate::clock::parse_rfc3339(&banked.ts).unwrap())
+            .unwrap();
         crate::scratch::set_mtime(&path, at);
 
         let ledger = read(&repo).unwrap();
@@ -8881,7 +8886,8 @@ mod tests {
         std::fs::write(&path, transcript(&[("", 100), ("", 40), ("", 7)])).unwrap();
         crate::scratch::set_mtime(
             &path,
-            std::time::SystemTime::from(watermark) + std::time::Duration::from_millis(500),
+            std::time::SystemTime::try_from(watermark).unwrap()
+                + std::time::Duration::from_millis(500),
         );
 
         let ledger = read(&repo).unwrap();

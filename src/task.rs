@@ -1392,7 +1392,9 @@ impl Task {
     /// `problem_log.rs` and `eval.rs` already do, rather than the UTC used
     /// for machine-read ledger entries in `usage.rs`.
     pub fn log_status(&mut self, text: &str) {
-        let stamp = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string();
+        let stamp = jiff::ZonedDateTime::now()
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string();
         self.append_to_section("## Status Log", &format!("- {stamp} {text}\n"));
     }
 
@@ -1421,7 +1423,9 @@ impl Task {
         if last.is_empty() || last.starts_with(BLOCKER_CLEARED) {
             return;
         }
-        let stamp = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M").to_string();
+        let stamp = jiff::ZonedDateTime::now()
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string();
         self.append_to_section(
             "## Blocker",
             &format!(
