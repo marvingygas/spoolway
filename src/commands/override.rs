@@ -411,8 +411,9 @@ const OVERRIDE_CONTRACT_LINES: &[&str] = &[
     "                         for any key `spoolway pipeline contract` lists except `id` —",
     "                         renaming a step is refused by name. `override promote` only",
     "                         ever writes a step's own keys: a layered `description`,",
-    "                         `task_template` or `add_dirs` is refused there by name too, and has to be",
-    "                         edited into the tracked file by hand instead.",
+    "                         `task_template` or `add_dirs` is refused there by",
+    "                         name too, and has to be edited into the tracked file by hand",
+    "                         instead.",
     "  config.toml            any key `spoolway config contract` lists, exactly as `config",
     "                         set` would accept it.",
     "  prompts/<name>         the whole file — see the merge rule above.",
@@ -1820,6 +1821,34 @@ mod tests {
             )
             .unwrap();
             assert!(!crate::overrides::config_patch_path(&repo.overrides_dir()).exists());
+        });
+    }
+
+    /// A patch holding only a pipeline's `add_dirs` is listed by that name,
+    /// is found by `override promote` (which then refuses it by name rather
+    /// than say there is no override), and is dropped by it, taking the file
+    /// with it. Fails before the key is read in each place: the row is
+    /// empty, promote reports no override, and the drop is refused.
+    // covers: pipeline.add_dirs — override list, promote and drop know a patch's top-level add_dirs
+    #[test]
+    fn override_list_promote_and_drop_know_a_pipelines_add_dirs() {
+        with_repo("add-dirs-key", |repo| {
+            let overrides = repo.overrides_dir();
+            let patch = crate::overrides::PipelinePatch {
+                add_dirs: Some("~/dev/notes".to_string()),
+                ..Default::default()
+            };
+            crate::overrides::write_pipeline_patch(&overrides, "demo", &patch).unwrap();
+
+            let rows = collect_override_rows(repo).unwrap();
+            assert_eq!(rows[0].overrides, "add_dirs");
+
+            let err = promote_pipeline(repo, &repo.checkout, "demo").unwrap_err();
+            assert!(format!("{err:#}").contains("`add_dirs`"), "{err:#}");
+
+            let file = drop_override_key(repo, "demo", "add_dirs").unwrap();
+            assert_eq!(file, "pipelines/demo.yml");
+            assert!(!overrides.exists(), "empty layer folders remain");
         });
     }
 
