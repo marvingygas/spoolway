@@ -97,6 +97,29 @@ mod tests {
         assert_eq!(parse_rfc3339(&rfc3339(at)), Some(at));
     }
 
+    /// spoolway is built on `jiff` 1.0: the manifest asks for it with the
+    /// `serde` feature, and the lock file resolves a 1.x release.
+    #[test]
+    fn jiff_is_required_at_1_0_and_locked_to_a_1_x_release() {
+        let manifest = include_str!("../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|l| l.starts_with("jiff = "))
+            .expect("Cargo.toml has a jiff dependency");
+        assert_eq!(line, r#"jiff = { version = "1.0", features = ["serde"] }"#);
+
+        let lock = include_str!("../Cargo.lock");
+        let version = lock
+            .split("[[package]]")
+            .find(|p| p.lines().any(|l| l == r#"name = "jiff""#))
+            .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = ")))
+            .expect("Cargo.lock resolves jiff");
+        assert!(
+            version.starts_with("\"1."),
+            "Cargo.lock resolves jiff {version}, want 1.x"
+        );
+    }
+
     /// A zone's offset is written with a colon, and the same instant reads
     /// back whichever way it was spelled.
     #[test]
