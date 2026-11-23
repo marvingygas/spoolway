@@ -2,9 +2,9 @@
 //! nobody reads.
 //!
 //! A spoolway home mixes two kinds of directory. `queue/`, `pending/`,
-//! `worktrees/`, `plans/` (in repo mode; in home mode it sits in the
-//! workspace, outside any home, and the sweep never reaches it) and
-//! `overrides/` hold work in flight — losing an entry there loses work,
+//! `worktrees/`, `plans/` (in home mode it sits in the workspace,
+//! outside any home; the sweep deletes a page there only as the archive
+//! paragraph below says) and `overrides/` hold work in flight — losing an entry there loses work,
 //! and a patch under `overrides/` swept after
 //! `retention.days` would silently change how a project runs rather than
 //! merely lose a record of one. `system-prompts/`, `commands/`, `tracking/`,
@@ -81,13 +81,17 @@
 //! never start without it. So is the record of an id a queue file holds, or a
 //! leftover copy of the finished task would run it again. The sweep also
 //! removes a swept task's line from `archive/index.jsonl` in the same pass,
-//! and never sweeps that file itself — see [`crate::archive_index`].
+//! and never sweeps that file itself — see [`crate::archive_index`]. It also
+//! deletes each plan page a swept task named, once no task in any clone's
+//! `pending/`, `queue/` or `archive/` names it; no other page in `plans/` is
+//! ever looked at, and no folder there is touched.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Once;
 use std::time::{Duration, SystemTime};
 
+use crate::commands::pending_delete::delete_plan;
 use crate::repo::Repo;
 
 /// Mirrors [`crate::scratch::SWEEP_LIMIT`] — see its own doc for why a
@@ -213,6 +217,14 @@ fn sweep_byproducts(repo: &Repo, max_age: Duration, limit: usize) -> usize {
 /// deletion, to the rewrite, so another process archiving a task cannot have
 /// its change stamped as this sweep's. With no lock the files are swept
 /// anyway and the index is left to rebuild.
+///
+/// The plan pages the swept tasks named go too, once nothing names them: a
+/// page whose last task was swept would otherwise list in the queue screen as
+/// a plan that was never cut. Only pages a task swept in this pass named are
+/// candidates, and each goes through [`delete_plan`], which keeps a page any
+/// pending, queued or archived task, in any clone, still names. That check
+/// runs after the swept files and their index lines are gone, with the lock
+/// released, because it reads the archive through the index itself.
 fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     // Without a trustworthy read of the queue the pass is skipped, not run
     // unguarded: see [`depended_on_files`].
@@ -221,11 +233,31 @@ fn sweep_archive(repo: &Repo, max_age: Duration, limit: usize) -> usize {
     };
     let guard = crate::archive_index::lock(repo);
     let was_current = guard.is_some() && crate::archive_index::is_current(repo);
+    // Read before the sweep, since the files that go cannot be asked
+    // afterwards. The sweep does not say which it removed, so each one's plan
+    // is matched back by its `<id>.md` name.
+    let plans: Vec<(String, String)> = crate::archive_index::read(repo)
+        .into_iter()
+        .filter_map(|entry| Some((format!("{}.md", entry.id), entry.plan?)))
+        .collect();
     let removed = sweep_dir(&repo.archive_dir(), max_age, limit, Some(&spared));
     if removed > 0
         && let Some(guard) = &guard
     {
         crate::archive_index::forget_missing(repo, guard, was_current);
+    }
+    drop(guard);
+    if removed > 0 {
+        let swept: BTreeSet<&str> = plans
+            .iter()
+            .filter(|(file, _)| !repo.archive_dir().join(file).exists())
+            .map(|(_, plan)| plan.as_str())
+            .collect();
+        for plan in swept {
+            // `Named` and `Failed` both leave the page: a folder that will
+            // not read must not delete a page a task may still link to.
+            let _ = delete_plan(repo, Path::new(plan));
+        }
     }
     removed
 }
@@ -980,5 +1012,122 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Archive `id` as an aged task naming `plan`, written through the index
+    /// the way teardown records it. It has a `group:`, since an archived task
+    /// without one names no plan to the queue screen's listing.
+    fn archive_old(repo: &Repo, id: &str, plan: Option<&Path>, days: u64) {
+        let front = plan.map_or("group: g\n".to_string(), |p| {
+            format!("group: g\nplan: {}\n", p.display())
+        });
+        crate::archive_index::testutil::archive(repo, id, &front);
+        age(
+            &repo.archive_dir().join(format!("{id}.md")),
+            days * SECS_PER_DAY,
+        );
+    }
+
+    fn plan_page(repo: &Repo, name: &str) -> std::path::PathBuf {
+        let page = repo.plans_dir().join(name);
+        std::fs::write(&page, "<html></html>").unwrap();
+        page
+    }
+
+    /// A page whose only task was swept goes in the same pass, a page two
+    /// archived tasks name stays until the last of them goes, and a page no
+    /// swept task named stays whatever its age.
+    #[test]
+    fn the_archive_sweep_deletes_a_plan_page_once_its_last_task_goes() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-plan-last");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let sole = plan_page(&repo, "sole.html");
+        let shared = plan_page(&repo, "shared.html");
+        let uncut = plan_page(&repo, "uncut.html");
+        age(&uncut, 90 * SECS_PER_DAY);
+        archive_old(&repo, "a", Some(&sole), 60);
+        archive_old(&repo, "b", Some(&shared), 60);
+        archive_old(&repo, "c", Some(&shared), 1);
+
+        sweep_now(&repo);
+
+        assert!(!sole.exists(), "the last task naming it was swept");
+        assert!(shared.exists(), "a task naming it is still archived");
+        assert!(uncut.exists(), "no swept task named it");
+
+        age(&repo.archive_dir().join("c.md"), 60 * SECS_PER_DAY);
+        sweep_now(&repo);
+        assert!(!shared.exists(), "its last task went in this pass");
+        assert!(uncut.exists(), "no swept task named it");
+    }
+
+    /// A pending or queued task naming the page keeps it, though every
+    /// archived task naming it is swept.
+    #[test]
+    fn the_archive_sweep_keeps_a_plan_page_a_live_task_names() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-plan-live");
+        repo.config.housekeeping.archive_retention_days = 30;
+        let pending = plan_page(&repo, "pending.html");
+        let queued = plan_page(&repo, "queued.html");
+        for (dir, id, page) in [
+            (repo.pending_dir(), "p1", &pending),
+            (repo.queue_dir(), "q1", &queued),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntitle: {id}\ngroup: g\nstage: queued\nplan: {}\n---\n",
+                    page.display()
+                ),
+            )
+            .unwrap();
+        }
+        archive_old(&repo, "a", Some(&pending), 60);
+        archive_old(&repo, "b", Some(&queued), 60);
+
+        sweep_now(&repo);
+
+        assert!(!repo.archive_dir().join("a.md").exists());
+        assert!(pending.exists(), "a pending task names it");
+        assert!(queued.exists(), "a queued task names it");
+    }
+
+    /// In a workspace, another clone's task naming the page keeps it.
+    #[test]
+    fn the_archive_sweep_keeps_a_plan_page_another_clone_names() {
+        let (shop, mut shop_2, _root) = crate::commands::testutil::two_clones("retain-plan-clones");
+        shop_2.config.housekeeping.archive_retention_days = 30;
+        let page = plan_page(&shop, "search.html");
+        std::fs::create_dir_all(shop.pending_dir()).unwrap();
+        std::fs::write(
+            shop.pending_dir().join("s1.md"),
+            format!(
+                "---\nid: s1\ntitle: s1\ngroup: g\nplan: {}\n---\n",
+                page.display()
+            ),
+        )
+        .unwrap();
+        archive_old(&shop_2, "a", Some(&page), 60);
+
+        sweep_now(&shop_2);
+
+        assert!(!shop_2.archive_dir().join("a.md").exists());
+        assert!(page.exists(), "another clone's task names it");
+    }
+
+    /// With `archive_retention_days = 0` the sweep never runs, so no page goes
+    /// however old its tasks are.
+    #[test]
+    fn archive_retention_zero_deletes_no_plan_page() {
+        let (mut repo, _root) = crate::commands::testutil::fixture("retain-plan-zero");
+        repo.config.housekeeping.archive_retention_days = 0;
+        let page = plan_page(&repo, "old.html");
+        archive_old(&repo, "a", Some(&page), 400);
+
+        sweep_now(&repo);
+
+        assert!(repo.archive_dir().join("a.md").exists());
+        assert!(page.exists());
     }
 }
