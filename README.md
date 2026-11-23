@@ -281,6 +281,7 @@ hide_commands = false        # true runs command steps without a pane
 autofocus_panes = false      # true brings a held or given-up lane's pane to the front on its own
 lane_layout = "panes"        # every step a pane of one tab; "tabs" gives each step its own tab
 tips = true                  # false draws no tip row at the foot of the dispatch tab
+add_dirs = []                # extra folders given to every claude and codex lane as --add-dir
 
 [unattended]
 enabled = false              # the overnight switch
