@@ -21,6 +21,12 @@
 //! whose first write stops and joins the drawing thread before anything of
 //! the work's reaches the screen. The rule above holds there too: one writer
 //! at a time, and the spool gone before the work's own frame.
+//!
+//! The eval tab's load turns the spool with neither. That load already runs
+//! on a thread of its own while the tab's loop reads a tab's digit and `q`,
+//! so the loop draws each frame itself between key reads, laid down by
+//! [`spool_frame`] on the clock [`frame_at`], [`until_change`] and
+//! [`hold_left`] keep for every wait here.
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -100,7 +106,7 @@ fn white(patch: &[String], i: usize) -> Vec<Option<&'static str>> {
 /// it, since the patch is never laid over the first row: a pane that small
 /// has nowhere to put the whole spool, so it draws none, and the next normal
 /// frame is drawn at whatever size the pane is by then.
-fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
+pub(crate) fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
     let width = last
         .iter()
         .map(|row| crate::status::strip_ansi(row).chars().count())
@@ -119,14 +125,15 @@ fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
 
 /// Which of the mark's two frames shows `elapsed` into the work: `None`
 /// before [`DELAY`], then frame 0 and frame 1 in turn, [`FLIP`] each.
-fn frame_at(elapsed: Duration) -> Option<usize> {
+pub(crate) fn frame_at(elapsed: Duration) -> Option<usize> {
     let up = elapsed.checked_sub(DELAY)?;
     Some((up.as_nanos() / FLIP.as_nanos() % 2) as usize)
 }
 
 /// How long after `elapsed` [`frame_at`] next changes its answer — what the
-/// drawing thread waits for a stop for before it draws again.
-fn until_change(elapsed: Duration) -> Duration {
+/// drawing thread waits for a stop for before it draws again, and what the
+/// eval tab waits for a key for while its load runs.
+pub(crate) fn until_change(elapsed: Duration) -> Duration {
     match elapsed.checked_sub(DELAY) {
         None => DELAY - elapsed,
         Some(up) => FLIP - Duration::from_nanos((up.as_nanos() % FLIP.as_nanos()) as u64),
@@ -135,7 +142,7 @@ fn until_change(elapsed: Duration) -> Duration {
 
 /// How much longer the spool stays up once the work ended at `ended`, having
 /// first shown at `shown` — both measured from the work's start.
-fn hold_left(shown: Duration, ended: Duration) -> Duration {
+pub(crate) fn hold_left(shown: Duration, ended: Duration) -> Duration {
     (shown + HOLD).saturating_sub(ended)
 }
 

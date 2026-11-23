@@ -46,7 +46,9 @@ use crate::cli::{EvalArgs, EvalBy};
 use crate::fmt::csv_field;
 use crate::pipeline::Pipelines;
 use crate::repo::Repo;
-use crate::screen::{Key, PollableRead, boxed, key_hint, keys, overlay, pad_to, panel, plural};
+use crate::screen::{
+    Key, PollableRead, boxed, key_hint, keys, overlay, pad_to, panel, plural, spool,
+};
 use crate::usage::{Entry, ModelPrice, Tokens};
 
 /// The printing path: every `spoolway eval` with a flag of its own. The
@@ -5111,7 +5113,7 @@ fn draw(
 
 /// The eval tab's own frame, as the rows [`draw`] paints — `loaded` is
 /// `None` only on a visit whose first load has not landed yet, when the
-/// frame is drawn empty under the loading popup.
+/// frame is drawn empty under the loading spool.
 fn eval_frame_rows(
     pipelines: &Pipelines,
     loaded: Option<&Loaded>,
@@ -5216,7 +5218,8 @@ fn eval_frame_rows_at(
                 None => boxed(title, &lines),
             })
         }
-        Mode::Loading { .. } => Some(boxed("eval", &["loading…".to_string()])),
+        // The spool is laid over the whole frame below, once it is built.
+        Mode::Loading { .. } => None,
         Mode::Filter(draft) => loaded.map(|loaded| filter_panel(loaded, draft)),
         Mode::Calendar {
             field,
@@ -5262,6 +5265,16 @@ fn eval_frame_rows_at(
 
     rows_out.extend(frame);
     rows_out.extend(keys);
+    // The spool dims the strip, the table and the key line itself. A pane
+    // too small for its patch draws the tab as it is, as every other wait
+    // draws no spool there.
+    if let Mode::Loading {
+        spool: Some(frame), ..
+    } = &state.mode
+        && let Some(turned) = spool::spool_frame(&rows_out, *frame)
+    {
+        return turned;
+    }
     rows_out
 }
 
@@ -5376,14 +5389,21 @@ enum Mode {
         body: String,
         keys: Option<&'static str>,
     },
-    /// A [`load`] running on its own thread, under a keyless `eval` popup
-    /// reading `loading…` — over an empty frame on a visit's first load, and
-    /// over the table already shown on `r` or the filter panel's `enter`.
-    /// Only a tab's digit and `q` are read: every other key would act on a
-    /// table that is about to be replaced. `filters` are the ones loaded
-    /// through, the screen's own once the result lands; `reset_cursor` is set
-    /// by the filter panel, whose new filters can leave the old row far past
-    /// the end.
+    /// A [`load`] running on its own thread, with the loading spool turning
+    /// over the tab — over an empty frame on a visit's first load, and over
+    /// the table already shown on `r` or the filter panel's `enter`. Only a
+    /// tab's digit and `q` are read: every other key would act on a table
+    /// that is about to be replaced. `filters` are the ones loaded through,
+    /// the screen's own once the result lands; `reset_cursor` is set by the
+    /// filter panel, whose new filters can leave the old row far past the
+    /// end.
+    ///
+    /// The loop draws the spool itself, on the clock every other wait keeps
+    /// — see [`ScreenState::turn_spool`]. `since` is when the load started,
+    /// `spool` the frame of the mark to draw, `None` until [`spool::DELAY`]
+    /// has passed, and `shown` how far into the load it first showed.
+    /// `landed` holds a result that arrived while the spool still has to
+    /// stay up out to [`spool::HOLD`], so it never flickers on and off.
     ///
     /// The screen owns the only receiver, so a load replaced by a newer one,
     /// or one still running when the person leaves the tab, sends into a
@@ -5393,6 +5413,10 @@ enum Mode {
         pending: Pending,
         filters: Filters,
         reset_cursor: bool,
+        since: std::time::Instant,
+        spool: Option<usize>,
+        shown: Option<std::time::Duration>,
+        landed: Option<Result<Loaded>>,
     },
     /// The sort popup `a` (ascending) or `d` (descending) opens: `default
     /// order`, then every column the table on screen draws — `columns`, as
@@ -5549,7 +5573,7 @@ impl ScreenState {
         landed
     }
 
-    /// Start loading through `filters`, under the loading popup.
+    /// Start loading through `filters`, under the loading spool.
     fn start_loading(
         &mut self,
         start: &mut impl FnMut(&Filters) -> Pending,
@@ -5560,7 +5584,55 @@ impl ScreenState {
             pending: start(&filters),
             filters,
             reset_cursor,
+            since: std::time::Instant::now(),
+            spool: None,
+            shown: None,
+            landed: None,
         };
+    }
+
+    /// Move the spool on to the frame of the mark the load's clock says
+    /// shows now. `true` when that changed what the frame draws.
+    fn turn_spool(&mut self) -> bool {
+        let Mode::Loading {
+            since,
+            spool: drawn,
+            shown,
+            ..
+        } = &mut self.mode
+        else {
+            return false;
+        };
+        let elapsed = since.elapsed();
+        let frame = spool::frame_at(elapsed);
+        if frame == *drawn {
+            return false;
+        }
+        *drawn = frame;
+        shown.get_or_insert(elapsed);
+        true
+    }
+
+    /// How long the loop may wait for a key before the frame on screen is
+    /// due to change: the spool's next flip, or the end of its hold over a
+    /// result that already landed, while loading. Otherwise the shell's own
+    /// once-a-second tick, as every tab waits.
+    fn wake_in(&self) -> std::time::Duration {
+        let Mode::Loading {
+            since,
+            shown,
+            landed,
+            ..
+        } = &self.mode
+        else {
+            return crate::status::POLL;
+        };
+        let elapsed = since.elapsed();
+        let flip = spool::until_change(elapsed);
+        match (landed, shown) {
+            (Some(_), Some(shown)) => flip.min(spool::hold_left(*shown, elapsed)),
+            _ => flip,
+        }
     }
 
     /// Pick up the load in flight, if it has landed. `true` when it has, and
@@ -5569,24 +5641,41 @@ impl ScreenState {
     /// the visit's first load has no table to sit over, and lands in
     /// `failed` for [`run_screen_with`] to hold on the tab.
     fn settle(&mut self, loaded: &mut Option<Loaded>, failed: &mut Option<String>) -> bool {
-        let Mode::Loading { pending, .. } = &self.mode else {
+        let Mode::Loading {
+            pending,
+            since,
+            shown,
+            landed,
+            ..
+        } = &mut self.mode
+        else {
             return false;
         };
-        let result = match pending.try_recv() {
-            Ok(result) => result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            // The thread ended without sending: `load` panicked.
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err(anyhow::anyhow!("the load stopped before it finished"))
-            }
-        };
+        if landed.is_none() {
+            *landed = Some(match pending.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                // The thread ended without sending: `load` panicked.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err(anyhow::anyhow!("the load stopped before it finished"))
+                }
+            });
+        }
+        // A spool that has shown stays up out to its hold, so a load landing
+        // just after it appeared does not flicker it on and straight off.
+        if let Some(shown) = shown
+            && !spool::hold_left(*shown, since.elapsed()).is_zero()
+        {
+            return false;
+        }
         let Mode::Loading {
             filters,
             reset_cursor,
+            landed: Some(result),
             ..
         } = std::mem::replace(&mut self.mode, Mode::Browsing)
         else {
-            unreachable!("matched as loading above");
+            unreachable!("matched as loading, with its result landed, above");
         };
         match result {
             Ok(fresh) => {
