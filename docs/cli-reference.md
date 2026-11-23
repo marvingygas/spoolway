@@ -161,9 +161,9 @@ The work that can show it is:
 
 Moving the cursor, `esc`, `f`, typing in a field, filter or search, and moves inside a picker
 never show it. The eval tab's `r` and filter show their `loading…` box and no spool. `u` on the
-dispatch tab shows its `updating` pop-up and no spool. A picker that lists branches first, such as edit lands in, draws only
-after the spool has gone. On a tab switch, the spool stays over the tab being left until the
-next tab draws its first frame. It sits on a blank patch eight columns by five rows in
+dispatch tab shows its `updating` pop-up and no spool. A picker that lists branches first, such
+as edit lands in, draws only after the spool has gone. On a tab switch, the spool stays over the
+tab being left until the next tab draws its first frame. It sits on a blank patch eight columns by five rows in
 the middle of the tab, and the rest of the tab is drawn dim behind it. It switches between the
 mark's two frames every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work
 ends sooner. Work that ends within 200 ms draws nothing. A pane too small for the patch draws no
@@ -401,7 +401,7 @@ When no group has a task without a `ticket:`, no popup opens. With
 screen or the routines tab: `enter` opens every group's tickets with no question.
 `tracking: off` and `spoolway queue add --no-tracking` still leave a group untracked. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events).
-While the hook runs, the question closes and the loading spool turns over the queue tab.
+While the hook runs, the question closes and the loading spool turns over the tab beneath it.
 Every key typed while it runs is thrown away when it returns, even when the spool never showed.
 The `queued` popup then opens on `hook executed successfully`, followed by
 `queued <n> tasks`, every queued id and the dispatcher line. Like any clean `queued` popup, it
