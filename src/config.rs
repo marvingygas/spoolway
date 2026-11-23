@@ -737,6 +737,16 @@ pub struct DispatchConfig {
     /// tip row, and RECENT keeps the row the tip would have taken.
     pub tips: bool,
 
+    /// Extra folders every claude and codex lane of this project is started
+    /// with, one `--add-dir` each, after spoolway's own grants.
+    ///
+    /// Absolute, `~`-relative, or relative to the repo root — the forms
+    /// [`WatchConfig::dirs`] takes. A folder that does not exist is left out
+    /// of the argv without a notice, so a stale entry never stops a lane
+    /// from starting: see [`Config::lane_add_dirs`]. A pi lane gets none,
+    /// because pi has no such flag.
+    pub add_dirs: Vec<String>,
+
     /// Retired: whether a finished step's agent stayed open in its own pane.
     /// [`Self::visible_lanes`] replaces it, and [`Config::migrate`] reads this
     /// one only to carry it over — `true` kept every pane, which is `all`,
@@ -801,6 +811,7 @@ impl Default for DispatchConfig {
             autofocus_panes: false,
             lane_layout: LaneLayout::default(),
             tips: true,
+            add_dirs: Vec::new(),
             keep_finished_lanes: None,
             tear_lanes_on_stop: None,
             herdr_mode: None,
@@ -2523,6 +2534,24 @@ impl Config {
 
         roots
     }
+
+    /// The folders `dispatch.add_dirs` names that exist, resolved the way
+    /// `watch.dirs` entries are and in list order.
+    ///
+    /// Relative to `repo_root`, never the lane's worktree: the worktree is a
+    /// per-task copy, so a relative entry resolved there would name a
+    /// different folder for every task. An entry naming nothing that exists
+    /// is dropped without a notice, because claude and codex refuse to start
+    /// over an `--add-dir` that is not a directory.
+    pub fn lane_add_dirs(&self, repo_root: &Path) -> Vec<PathBuf> {
+        let home = crate::platform::home_dir();
+        self.dispatch
+            .add_dirs
+            .iter()
+            .map(|raw| resolve_watch_dir(raw, home.as_deref(), repo_root))
+            .filter(|path| path.is_dir())
+            .collect()
+    }
 }
 
 /// The ids of the tasks whose worktree sits under `raw`, a `worktree_root`
@@ -4236,6 +4265,35 @@ mod tests {
         }
     }
 
+    /// `dispatch.add_dirs` entries resolve the way `watch.dirs` entries do —
+    /// absolute, `~`-relative, relative to the repo root — in list order, and
+    /// one naming nothing that exists is dropped. Fails before the method
+    /// exists.
+    #[test]
+    fn lane_add_dirs_resolves_every_form_and_drops_what_does_not_exist() {
+        let root = crate::scratch::root("lane-add-dirs-forms");
+        let home = root.join("home");
+        let repo = root.join("repo");
+        for dir in [home.join("notes"), repo.join("specs"), root.join("abs")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut config = Config::default();
+        config.dispatch.add_dirs = vec![
+            root.join("abs").display().to_string(),
+            "~/notes".into(),
+            "specs".into(),
+            "gone".into(),
+            "~/gone".into(),
+        ];
+
+        let dirs = crate::platform::test_home::with_home(&home, || config.lane_add_dirs(&repo));
+
+        assert_eq!(
+            dirs,
+            [root.join("abs"), home.join("notes"), repo.join("specs")]
+        );
+    }
+
     /// A rendered default config names all five formerly skipped keys, reads
     /// back as the same values, and still leaves out a `concurrency` a profile
     /// does not cap. `agrees_with` refuses a rewrite that changes a value, so
@@ -4257,6 +4315,7 @@ mod tests {
             "autofocus_panes = false",
             "lane_layout = \"panes\"",
             "tips = true",
+            "add_dirs = []",
         ] {
             assert!(body.contains(line), "{line} missing from {body}");
         }

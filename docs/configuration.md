@@ -492,6 +492,7 @@ hide_commands = false
 autofocus_panes = false
 lane_layout = "panes"
 tips = true
+add_dirs = []
 ```
 
 | Key | Default | What it controls |
@@ -505,6 +506,7 @@ tips = true
 | `autofocus_panes` | `false` | Whether the dispatcher may bring a lane's pane to the front on its own. Off, a held pane is still kept open and the notification still fires, but your focus stays where it was. On, a pane comes forward in three cases: a task paused at a gate, a task waiting for you on `blocked` or `hook_failed`, and a lane that was stopped and given up on. Set to `true` to have panes come forward. |
 | `lane_layout` | `panes` | Where a task's steps run in its workspace. `panes` puts every step in one tab as a labelled pane. `tabs` opens each agent step, and each shown command step, in a tab of its own, named after the step, with one unlabelled pane in it. The workspace keeps its `spoolway/<task>` label in both. `visible_lanes` limits tabs as it limits panes. A step that comes back reuses its own tab. A new tab opens in the background and never takes focus. |
 | `tips` | `true` | Whether the dispatch tab ends on a tip row, with one tip at a time that changes every 30 seconds. Set to `false` to draw no tip row, so RECENT keeps its row. Other tabs never show a tip. An open `spoolway` screen reads this setting when it starts, so a change takes effect the next time you open it. |
+| `add_dirs` | `[]` | Extra folders every `claude` and `codex` lane of the project is started with, one `--add-dir` each, after spoolway's own grants and in list order. An entry is absolute, `~`-relative or relative to the repo root, the forms `watch.dirs` takes. A folder that does not exist is left out without a notice, so the lane still starts. A `pi` lane gets none. Each kind keeps the access its own flag gives in an added folder. A path that only exists on your machine belongs in the overrides layer's `config.toml`, which takes the same key. |
 
 A fresh `config.toml` holds every one of these keys with its value, and `spoolway sync` adds any that
 an older file lacks and names each one it adds in its report. `all` is written as `visible_lanes = "all"`.

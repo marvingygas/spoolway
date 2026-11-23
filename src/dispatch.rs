@@ -8980,6 +8980,15 @@ fn prepare_boot(
         ("plans_dir", repo.plans_dir().display().to_string()),
     ]);
     let mut args = profile.render_args(&values)?;
+    // The project's own folders, after spoolway's grants. Only a kind whose
+    // row already carries `--add-dir` takes them: pi has no such flag and
+    // would fail to start on one.
+    if adapter.is_some_and(|adapter| adapter.args.contains(&"--add-dir")) {
+        for dir in repo.config.lane_add_dirs(&repo.root) {
+            args.push("--add-dir".to_string());
+            args.push(dir.display().to_string());
+        }
+    }
     args.extend(profile.effort_args(step.effort.as_deref()));
     // The model's compaction threshold, in the spelling this kind reads: an
     // environment variable below, or argv items here.
@@ -33561,6 +33570,9 @@ mod tests {
         let (mut repo, _root_guard) = fixture("codex-borrowed-git-dir");
         let codex = repo.config.agents["codex"].clone();
         *repo.config.agents.get_mut("claude").unwrap() = codex;
+        // One folder that exists and one that does not: the lane must still
+        // start, and the second must not reach the argv.
+        repo.config.dispatch.add_dirs = vec![repo.root.display().to_string(), "gone".into()];
         let worktree = a_checkout("dispatch-codex-borrowed");
         add_task_with(&repo, "demo", "review", |f| {
             f.workspace_id = Some("w1".into());
@@ -33588,6 +33600,98 @@ mod tests {
                 args[0]
             );
         }
+    }
+
+    /// The `--add-dir` folders a started lane carries, in argv order.
+    fn lane_grants(argv: &str) -> Vec<&str> {
+        let words: Vec<&str> = argv.split_whitespace().collect();
+        words
+            .windows(2)
+            .filter(|w| w[0] == "--add-dir")
+            .map(|w| w[1])
+            .collect()
+    }
+
+    /// A claude lane is started with each folder `dispatch.add_dirs` names
+    /// that exists, after spoolway's own grants and in list order. A relative
+    /// entry names a folder under the repo root, not under the lane's
+    /// worktree, and a folder that is gone is left out. Fails before the key
+    /// is read, when the argv carries none of the three.
+    // covers: dispatch.add_dirs — a claude lane gets the project's folders after its own grants
+    #[test]
+    fn a_claude_lane_gets_the_projects_add_dirs_after_its_own_grants() {
+        let (mut repo, _root_guard) = fixture("add-dirs-claude");
+        let outside = crate::scratch::root("dispatch-add-dirs-claude-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(repo.root.join("notes")).unwrap();
+        repo.config.dispatch.add_dirs = vec![
+            outside.display().to_string(),
+            "notes".to_string(),
+            "gone".to_string(),
+        ];
+        let worktree = a_checkout("dispatch-add-dirs-claude-checkout");
+        // The same relative name inside the worktree, which must not be the
+        // one the lane is given.
+        std::fs::create_dir_all(worktree.join("notes")).unwrap();
+        std::fs::create_dir_all(worktree.join("gone")).unwrap();
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        let args = mux.did("args demo · review");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        let grants = lane_grants(&args[0]);
+        let own = repo.plans_dir().display().to_string();
+        let tail: Vec<&str> = grants.iter().rev().take(2).rev().copied().collect();
+        assert_eq!(
+            tail,
+            [
+                outside.display().to_string().as_str(),
+                repo.root.join("notes").display().to_string().as_str()
+            ],
+            "{}",
+            args[0]
+        );
+        assert!(grants.contains(&own.as_str()), "{}", args[0]);
+        assert!(
+            grants.iter().position(|g| *g == own).unwrap() < grants.len() - 2,
+            "the project's folders come after spoolway's own: {}",
+            args[0]
+        );
+        assert!(!args[0].contains("gone"), "{}", args[0]);
+    }
+
+    /// A pi lane starts with none of `dispatch.add_dirs` and no error: pi has
+    /// no `--add-dir` flag. Fails before the kind is checked, when pi is handed
+    /// a flag it does not know.
+    // covers: dispatch.add_dirs — a pi lane gets none of the project's folders
+    #[test]
+    fn a_pi_lane_gets_none_of_the_projects_add_dirs() {
+        let (mut repo, _root_guard) = fixture("add-dirs-pi");
+        let pi = repo.config.agents["pi"].clone();
+        *repo.config.agents.get_mut("claude").unwrap() = pi;
+        std::fs::create_dir_all(repo.root.join("notes")).unwrap();
+        repo.config.dispatch.add_dirs = vec!["notes".to_string()];
+        let worktree = a_checkout("dispatch-add-dirs-pi-checkout");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass(&repo, &mux);
+
+        let args = mux.did("args demo · review");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        assert!(!args[0].contains("--add-dir"), "{}", args[0]);
     }
 
     /// A step whose profile blocks at or below its model's `compact_ctx` does
