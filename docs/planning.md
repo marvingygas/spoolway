@@ -149,7 +149,7 @@ which pane the keys act on. `←` and `→` move the brackets to the other pane.
 A plan page that no task names yet gets a row of its own, so a plan waiting to be cut is not
 forgotten. A page counts as named once any pending, queued or archived task points at it in
 `plan:`. In home mode a task in any clone of the workspace counts, so a page leaves every
-clone's list once one clone cuts it. Plan rows sit right under the queueable groups, newest first, and above the done
+clone's list once one clone cuts it. When `housekeeping.archive_retention_days` deletes the last task that names a page, the sweep deletes the page too, so it never appears as a plan row. Plan rows sit right under the queueable groups, newest first, and above the done
 groups. A plan row shows only its name, without the date in front of it, with no checkbox and
 no tail. With a plan row highlighted, the tasks pane says only `use /spoolway-tasks`:
 

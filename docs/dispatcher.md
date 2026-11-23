@@ -2398,7 +2398,8 @@ has no `plan` field, or when the folder has changed since the index was written.
 A rebuilt line uses the file's modification time as `archived_at` and the file's creation time as `created_ns`.
 
 The retention sweep removes the line of every archive file it deletes. It never deletes
-`index.jsonl` itself. It only deletes archive files when `archive_retention_days` is set. See
+`index.jsonl` itself. It only deletes archive files when `archive_retention_days` is set. After it
+removes them, it deletes each plan page those tasks named when no remaining task names it. See
 [Configuration](configuration.md).
 
 Archiving a task, the retention sweep, a trial settling and `spoolway eval --discard` each take
