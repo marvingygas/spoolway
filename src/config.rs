@@ -2535,23 +2535,32 @@ impl Config {
         roots
     }
 
-    /// The folders `dispatch.add_dirs` names that exist, resolved the way
-    /// `watch.dirs` entries are and in list order.
-    ///
-    /// Relative to `repo_root`, never the lane's worktree: the worktree is a
-    /// per-task copy, so a relative entry resolved there would name a
-    /// different folder for every task. An entry naming nothing that exists
-    /// is dropped without a notice, because claude and codex refuse to start
-    /// over an `--add-dir` that is not a directory.
+    /// The folders `dispatch.add_dirs` names that exist: see
+    /// [`resolve_add_dirs`].
     pub fn lane_add_dirs(&self, repo_root: &Path) -> Vec<PathBuf> {
-        let home = crate::platform::home_dir();
-        self.dispatch
-            .add_dirs
-            .iter()
-            .map(|raw| resolve_watch_dir(raw, home.as_deref(), repo_root))
-            .filter(|path| path.is_dir())
-            .collect()
+        resolve_add_dirs(&self.dispatch.add_dirs, repo_root)
     }
+}
+
+/// The folders among `entries` that exist, resolved the way `watch.dirs`
+/// entries are and in list order.
+///
+/// The one resolver for all three lists a lane is given — the project's
+/// `dispatch.add_dirs`, its pipeline's `add_dirs:` and its step's — so one
+/// entry names the same folder wherever it is written.
+///
+/// Relative to `repo_root`, never the lane's worktree: the worktree is a
+/// per-task copy, so a relative entry resolved there would name a
+/// different folder for every task. An entry naming nothing that exists
+/// is dropped without a notice, because claude and codex refuse to start
+/// over an `--add-dir` that is not a directory.
+pub fn resolve_add_dirs(entries: &[String], repo_root: &Path) -> Vec<PathBuf> {
+    let home = crate::platform::home_dir();
+    entries
+        .iter()
+        .map(|raw| resolve_watch_dir(raw, home.as_deref(), repo_root))
+        .filter(|path| path.is_dir())
+        .collect()
 }
 
 /// The ids of the tasks whose worktree sits under `raw`, a `worktree_root`

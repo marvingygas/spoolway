@@ -73,6 +73,7 @@ steps:
 | `version` | `1.0` | The pipeline's own version, in `x.y` form. Yours to raise when the pipeline changed enough to compare. spoolway only records it. |
 | `description` | none | One sentence on what this pipeline is for. Shown when choosing between pipelines. |
 | `task_template` | the pipeline's name, then `default` | Which task skeleton a task queued here is written from. |
+| `add_dirs` | none | Extra folders every claude and codex step of this pipeline is given, one `--add-dir` each, after the project's `dispatch.add_dirs` and before a step's own list. One comma-separated line. An entry is absolute, `~`-relative or relative to the repo root, and a folder that does not exist is left out without a notice. A `pi` step is skipped, and the unattended `blocked` step is given the project's list only. A private copy goes in the overrides layer's pipeline patch. |
 | `steps` | required | The steps, in order. The first one is where a task starts. It is never `blocked`. |
 
 ## Per-step keys
@@ -87,6 +88,7 @@ steps:
 | `model` | none | The model. Required on every agent step. |
 | `effort` | none | Passed to the agent kind's effort flag. Blank sends no flag. See [Effort](agents.md#effort). |
 | `skills` | none | Skills the lane invokes before the task briefing, each as its own message. Comma separated, names only. See [Skills](agents.md#skills). |
+| `add_dirs` | none | Extra folders this step's lane is given, one `--add-dir` each, after the project's and the pipeline's. One comma-separated line, read as the pipeline's is. Refused by `pipeline check` on a `pi` step, which has no such flag, and on a command step or the `blocked` step. |
 | `session` | `false` | `true` resumes this prompt's earlier conversation on the task. |
 | `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` applies either way. |
 | `gate` | none | `on_pass` holds the step's pass, `on_fail` holds its fail and `always` holds either, on `paused` until `spoolway resume`. Agent steps only. Absent holds nothing. See [Gates](#gates). |

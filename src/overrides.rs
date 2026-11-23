@@ -267,8 +267,8 @@ pub(crate) fn dir_if_identified(root: &Path) -> Result<Option<PathBuf>> {
 /// The shape `overrides/pipelines/<name>.yml` is allowed to take: `steps:`
 /// keyed by id rather than the tracked file's own ordered list — a patch
 /// names a step, never a position, since position is what decides slot
-/// priority — beside `description` and `task_template`, the two other keys
-/// a patch may set. Not every top-level key a pipeline itself carries: the
+/// priority — beside `description`, `task_template` and `add_dirs`, the
+/// other keys a patch may set. Not every top-level key a pipeline itself carries: the
 /// Mockup raises `version:` by editing the tracked file directly, so this
 /// struct carries no field for it, and `deny_unknown_fields` refuses a patch
 /// that names it.
@@ -285,6 +285,10 @@ pub(crate) struct PipelinePatch {
     pub(crate) description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) task_template: Option<String>,
+    /// The pipeline's own `add_dirs:` line, as written in the tracked file:
+    /// one comma-separated string. Set means replaced, as for the other two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) add_dirs: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) steps: BTreeMap<String, serde_norway::Mapping>,
 }
@@ -325,6 +329,9 @@ pub(crate) fn apply_pipeline_patch(
     }
     if let Some(task_template) = patch.task_template {
         pipeline.task_template = Some(task_template);
+    }
+    if let Some(add_dirs) = patch.add_dirs {
+        pipeline.add_dirs = crate::pipeline::split_dirs(&add_dirs);
     }
     let target_file = format!("pipelines/{}.yml", pipeline.name);
     let mut ignored = Vec::new();
@@ -1211,7 +1218,7 @@ pub(crate) struct ConfigLeaf {
 
 /// Remove every one of `keys` from a pipeline's patch in one step, so a
 /// process stopped partway leaves either every key or none. Each is
-/// `<step>.<key>`, or `description` or `task_template`, the forms `override
+/// `<step>.<key>`, or `description`, `task_template` or `add_dirs`, the forms `override
 /// list` prints. A key the patch does not set refuses the whole call before
 /// anything is written. A step left with no key goes, and the file is
 /// removed, not written, when nothing is left in it.
@@ -1236,15 +1243,23 @@ pub(crate) fn remove_pipeline_patch_keys(
             }
             None if step_key == "description" => patch.description.take().is_some(),
             None if step_key == "task_template" => patch.task_template.take().is_some(),
+            None if step_key == "add_dirs" => patch.add_dirs.take().is_some(),
             None => {
-                bail!("`{step_key}` — expected `<step>.<key>`, `description` or `task_template`")
+                bail!(
+                    "`{step_key}` — expected `<step>.<key>`, `description`, `task_template` or \
+                     `add_dirs`"
+                )
             }
         };
         if !removed {
             bail!("the override for pipeline `{name}` does not set `{step_key}`");
         }
     }
-    if patch.steps.is_empty() && patch.description.is_none() && patch.task_template.is_none() {
+    if patch.steps.is_empty()
+        && patch.description.is_none()
+        && patch.task_template.is_none()
+        && patch.add_dirs.is_none()
+    {
         return remove_pipeline_patch(overrides, name);
     }
     write_pipeline_patch(overrides, name, &patch)
@@ -1391,20 +1406,21 @@ fn replace_step_value(
 /// Never re-serialises the file — see this module's own doc. Only possible
 /// because a patch is limited to scalar keys on steps that already exist:
 /// the edit is "find `- id: <step>`, find `<key>:` inside its block, replace
-/// the value", never a rewrite of the document. `patch.description` and
-/// `patch.task_template` are refused rather than silently dropped: they
-/// would need touching the file outside any step's block, which this line
-/// editor was never built to do — a project that wants one promoted has to
-/// edit the tracked file by hand.
+/// the value", never a rewrite of the document. `patch.description`,
+/// `patch.task_template` and `patch.add_dirs` are refused rather than
+/// silently dropped: they would need touching the file outside any step's
+/// block, which this line editor was never built to do — a project that wants
+/// one promoted has to edit the tracked file by hand.
 pub(crate) fn promote_pipeline_patch(
     root: &Path,
     name: &str,
     patch: &PipelinePatch,
 ) -> Result<Vec<(String, String, String)>> {
-    if patch.description.is_some() || patch.task_template.is_some() {
+    if patch.description.is_some() || patch.task_template.is_some() || patch.add_dirs.is_some() {
         bail!(
-            "overrides `description` or `task_template` on pipeline `{name}` — `override \
-             promote` only writes step keys; edit the tracked file for either of those by hand"
+            "overrides `description`, `task_template` or `add_dirs` on pipeline `{name}` — \
+             `override promote` only writes step keys; edit the tracked file for any of those \
+             by hand"
         );
     }
     // `headless:` is no longer a step key. Copied across like any other, it
@@ -1809,6 +1825,7 @@ mod tests {
         PipelinePatch {
             description: None,
             task_template: None,
+            add_dirs: None,
             steps,
         }
     }
@@ -1969,6 +1986,7 @@ agent: pi
         let patch = PipelinePatch {
             description: Some("something else".to_string()),
             task_template: None,
+            add_dirs: None,
             steps: BTreeMap::new(),
         };
         let err = promote_pipeline_patch(&root, "demo", &patch).unwrap_err();
@@ -1976,6 +1994,54 @@ agent: pi
             format!("{err:#}").contains("only writes step keys"),
             "{err:#}"
         );
+    }
+
+    /// A private patch's top-level `add_dirs:` and a step's own both reach the
+    /// merged pipeline, split the way the tracked file's line is. Fails before
+    /// the patch carries the key, when `deny_unknown_fields` refuses the file.
+    // covers: pipeline.add_dirs — an overrides patch sets the pipeline's and a step's add_dirs
+    #[test]
+    fn a_pipeline_patch_sets_add_dirs_at_the_top_level_and_on_a_step() {
+        let root = crate::scratch::root("overrides-patch-add-dirs");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join(PIPELINES_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("demo.yml"),
+            "add_dirs: ~/dev/notes, /srv/specs\nsteps:\n  a:\n    add_dirs: ~/dev/more\n",
+        )
+        .unwrap();
+        let mut pipeline = Pipeline::parse(
+            "demo",
+            "steps:\n  - id: a\n    agent: claude\n    model: m\n    on_pass: done\n",
+        )
+        .unwrap();
+
+        let ignored = apply_pipeline_patch(&mut pipeline, &root).unwrap();
+
+        assert!(ignored.is_empty(), "{ignored:?}");
+        assert_eq!(pipeline.add_dirs, ["~/dev/notes", "/srv/specs"]);
+        assert_eq!(pipeline.step("a").unwrap().add_dirs, ["~/dev/more"]);
+    }
+
+    /// `override promote` cannot write a top-level key, and says so for
+    /// `add_dirs:` as it does for the other two. Fails before the check names
+    /// the key, when the promote goes through and drops it.
+    // covers: pipeline.add_dirs — promote refuses a patch's top-level add_dirs by name
+    #[test]
+    fn promote_pipeline_patch_refuses_a_top_level_add_dirs() {
+        let root = crate::scratch::root("overrides-promote-pipeline-add-dirs");
+        let _ = std::fs::remove_dir_all(&root);
+        let path = crate::pipeline::Pipelines::file_in(&root, "demo");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, pipeline_fixture()).unwrap();
+
+        let patch = PipelinePatch {
+            add_dirs: Some("~/dev/notes".to_string()),
+            ..PipelinePatch::default()
+        };
+        let err = promote_pipeline_patch(&root, "demo", &patch).unwrap_err();
+        assert!(format!("{err:#}").contains("`add_dirs`"), "{err:#}");
     }
 
     /// `field_display` reads the value a step actually has, rendered the same

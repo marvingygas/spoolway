@@ -54,7 +54,7 @@ enum KeyState {
 #[derive(Debug, Clone)]
 struct KeyRow {
     /// The key as `override list` prints it: a dotted config key,
-    /// `<step>.<field>`, `description` or `task_template`.
+    /// `<step>.<field>`, `description`, `task_template` or `add_dirs`.
     key: String,
     /// The key `edit` sets: a config key as the merge applies it, which
     /// differs from `key` only for a retired spelling the merge still reads.
@@ -925,7 +925,7 @@ fn beside(head: &str, value: &str, width: usize) -> Vec<String> {
 /// Write `value` as `key` into pipeline `pipeline`'s patch, keeping every
 /// other key in it. A step key goes through the pipeline section's own
 /// write, which reads the value as YAML as `pipeline override --set` does.
-/// `description` and `task_template` are written here, as text. Checked no
+/// `description`, `task_template` and `add_dirs` are written here, as text. Checked no
 /// more than the pipeline section checks a value: the merge decides, and
 /// the row says so.
 fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Result<()> {
@@ -946,6 +946,7 @@ fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Re
     match key {
         "description" => patch.description = Some(value.trim().to_string()),
         "task_template" => patch.task_template = Some(value.trim().to_string()),
+        "add_dirs" => patch.add_dirs = Some(value.trim().to_string()),
         _ => bail!("`{key}` is not a key a pipeline patch holds"),
     }
     crate::overrides::write_pipeline_patch(&overrides, pipeline, &patch)
@@ -1050,6 +1051,13 @@ fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
                 "task_template",
                 tracked.and_then(|p| p.task_template.clone()),
                 patch.task_template.clone(),
+            ),
+            (
+                "add_dirs",
+                tracked
+                    .filter(|p| !p.add_dirs.is_empty())
+                    .map(|p| p.add_dirs.join(", ")),
+                patch.add_dirs.clone(),
             ),
         ] {
             if let Some(ours) = ours {

@@ -220,6 +220,9 @@ pub(crate) fn collect_override_rows(repo: &Repo) -> Result<Vec<OverrideRow>> {
         if patch.task_template.is_some() {
             keys.push("task_template".to_string());
         }
+        if patch.add_dirs.is_some() {
+            keys.push("add_dirs".to_string());
+        }
 
         // Four answers, not three: the tracked pipelines failed to load at
         // all (`None` — that tracked file's own problem, not this patch's to
@@ -403,11 +406,12 @@ const OVERRIDE_CONTRACT_LINES: &[&str] = &[
     "  aim at.",
     "",
     "WHAT A PATCH MAY CARRY",
-    "  pipelines/<name>.yml   `description`, `task_template`, and `steps.<id>.<key>=<value>`",
+    "  pipelines/<name>.yml   `description`, `task_template`, `add_dirs`, and",
+    "                         `steps.<id>.<key>=<value>`",
     "                         for any key `spoolway pipeline contract` lists except `id` —",
     "                         renaming a step is refused by name. `override promote` only",
-    "                         ever writes a step's own keys: a layered `description` or",
-    "                         `task_template` is refused there by name too, and has to be",
+    "                         ever writes a step's own keys: a layered `description`,",
+    "                         `task_template` or `add_dirs` is refused there by name too, and has to be",
     "                         edited into the tracked file by hand instead.",
     "  config.toml            any key `spoolway config contract` lists, exactly as `config",
     "                         set` would accept it.",
@@ -545,7 +549,12 @@ fn promote_pipeline(repo: &Repo, write_root: &Path, name: &str) -> Result<Vec<St
     let _lock = crate::lock::EditLock::acquire(&repo.edit_lock_path())?;
     let overrides_dir = repo.overrides_dir();
     let patch = crate::overrides::read_pipeline_patch(&overrides_dir, name)?
-        .filter(|p| !p.steps.is_empty() || p.description.is_some() || p.task_template.is_some())
+        .filter(|p| {
+            !p.steps.is_empty()
+                || p.description.is_some()
+                || p.task_template.is_some()
+                || p.add_dirs.is_some()
+        })
         .with_context(|| format!("no override for pipeline `{name}`"))?;
 
     let path = Pipelines::file_in(write_root, name);
@@ -905,6 +914,7 @@ mod tests {
                 &crate::overrides::PipelinePatch {
                     description: None,
                     task_template: None,
+                    add_dirs: None,
                     steps,
                 },
             )
@@ -986,6 +996,7 @@ mod tests {
                 &crate::overrides::PipelinePatch {
                     description: None,
                     task_template: None,
+                    add_dirs: None,
                     steps,
                 },
             )
@@ -1038,6 +1049,7 @@ mod tests {
                 &crate::overrides::PipelinePatch {
                     description: None,
                     task_template: None,
+                    add_dirs: None,
                     steps,
                 },
             )

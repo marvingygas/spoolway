@@ -8980,11 +8980,24 @@ fn prepare_boot(
         ("plans_dir", repo.plans_dir().display().to_string()),
     ]);
     let mut args = profile.render_args(&values)?;
-    // The project's own folders, after spoolway's grants. Only a kind whose
-    // row already carries `--add-dir` takes them: pi has no such flag and
-    // would fail to start on one.
+    // The project's, then the pipeline's, then the step's own folders, after
+    // spoolway's grants. Only a kind whose row already carries `--add-dir`
+    // takes them: pi has no such flag and would fail to start on one.
+    //
+    // The unblocker is no step of the flow, so it gets the project's list
+    // alone: the pipeline's list is meant for the steps its file declares.
     if adapter.is_some_and(|adapter| adapter.args.contains(&"--add-dir")) {
-        for dir in repo.config.lane_add_dirs(&repo.root) {
+        let pipeline_dirs: &[String] = if step.id == crate::pipeline::BLOCKED {
+            &[]
+        } else {
+            &pipeline.add_dirs
+        };
+        let dirs = repo.config.lane_add_dirs(&repo.root).into_iter().chain(
+            [pipeline_dirs, &step.add_dirs]
+                .into_iter()
+                .flat_map(|list| crate::config::resolve_add_dirs(list, &repo.root)),
+        );
+        for dir in dirs {
             args.push("--add-dir".to_string());
             args.push(dir.display().to_string());
         }
@@ -33692,6 +33705,120 @@ mod tests {
         let args = mux.did("args demo · review");
         assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
         assert!(!args[0].contains("--add-dir"), "{}", args[0]);
+    }
+
+    /// The built-in `default` pipeline with `add_dirs` set on the pipeline
+    /// and on its `review` step, so the argv of a lane on either can be read.
+    fn pipelines_with_add_dirs(pipeline: &[&str], review: &[&str]) -> Pipelines {
+        let mut pipelines = Pipelines::builtin();
+        let default = pipelines.pipelines.get_mut("default").unwrap();
+        default.add_dirs = pipeline.iter().map(|d| d.to_string()).collect();
+        default
+            .steps
+            .iter_mut()
+            .find(|s| s.id == "review")
+            .unwrap()
+            .add_dirs = review.iter().map(|d| d.to_string()).collect();
+        pipelines
+    }
+
+    /// A claude lane is started with the project's folders, then its
+    /// pipeline's, then its step's, each after spoolway's own grants. A
+    /// folder that is gone is left out of each list. Fails before the
+    /// pipeline's and step's lists are read, when only the project's reach
+    /// the argv.
+    // covers: pipeline.add_dirs — a claude lane gets the project's, pipeline's and step's folders in order
+    #[test]
+    fn a_claude_lane_gets_the_project_pipeline_and_step_add_dirs_in_order() {
+        let (mut repo, _root_guard) = fixture("add-dirs-three-lists");
+        for dir in ["proj", "pipe", "step"] {
+            std::fs::create_dir_all(repo.root.join(dir)).unwrap();
+        }
+        repo.config.dispatch.add_dirs = vec!["proj".into(), "gone-proj".into()];
+        let pipelines = pipelines_with_add_dirs(&["pipe", "gone-pipe"], &["step", "gone-step"]);
+        let worktree = a_checkout("dispatch-add-dirs-three-lists-checkout");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let args = mux.did("args demo · review");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        let grants = lane_grants(&args[0]);
+        let tail: Vec<&str> = grants.iter().rev().take(3).rev().copied().collect();
+        let want: Vec<String> = ["proj", "pipe", "step"]
+            .iter()
+            .map(|d| repo.root.join(d).display().to_string())
+            .collect();
+        assert_eq!(tail, want, "{}", args[0]);
+        assert!(!args[0].contains("gone"), "{}", args[0]);
+    }
+
+    /// A pi step takes none of its pipeline's folders and starts without
+    /// error. Fails before the kind is checked, when pi is handed the flag.
+    // covers: pipeline.add_dirs — a pipeline's list skips its pi steps
+    #[test]
+    fn a_pipelines_add_dirs_skip_a_pi_step() {
+        let (mut repo, _root_guard) = fixture("add-dirs-pipeline-pi");
+        let pi = repo.config.agents["pi"].clone();
+        *repo.config.agents.get_mut("claude").unwrap() = pi;
+        std::fs::create_dir_all(repo.root.join("pipe")).unwrap();
+        let pipelines = pipelines_with_add_dirs(&["pipe"], &[]);
+        let worktree = a_checkout("dispatch-add-dirs-pipeline-pi-checkout");
+        add_task_with(&repo, "demo", "review", |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let args = mux.did("args demo · review");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        assert!(!args[0].contains("--add-dir"), "{}", args[0]);
+    }
+
+    /// The unattended `blocked` step is given the project's folders and not
+    /// its pipeline's. Fails before the step is exempted, when the
+    /// pipeline's folder reaches the unblocker.
+    // covers: pipeline.add_dirs — the unblocker gets the project's list only
+    #[test]
+    fn the_unblocker_gets_the_project_add_dirs_only() {
+        let (mut repo, _root_guard) = unattended_fixture("add-dirs-unblocker");
+        for dir in ["proj", "pipe"] {
+            std::fs::create_dir_all(repo.root.join(dir)).unwrap();
+        }
+        repo.config.dispatch.add_dirs = vec!["proj".into()];
+        let pipelines = pipelines_with_add_dirs(&["pipe"], &[]);
+        let worktree = a_checkout("dispatch-add-dirs-unblocker-checkout");
+        add_task_with(&repo, "demo", crate::pipeline::BLOCKED, |f| {
+            f.workspace_id = Some("w1".into());
+            f.tab_id = Some("w1:t1".into());
+            f.pane_id = Some("w1:p1".into());
+            f.worktree_path = Some(worktree.to_path_buf());
+            f.blocked_from = Some("review".into());
+        });
+        let mux = FakeMux::new(vec![]);
+
+        run_pass_with(&repo, &mux, &pipelines);
+
+        let args = mux.did("args demo · blocked");
+        assert_eq!(args.len(), 1, "the lane did not start: {:?}", mux.calls());
+        let grants = lane_grants(&args[0]);
+        assert_eq!(
+            grants.last().copied(),
+            Some(repo.root.join("proj").display().to_string().as_str()),
+            "{}",
+            args[0]
+        );
+        assert!(!grants.contains(&repo.root.join("pipe").display().to_string().as_str()));
     }
 
     /// A step whose profile blocks at or below its model's `compact_ctx` does
