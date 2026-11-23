@@ -1437,6 +1437,7 @@ mod tests {
                 "    prompt",
                 "    session",
                 "    skills",
+                "    add_dirs",
                 "    slot",
                 "    gate",
                 "  command steps",
@@ -1445,7 +1446,6 @@ mod tests {
                 "    hide",
                 "    background",
                 "    serial",
-                "",
                 "",
             ]
         );
