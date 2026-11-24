@@ -4858,8 +4858,8 @@ mod tests {
     }
 
     /// A `blocked` hook only records its failure, so its row says the task
-    /// is fine and names no resume. An empty log has no reason to quote, so
-    /// the row falls back to the exit code.
+    /// is fine and names no resume. A run with no log has no reason to quote,
+    /// so the row falls back to the exit code.
     #[test]
     fn a_failing_blocked_hook_row_says_the_task_is_fine() {
         let (repo, _root_guard) = scratch_repo("hook-failure-blocked");

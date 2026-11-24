@@ -1333,25 +1333,22 @@ pub const STOPPING_EVENTS: &[&str] = &[
 ];
 
 /// Why a failed hook run failed, in the hook's own words: the first
-/// non-blank line of the run's `.log`, trimmed. The tools a hook calls print
-/// their error first and the shipped hooks add trace lines after it, so the
-/// first line is the cause and the rest is detail.
+/// non-blank line of the run's `.log`, trimmed (see [`crate::fmt::first_line`]).
+/// That is the hook's error when the failing command is the first thing it
+/// prints. A hook that prints success output before it fails is quoted by that
+/// output instead.
 ///
 /// A run that printed nothing, or only blank lines, or whose log cannot be
 /// read, has no words to quote, so the answer is `no output, exit <code>`.
-/// Only the one line is returned so a hook that prints a very long first line
-/// still cannot flood the row that quotes it.
+/// Only the one line is returned, so the trace lines after it stay in the log.
 pub fn failure_reason(log: &Path, exit_code: i32) -> String {
-    std::fs::read(log)
-        .ok()
-        .and_then(|raw| {
-            String::from_utf8_lossy(&raw)
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| format!("no output, exit {exit_code}"))
+    let text = std::fs::read(log)
+        .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+        .unwrap_or_default();
+    match crate::fmt::first_line(&text) {
+        "" => format!("no output, exit {exit_code}"),
+        line => line.to_string(),
+    }
 }
 
 /// Every task hook run under `tracking/` that exited non-zero, in key order.
