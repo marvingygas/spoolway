@@ -482,7 +482,7 @@ pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> Vec<String> {
 }
 
 /// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough
-/// to keep the longest of the three, `The current session is removed, a new
+/// to keep the longest of the three, `the current session is removed, a new
 /// one will be started`, on one row, and narrow enough that the panel stays
 /// inside an 80-column pane.
 const RESTART_WRAP: usize = 57;
@@ -516,7 +516,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
             if let Some(session) = session {
                 body.push(format!("session   {}", session.describe()));
             }
-            "The current session is removed, a new one will be started".to_string()
+            "the current session is removed, a new one will be started".to_string()
         }
         RestartEnds::Command {
             elapsed: Some(elapsed),
@@ -526,12 +526,12 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
                 AbortKind::Command.word(),
                 human_secs(elapsed.as_secs() as i64)
             ));
-            "The running command is stopped and started again.".to_string()
+            "the running command is stopped and started again.".to_string()
         }
         // No run is going: a pause already ended its process, or it exited
         // on its own. Saying the restart ends one would name a process that
         // is not there.
-        RestartEnds::Command { elapsed: None } => "The command is started again.".to_string(),
+        RestartEnds::Command { elapsed: None } => "the command is started again.".to_string(),
     };
     body.push(String::new());
     body.extend(crate::screen::wrap(&closing, RESTART_WRAP));
@@ -5537,7 +5537,7 @@ mod tests {
                 "  lane      prompt-cache-ttl-default · review-spec",
                 "  session   32b0d7bd — abandoned, already banked",
                 "",
-                "  The current session is removed, a new one will be started",
+                "  the current session is removed, a new one will be started",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
@@ -5593,7 +5593,7 @@ mod tests {
                 "  step      build",
                 "  run       command · 4m 12s",
                 "",
-                "  The running command is stopped and started again.",
+                "  the running command is stopped and started again.",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
@@ -5614,7 +5614,7 @@ mod tests {
                 "",
                 "  step      build",
                 "",
-                "  The command is started again.",
+                "  the command is started again.",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
