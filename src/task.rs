@@ -631,7 +631,7 @@ pub struct Frontmatter {
     pub hook_paused: Option<String>,
 
     /// Why the hook [`Frontmatter::hook_paused`] names failed, in the words
-    /// the dispatcher wrote: `issue_tracking hook exited 1`, say. Written and
+    /// the dispatcher wrote: `error connecting to api.github.com`, say. Written and
     /// cleared together with that field. It is what the board's RECENT line
     /// says after `<event> hook failed:`, since the board reads the front
     /// matter and never the body, where the same reason sits in the status

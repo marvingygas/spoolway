@@ -80,7 +80,7 @@ impl std::error::Error for UsageRefusal {}
 mod agent;
 mod config;
 mod dispatch;
-mod doctor;
+pub(crate) mod doctor;
 mod group;
 mod herdr;
 mod hook;
