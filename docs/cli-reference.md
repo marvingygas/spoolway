@@ -161,14 +161,16 @@ The work that can show it is:
 
 Moving the cursor, `esc`, `f`, typing in a field, filter or search, and moves inside a picker
 never show it. A picker that lists branches first, such as edit lands in, draws only after the
-spool has gone. On a tab switch, the spool stays over the
-tab being left until the next tab draws its first frame. It sits on a blank patch eight columns by five rows in
-the middle of the tab, and the rest of the tab is drawn dim behind it. It switches between the
-mark's two frames every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work
-ends sooner. Work that ends within 200 ms draws nothing. A pane too small for the patch draws no
-spool. When the spool has shown, every key typed while the work ran is thrown away when the work
-ends, so a second `enter` does not land on the screen that follows. When it never showed, typed
-keys are kept.
+spool has gone. On a tab switch, the spool stays over the tab being left until the next tab
+draws its first frame. It sits on a blank patch eight columns by five rows in the middle of the
+tab, and the rest of the tab is drawn dim behind it. It switches between the mark's two frames
+every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work ends sooner.
+Work that ends within 200 ms draws nothing. A pane too small for the patch draws no spool.
+
+When a spool has shown, every key typed while the work ran is thrown away when the work ends, so
+a second `enter` does not land on the screen that follows. When it never showed, typed keys are
+kept. The exception is the eval tab's read of the ledger. It keeps reading keys while its spool
+turns, so a tab's digit and `q` act at once.
 
 The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
 
