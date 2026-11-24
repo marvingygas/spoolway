@@ -233,15 +233,17 @@ first. Run `spoolway init` there before working from a linked worktree of such a
 
 | Directory | Holds | Swept by |
 |---|---|---|
-| `queue/`, `pending/`, `worktrees/`, `removing/`, `plans/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
+| `queue/`, `pending/`, `worktrees/`, `removing/`, `overrides/`, `local/`, `claims/` | Work in flight | Never |
+| `plans/` (its `.html` plan pages and mockup folders) | Plan pages and mockups | Never by age. `archive_retention_days` deletes a page or folder once no task names or links it. See [`[housekeeping]`](#housekeeping--everything-spoolway-does-for-its-own-upkeep). |
 | `archive/` (its `<id>.md` files and `index.jsonl`) | Finished tasks | `archive_retention_days`, off by default |
 | `scratch/`, `headless/` (lane records, and lane logs in `headless/logs/`), `system-prompts/` | What finished runs left behind. An entry of a task still in the queue is kept, except in `system-prompts/`. | `retention_days` |
 | `commands/`, `tracking/`, `cuts/` | Run files of a task still in the queue | Deleted when the task is archived; `retention_days` sweeps only strays, and keeps an entry whose task is still in the queue |
 | `logs/<project>/` (beside the home, with the problem log) | A copy of the log of each command step that failed and sent its task anywhere but `done`, named `<task> · <step> · <YYYY-MM-DDTHH-MM>.log` | `retention_days`. A copy of a task still in the queue goes too. |
 | `project.toml`, `lanes.json`, `first-pass`, `plans-since`, `usage.jsonl`, `dispatch.pid`, `spoolway.pid`, `archive-index.lock`, `edit.lock`, `jobs.toml`, `jobs.state.json` | Project records | Never |
 
-In home mode, `plans/` and `plans-since` sit in the workspace, not in a clone's home. They are
-never swept. See [Home mode](concepts.md#home-mode).
+In home mode, `plans/` and `plans-since` sit in the workspace, not in a clone's home. The archive
+sweep deletes plan pages there as well, and `plans-since` is never swept. See
+[Home mode](concepts.md#home-mode).
 
 Every directory inside a home is created the first time something resolves it. `overrides/` is
 the exception. It is never created for you, because its absence is how the patch layer is
@@ -559,7 +561,7 @@ archive_retention_days = 0
 | `update_check` | `true` | Show a newer release in the dispatcher header when one is out. The header shows the published version in yellow. Only a binary that npm or Homebrew installed checks. It asks npm or `brew info`. The check reads a cached answer and refreshes it in the background once a day. `SPOOLWAY_SKIP_VERSION_CHECK=1` turns it off for one machine. |
 | `calibrate_window` | `14d` | How far back `/spoolway-calibrate` reads archived tasks and ledger rows. Takes `30d`, `36h` or `90m`. When `archive_retention_days` is set, keep it below that. |
 | `retention_days` | `30` | Days before an entry in `scratch/`, `headless/`, `commands/`, `tracking/`, `cuts/` or `system-prompts/` is deleted. `0` keeps everything. An entry in `scratch/`, `headless/`, `commands/`, `tracking/` or `cuts/` of a task still in the queue is kept. Lane logs in `headless/logs/` are deleted one file at a time; the `logs/` folder itself is never deleted. It also deletes the copies of failed command logs in `~/.spoolway/logs/<project>/`, whatever task they belong to, and trims lines older than that from the problem log `~/.spoolway/logs/<project>.log` when a dispatcher starts. It does not touch `archive/`. |
-| `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on` or holds its id. The sweep skips `archive/` while a file in `queue/` does not parse, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. |
+| `archive_retention_days` | `0` | Days before a finished task's file in `archive/` is deleted, together with its line in `archive/index.jsonl`. `0` keeps every finished task. Each task takes about 25 KB. The sweep never deletes `index.jsonl`. It also keeps a finished task, whatever its age, while a task in `queue/` lists it in `depends_on` or holds its id. The sweep skips `archive/` while a file in `queue/` does not parse, and runs again once that file is fixed. A deleted task can no longer be named in `depends_on`, and drops out of what `spoolway eval` and `calibrate_window` read. The sweep also deletes each plan page a deleted task named, once no task in `pending/`, `queue/` or `archive/` names it. In home mode no task in any clone may name it. It keeps every plan page while a task file in `pending/` or in another clone does not read or parse. The sweep also deletes each folder directly under `plans/` that a deleted task's text links to by path, such as `<plans>/board-focus/options.png`, once no task left links to it. A remaining task keeps the folder when its text spells the folder's path, with or without a trailing `/`. In home mode a task in `pending/` or `queue/` of any other clone also keeps it. The sweep reads the remaining tasks only when a deleted task linked a folder. If any of them cannot be read, every folder stays. It deletes no other plan page and no other folder in `plans/`. |
 
 Archiving a task removes its files under `tracking/`, `commands/`, `cuts/` and its session home at
 once. Moving a task back to the pending directory stops its running hooks and removes its files

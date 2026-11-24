@@ -90,7 +90,7 @@ mod jobs;
 mod lanes;
 mod r#override;
 pub(crate) mod pending;
-mod pending_delete;
+pub(crate) mod pending_delete;
 mod pipeline;
 mod queue;
 pub(crate) mod refusal;

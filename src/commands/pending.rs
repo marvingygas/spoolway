@@ -573,6 +573,33 @@ pub(crate) fn plans_named_by_other_clones_in(
     Ok(named)
 }
 
+/// How many task files in other clones' `pending/` and `queue/` will not
+/// read or parse, which [`plans_named_by_other_clones`] passes over without
+/// a word. A file like that may still name a plan page, so a caller that is
+/// about to delete one on its own, with no person looking at the list, uses
+/// this to know the answer is incomplete. An error when a clone's folder
+/// will not list, as there.
+pub(crate) fn unreadable_tasks_in_other_clones(repo: &Repo) -> Result<usize> {
+    let mut unreadable = 0;
+    for home in repo.other_clone_homes()? {
+        for name in [crate::config::PENDING_DIR, crate::config::QUEUE_DIR] {
+            let dir = home.join(name);
+            if !folder_exists(&dir)? {
+                continue;
+            }
+            for path in md_files(&dir)? {
+                let parsed = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|doc| parse_front(&doc));
+                if parsed.is_none() {
+                    unreadable += 1;
+                }
+            }
+        }
+    }
+    Ok(unreadable)
+}
+
 /// Whether another clone's task folder is there to read. Only a folder that
 /// is not there answers `false`. `Path::exists` would answer `false` too for
 /// a clone home this user cannot search, and that clone's tasks would then
