@@ -620,7 +620,7 @@ spoolway queue route <task>
 spoolway queue route <task> --json
 ```
 
-The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: issue_tracking hook exited 1`, and no step is marked. Each step shows its id, its description and its routes. A step with a `gate:` says which outcome waits for a person: `A pass waits for a person.`, `A fail waits for a person.` or `A pass or a fail waits for a person.` The `blocked` step is not listed.
+The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: error connecting to api.github.com`, and no step is marked. Each step shows its id, its description and its routes. A step with a `gate:` says which outcome waits for a person: `A pass waits for a person.`, `A fail waits for a person.` or `A pass or a fail waits for a person.` The `blocked` step is not listed.
 
 A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while an open task above this one in its group runs a `last:` step of its own. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
@@ -645,7 +645,7 @@ The last lines apply to a task on `paused` or `blocked`. They name the step `spo
 A task on `hook_failed` has no step to resume at. After the step list it prints the hook's last output, then names the two ways out, each with its board key and its shell command:
 
 ```
-impl — hook failed at done: issue_tracking hook exited 1
+impl — hook failed at done: error connecting to api.github.com
 
   implement         Write the code to satisfy the task's acceptance criteria.
                     pass → review-spec · fail → blocked
