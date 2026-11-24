@@ -10130,53 +10130,66 @@ mod screen_tests {
         assert!(matches!(state.mode, Mode::Browsing));
     }
 
+    /// A result is held back only behind a spool a frame actually carried.
     /// A pane too small for the spool draws the tab without it, so a result
     /// landing past the delay there is taken onto the screen at once: there
-    /// is no spool up whose hold could keep it back.
+    /// is no spool up whose hold could keep it back. Over a table the spool
+    /// fits, the same result waits out the hold.
     #[test]
-    fn a_result_landing_in_a_pane_too_small_for_the_spool_is_not_held() {
+    fn a_result_is_held_only_behind_a_spool_that_was_drawn() {
         use crate::screen::spool::{DELAY, FLIP, fits};
         use std::time::{Duration, Instant};
 
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-hold-drawn");
         let pipelines = Pipelines::builtin();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut state = ScreenState::new(&no_args());
-        // Half a flip past the delay, so the clock is on frame 0 and nowhere
-        // near its next turn.
-        state.mode = Mode::Loading {
-            pending: rx,
-            filters: no_filters(),
-            reset_cursor: false,
-            since: Instant::now() - (DELAY + FLIP / 2),
-            spool: None,
-            shown: None,
-            landed: None,
+        let table = load(&repo, &no_filters()).unwrap();
+        // The loop's own order, half a flip past the delay so the clock is
+        // on frame 0 and nowhere near its next turn: turn, draw over `under`,
+        // then the result lands. Whether `settle` took it at once.
+        let settles_at_once = |under: Option<&Loaded>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut state = ScreenState::new(&no_args());
+            state.mode = Mode::Loading {
+                pending: rx,
+                filters: no_filters(),
+                reset_cursor: false,
+                since: Instant::now() - (DELAY + FLIP / 2),
+                spool: None,
+                shown: None,
+                landed: None,
+            };
+            assert!(state.turn_spool(), "the clock is past the delay");
+            draw(
+                &pipelines,
+                under,
+                &mut state,
+                &mut crate::screen::frame_writer::FrameWriter::new(),
+                &mut Vec::new(),
+            );
+            assert!(
+                state.wake_in() > Duration::ZERO,
+                "the frame the clock is on counts as turned, drawn or not"
+            );
+            tx.send(Ok(loaded(Vec::new()))).unwrap();
+            let (mut loaded, mut failed) = (None, None);
+            let settled = state.settle_clamped(&mut loaded, &mut failed, &pipelines);
+            assert_eq!(settled, loaded.is_some());
+            settled
         };
+
         // A first load's frame has no table yet: too short for the patch.
+        let state = ScreenState::new(&no_args());
         assert!(!fits(&eval_frame_rows(&pipelines, None, &state)));
-
-        // The loop's own order: turn, draw, then wait.
-        assert!(state.turn_spool(), "the clock is past the delay");
-        draw(
-            &pipelines,
-            None,
-            &mut state,
-            &mut crate::screen::frame_writer::FrameWriter::new(),
-            &mut Vec::new(),
-        );
         assert!(
-            state.wake_in() > Duration::ZERO,
-            "the frame the clock is on counts as turned, drawn or not"
-        );
-
-        tx.send(Ok(loaded(Vec::new()))).unwrap();
-        let (mut loaded, mut failed) = (None, None);
-        assert!(
-            state.settle_clamped(&mut loaded, &mut failed, &pipelines),
+            settles_at_once(None),
             "no spool was drawn, so nothing holds the result back"
         );
-        assert!(loaded.is_some());
-        assert!(matches!(state.mode, Mode::Browsing));
+
+        assert!(fits(&eval_frame_rows(&pipelines, Some(&table), &state)));
+        assert!(
+            !settles_at_once(Some(&table)),
+            "the spool was drawn over the table, so its hold keeps the result back"
+        );
     }
 
     /// The acceptance criterion this task exists for: the eval tab's own
