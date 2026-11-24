@@ -1236,19 +1236,8 @@ fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
             } = failure;
             let reason = crate::tracking::failure_reason(&log, exit_code);
             let sentence = match crate::tracking::STOPPING_EVENTS.contains(&event.as_str()) {
-                true => format!(
-                    "{task} stopped because its issue could not be marked as {event} \
-                     ({reason}). fix that, then run `spoolway resume {task}`."
-                ),
-                false => {
-                    let what = match event.as_str() {
-                        "blocked" => "was not updated when it became blocked".to_string(),
-                        "paused" => "was not updated when it was paused".to_string(),
-                        "open" => "could not be opened".to_string(),
-                        other => format!("was not updated on `{other}`"),
-                    };
-                    format!("the issue for {task} {what} ({reason}). the task is fine.")
-                }
+                true => crate::tracking::stopped_sentence(&task, &event, &reason),
+                false => crate::tracking::not_updated_sentence(&task, &event, &reason),
             };
             Finding::Check(
                 HOOK_FAILURE_LABEL.into(),

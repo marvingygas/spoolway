@@ -1341,14 +1341,54 @@ pub const STOPPING_EVENTS: &[&str] = &[
 /// A run that printed nothing, or only blank lines, or whose log cannot be
 /// read, has no words to quote, so the answer is `no output, exit <code>`.
 /// Only the one line is returned, so the trace lines after it stay in the log.
+///
+/// The line is the hook's text, not spoolway's, and it is saved in a task's
+/// front matter and drawn on the board. Control characters (colour escapes,
+/// carriage returns) are dropped so they cannot repaint the board, and a line
+/// longer than [`FAILURE_REASON_MAX`] characters is cut with `…`, so a
+/// one-line JSON error body cannot swell the front matter.
 pub fn failure_reason(log: &Path, exit_code: i32) -> String {
     let text = std::fs::read(log)
         .map(|raw| String::from_utf8_lossy(&raw).into_owned())
         .unwrap_or_default();
-    match crate::fmt::first_line(&text) {
-        "" => format!("no output, exit {exit_code}"),
-        line => line.to_string(),
+    let line: String = crate::fmt::first_line(&text)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let line = line.trim();
+    if line.is_empty() {
+        return format!("no output, exit {exit_code}");
     }
+    match line.char_indices().nth(FAILURE_REASON_MAX) {
+        Some((end, _)) => format!("{}…", line[..end].trim_end()),
+        None => line.to_string(),
+    }
+}
+
+/// The longest hook output line [`failure_reason`] quotes whole.
+const FAILURE_REASON_MAX: usize = 200;
+
+/// The sentence for a `queued`, `started` or `done` hook that failed: the task
+/// stopped, and the command that restarts it. Doctor's row and the
+/// dispatcher's problem line both print it, so the two cannot word it apart.
+pub fn stopped_sentence(task: &str, event: &str, reason: &str) -> String {
+    format!(
+        "{task} stopped because its issue could not be marked as {event} \
+         ({reason}). fix that, then run `spoolway resume {task}`."
+    )
+}
+
+/// The sentence for a hook that failed on an event that holds nothing
+/// (`blocked`, `paused`, `open`): the issue missed an update and the task is
+/// fine. Doctor's row and the dispatcher's timeout line both print it.
+pub fn not_updated_sentence(task: &str, event: &str, reason: &str) -> String {
+    let what = match event {
+        crate::pipeline::BLOCKED => "was not updated when it became blocked".to_string(),
+        crate::pipeline::PAUSED => "was not updated when it was paused".to_string(),
+        "open" => "could not be opened".to_string(),
+        other => format!("was not updated on `{other}`"),
+    };
+    format!("the issue for {task} {what} ({reason}). the task is fine.")
 }
 
 /// Every task hook run under `tracking/` that exited non-zero, in key order.
@@ -2477,6 +2517,30 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         stop_and_reclaim(&repo, t.id());
+    }
+
+    /// The reason is the hook's own words but not its control characters or
+    /// its length: the line is saved in front matter and drawn on the board,
+    /// so an escape code or a kilobyte-long JSON body must not reach either.
+    /// Quoting the raw line would keep the escape bytes and the whole body.
+    #[test]
+    fn a_failure_reason_has_no_control_characters_and_a_bounded_length() {
+        let (_repo, root) = fixture("failure-reason-clean");
+        let log = root.join("run.log");
+
+        std::fs::write(&log, "\n\x1b[31merror\x1b[0m connecting\r\nsecond\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "[31merror[0m connecting");
+
+        std::fs::write(&log, "\x1b\r\n\x07\n").unwrap();
+        assert_eq!(failure_reason(&log, 3), "no output, exit 3");
+
+        std::fs::write(&log, "x".repeat(FAILURE_REASON_MAX + 50)).unwrap();
+        let reason = failure_reason(&log, 1);
+        assert_eq!(reason.chars().count(), FAILURE_REASON_MAX + 1, "{reason}");
+        assert!(reason.ends_with('…'), "{reason}");
+
+        std::fs::write(&log, "x".repeat(FAILURE_REASON_MAX)).unwrap();
+        assert!(!failure_reason(&log, 1).ends_with('…'));
     }
 
     /// An adopted hook that is already past its limit is stopped with

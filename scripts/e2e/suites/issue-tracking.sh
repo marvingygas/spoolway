@@ -694,8 +694,8 @@ has "queue list --json names the state hook_failed" '"state": "hook_failed"' \
   "$LIVE/hook-list.json"
 has "the reason says the hook printed nothing" "no output, exit 1" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
-# The old reason began with these same words, so the line above alone would
-# pass against it too; what it no longer carries is the log path.
+# An older reason named a log path under tracking/; the reason is one line of
+# the hook's own words now, and this keeps it from growing one back.
 lacks "and no longer points at a log under tracking/" "see tracking/" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
 has "the task gains a Hook error section holding the hook's own last output" \

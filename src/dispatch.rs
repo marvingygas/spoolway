@@ -1023,7 +1023,7 @@ fn refired_note(id: &str, event: &str, kills: u32) -> String {
     format!(
         "{}: marking the issue for {id} as {event} was interrupted. trying again \
          ({kills} of {}).",
-        crate::commands::doctor::HOOK_FAILURE_LABEL,
+        crate::commands::HOOK_FAILURE_LABEL,
         crate::tracking::MAX_HOOK_KILLS
     )
 }
@@ -1032,7 +1032,7 @@ fn refired_note(id: &str, event: &str, kills: u32) -> String {
 fn hook_not_started_line(id: &str, err: &anyhow::Error) -> String {
     format!(
         "{}: the hook for {id} could not start ({err:#}).",
-        crate::commands::doctor::HOOK_FAILURE_LABEL
+        crate::commands::HOOK_FAILURE_LABEL
     )
 }
 
@@ -1046,16 +1046,12 @@ fn timeout_reason() -> String {
 }
 
 /// The line for a `blocked` or `paused` hook that was stopped at its limit.
-/// Neither event holds the task, so the line says the task is fine; it is
-/// the same sentence doctor's row uses for these two events.
+/// Neither event holds the task, so the line says the task is fine.
 fn untracked_event_line(id: &str, event: &str, reason: &str) -> String {
-    let what = match event {
-        crate::pipeline::BLOCKED => "became blocked",
-        _ => "was paused",
-    };
     format!(
-        "{}: the issue for {id} was not updated when it {what} ({reason}). the task is fine.",
-        crate::commands::doctor::HOOK_FAILURE_LABEL
+        "{}: {}",
+        crate::commands::HOOK_FAILURE_LABEL,
+        crate::tracking::not_updated_sentence(id, event, reason)
     )
 }
 
@@ -2952,8 +2948,9 @@ impl<'a> Dispatcher<'a> {
     /// read whether one is configured for this stage, and if so what it
     /// said — and used to ask with the same few lines of code typed out
     /// twice. Reading it here once leaves each call site free to still act
-    /// on the answer differently, which they do — each names its own stage
-    /// in the reason a failure pauses the task with.
+    /// on the answer differently, which they do. No reason names its stage:
+    /// [`Dispatcher::stop_on_hook_failure`]'s line and the board's
+    /// `<event> hook failed:` prefix say which hook it was.
     fn tracking_gate(&self, task: &Task, stage: &str) -> TrackingGate {
         // A trial arm, or a task queued with `tracking: off`:
         // `route_reserved_stage` never calls `fire` for either (see its own
@@ -3010,12 +3007,13 @@ impl<'a> Dispatcher<'a> {
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
     ///
-    /// The stop's reason stays one short line — the hook's own last
-    /// output, not a log path a person has to go find, is what explains it:
-    /// the last 15 lines of its combined stdout and stderr, indented the way
+    /// The stop's reason stays one short line, the hook's first line of
+    /// output (see [`crate::tracking::failure_reason`]), and the problem line
+    /// this prints names the run's log. The last 15 lines of the log, its
+    /// combined stdout and stderr, are indented the way
     /// a failed command step's own `## Blocker` tail already is (see the
-    /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
-    /// under `## Hook error` so a second failure on the same task grows the
+    /// `output` tail built in `Dispatcher::tear_down_and_escalate`) and
+    /// appended under `## Hook error` so a second failure on the same task grows the
     /// section rather than overwriting it.
     fn stop_on_hook_failure(
         &mut self,
@@ -3047,11 +3045,10 @@ impl<'a> Dispatcher<'a> {
         // stops it, the way `pause_for_missing_start_branch` says its own.
         report.moved = true;
         report.problems.push(format!(
-            "{}: {id} stopped because its issue could not be marked as {stage} ({reason}). \
-             fix that, then run `spoolway resume {id}`. log: {}",
-            crate::commands::doctor::HOOK_FAILURE_LABEL,
+            "{}: {} log: {}",
+            crate::commands::HOOK_FAILURE_LABEL,
+            crate::tracking::stopped_sentence(task.id(), stage, reason),
             crate::repo::shorten_home(&log_path),
-            id = task.id()
         ));
         Ok(())
     }
@@ -34258,6 +34255,30 @@ exit 0"#,
                 .all(|p| !p.contains("when it was paused")),
             "said again: {:?}",
             quiet.problems
+        );
+    }
+
+    /// The two lines about a hook that never ran or ran out of time say so
+    /// in plain words, name the issue's task, and carry neither the
+    /// `issue_tracking` setting's name nor an exit code. Each event reads its
+    /// own way: a `blocked` hook is not worded as a `paused` one.
+    #[test]
+    fn hook_lines_that_are_not_stops_read_in_plain_words() {
+        let err = anyhow::anyhow!("no such file");
+        assert_eq!(
+            hook_not_started_line("demo", &err),
+            "issue tracker: the hook for demo could not start (no such file)."
+        );
+        let reason = timeout_reason();
+        assert_eq!(
+            untracked_event_line("demo", crate::pipeline::BLOCKED, &reason),
+            "issue tracker: the issue for demo was not updated when it became blocked \
+             (the hook ran longer than 10m and was stopped). the task is fine."
+        );
+        assert_eq!(
+            untracked_event_line("demo", crate::pipeline::PAUSED, &reason),
+            "issue tracker: the issue for demo was not updated when it was paused \
+             (the hook ran longer than 10m and was stopped). the task is fine."
         );
     }
 
