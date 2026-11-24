@@ -54,7 +54,7 @@ enum KeyState {
 #[derive(Debug, Clone)]
 struct KeyRow {
     /// The key as `override list` prints it: a dotted config key,
-    /// `<step>.<field>`, `description` or `task_template`.
+    /// `<step>.<field>`, `description`, `task_template` or `add_dirs`.
     key: String,
     /// The key `edit` sets: a config key as the merge applies it, which
     /// differs from `key` only for a retired spelling the merge still reads.
@@ -925,9 +925,9 @@ fn beside(head: &str, value: &str, width: usize) -> Vec<String> {
 /// Write `value` as `key` into pipeline `pipeline`'s patch, keeping every
 /// other key in it. A step key goes through the pipeline section's own
 /// write, which reads the value as YAML as `pipeline override --set` does.
-/// `description` and `task_template` are written here, as text. Checked no
-/// more than the pipeline section checks a value: the merge decides, and
-/// the row says so.
+/// `description`, `task_template` and `add_dirs` are written here, as text.
+/// Checked no more than the pipeline section checks a value: the merge
+/// decides, and the row says so.
 fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Result<()> {
     if let Some((step, field)) = key.split_once('.') {
         let targets = [(pipeline.to_string(), vec![step.to_string()])];
@@ -946,6 +946,7 @@ fn write_pipeline_key(repo: &Repo, pipeline: &str, key: &str, value: &str) -> Re
     match key {
         "description" => patch.description = Some(value.trim().to_string()),
         "task_template" => patch.task_template = Some(value.trim().to_string()),
+        "add_dirs" => patch.add_dirs = Some(value.trim().to_string()),
         _ => bail!("`{key}` is not a key a pipeline patch holds"),
     }
     crate::overrides::write_pipeline_patch(&overrides, pipeline, &patch)
@@ -1050,6 +1051,18 @@ fn load(repo: &Repo, config: &Config) -> (Vec<FileRow>, Option<String>) {
                 "task_template",
                 tracked.and_then(|p| p.task_template.clone()),
                 patch.task_template.clone(),
+            ),
+            (
+                "add_dirs",
+                tracked
+                    .filter(|p| !p.add_dirs.is_empty())
+                    .map(|p| p.add_dirs.join(", ")),
+                // Compared as the merge applies it: `a,b` over `a, b` is no
+                // change.
+                patch
+                    .add_dirs
+                    .as_deref()
+                    .map(|raw| crate::pipeline::split_dirs(raw).join(", ")),
             ),
         ] {
             if let Some(ours) = ours {
@@ -2071,5 +2084,36 @@ mod tests {
         assert!(state.layer.popup(None).is_some(), "only enter closes it");
         type_keys(&repo, &mut state, "\r");
         assert!(state.layer.popup(None).is_none());
+    }
+
+    /// A pipeline's `add_dirs` is written as text into its patch, and its row
+    /// compares the patch as the merge reads it: `a,b` over a tracked `a, b`
+    /// is no change, `a,c` is. Fails before the row exists, when the write
+    /// is refused and no row is drawn.
+    // covers: pipeline.add_dirs — the overrides screen writes and compares a pipeline's add_dirs
+    #[test]
+    fn a_pipelines_add_dirs_is_written_and_compared_as_the_merge_reads_it() {
+        let (repo, _guard) = project("active-add-dirs");
+        let dir = crate::pipeline::Pipelines::dir_in(&repo.checkout);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("impl.yml"), format!("add_dirs: a, b\n{IMPL}")).unwrap();
+
+        super::write_pipeline_key(&repo, "impl", "add_dirs", " a,b ").unwrap();
+        let patch = crate::overrides::read_pipeline_patch(&repo.overrides_dir(), "impl")
+            .unwrap()
+            .unwrap();
+        assert_eq!(patch.add_dirs.as_deref(), Some("a,b"));
+
+        let state = State::new(&repo);
+        let row = &state.layer.files[0].keys[0];
+        assert_eq!(row.key, "add_dirs");
+        assert!(matches!(row.state, super::KeyState::Matches), "no change");
+
+        super::write_pipeline_key(&repo, "impl", "add_dirs", "a,c").unwrap();
+        let state = State::new(&repo);
+        assert!(matches!(
+            state.layer.files[0].keys[0].state,
+            super::KeyState::Changed { .. }
+        ));
     }
 }

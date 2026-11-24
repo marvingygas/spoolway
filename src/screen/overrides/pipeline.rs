@@ -49,7 +49,7 @@ pub(super) struct Field {
 /// except `slot`: a command step takes no worker slot, so the key means
 /// nothing there and is listed under agent steps. `gate` is an agent field
 /// because a command has no lane to tell a person what it did.
-const FIELDS: [Field; 19] = [
+const FIELDS: [Field; 20] = [
     Field::every("description"),
     Field::every("on_pass"),
     Field::every("on_fail"),
@@ -62,6 +62,7 @@ const FIELDS: [Field; 19] = [
     Field::agent("prompt"),
     Field::agent("session"),
     Field::agent("skills"),
+    Field::agent("add_dirs"),
     Field::agent("slot"),
     Field::agent("gate"),
     Field::command("run"),
@@ -1436,6 +1437,7 @@ mod tests {
                 "    prompt",
                 "    session",
                 "    skills",
+                "    add_dirs",
                 "    slot",
                 "    gate",
                 "  command steps",
@@ -1444,7 +1446,6 @@ mod tests {
                 "    hide",
                 "    background",
                 "    serial",
-                "",
                 "",
             ]
         );

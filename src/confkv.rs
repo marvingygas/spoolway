@@ -97,6 +97,12 @@ pub const REFERENCE: &[Reference] = &[
         sentence: "Show a tip on the dispatch tab's last row, changing every 30 seconds.",
     },
     Reference {
+        key: "dispatch.add_dirs",
+        values: "folders",
+        sentence: "Extra folders every lane of this project is given. Absolute, \
+                    ~-relative or relative to the repo root.",
+    },
+    Reference {
         key: "unattended.enabled",
         values: "true, false",
         sentence: "Run without a person: a blocked task goes to an agent (the unblocker) \

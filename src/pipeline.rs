@@ -388,6 +388,19 @@ pub struct Step {
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "skills_field")]
     pub skills: Vec<String>,
 
+    /// Extra folders this step's lane is given, after the project's
+    /// `dispatch.add_dirs` and this pipeline's own [`Pipeline::add_dirs`] —
+    /// see [`crate::config::resolve_add_dirs`] for how each entry is read.
+    /// Written as one comma-separated line, the way `skills:` is, so a
+    /// pipeline file spells its lists one way.
+    ///
+    /// Only a kind whose launch row carries `--add-dir` can take them. `pi`
+    /// has no such flag, so `pipeline check` refuses this on a pi step rather
+    /// than leave it doing nothing. A command step starts no lane, and
+    /// [`Pipeline::validate`] refuses it there like every other lane key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "dirs_field")]
+    pub add_dirs: Vec<String>,
+
     /// Whether this step's conversation carries over from an earlier step
     /// in this task that ran the same prompt, rather than opening fresh.
     /// `false`, same as absent: every visit opens fresh, which is every
@@ -889,6 +902,34 @@ mod skills_field {
     }
 }
 
+/// The entries of an `add_dirs:` line: split on commas, trimmed, empty items
+/// dropped. Shared with the overrides layer, whose patch holds the line as
+/// text, so both read it the same way.
+pub(crate) fn split_dirs(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+        .collect()
+}
+
+/// An `add_dirs:` in a pipeline file, written as one comma-separated line
+/// like `skills:`.
+///
+/// Splits on commas and trims, and nothing more: unlike a skill name an
+/// entry keeps a leading `/`, since that is how an absolute folder starts.
+/// A folder whose own name holds a comma cannot be written here.
+mod dirs_field {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(dirs: &[String], s: S) -> Result<S::Ok, S::Error> {
+        dirs.join(", ").serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+        Ok(super::split_dirs(&String::deserialize(d)?))
+    }
+}
+
 /// A `session:` in a pipeline file. `true` or `false` only now — the
 /// percentage `session:` used to take moved to
 /// `agents.<profile>.session_reuse_ctx`, so anything else here is refused
@@ -1129,6 +1170,17 @@ pub struct Pipeline {
     /// `prompt:`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_template: Option<String>,
+
+    /// Extra folders every agent step of this pipeline is given, after the
+    /// project's `dispatch.add_dirs` and before the step's own
+    /// [`Step::add_dirs`]. One comma-separated line.
+    ///
+    /// A pi step is skipped rather than refused, since the list is meant for
+    /// the pipeline's other steps and a pipeline that mixes kinds should not
+    /// have to repeat it per step. The unattended `blocked` step is skipped
+    /// too: it gets the project's list only, as it is no step of the flow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "dirs_field")]
+    pub add_dirs: Vec<String>,
 
     /// Where an old pipeline-level `blocked_on_write:` lands so an existing
     /// pipeline file still parses. Retired along with the check that read
@@ -1525,12 +1577,12 @@ impl Pipeline {
                     );
                 }
                 // The five keys above route or gate the step, which `blocked` never does. These
-                // three are not wrong the way those are — a command, a slot opt-out and a loop
-                // bound all mean something on an ordinary step — but `blocked` is materialised
-                // from `[unattended]`'s own keys, and a pipeline's override is only the five
-                // `Pipelines::assemble` actually merges: `agent`, `model`, `effort`, `session`,
-                // `prompt`. Anything else here would silently do nothing once assembled, which
-                // is worse than refusing it by name.
+                // four are not wrong the way those are — a command, a slot opt-out, a loop bound and
+                // a folder list all mean something on an ordinary step — but `blocked` is
+                // materialised from `[unattended]`'s own keys, and a pipeline's override is only
+                // the five `Pipelines::assemble` actually merges: `agent`, `model`, `effort`,
+                // `session`, `prompt`. Anything else here would silently do nothing once
+                // assembled, which is worse than refusing it by name.
                 //
                 // `description:` belongs on this same list — it is not one of the five either —
                 // but it cannot be checked here: `assemble` writes the canonical description
@@ -1551,6 +1603,12 @@ impl Pipeline {
                 }
                 if !step.r#loop.is_unbounded() {
                     bail!("step `blocked` declares `loop:` — {OVERRIDE_KEYS}; delete `loop:`");
+                }
+                if !step.add_dirs.is_empty() {
+                    bail!(
+                        "step `blocked` declares `add_dirs:` — {OVERRIDE_KEYS}; the unblocker \
+                         is given `dispatch.add_dirs` only, so delete `add_dirs:`"
+                    );
                 }
             }
 
@@ -1628,6 +1686,7 @@ impl Pipeline {
                     ("prompt", step.prompt.is_some()),
                     ("model", step.model.is_some()),
                     ("effort", step.effort.is_some()),
+                    ("add_dirs", !step.add_dirs.is_empty()),
                     ("session", step.session),
                 ] {
                     if set {
@@ -2192,6 +2251,7 @@ fn blocked_step_from_config(unattended: &crate::config::UnattendedConfig) -> Ste
         model: opt(&unattended.blocked_model),
         effort: opt(&unattended.blocked_effort),
         skills: Vec::new(),
+        add_dirs: Vec::new(),
         session: unattended.blocked_session,
         slot: true,
         gate: None,
@@ -4470,6 +4530,59 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("code review"), "{message}");
         assert!(message.contains("whitespace"), "{message}");
+    }
+
+    /// `add_dirs:` at the top level and on a step is one comma-separated line,
+    /// each entry trimmed and empty items dropped. A leading `/` stays: it
+    /// is how an absolute folder starts.
+    // covers: pipeline.add_dirs — a comma-separated line becomes one entry per folder
+    #[test]
+    fn add_dirs_parses_a_comma_separated_line_at_both_levels() {
+        let pipeline = parse(
+            "add_dirs: \" ~/dev/notes , /srv/specs,, \"\nsteps:\n  - id: a\n    agent: claude\n    \
+             add_dirs: ../other\n    on_pass: done\n",
+        )
+        .unwrap();
+        assert_eq!(pipeline.add_dirs, ["~/dev/notes", "/srv/specs"]);
+        assert_eq!(pipeline.step("a").unwrap().add_dirs, ["../other"]);
+    }
+
+    /// A pipeline naming no `add_dirs:` writes none back.
+    // covers: pipeline.add_dirs — absent add_dirs serialize away entirely
+    #[test]
+    fn add_dirs_absent_serializes_without_the_key() {
+        let pipeline = parse("steps:\n  - id: a\n    agent: pi\n    on_pass: done\n").unwrap();
+        assert!(
+            !serde_norway::to_string(&pipeline)
+                .unwrap()
+                .contains("add_dirs")
+        );
+    }
+
+    /// A command step starts no lane, so `add_dirs:` on one is refused as the
+    /// other lane keys are. Fails before the key is listed, when it loads.
+    // covers: step.add_dirs — refused on a command step
+    #[test]
+    fn rejects_add_dirs_on_a_command_step() {
+        let err = parse("steps:\n  - id: a\n    run: x\n    add_dirs: ../o\n    on_pass: done\n")
+            .unwrap_err();
+        assert!(err.to_string().contains("declares `add_dirs`"), "{err}");
+    }
+
+    /// `blocked` is given the project's folders only, so a step-level list on
+    /// it is refused by name. Fails before the refusal, when it loads.
+    // covers: step.add_dirs — refused on the blocked step
+    #[test]
+    fn rejects_add_dirs_on_the_blocked_step() {
+        let err = parse(
+            "steps:\n  - id: a\n    agent: pi\n    on_pass: done\n  - id: blocked\n    \
+             agent: pi\n    add_dirs: ../o\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("`blocked` declares `add_dirs:`"),
+            "{err}"
+        );
     }
 
     /// A step naming no `skills:` writes nothing back — the same as any other

@@ -241,7 +241,13 @@ fn build_list(pipelines: &Pipelines) -> PipelineListJson {
 }
 
 /// Keys a pipeline file may carry at the top level, above `steps:`.
-const PIPELINE_KEYS: &[&str] = &["version", "description", "task_template", "steps"];
+const PIPELINE_KEYS: &[&str] = &[
+    "version",
+    "description",
+    "task_template",
+    "add_dirs",
+    "steps",
+];
 
 /// Keys a step may carry — every one `Step` actually reads a value from.
 /// `loop` stands for the struct's own `r#loop`, a raw identifier only
@@ -254,6 +260,7 @@ const STEP_KEYS: &[&str] = &[
     "model",
     "effort",
     "skills",
+    "add_dirs",
     "session",
     "slot",
     "gate",
@@ -308,6 +315,14 @@ const FIELD_SENTENCES: &[(&str, &str)] = &[
         "Which task skeleton a task queued on this pipeline is written from, by \
          name under the task-templates directory — absent takes this pipeline's \
          own name, falling back to `default`.",
+    ),
+    (
+        "add_dirs",
+        "Extra folders, as one comma-separated line, given to a claude or codex \
+         lane with `--add-dir`: at the top level to every agent step of the \
+         pipeline, on a step to that step only, each after `dispatch.add_dirs`. \
+         A pipeline's list skips its pi steps, and `pipeline check` refuses the \
+         key on a pi step. Absent means none.",
     ),
     (
         "steps",
@@ -617,6 +632,10 @@ fn template() -> String {
          # `default.md`.\n\
          # task_template: default\n\
          \n\
+         # Extra folders every claude or codex step here is given, on top of\n\
+         # `dispatch.add_dirs`. Comma separated; pi steps are skipped.\n\
+         # add_dirs: ~/dev/notes\n\
+         \n\
          steps:\n\
          \x20\x20- id: implement\n\
          \x20\x20\x20\x20description: Write the code to satisfy the task's acceptance criteria.\n\
@@ -625,6 +644,7 @@ fn template() -> String {
          \x20\x20\x20\x20model: {local_model}\n\
          \x20\x20\x20\x20# effort: high             `medium` or `high`; the kind must carry a level\n\
          \x20\x20\x20\x20# skills: a, b             invoked at the top of this step's opening prompt\n\
+         \x20\x20\x20\x20# add_dirs: ~/dev/specs    extra folders for this step; refused on a pi step\n\
          \x20\x20\x20\x20# slot: false              run without consuming one of the profile's lanes\n\
          \x20\x20\x20\x20# gate: on_pass            or on_fail, always: that outcome parks on `paused` for `spoolway resume`\n\
          \x20\x20\x20\x20on_pass: review\n\
@@ -1040,6 +1060,33 @@ fn step_problems(repo: &Repo, pipelines: &Pipelines, config: &Config) -> Vec<Str
                         step.id,
                         kind.map(|k| format!(" `{k}`")).unwrap_or_default(),
                         loading.join(", ")
+                    ));
+                }
+            }
+
+            // The same test `dispatch` makes before it hands a lane any
+            // `add_dirs`: a kind whose launch row carries `--add-dir`. A
+            // pipeline's own list skips a kind without one, but a step that
+            // names its own was written in the belief that it reaches the
+            // lane.
+            if !step.add_dirs.is_empty() {
+                let kind = step
+                    .agent
+                    .as_deref()
+                    .and_then(|agent| config.agent(agent).ok())
+                    .map(|profile| profile.kind.clone());
+                let grants = kind
+                    .as_deref()
+                    .and_then(crate::agent::adapter)
+                    .is_some_and(|adapter| adapter.args.contains(&"--add-dir"));
+                if !grants {
+                    problems.push(format!(
+                        "`{}`/`{}` sets `add_dirs:`, but its agent kind{} has no way to grant \
+                         a folder — run the step on a claude or codex profile, or drop \
+                         `add_dirs:` from it",
+                        pipeline.name,
+                        step.id,
+                        kind.map(|k| format!(" `{k}`")).unwrap_or_default(),
                     ));
                 }
             }
@@ -5580,6 +5627,57 @@ mod tests {
         // adapter row can carry.
         let err = pipeline_check(&repo, Ok(pipelines)).unwrap_err();
         assert!(err.to_string().contains("2 problem"), "{err}");
+    }
+
+    /// A pi step that sets `add_dirs:` is refused with the fix named, while a
+    /// pipeline's own list on a pi step is no problem. Fails before the check
+    /// reads `add_dirs:`, when nothing is reported.
+    // covers: step.add_dirs — pipeline check refuses it on a pi step, and the pipeline's list skips pi
+    #[test]
+    fn pipeline_check_refuses_add_dirs_on_a_pi_step_only() {
+        let root = crate::scratch::root("commands-add-dirs-check-pi");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::scratch::git_init(&root, &["-b", "plan/demo"]);
+        init_at(&root);
+        let repo = Repo {
+            borrowed: false,
+            started_in_lane: false,
+            home: root.join(".home"),
+            checkout: root.to_path_buf(),
+            root: root.to_path_buf(),
+            config: Config::default(),
+        };
+        let load = |yaml: &str| Pipelines {
+            pipelines: [("solo".to_string(), Pipeline::parse("solo", yaml).unwrap())]
+                .into_iter()
+                .collect(),
+            ignored_overrides: Vec::new(),
+            clashes: Default::default(),
+        };
+
+        let step_level = load(
+            "steps:\n  - id: a\n    agent: pi\n    prompt: implementer\n    model: m\n    \
+             add_dirs: ../o\n    on_pass: done\n",
+        );
+        let problems = step_problems(&repo, &step_level, &repo.config);
+        assert!(
+            problems.iter().any(|p| p.contains(
+                "`solo`/`a` sets `add_dirs:`, but its agent kind `pi` has no way to grant a \
+                 folder — run the step on a claude or codex profile, or drop `add_dirs:` from it"
+            )),
+            "{problems:?}"
+        );
+
+        let pipeline_level = load(
+            "add_dirs: ../o\nsteps:\n  - id: a\n    agent: pi\n    prompt: implementer\n    \
+             model: m\n    on_pass: done\n",
+        );
+        let problems = step_problems(&repo, &pipeline_level, &repo.config);
+        assert!(
+            !problems.iter().any(|p| p.contains("add_dirs")),
+            "{problems:?}"
+        );
     }
 
     /// A name found in neither place spoolway can see — a project's own

@@ -1082,7 +1082,7 @@ section only while the section is at rest. They do nothing inside a search row o
 ```
 
 The count on active is the number of keys in the layer: every config key, every field of every
-patched pipeline step, a pipeline's `description` and `task_template`, and each prompt as one.
+patched pipeline step, a pipeline's `description`, `task_template` and `add_dirs`, and each prompt as one.
 The [active section](#the-active-section) lists those keys, deletes them, and promotes them onto
 a branch. On every section `w` opens the overrides folder. See [Opening the overrides folder](#opening-the-overrides-folder).
 
@@ -1202,6 +1202,7 @@ number of steps it is set on. Only the pipelines in the repo's `.spoolway/` are 
 │     prompt                                                                   │
 │     session                                                                  │
 │     skills                                                                   │
+│     add_dirs                                                                 │
 │     slot                                                                     │
 │     gate                                                                     │
 │   command steps                                                              │
