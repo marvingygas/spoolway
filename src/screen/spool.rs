@@ -107,13 +107,10 @@ fn white(patch: &[String], i: usize) -> Vec<Option<&'static str>> {
 /// has nowhere to put the whole spool, so it draws none, and the next normal
 /// frame is drawn at whatever size the pane is by then.
 pub(crate) fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
-    let width = last
-        .iter()
-        .map(|row| crate::status::strip_ansi(row).chars().count())
-        .max()?;
-    if width < PATCH_WIDTH || last.len() < PATCH_HEIGHT + 1 {
+    if !fits(last) {
         return None;
     }
+    let width = widest(last);
     let mut rows = last.to_vec();
     super::dim(&mut rows);
     for row in &mut rows {
@@ -121,6 +118,21 @@ pub(crate) fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> 
     }
     super::overlay_painted(&mut rows, &patch(frame), width, white);
     Some(rows)
+}
+
+/// Whether [`spool_frame`] has room to lay the spool over `rows`: they are
+/// at least as wide as the patch, and a row taller than it. The rows it
+/// answers keep their size, so this reads the same of them.
+pub(crate) fn fits(rows: &[String]) -> bool {
+    widest(rows) >= PATCH_WIDTH && rows.len() > PATCH_HEIGHT
+}
+
+/// The widest of `rows`, as the terminal shows it.
+fn widest(rows: &[String]) -> usize {
+    rows.iter()
+        .map(|row| crate::status::strip_ansi(row).chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Which of the mark's two frames shows `elapsed` into the work: `None`

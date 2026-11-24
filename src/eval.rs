@@ -5100,15 +5100,23 @@ fn footer(table: TableKind, figures: Figures, mode: &Mode, rows: usize) -> Strin
 /// rows themselves, split out so a test can play the very same rows through
 /// today's frozen write and through [`crate::screen::frame_writer`] and
 /// require the same picture, without duplicating everything this builds.
+///
+/// A frame that carried the loading spool is recorded on `state` as shown,
+/// which starts its hold — see [`ScreenState::spool_drawn`].
 fn draw(
     pipelines: &Pipelines,
     loaded: Option<&Loaded>,
-    state: &ScreenState,
+    state: &mut ScreenState,
     writer: &mut crate::screen::frame_writer::FrameWriter,
     out: &mut impl std::io::Write,
 ) {
     let rows = eval_frame_rows(pipelines, loaded, state);
     writer.write_frame(&rows, crate::screen::pane_size(), out);
+    // Laying the spool keeps the frame's size, so the rows fit it exactly
+    // when it was laid over them.
+    if spool::fits(&rows) {
+        state.spool_drawn();
+    }
 }
 
 /// The eval tab's own frame, as the rows [`draw`] paints — `loaded` is
@@ -5400,9 +5408,11 @@ enum Mode {
     ///
     /// The loop draws the spool itself, on the clock every other wait keeps
     /// — see [`ScreenState::turn_spool`]. `since` is when the load started,
-    /// `spool` the frame of the mark to draw, `None` until [`spool::DELAY`]
-    /// has passed, and `shown` how far into the load it first showed.
-    /// `landed` holds a result that arrived while the spool still has to
+    /// `spool` the frame of the mark the clock is on, `None` until
+    /// [`spool::DELAY`] has passed, and `shown` how far into the load a
+    /// frame first carried it: still `None` in a pane too small for the
+    /// spool, which draws none, so no hold keeps a result back there.
+    /// `landed` holds a result that arrived while a shown spool still has to
     /// stay up out to [`spool::HOLD`], so it never flickers on and off.
     ///
     /// The screen owns the only receiver, so a load replaced by a newer one,
@@ -5592,25 +5602,41 @@ impl ScreenState {
     }
 
     /// Move the spool on to the frame of the mark the load's clock says
-    /// shows now. `true` when that changed what the frame draws.
+    /// shows now. `true` when that moved it, and the frame needs drawing
+    /// again. Whether the spool is then drawn is up to the pane's size, and
+    /// is recorded apart by [`ScreenState::spool_drawn`].
     fn turn_spool(&mut self) -> bool {
         let Mode::Loading {
             since,
-            spool: drawn,
-            shown,
+            spool: turned,
             ..
         } = &mut self.mode
         else {
             return false;
         };
-        let elapsed = since.elapsed();
-        let frame = spool::frame_at(elapsed);
-        if frame == *drawn {
+        let frame = spool::frame_at(since.elapsed());
+        if frame == *turned {
             return false;
         }
-        *drawn = frame;
-        shown.get_or_insert(elapsed);
+        *turned = frame;
         true
+    }
+
+    /// Record that a frame carrying the spool was just written, if one has
+    /// not been before, so a result landing from here on waits out the
+    /// spool's hold. Not done in [`ScreenState::turn_spool`]: a pane too
+    /// small for the spool draws the tab without it, and a result held back
+    /// for a spool nobody saw would only be late.
+    fn spool_drawn(&mut self) {
+        if let Mode::Loading {
+            since,
+            spool: Some(_),
+            shown,
+            ..
+        } = &mut self.mode
+        {
+            shown.get_or_insert(since.elapsed());
+        }
     }
 
     /// How long the loop may wait for a key before the frame on screen is
@@ -5626,7 +5652,7 @@ impl ScreenState {
     fn wake_in(&self) -> std::time::Duration {
         let Mode::Loading {
             since,
-            spool: drawn,
+            spool: turned,
             shown,
             landed,
             ..
@@ -5635,7 +5661,7 @@ impl ScreenState {
             return crate::status::POLL;
         };
         let elapsed = since.elapsed();
-        if spool::frame_at(elapsed) != *drawn {
+        if spool::frame_at(elapsed) != *turned {
             return std::time::Duration::ZERO;
         }
         let flip = spool::until_change(elapsed);
@@ -5645,11 +5671,15 @@ impl ScreenState {
         }
     }
 
-    /// Pick up the load in flight, if it has landed. `true` when it has, and
-    /// the screen needs drawing again. A failure with a table already on
-    /// screen becomes the same notice every other failure here is; one on
-    /// the visit's first load has no table to sit over, and lands in
-    /// `failed` for [`run_screen_with`] to hold on the tab.
+    /// Pick up the load in flight, if it has landed. `true` once a landed
+    /// result is taken onto the screen, which needs drawing again. A result
+    /// landing while a shown spool's hold still runs is kept in `landed`, and
+    /// this answers `false` until the hold is over.
+    ///
+    /// A failure with a table already on screen becomes the same notice
+    /// every other failure here is; one on the visit's first load has no
+    /// table to sit over, and lands in `failed` for [`run_screen_with`] to
+    /// hold on the tab.
     fn settle(&mut self, loaded: &mut Option<Loaded>, failed: &mut Option<String>) -> bool {
         let Mode::Loading {
             pending,
@@ -5825,7 +5855,7 @@ fn run_screen_with(
         state.turn_spool();
         match &failed {
             Some(message) => crate::screen::shell::message_frame(message, writer, out),
-            None => draw(pipelines, loaded.as_ref(), &state, writer, out),
+            None => draw(pipelines, loaded.as_ref(), &mut state, writer, out),
         }
         // Not a bare `read_key`: inside bare `spoolway` a `ctrl-c` has to end
         // this wait too, and a blocking read never sees one — see
@@ -5853,7 +5883,7 @@ fn run_screen_with(
                                 Some(message) => {
                                     crate::screen::shell::message_frame(message, writer, out)
                                 }
-                                None => draw(pipelines, loaded.as_ref(), &state, writer, out),
+                                None => draw(pipelines, loaded.as_ref(), &mut state, writer, out),
                             }
                         }
                         wake.set(state.wake_in());
@@ -10097,6 +10127,55 @@ mod screen_tests {
         let mut state = loading(HOLD);
         assert!(state.settle_clamped(&mut loaded, &mut failed, &pipelines));
         assert!(loaded.is_some(), "the hold had run out");
+        assert!(matches!(state.mode, Mode::Browsing));
+    }
+
+    /// A pane too small for the spool draws the tab without it, so a result
+    /// landing past the delay there is taken onto the screen at once: there
+    /// is no spool up whose hold could keep it back.
+    #[test]
+    fn a_result_landing_in_a_pane_too_small_for_the_spool_is_not_held() {
+        use crate::screen::spool::{DELAY, FLIP, fits};
+        use std::time::{Duration, Instant};
+
+        let pipelines = Pipelines::builtin();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut state = ScreenState::new(&no_args());
+        // Half a flip past the delay, so the clock is on frame 0 and nowhere
+        // near its next turn.
+        state.mode = Mode::Loading {
+            pending: rx,
+            filters: no_filters(),
+            reset_cursor: false,
+            since: Instant::now() - (DELAY + FLIP / 2),
+            spool: None,
+            shown: None,
+            landed: None,
+        };
+        // A first load's frame has no table yet: too short for the patch.
+        assert!(!fits(&eval_frame_rows(&pipelines, None, &state)));
+
+        // The loop's own order: turn, draw, then wait.
+        assert!(state.turn_spool(), "the clock is past the delay");
+        draw(
+            &pipelines,
+            None,
+            &mut state,
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            state.wake_in() > Duration::ZERO,
+            "the frame the clock is on counts as turned, drawn or not"
+        );
+
+        tx.send(Ok(loaded(Vec::new()))).unwrap();
+        let (mut loaded, mut failed) = (None, None);
+        assert!(
+            state.settle_clamped(&mut loaded, &mut failed, &pipelines),
+            "no spool was drawn, so nothing holds the result back"
+        );
+        assert!(loaded.is_some());
         assert!(matches!(state.mode, Mode::Browsing));
     }
 
