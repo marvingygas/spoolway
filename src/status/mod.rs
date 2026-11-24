@@ -16674,7 +16674,7 @@ mod tests {
         assert!(!frame.contains("lane      "), "{frame}");
         assert!(!frame.contains("session   "), "{frame}");
         assert!(
-            frame.contains("the command's process is ended and `handover` runs"),
+            frame.contains("The running command is stopped and started again."),
             "{frame}"
         );
         assert_eq!(runs.state(&key), crate::command_step::RunState::Running);
