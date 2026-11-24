@@ -660,8 +660,9 @@ must "the hook is switched back to the one that only answers open" \
 
 # ------------------------------------------- a failing hook stops the task
 # A hook that always fails, on each of the four events by hand: a non-zero
-# reason quoting the hook's first line of output (`no output, exit 1` here) and the hook's own last output landing
-# reason keeping only the exit code and the hook's own last output landing
+# exit on `queued` or `done` moves the task to `hook_failed`, with the
+# reason quoting the hook's first line of output (`no output, exit 1` here)
+# and the hook's own last output landing
 # under the task's `## Hook error` instead, and only records the failure on
 # `blocked` and `paused` — both already stopped for a person, so nothing
 # about stopping them again would mean anything.
