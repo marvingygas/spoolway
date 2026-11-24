@@ -21,6 +21,52 @@ the following contract so the binary can parse and replay them:
 The highlights, migrations, and release URL are public copy. Keep internal task
 bookkeeping out of them and describe user-visible outcomes.
 
+## 0.20.0
+
+### Highlights
+- A project can read its setup from another folder. `spoolway config source <folder>` points a main checkout with no `.spoolway/` of its own at a folder that has one, and `--clear` removes it. `init` in a linked worktree sets that worktree up and records it as the source while the main checkout has none, bare `spoolway` offers a picker of the worktrees that hold a setup, a dim `setup` row under the strip names the source, and a lane with no setup of its own reads the one its dispatcher runs on. (#1554, #1555, #1565, #1566, #1567, #1568)
+- Lanes can be given extra folders. `dispatch.add_dirs` in `config.toml`, and `add_dirs:` on a pipeline or an agent step, hand every `claude` and `codex` lane one `--add-dir` per folder, the project's first, then the pipeline's, then the step's. A folder that does not exist is left out and the lane still starts. (#1587, #1589)
+- The board's `focus` has its own key. `[f] focus` sits on the footer between `[r] resume` and `[o] options`, on rows where it would act, so a task's session is one key press away where it took three. (#1563)
+- Issue hook failures read in plain English. `spoolway doctor`, the popup before dispatching and the dispatcher say what did not happen to the issue, quote the hook's own first line of output, and for a stopped task name `spoolway resume <task>` and the log. (#1597, #1598)
+- Three more waits turn the loading spool in place of a box of their own: the config reload on the dispatch tab's `u`, the issue hook after the issue question's `enter`, and the eval tab's read of the ledger. (#1562, #1588, #1590)
+
+### Breaking changes and migration
+- `spoolway sync` adds `dispatch.add_dirs = []` to `config.toml`, rewords the `housekeeping.archive_retention_days` line of its settings reference, and adds the `add_dirs` rows to the key block of each shipped pipeline file. `spoolway doctor` reports the files as behind until it runs. Run `spoolway sync` in each project and commit what it writes. (#1576, #1577, #1587, #1589)
+- `focus` is no longer in the board's options menu. A pty script that opened the menu with `o` and picked `focus` presses `f` on the row instead, and one that matched a whole footer expects `[f] focus` on a row where focus would act. (#1563)
+- The dispatch tab's `u` no longer opens the `updating config…` popup. It turns the loading spool and then shows `successfully loaded` in a three-row `update config` box. A pty script that waited for `updating config…` waits for `successfully loaded`. A refused or failed reload still opens the popup it did. (#1562)
+- The issue question's `enter` closes the question and runs the hook under the loading spool, and the `issue tracking` popup with its `progress:` bar is gone. Every key typed while the hook runs is thrown away, even when the spool never showed. A pty script that matched the bar, or typed while the hook ran, waits for the `queued` popup. (#1588)
+- The eval tab no longer draws a `loading…` box while it reads the ledger. A pty script that waited for that box to clear waits for the tab's tables. (#1590)
+- Issue hook failures are worded anew in `spoolway doctor`, the popup before dispatching and the dispatcher's lines. Their label reads `issue tracker`, where it read `issue_tracking hooks`, and a task stopped on `hook_failed` carries the hook's own first line of output as its reason, or `no output, exit <code>`, where it carried `issue_tracking hook exited N`. A script that matched the old label, lines or reason matches the new ones, which the 0.19.0 to 0.20.0 section of `docs/migrations.md` quotes. (#1597, #1598)
+- The board's restart panel ends on `the current session is removed, a new one will be started`, `the running command is stopped and started again.` or `the command is started again.`, where it spoke of lanes, briefs and the previous log. A pty script that matched the old sentence matches the new one. (#1596)
+- With `housekeeping.archive_retention_days` above 0, the archive sweep deletes a plan page, and a mockup folder directly under `plans/`, once it removes the last task that names or links it. 0.19.0 kept both forever. Copy any plan you want to keep out of `plans/`, or set `archive_retention_days = 0`. (#1576, #1577)
+- `spoolway init` in a linked worktree writes `.spoolway/` into that worktree, and records it as the project's source, while the main checkout has none. 0.19.0 always wrote the main checkout. To set up the main checkout, run `init` there or pass `-C <main checkout>`. (#1567)
+- Bare `spoolway` in a main checkout with no `.spoolway/`, no workspace and no source opens a picker when another worktree of the repository holds a `.spoolway/`, where it refused. `esc` leaves it without writing anything. A pty script that expected the refusal presses `esc`. (#1568)
+
+### Features
+- `spoolway config source <folder>` stores the folder as an absolute path in `project.toml`'s new `source` line. While it is in use, `config set`, `override promote` and `sync` in the main checkout write the source folder's files, and `config path` and the `checkout:` line name it. A source in another repository is refused. The first command that finds a `.spoolway/` in the main checkout deletes the line and says so. (#1555, #1566)
+- A linked worktree that holds the only `.spoolway/` supplies the whole setup while the main checkout has none, where spoolway refused to read it. The queue and the project's record stay with the main checkout. (#1554)
+- A lane whose worktree and main checkout both lack a `.spoolway/` reads the setup its dispatcher found, so `spoolway report` works there and the task moves on. (#1565)
+- The overrides layer's pipeline patch accepts `add_dirs:` at its top level and on a step, and the overrides tab shows and edits a step's `add_dirs`. `pipeline check` refuses `add_dirs:` on a `pi` step, and the unblocker gets only the project's folders. (#1589)
+
+### Fixes
+- A hook's reason is cleaned before it reaches the task file and the board: colour codes and control characters are removed, tabs become spaces, and a reason over 200 characters is cut. A hook that hits its time limit or is interrupted three times gets a plain reason too. (#1598)
+- The answer to the dispatch tab's `u` shows as soon as it lands, where the tab looked for it once a second. (#1562)
+- `spoolway herdr bind --help` says it writes three key blocks, where it said four. (#1543)
+
+### Platform and packaging
+- The bundled model price table was refreshed from litellm.
+- spoolway reads and writes dates with `jiff` 1.0 in place of the unmaintained `chrono`. Ledger timestamps keep the text form they had, and rows written by 0.19.0 still load. (#1564, #1572, #1586)
+- spoolway builds against `url` 2.5.9, which fixes RUSTSEC-2026-0592, and against `toml` 1.2.1, `toml_edit` 0.25.19, `sysinfo` 0.40.4, `clap` 4.6.8 and `regex` 1.13.2. (#1544, #1569, #1570)
+- The upgrade suite runs a project the released 0.19.0 binary wrote through the new binary. (#1542)
+
+### Upgrading
+- Install or update with `npm install -g spoolway@0.20.0`, run it without installing via `npx spoolway@0.20.0`, install it with `brew install marvingygas/tap/spoolway`, or download it with `curl -fsSL https://github.com/marvingygas/spoolway/releases/download/v0.20.0/install.sh | sh`.
+- The `spoolway` wrapper package selects one of six platform packages at install time: linux-x64-gnu, linux-arm64-gnu, linux-x64-musl, linux-arm64-musl, darwin-arm64 and darwin-x64; the GitHub release carries four bare executables, `install.sh` and `SHA256SUMS`.
+- Run `spoolway sync` in each project and commit what it writes, copy any plan you want to keep out of `plans/` when the archive sweep is on, run `init` in the main checkout or pass `-C` to set up the main checkout from a worktree, update pty scripts that pick `focus` from the options menu, wait for `updating config…`, the issue hook's `progress:` bar or the eval tab's `loading…` box, expect the refusal from bare `spoolway` where it now opens a picker, or match the restart panel's closing sentence, update scripts that match the old hook failure label, lines or reason, and restart the dispatcher. The 0.19.0 to 0.20.0 section of `docs/migrations.md` gives the same steps.
+- Run `spoolway whats-new` to read this record back from the installed binary.
+
+Release: https://github.com/marvingygas/spoolway/releases/tag/v0.20.0
+
 ## 0.19.0
 
 ### Highlights

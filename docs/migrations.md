@@ -12,6 +12,7 @@ install the current release and run `spoolway init`; none of the earlier-version
 
 | Upgrade | What changes | What you need to do |
 |---|---|---|
+| 0.19.0 to 0.20.0 | `sync` adds `dispatch.add_dirs` and the `add_dirs` rows of the pipeline key block; with `archive_retention_days` above 0 the archive sweep deletes plan pages and mockup folders no task names any more; `init` in a linked worktree writes that worktree while the main checkout has no setup; bare `spoolway` opens a source picker where it refused; `focus` moves from the options menu to `f`; the config reload, the issue hook and the eval tab's ledger read turn the loading spool in place of their own boxes; the restart panel's closing sentence changes; issue hook failures are worded in plain English under the label `issue tracker`. | Run `spoolway sync` and commit what it writes, copy out any plan you want to keep, run `init` in the main checkout to set that up, and update pty scripts that pick `focus` from the options menu, wait for `updating config…`, the issue hook's `progress:` bar or the eval tab's `loading…` box, expect bare `spoolway`'s refusal or match the restart panel, and scripts that match the old hook failure label, lines or reasons. |
 | 0.18.1 to 0.19.0 | `sync` adds `dispatch.tips` and `issue_tracking.ask_to_deactivate`; `pipeline check` fails a prompt that tells its lane to run a command spoolway refuses in a lane; a home-mode lane is refused the setup commands a repo-mode lane is; `queue add`, the queue screen and routines refuse a task whose `task/<id>` branch `origin` still has; the clean `queued` popup closes on its own and passes keys to the screen beneath; popups are coloured and dim the screen behind them; the dispatch tab ends on a tip row; the strip narrows its gap and wraps between labels; keys typed under the loading spool are thrown away; a task on a missing pipeline reads `held`. | Run `spoolway sync` and commit what it writes, rewrite prompts that name a refused command, run setup commands from your own checkout, drop or rename a leftover `task/<id>` branch on `origin`, and update pty scripts that close the clean `queued` popup with `enter`, match raw popup or board text, read the dispatch tab's last rows, match the strip on a narrow pty, type ahead of slow work, or match `unknown` for a task on a missing pipeline. |
 | 0.17.0 to 0.18.0 | `spoolway queue unqueue <task>` unqueues any stopped task and every task after it, prints what it deleted and moved, and refuses only a running task; `--force` and `--all` are removed; bare `spoolway` opens a tab with its digit, and `←`/`→` no longer switch tabs; the strip numbers every tab and dims all but the open one; `←`/`→` move between sections and panes and `tab` does nothing; `space` on a routine's details ticks the routine, and no key queues one routine task alone; the shipped `create-pr` prompt leads a pull request title with the task's issue; `init` on a tracked checkout at a terminal offers `workspace only` first; the focused pane's title is bracketed; key lines name a key only while it acts; the step picker keeps the section names and hides `not set` steps behind `h`. | Run `spoolway sync` and commit what it writes, run `spoolway sync --replace .spoolway/prompts/create-pr/PROMPT.md`, run `spoolway init --setup repo` to restore missing files, replace `unqueue <task> --force` with `queue pause <task>` then `queue unqueue <task>`, replace `unqueue --all` with one `queue unqueue <task>` for each task, update scripts that read its output, and update pty scripts that press `←` or `→` to switch tabs, press `tab` to change section or pane, match the strip or a `[tab]` pair, press `space` on a routine's task to queue it alone, match plain pane titles or whole key lines, or select `not set` steps in the step picker. |
 | 0.16.0 to 0.17.0 | The overrides pipeline section lists every step key but `id` under three headers and its cursor starts on `description`; the step picker lists every pipeline's steps and its pipeline rows draw no counts; every empty eval table reads `no data.`. | Run `spoolway sync` and commit what it writes, and update pty scripts that walk the overrides pipeline section or its step picker, or match the eval screen's empty-table lines. |
@@ -59,6 +60,73 @@ package. On Windows, install the Linux package under WSL:
 ```
 wsl npm install -g spoolway
 ```
+
+## 0.19.0 to 0.20.0
+
+Run `spoolway sync` in each project and commit what it writes. It adds `dispatch.add_dirs = []`
+to `config.toml`, with its line in the settings reference, rewords the reference line for
+`housekeeping.archive_retention_days`, and adds the `add_dirs` rows to the key block of each
+shipped pipeline file. `spoolway doctor` reports the files as behind until it runs. The empty list
+gives no lane an extra folder, so a project runs as it did. Then read the plan and `init` items
+below, update the scripts that drive bare `spoolway` on a pty or match issue hook failures, and
+restart the dispatcher.
+
+- With `housekeeping.archive_retention_days` above 0, the archive sweep deletes a plan page once
+  it removes the last task that names it, and a folder directly under `plans/` once it removes the
+  last task that links into it. 0.19.0 kept both forever. A page or folder stays while any
+  pending, queued or archived task still names or links it. Copy any plan you want to keep out of
+  `plans/`, or set `archive_retention_days = 0`, which keeps everything as before. See
+  [`[housekeeping]`](configuration.md#housekeeping--everything-spoolway-does-for-its-own-upkeep).
+- `spoolway init` in a linked worktree writes `.spoolway/` into that worktree while the main
+  checkout has none, and records the worktree as the project's `source` in `project.toml`. 0.19.0
+  always wrote the main checkout. To set up the main checkout, run `init` there or pass
+  `-C <main checkout>`. Once the main checkout has a `.spoolway/`, `init` in a worktree acts on
+  the main checkout as before, and the first command that finds it deletes the `source` line. See
+  [The source folder](configuration.md#the-source-folder).
+- Bare `spoolway` in a main checkout with no `.spoolway/`, no workspace and no source opens a
+  picker of this repository's worktrees that hold a `.spoolway/`, where 0.19.0 printed a refusal.
+  `esc` leaves it without writing anything. With no such worktree, it still refuses. A pty script
+  that expected the refusal presses `esc`. While a source is in use, every tab draws one dim
+  `setup` row under the strip, so the tab's body is one row shorter.
+
+- `focus` is no longer in the dispatch board's options menu. It has its own key, `f`, and the
+  footer draws `[f] focus` between `[r] resume` and `[o] options` on a row where focus would act. A
+  pty script that pressed `o` and picked `focus` presses `f` on the row instead. See
+  [Focus](dispatcher.md#focus).
+- The dispatch tab's `u` no longer opens the `updating config…` popup. It turns the loading spool
+  while the reload runs, then shows `successfully loaded` in a three-row `update config` box for
+  one second. A refused reload, an unreadable answer and a dispatcher that stops before answering
+  still open the popup they did. A pty script that waited for `updating config…` waits for
+  `successfully loaded`. See [Updating the config](dispatcher.md#updating-the-config).
+- The issue question's `enter` closes the question, then runs the hook under the loading spool
+  over the bare queue or routines tab. The `issue tracking` popup with its `progress:` bar is gone,
+  and every key typed while the hook runs is thrown away, even when the spool never showed. A pty
+  script that matched the bar, or typed while the hook ran, waits for the `queued` popup.
+- The eval tab no longer draws a `loading…` box while it reads the ledger. It turns the loading
+  spool instead, and its digits and `q` still act during the read. A pty script that waited for the
+  box to clear waits for the tab's tables.
+- The restart panel's closing sentence reads `the current session is removed, a new one will be
+  started` for an agent step, `the running command is stopped and started again.` for a running
+  command, and `the command is started again.` for one that is not running. A pty script that
+  matched the old sentence matches the new one. See [Restart panel](dispatcher.md#restart-panel).
+
+- Issue hook failures are worded in plain English, in the same sentence in `spoolway doctor`, the
+  popup before dispatching and the dispatcher's problem lines. Their label reads `issue tracker`,
+  where it read `issue_tracking hooks`. When or how a row clears does not change. See
+  [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events).
+
+  | 0.19.0 printed | 0.20.0 prints |
+  |---|---|
+  | ``issue_tracking hooks: `started` failed for t5 (exit 1), so the task stopped on `hook_failed`. …`` | ``issue tracker: t5 stopped because its issue could not be marked as started (<reason>). fix that, then run `spoolway resume t5`. log: <path>`` |
+  | A `blocked`, `paused` or `open` row naming the event and the exit code | `issue tracker: the issue for t5 was not updated when it became blocked (<reason>). the task is fine. log: <path>`, with `was paused` or `could not be opened` for the other two |
+  | ``` `t5`'s `done` hook failed: issue_tracking hook exited 3. fix the hook, then resume the task to run it again. ``` | The `doctor` row's sentence, after `issue tracker: ` |
+
+  A task stopped on `hook_failed` carries the first non-blank line of the hook's own log as its
+  reason, cleaned of colour codes and cut at 200 characters, or `no output, exit <code>` when the
+  hook printed nothing. 0.19.0 wrote `issue_tracking hook exited N`. A hook stopped at its
+  10-minute limit reads `the hook ran longer than 10m and was stopped`, and one interrupted three
+  times reads `the hook was interrupted 3 times in a row`. A script that matched the old label,
+  lines or reasons matches the new ones.
 
 ## 0.18.1 to 0.19.0
 
