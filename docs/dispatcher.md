@@ -863,32 +863,29 @@ it.
 The agent form names the step, the lane and the session that a restart throws away. The session row is left out when the task has no session on record.
 
 ```
-╭─ restart login ─────────────────────────────────────╮
+╭─ restart login ─────────────────────────────────────────────╮
+│  step      review                                           │
+│  lane      login · review                                   │
+│  session   32b0d7bd — abandoned, already banked             │
+│                                                             │
+│  the current session is removed, a new one will be started  │
+│                                                             │
+│  [enter] confirm   [esc] close                              │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+The command form is drawn for a command step, which has no lane and no session. It names the step and the run instead. The `run` row gives how long the command has been running, and is left out when no run is going, as on a paused or blocked task. The closing sentence says the running command is stopped and started again. When no run is going, the sentence says the command is started again.
+
+```
+╭─ restart solo ──────────────────────────────────────╮
 │                                                     │
-│ step      review                                    │
-│ lane      login · review                            │
-│ session   32b0d7bd — abandoned, already banked      │
+│  step      build                                    │
+│  run       command · 4m 12s                         │
 │                                                     │
-│ the lane is torn down and `review` is briefed from  │
-│ scratch. its conversation is not kept.              │
+│  the running command is stopped and started again.  │
 │                                                     │
-│ [enter] confirm   [esc] close                       │
+│  [enter] confirm   [esc] close                      │
 ╰─────────────────────────────────────────────────────╯
-```
-
-The command form is drawn for a command step, which has no lane and no session. It names the step and the run instead. The `run` row gives how long the command has been running, and is left out when no run is going, as on a paused or blocked task. The closing sentence says the command's process is ended and the step runs again from the start, with its log kept as the previous log. When no run is going there is no process to end, so the sentence only says the step runs again from the start and its log is kept.
-
-```
-╭─ restart solo ──────────────────────────────────────────╮
-│                                                         │
-│  step      build                                        │
-│  run       command · 4m 12s                             │
-│                                                         │
-│  the command's process is ended and `build` runs again  │
-│  from the start. its log is kept as the previous log.   │
-│                                                         │
-│  [enter] confirm   [esc] close                          │
-╰─────────────────────────────────────────────────────────╯
 ```
 
 | Key | What it does |

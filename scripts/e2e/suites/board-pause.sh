@@ -1058,7 +1058,7 @@ if cursor_to stuck && pick_item restart \
   && RESTART_FRAME=$(frame_showing "╭─ restart stuck ─" 10); then
   SAW_RESTART=stuck
   for want in "╭─ restart stuck ─" "step      implement" "lane      stuck · implement" \
-    "is briefed from" "[enter] confirm   [esc] close"; do
+    "the current session is removed, a new one will be started" "[enter] confirm   [esc] close"; do
     if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the restart panel says: $want"
     else bad "the restart panel says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi
   done
@@ -1121,8 +1121,7 @@ if cursor_to build-cmd && pick_item restart \
   && RESTART_FRAME=$(frame_showing "╭─ restart build-cmd ─" 10); then
   SAW_RESTART=build-cmd
   for want in "╭─ restart build-cmd ─" "step      build" "run       command · " \
-    "the command's process is ended and \`build\` runs again" \
-    "from the start. its log is kept as the previous log." \
+    "the running command is stopped and started again." \
     "[enter] confirm   [esc] close"; do
     if grep -qF -- "$want" <<<"$RESTART_FRAME"; then ok "the command form says: $want"
     else bad "the command form says: $want"; sed 's/^/        /' <<<"$RESTART_FRAME"; fi

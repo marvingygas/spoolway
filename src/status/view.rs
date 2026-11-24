@@ -482,9 +482,10 @@ pub(super) fn pause_answers(abort: &Abort, scheduled: bool) -> Vec<String> {
 }
 
 /// How wide [`restart_confirm_panel`] wraps its closing sentence: wide enough
-/// to keep `the lane is torn down and `review-spec` is briefed from` on one
-/// row, and narrow enough that the panel stays inside an 80-column pane.
-const RESTART_WRAP: usize = 56;
+/// to keep the longest of the three, `the current session is removed, a new
+/// one will be started`, on one row, and narrow enough that the panel stays
+/// inside an 80-column pane.
+const RESTART_WRAP: usize = 57;
 
 /// [`BoardMode::ConfirmRestart`]'s panel, `restart`'s own: the step, the lane
 /// and the session a restart throws away, then what happens to them, so a
@@ -497,10 +498,10 @@ const RESTART_WRAP: usize = 56;
 /// is printed under the closing sentence, above the key row.
 ///
 /// A command step has no lane and no session, so its form names the step and
-/// the run in their place, and says the command's process is ended and run
+/// the run in their place, and says the running command is stopped and started
 /// again. When no run is going, on a task paused on or blocked off the step,
-/// the `run` row is left out and the closing sentence only says the step runs
-/// again, since there is no process left to end.
+/// the `run` row is left out and the closing sentence only says the command is
+/// started again, since there is no process left to stop.
 pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
     let mut body = Vec::new();
     // The command form opens on a blank row that sets its two short rows
@@ -515,11 +516,7 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
             if let Some(session) = session {
                 body.push(format!("session   {}", session.describe()));
             }
-            format!(
-                "the lane is torn down and `{}` is briefed from scratch. its conversation is not \
-                 kept.",
-                confirm.step
-            )
+            "the current session is removed, a new one will be started".to_string()
         }
         RestartEnds::Command {
             elapsed: Some(elapsed),
@@ -529,19 +526,12 @@ pub(super) fn restart_confirm_panel(confirm: &RestartConfirm) -> Vec<String> {
                 AbortKind::Command.word(),
                 human_secs(elapsed.as_secs() as i64)
             ));
-            format!(
-                "the command's process is ended and `{}` runs again from the start. its log is \
-                 kept as the previous log.",
-                confirm.step
-            )
+            "the running command is stopped and started again.".to_string()
         }
         // No run is going: a pause already ended its process, or it exited
         // on its own. Saying the restart ends one would name a process that
         // is not there.
-        RestartEnds::Command { elapsed: None } => format!(
-            "`{}` runs again from the start. its log is kept as the previous log.",
-            confirm.step
-        ),
+        RestartEnds::Command { elapsed: None } => "the command is started again.".to_string(),
     };
     body.push(String::new());
     body.extend(crate::screen::wrap(&closing, RESTART_WRAP));
@@ -5547,8 +5537,7 @@ mod tests {
                 "  lane      prompt-cache-ttl-default · review-spec",
                 "  session   32b0d7bd — abandoned, already banked",
                 "",
-                "  the lane is torn down and `review-spec` is briefed from",
-                "  scratch. its conversation is not kept.",
+                "  the current session is removed, a new one will be started",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
@@ -5596,10 +5585,6 @@ mod tests {
                 .map(|line| line.trim_matches('│').trim_end().to_string())
                 .collect()
         };
-        let closing = [
-            "  the command's process is ended and `build` runs again",
-            "  from the start. its log is kept as the previous log.",
-        ];
         let running = body(&confirm);
         assert_eq!(
             running,
@@ -5608,8 +5593,7 @@ mod tests {
                 "  step      build",
                 "  run       command · 4m 12s",
                 "",
-                closing[0],
-                closing[1],
+                "  the running command is stopped and started again.",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
@@ -5630,8 +5614,7 @@ mod tests {
                 "",
                 "  step      build",
                 "",
-                "  `build` runs again from the start. its log is kept as",
-                "  the previous log.",
+                "  the command is started again.",
                 "",
                 "  [enter] confirm   [esc] close",
             ]
@@ -5655,7 +5638,7 @@ mod tests {
             .expect("the refusal is printed");
         let closed = panel
             .iter()
-            .position(|line| line.contains("its log is kept"))
+            .position(|line| line.contains("stopped and started again"))
             .unwrap();
         assert!(
             closed < refusal,
