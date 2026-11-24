@@ -1375,7 +1375,9 @@ const FAILURE_REASON_MAX: usize = 200;
 /// byte in `0x40..=0x7E`, so `ESC [ 2 K` goes entirely. It is not skipped up
 /// to the next `m` the way a colour code alone could be, which would eat the
 /// words after a cursor move. An OSC sequence is `ESC ]` up to a bell or
-/// `ESC \`. Any other `ESC` takes the one character after it.
+/// `ESC \`. Any other `ESC` takes the one character after it, unless that is
+/// a newline, which is kept so two lines are not joined. A tab becomes a
+/// space, so words a hook separates with one stay apart.
 fn without_terminal_codes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -1401,9 +1403,11 @@ fn without_terminal_codes(text: &str) -> String {
                         }
                     }
                 }
+                Some('\n') => out.push('\n'),
                 _ => {}
             },
             '\n' => out.push(c),
+            '\t' => out.push(' '),
             c if c.is_control() => {}
             c => out.push(c),
         }
@@ -2585,6 +2589,12 @@ mod tests {
             failure_reason(&log, 1),
             "error connecting to api.github.com"
         );
+
+        std::fs::write(&log, "HTTP 404\tNot Found\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "HTTP 404 Not Found");
+
+        std::fs::write(&log, "progress\x1b\nerror connecting\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "progress");
 
         std::fs::write(&log, "\x1b\r\n\x07\n").unwrap();
         assert_eq!(failure_reason(&log, 3), "no output, exit 3");
