@@ -12080,7 +12080,7 @@ mod tests {
     /// midnight carries the earlier date, so a check against a date read only
     /// afterwards would fail on timing alone.
     fn dates_around(action: impl FnOnce()) -> Vec<String> {
-        let today = || jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
+        let today = || jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         let before = today();
         action();
         vec![before, today()]

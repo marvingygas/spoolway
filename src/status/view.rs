@@ -4455,7 +4455,7 @@ mod tests {
     /// 1d 11h from now, each with half a minute to spare so `until` reads the
     /// same however long the test takes to reach it.
     fn two_jobs() -> Vec<crate::jobs::ActiveJob> {
-        let now = jiff::Zoned::now();
+        let now = jiff::ZonedDateTime::now();
         let job = |name: &str, mins: i64| crate::jobs::ActiveJob {
             name: name.to_string(),
             next: Some(
@@ -5324,7 +5324,7 @@ mod tests {
             "no ledger without an enabled job: {quiet:#?}"
         );
 
-        let soon = jiff::Zoned::now() + jiff::SignedDuration::from_hours(6);
+        let soon = jiff::ZonedDateTime::now() + jiff::SignedDuration::from_hours(6);
         let jobs = [
             crate::jobs::ActiveJob {
                 name: "nightly-audit".to_string(),

@@ -3314,7 +3314,7 @@ const SESSIONS_MODEL_MIN_WIDTH: usize = 16;
 /// a row with, so `WHEN` carries the minute it started: the same minute
 /// `--by task` draws for a run, without the year in front.
 fn session_when(at: jiff::Timestamp) -> String {
-    at.to_zoned(jiff::tz::TimeZone::system())
+    at.to_zoned_datetime(jiff::tz::TimeZone::system())
         .strftime("%m-%d %H:%M")
         .to_string()
 }
@@ -4761,7 +4761,9 @@ fn export(
     let dir = evals_dir(repo);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let stamp = jiff::Zoned::now().strftime("%Y-%m-%d-%H%M").to_string();
+    let stamp = jiff::ZonedDateTime::now()
+        .strftime("%Y-%m-%d-%H%M")
+        .to_string();
     let base = format!(
         "eval-by-{}-{}-{stamp}",
         by_label(filters, table),
@@ -6242,7 +6244,7 @@ fn sort_panel(descending: bool, columns: &[(&str, &str)], cursor: usize) -> Vec<
 /// holds anything else, such as a `7d` passed on the command line.
 /// Deliberately blind to the ledger, the same as the grid itself.
 fn calendar_open_date(text: &str) -> (i32, u32, u32) {
-    let today = jiff::Zoned::now().date();
+    let today = jiff::ZonedDateTime::now().date();
     let date = non_empty(text)
         .and_then(|t| jiff::civil::Date::strptime("%Y-%m-%d", t).ok())
         .unwrap_or(today);
@@ -6370,7 +6372,7 @@ fn render_week(week: &[Option<u32>; 7], selected: u32) -> String {
 /// cursor lands rather than clamping at either edge of the visible month.
 fn step_calendar_day(year: &mut i32, month: &mut u32, day: &mut u32, delta: i64) {
     let current = jiff::civil::Date::new(*year as i16, *month as i8, *day as i8)
-        .unwrap_or_else(|_| jiff::Zoned::now().date());
+        .unwrap_or_else(|_| jiff::ZonedDateTime::now().date());
     let next = current
         .checked_add(jiff::Span::new().days(delta))
         .unwrap_or(current);
@@ -10854,7 +10856,10 @@ mod screen_tests {
     #[test]
     fn esc_leaves_the_row_untouched_enter_picks_the_day_x_clears_it() {
         let (repo, _root_guard) = fixture("screen-calendar-roundtrip");
-        let today = jiff::Zoned::now().date().strftime("%Y-%m-%d").to_string();
+        let today = jiff::ZonedDateTime::now()
+            .date()
+            .strftime("%Y-%m-%d")
+            .to_string();
         let to_since = format!("f{}", DOWN.repeat(5));
 
         // No trailing `q` after a bare `Esc`: its own lookahead read would
