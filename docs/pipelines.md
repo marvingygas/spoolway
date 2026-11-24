@@ -88,7 +88,7 @@ steps:
 | `model` | none | The model. Required on every agent step. |
 | `effort` | none | Passed to the agent kind's effort flag. Blank sends no flag. See [Effort](agents.md#effort). |
 | `skills` | none | Skills the lane invokes before the task briefing, each as its own message. Comma separated, names only. See [Skills](agents.md#skills). |
-| `add_dirs` | none | Extra folders this step's lane is given, one `--add-dir` each, after the project's and the pipeline's. One comma-separated line, read as the pipeline's is. Refused by `pipeline check` on a `pi` step, which has no such flag, and on a command step or the `blocked` step. |
+| `add_dirs` | none | Extra folders this step's lane is given, one `--add-dir` each, after the project's and the pipeline's. One comma-separated line, read as the pipeline's is. `spoolway pipeline check` refuses it on a `pi` step, which has no such flag. Loading the pipeline refuses it on a command step and on the `blocked` step. |
 | `session` | `false` | `true` resumes this prompt's earlier conversation on the task. |
 | `slot` | `true` | Whether the step takes one of the profile's slots. A model's own `slots` applies either way. |
 | `gate` | none | `on_pass` holds the step's pass, `on_fail` holds its fail and `always` holds either, on `paused` until `spoolway resume`. Agent steps only. Absent holds nothing. See [Gates](#gates). |

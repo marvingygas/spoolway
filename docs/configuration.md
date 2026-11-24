@@ -379,6 +379,8 @@ steps:
     model: claude-opus-5
 ```
 
+A pipeline patch may also set `description`, `task_template` and `add_dirs` above `steps:`.
+
 One override is one step's whole entry: every key it sets on that step id. An entry is stale
 when it sets `id:`, names a step the pipeline no longer has, or leaves the step invalid once
 merged, for example a step that already runs a command and gets `agent:` added on top. A

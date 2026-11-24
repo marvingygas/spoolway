@@ -164,8 +164,10 @@ extra workspace directories with `--add-dir`. The plans folder lets the lane rea
 page and mockups its task links to. `bypassPermissions` is not the default mode, because many
 organisations disable it.
 
-Every `claude` lane also gets the folders named in `dispatch.add_dirs`, one `--add-dir` each,
-after these. See [`dispatch`](configuration.md#dispatch--the-run-loop).
+Every `claude` lane also gets the folders named in `dispatch.add_dirs`, then those named in its
+pipeline's `add_dirs:`, then those named in its step's `add_dirs:`, one `--add-dir` each,
+after these. See [`dispatch`](configuration.md#dispatch--the-run-loop) and the
+[per-pipeline](pipelines.md#per-pipeline-keys) and [per-step](pipelines.md#per-step-keys) keys.
 
 ### Codex lanes
 
@@ -177,7 +179,8 @@ the lane run `git add` and `git commit` in a linked worktree. In a checkout that
 linked worktree, it is the same path as the shared `.git`. The plans folder lets the lane read
 the plan page and mockups its task links to.
 
-Every `codex` lane also gets the folders named in `dispatch.add_dirs`, one `--add-dir` each,
+Every `codex` lane also gets the folders named in `dispatch.add_dirs`, then those named in its
+pipeline's `add_dirs:`, then those named in its step's `add_dirs:`, one `--add-dir` each,
 after these. A `pi` lane gets none, because `pi` has no such flag.
 
 ### Leaving a pane without closing it
