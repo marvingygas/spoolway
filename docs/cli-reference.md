@@ -153,24 +153,24 @@ The work that can show it is:
 
 | Tab | Keys |
 |---|---|
-| Dispatch | `enter` and the stop answers, and the board's `o`, `r` and `k` with every answer in their menus and confirms |
-| Queue and routines | `enter`, every item in the options menu, every save in a picker, the second stage of a trial, save as routine, every delete confirm, the routines tab's `o`, and the new-job save |
+| Dispatch | `enter` and the stop answers, `u`, and the board's `o`, `r` and `k` with every answer in their menus and confirms |
+| Queue and routines | `enter`, the issue question's `enter`, every item in the options menu, every save in a picker, the second stage of a trial, save as routine, every delete confirm, the routines tab's `o`, and the new-job save |
 | Overrides | `w`, saving a set value, delete, copying a prompt, saving a pipeline value, and every action in the layer menu: edit, promote, delete and set |
-| Eval | `e` |
+| Eval | Opening the tab, `r`, the filter panel's `enter`, and `e` |
 | Any tab | A switch to another tab |
 
 Moving the cursor, `esc`, `f`, typing in a field, filter or search, and moves inside a picker
-never show it. The eval tab's `r` and filter show their `loading…` box and no spool. `u` on the
-dispatch tab shows its `updating` pop-up and no spool. The issue question's `enter` shows its
-progress bar and no spool. A picker that lists branches first, such as edit lands in, draws only
-after the spool has gone. On a tab switch, the spool stays over the tab being left until the
-next tab draws its first frame. It sits on a blank patch eight columns by five rows in
-the middle of the tab, and the rest of the tab is drawn dim behind it. It switches between the
-mark's two frames every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work
-ends sooner. Work that ends within 200 ms draws nothing. A pane too small for the patch draws no
-spool. When the spool has shown, every key typed while the work ran is thrown away when the work
-ends, so a second `enter` does not land on the screen that follows. When it never showed, typed
-keys are kept.
+never show it. A picker that lists branches first, such as edit lands in, draws only after the
+spool has gone. On a tab switch, the spool stays over the tab being left until the next tab
+draws its first frame. It sits on a blank patch eight columns by five rows in the middle of the
+tab, and the rest of the tab is drawn dim behind it. It switches between the mark's two frames
+every 250 ms. Once it shows, it stays up for at least 250 ms, even when the work ends sooner.
+Work that ends within 200 ms draws nothing. A pane too small for the patch draws no spool.
+
+When a spool has shown, every key typed while the work ran is thrown away when the work ends, so
+a second `enter` does not land on the screen that follows. When it never showed, typed keys are
+kept. The exception is the eval tab's read of the ledger. It keeps reading keys while its spool
+turns, so a tab's digit and `q` act at once.
 
 The screen checks for changes once a second. The queue tab reads the pending and queue files again, and asks git for the branch, only when a file or the checkout's `HEAD` has changed. The dispatch tab redraws when its board reads a new snapshot, and otherwise waits for the next second or a key.
 
@@ -402,10 +402,9 @@ When no group has a task without a `ticket:`, no popup opens. With
 screen or the routines tab: `enter` opens every group's tickets with no question.
 `tracking: off` and `spoolway queue add --no-tracking` still leave a group untracked. See
 [`[issue_tracking]`](configuration.md#issue_tracking--a-hook-fired-on-task-events).
-While the hook runs, an `issue tracking` popup shows one line, `progress: ` followed by a
-44-cell bar. A `█` marks a finished call and a `░` a cell still to fill. The bar starts empty
-and fills by one call's share each time a call returns. Its total counts the tasks the hook is called for, so a ticked group's tasks are
-not in it. The `queued` popup then opens on `hook executed successfully`, followed by
+While the hook runs, the question closes and the loading spool turns over the tab beneath it.
+Every key typed while it runs is thrown away when it returns, even when the spool never showed.
+The `queued` popup then opens on `hook executed successfully`, followed by
 `queued <n> tasks`, every queued id and the dispatcher line. Like any clean `queued` popup, it
 closes on its own after 2 seconds, and keys reach the screen beneath it. When every group was ticked, the hook is never called and the popup has no success line.
 Queueing a routine from the routines tab asks the same question and shows the same popups. A

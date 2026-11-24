@@ -1805,10 +1805,10 @@ mod tests {
     // its one-column indent ahead of the strip's bold: at 60 columns the
     // overrides label sits on the strip's second row, and the walk still
     // names the tab it reached rather than its fallback. The eval tab is
-    // left out: it opens under its own loading box, and a strip is dimmed
-    // whole behind a popup — see [`crate::screen::dim`] — so the frame that
-    // reaches it lights no tab. The test above reads the eval label at the
-    // end of a second row.
+    // left out: a load running past the spool's delay turns the spool over
+    // it, which dims the strip whole — see [`crate::screen::dim`] — so the
+    // frame that reaches it may light no tab. The test above reads the eval
+    // label at the end of a second row.
     #[test]
     fn a_walk_names_the_tab_a_narrow_host_frame_shows() {
         let (repo, _root_guard) = crate::status::testutil::fixture("shell-walk-narrow-strip");

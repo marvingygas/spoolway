@@ -354,7 +354,7 @@ screen_press 5   # eval
 # settle below. Judged from the frame on screen, not by counting frames: a tab
 # that redraws on a slow runner made three frames come before Eval's, and the
 # check then left Eval mid-load. A frame is read whole only once it holds the
-# frame writer's end code, so a frame cut short before its popup is drawn is
+# frame writer's end code, so a frame cut short before its key line is drawn is
 # never taken for a load that has ended.
 eval_frame() { # prints the frame on screen when it is a whole Eval frame
   local frame
@@ -362,10 +362,12 @@ eval_frame() { # prints the frame on screen when it is a whole Eval frame
   case "$frame" in *'─ [eval]'*$'\x1b[?2026l'*) printf '%s' "$frame" ;; *) return 1 ;; esac
 }
 eval_opened() { eval_frame > /dev/null; }
+# While the load runs, under the spool or before it shows, the key line reads
+# `[q] quit` alone; once the table is up it names `[r] refresh` too.
 eval_loaded() {
   local frame
   frame=$(eval_frame) || return 1
-  case "$frame" in *'loading…'*) return 1 ;; esac
+  case "$frame" in *'[r] refresh'*) ;; *) return 1 ;; esac
 }
 settled=0
 if ! poll_until 60 eval_opened; then

@@ -21,6 +21,12 @@
 //! whose first write stops and joins the drawing thread before anything of
 //! the work's reaches the screen. The rule above holds there too: one writer
 //! at a time, and the spool gone before the work's own frame.
+//!
+//! The eval tab's load turns the spool with neither. That load already runs
+//! on a thread of its own while the tab's loop reads a tab's digit and `q`,
+//! so the loop draws each frame itself between key reads, laid down by
+//! [`spool_frame`] on the clock [`frame_at`], [`until_change`] and
+//! [`hold_left`] keep for every wait here.
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -100,14 +106,11 @@ fn white(patch: &[String], i: usize) -> Vec<Option<&'static str>> {
 /// it, since the patch is never laid over the first row: a pane that small
 /// has nowhere to put the whole spool, so it draws none, and the next normal
 /// frame is drawn at whatever size the pane is by then.
-fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
-    let width = last
-        .iter()
-        .map(|row| crate::status::strip_ansi(row).chars().count())
-        .max()?;
-    if width < PATCH_WIDTH || last.len() < PATCH_HEIGHT + 1 {
+pub(crate) fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
+    if !fits(last) {
         return None;
     }
+    let width = widest(last);
     let mut rows = last.to_vec();
     super::dim(&mut rows);
     for row in &mut rows {
@@ -117,16 +120,32 @@ fn spool_frame(last: &[String], frame: usize) -> Option<Vec<String>> {
     Some(rows)
 }
 
+/// Whether [`spool_frame`] has room to lay the spool over `rows`: they are
+/// at least as wide as the patch, and a row taller than it. The rows it
+/// answers keep their size, so this reads the same of them.
+pub(crate) fn fits(rows: &[String]) -> bool {
+    widest(rows) >= PATCH_WIDTH && rows.len() > PATCH_HEIGHT
+}
+
+/// The widest of `rows`, as the terminal shows it.
+fn widest(rows: &[String]) -> usize {
+    rows.iter()
+        .map(|row| crate::status::strip_ansi(row).chars().count())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Which of the mark's two frames shows `elapsed` into the work: `None`
 /// before [`DELAY`], then frame 0 and frame 1 in turn, [`FLIP`] each.
-fn frame_at(elapsed: Duration) -> Option<usize> {
+pub(crate) fn frame_at(elapsed: Duration) -> Option<usize> {
     let up = elapsed.checked_sub(DELAY)?;
     Some((up.as_nanos() / FLIP.as_nanos() % 2) as usize)
 }
 
 /// How long after `elapsed` [`frame_at`] next changes its answer — what the
-/// drawing thread waits for a stop for before it draws again.
-fn until_change(elapsed: Duration) -> Duration {
+/// drawing thread waits for a stop for before it draws again, and what the
+/// eval tab waits for a key for while its load runs.
+pub(crate) fn until_change(elapsed: Duration) -> Duration {
     match elapsed.checked_sub(DELAY) {
         None => DELAY - elapsed,
         Some(up) => FLIP - Duration::from_nanos((up.as_nanos() % FLIP.as_nanos()) as u64),
@@ -135,7 +154,7 @@ fn until_change(elapsed: Duration) -> Duration {
 
 /// How much longer the spool stays up once the work ended at `ended`, having
 /// first shown at `shown` — both measured from the work's start.
-fn hold_left(shown: Duration, ended: Duration) -> Duration {
+pub(crate) fn hold_left(shown: Duration, ended: Duration) -> Duration {
     (shown + HOLD).saturating_sub(ended)
 }
 
@@ -190,11 +209,12 @@ fn turn(
 ///
 /// The spool shows only once `work` has run for [`DELAY`]; until then, and
 /// for a key that never takes that long, nothing is drawn. Once it has
-/// shown, every key typed during the work is thrown away when it ends, the
-/// way the issue-hook progress pop-up already throws them away: a person who
-/// pressed `enter` again because nothing seemed to happen meant it for this
-/// screen, not for whatever the work hands back. A spool that never showed
-/// leaves typed keys exactly where they were.
+/// shown, every key typed during the work is thrown away when it ends: a
+/// person who pressed `enter` again because nothing seemed to happen meant
+/// it for this screen, not for whatever the work hands back. A spool that
+/// never showed leaves typed keys exactly where they were; a caller that
+/// wants them gone either way, as the queue screen's issue question does,
+/// throws them away itself once this returns.
 ///
 /// `work` must not write to the terminal itself — it is handed neither
 /// `writer` nor `out`, which belong to the drawing thread until it returns.

@@ -3077,10 +3077,10 @@ fn open_and_prefix_waiting(
 
 /// Where [`open_tickets`] reports each ticket as the hook answers it. A
 /// caller with no screen prints the rows under its own command line —
-/// [`PrintedTickets`]; the queue screen draws a popup over its tab instead,
-/// counting the hook's calls and leaving the rows off — see [`PopupHook`] —
-/// since a row printed under a drawn frame lands where no frame is and is
-/// cleared by the next draw.
+/// [`PrintedTickets`]; the queue screen runs the hook under the loading
+/// spool instead, counting the hook's calls and leaving the rows off — see
+/// [`PopupHook`] — since a row printed under a drawn frame lands where no
+/// frame is and is cleared by the next draw.
 pub(crate) trait TicketLog {
     /// `group`'s tickets are about to be opened.
     fn group(&mut self, group: &str);
@@ -5916,15 +5916,14 @@ fn issue_question_panel(
     panel("issue tracking", &body, &fit_keys(keys(ISSUE_KEYS), width))
 }
 
-/// How wide [`issue_body`] holds the issue popups' text: room for the
-/// progress line and a queued task id of some length, so the running and
-/// result popups share one width for most batches.
+/// How wide [`issue_body`] holds the result popups' text: room for a
+/// queued task id of some length, so the `queued` popup keeps one width for
+/// most batches.
 const ISSUE_BODY_WIDTH: usize = 54;
 
-/// A body for one of the issue popups — the hook running, what was queued
-/// — opening on a blank row [`ISSUE_BODY_WIDTH`] wide. The two follow one
-/// another over the same spot, and holding them to one width keeps the box
-/// from jumping as the second replaces the first.
+/// A body for one of the result popups — what was queued, or what was not
+/// — opening on a blank row [`ISSUE_BODY_WIDTH`] wide, so the box keeps
+/// one width whichever of them a batch ends on.
 fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut body = vec![" ".repeat(ISSUE_BODY_WIDTH)];
     body.extend(lines);
@@ -5940,8 +5939,8 @@ fn issue_body(lines: impl IntoIterator<Item = String>) -> Vec<String> {
 ///
 /// The key is read here and nowhere else. `None` is the same answer as
 /// `enter` with nothing ticked, so both submits go on to the group
-/// description check, the progress popup and the `queued` popup unchanged,
-/// opening every group's tickets.
+/// description check, the hook under the loading spool and the `queued`
+/// popup unchanged, opening every group's tickets.
 ///
 /// One row per group with at least one task naming no `ticket:`, in batch
 /// order, counting every task of that group the batch queues. A group whose
@@ -5980,43 +5979,22 @@ fn issue_question(repo: &Repo, tracking: &Tracking, tasks: &[Task], then: Resume
     })
 }
 
-/// [`TicketLog`] for the queue screen: while the hook runs, an `issue
-/// tracking` popup with a progress bar of the calls that have returned, and
-/// `redraw` lays it over the tab again straight away — the hook runs on the
-/// screen's own thread, so nothing else draws until it returns. What the
+/// [`TicketLog`] for the queue screen, which draws nothing while the hook
+/// runs: the hook runs under the loading spool, which owns the terminal
+/// until it returns — see [`crate::screen::spool::under_spool`]. It only
+/// counts the calls, for the `queued` popup to say the hook ran. What the
 /// hook answers is left off: a hook may open no issue at all, or talk to a
 /// tracker whose words are not these, so the screen claims only that it ran
 /// — see [`queued_panel`].
-struct PopupHook<'a> {
+struct PopupHook {
     /// How many calls the hook has been handed so far, the one running
     /// included.
     called: usize,
-    /// How many of those calls have returned an answer.
-    finished: usize,
-    /// The tasks the hook is called for at all: every one that neither
-    /// opts out — a ticked group's tasks among them — nor already names its
-    /// `ticket:`, which [`open_tickets`] reports `kept` without a call.
-    total: usize,
-    redraw: &'a mut dyn FnMut(&[String]),
 }
 
-/// Cells in the progress bar. With the `progress: ` label, it fills the
-/// [`ISSUE_BODY_WIDTH`] row exactly, so the box keeps the width of the
-/// popups it is swapped with.
-const PROGRESS_BAR_CELLS: usize = 44;
-
-impl<'a> PopupHook<'a> {
-    fn new(tasks: &[Task], redraw: &'a mut dyn FnMut(&[String])) -> PopupHook<'a> {
-        let total = tasks
-            .iter()
-            .filter(|task| !opts_out_of_open(task) && task.extra_str("ticket").is_empty())
-            .count();
-        PopupHook {
-            called: 0,
-            finished: 0,
-            total,
-            redraw,
-        }
+impl PopupHook {
+    fn new() -> PopupHook {
+        PopupHook { called: 0 }
     }
 
     /// Whether the hook was called at all. A batch where every group was
@@ -6025,55 +6003,21 @@ impl<'a> PopupHook<'a> {
     fn ran(&self) -> bool {
         self.called > 0
     }
-
-    /// The popup while the hook is still answering.
-    fn panel(&self) -> Vec<String> {
-        // `total` is zero only when the hook is never called, and then no
-        // panel is drawn; the guard keeps a zero total from dividing by
-        // zero. The clamp keeps `PROGRESS_BAR_CELLS - filled` below from
-        // underflowing if a row is ever counted twice.
-        let filled = (self.finished * PROGRESS_BAR_CELLS)
-            .checked_div(self.total)
-            .unwrap_or(0)
-            .min(PROGRESS_BAR_CELLS);
-        crate::screen::boxed(
-            "issue tracking",
-            &issue_body([format!(
-                "progress: {}{}",
-                "█".repeat(filled),
-                "░".repeat(PROGRESS_BAR_CELLS - filled)
-            )]),
-        )
-    }
-
-    fn redraw_panel(&mut self) {
-        let panel = self.panel();
-        (self.redraw)(&panel);
-    }
 }
 
-impl TicketLog for PopupHook<'_> {
+impl TicketLog for PopupHook {
     fn group(&mut self, _group: &str) {}
 
     fn waiting(&mut self, _id: &str) {
         self.called += 1;
-        self.redraw_panel();
     }
 
-    /// Only a `task issue` row marked `created` is a call that returned: a
-    /// `group issue` row comes from the same answer as its task's row, so
-    /// counting it would run the bar ahead; `kept` was never called; and
-    /// `FAILED` stops the batch.
-    fn row(&mut self, kind: &str, status: &str, _ticket: &str, _name: &str) {
-        if kind == "task issue" && status == "created" {
-            self.finished += 1;
-            self.redraw_panel();
-        }
-    }
+    /// Left off: no row is drawn while the hook runs, and the `queued`
+    /// popup lists no ticket — see [`queued_panel`].
+    fn row(&mut self, _kind: &str, _status: &str, _ticket: &str, _name: &str) {}
 
-    /// Left off the popup too: the names-prefixed line comes after
-    /// [`TicketLog::done`], once the popup is about to be replaced, and the
-    /// prefix itself is on every queued name the result lists.
+    /// Left off too, and the prefix itself is on every queued name the
+    /// result lists.
     fn note(&mut self, _line: &str) {}
 
     fn done(&mut self) {}
@@ -7082,14 +7026,7 @@ fn run_screen_from(
                     // Under the loading spool, as the `enter` that opened
                     // the gate was: this runs the same checks and writes.
                     state.mode = crate::screen::spool::under_spool(writer, out, input, || {
-                        let mode = resume(
-                            &at,
-                            &then,
-                            Tracking::Off,
-                            &mut groups,
-                            &mut state,
-                            &mut |_| {},
-                        );
+                        let mode = resume(&at, &then, Tracking::Off, &mut groups, &mut state);
                         read_jobs_for(repo, &mode, &mut state);
                         mode
                     });
@@ -7104,12 +7041,17 @@ fn run_screen_from(
             },
             Mode::IssueQuestion { then, checklist } => match key {
                 // The hook runs here, on this thread, for every group left
-                // unticked, and the tab under the question is held as it
-                // stands while it does — the `issue tracking` progress popup
-                // is laid over that frame as each call starts and returns.
+                // unticked, under the loading spool. The question is taken
+                // down first: the spool is laid over the last frame written,
+                // and without the bare tab written here that frame would
+                // still carry the question.
                 // Whatever was typed while the hook ran is thrown away once it
-                // returns: the result popup takes `enter` only once it is on
-                // screen, never an `enter` pressed while the hook was running.
+                // returns, even when the spool never showed, which
+                // `under_spool` alone would leave in place: the result popup
+                // takes `enter` only once it is on screen, never an `enter`
+                // pressed while the hook was running.
+                // The job stores are read under the spool too, for a result
+                // over the routines pane, as every other spooled key does.
                 Key::Enter => {
                     let then = then.clone();
                     let tracking = Tracking::Open(checklist.ticked.clone());
@@ -7120,9 +7062,12 @@ fn run_screen_from(
                         base: &base,
                         routines: &routines,
                     };
-                    let held = Held::new(&groups, &panes, &state);
-                    let mut redraw = |panel: &[String]| held.draw(panel, writer, out);
-                    state.mode = resume(&at, &then, tracking, &mut groups, &mut state, &mut redraw);
+                    draw_bare(&groups, &panes, &state, writer, out);
+                    state.mode = crate::screen::spool::under_spool(writer, out, input, || {
+                        let mode = resume(&at, &then, tracking, &mut groups, &mut state);
+                        read_jobs_for(repo, &mode, &mut state);
+                        mode
+                    });
                     known_reading = known_reading.max(reader.started_count());
                     input.discard_typed();
                 }
@@ -7204,7 +7149,6 @@ fn run_screen_from(
                             &routines,
                             &nav,
                             Tracking::Ask,
-                            &mut |_| {},
                         );
                         read_jobs_for(repo, &mode, &mut state);
                         mode
@@ -7503,7 +7447,6 @@ fn run_screen_from(
                             &mut groups,
                             &mut state,
                             Tracking::Ask,
-                            &mut |_| {},
                         )
                     });
                     state.mode = mode;
@@ -7535,7 +7478,6 @@ fn resume(
     tracking: Tracking,
     groups: &mut Vec<Group>,
     state: &mut ScreenState,
-    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let Submitting {
         repo,
@@ -7544,45 +7486,30 @@ fn resume(
         routines,
     } = *at;
     match then {
-        Resume::Selection => {
-            begin_submission(repo, pipelines, base, groups, state, tracking, redraw)
-        }
+        Resume::Selection => begin_submission(repo, pipelines, base, groups, state, tracking),
         Resume::Routines(nav) => {
-            begin_routine_queue(repo, pipelines, base, routines, nav, tracking, redraw)
+            begin_routine_queue(repo, pipelines, base, routines, nav, tracking)
         }
     }
 }
 
-/// The tab as it stood when the issue question was answered, with no popup
-/// on it — what the `issue tracking` progress popup is laid over while the
-/// hook runs.
-/// Rendered once and owned, so drawing it again borrows nothing the submit
-/// itself is busy changing.
-struct Held {
-    frame: Vec<String>,
-    footer: String,
-}
-
-impl Held {
-    fn new(groups: &[Group], panes: &Panes, state: &ScreenState) -> Held {
-        let footer = screen_footer(groups, panes, state);
-        Held {
-            frame: beneath(groups, panes, state, &footer),
-            footer,
-        }
-    }
-
-    /// The held tab with `panel` over it, written the way [`draw`] writes
-    /// any frame.
-    fn draw(
-        &self,
-        panel: &[String],
-        writer: &mut crate::screen::frame_writer::FrameWriter,
-        out: &mut impl std::io::Write,
-    ) {
-        let frame = compose(self.frame.clone(), Some(panel), self.footer.clone());
-        paint(frame, writer, out);
-    }
+/// The tab as it stands under the issue question, with no popup on it and
+/// drawn bright: the frame the loading spool is laid over while the hook
+/// runs, so the question is gone before the spool shows.
+///
+/// Drawn from the mode still holding the question, so [`beneath`] picks the
+/// routines pane when the question came from there, and the key line is the
+/// one that pane or the pending screen shows under it.
+fn draw_bare(
+    groups: &[Group],
+    panes: &Panes,
+    state: &ScreenState,
+    writer: &mut crate::screen::frame_writer::FrameWriter,
+    out: &mut impl std::io::Write,
+) {
+    let footer = screen_footer(groups, panes, state);
+    let frame = beneath(groups, panes, state, &footer);
+    paint(compose(frame, None, footer), writer, out);
 }
 
 fn clamp_cursors(groups: &[Group], state: &mut ScreenState) {
@@ -11275,7 +11202,7 @@ fn draw(
 
 /// Write `frame` through `writer`, which paints only when it differs from
 /// the last frame written — [`draw`]'s own write, shared with
-/// [`Held::draw`].
+/// [`draw_bare`].
 fn paint(
     frame: Vec<String>,
     writer: &mut crate::screen::frame_writer::FrameWriter,
@@ -11781,9 +11708,6 @@ fn handle_trial_key(pipelines: &Pipelines, mut trial: TrialState, key: Key) -> M
 /// Takes `state` mutably rather than by reference: `selected_tasks` reads
 /// it to build the batch, and a landed write clears its selection and gates
 /// right here, before the caller ever sees the resulting mode.
-///
-/// `redraw` lays the `issue tracking` progress popup over the tab as each call
-/// to the hook starts and returns — see [`PopupHook`].
 fn begin_submission(
     repo: &Repo,
     pipelines: &Pipelines,
@@ -11791,7 +11715,6 @@ fn begin_submission(
     groups: &mut Vec<Group>,
     state: &mut ScreenState,
     tracking: Tracking,
-    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let tasks = selected_tasks(groups, state);
     let mut asks = OriginAsks::default();
@@ -11831,7 +11754,7 @@ fn begin_submission(
         return outcome("submission refused", format!("{err:#}"));
     }
     let ids: Vec<String> = pending.iter().map(|task| task.id().to_string()).collect();
-    let mut hook = PopupHook::new(&pending, redraw);
+    let mut hook = PopupHook::new();
     let selected = state.selected.clone();
     let left_out: Vec<String> = not_queued.iter().map(|n| n.id.clone()).collect();
     let submit = Submit {
@@ -13664,7 +13587,6 @@ fn begin_routine_queue(
     routines: &[RoutineFolder],
     nav: &RoutineNav,
     tracking: Tracking,
-    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     // A ticked folder holding a file that will not parse is refused whole,
     // before anything is minted: the batch would otherwise queue without a
@@ -13698,15 +13620,7 @@ fn begin_routine_queue(
         return Mode::Routines(nav.clone());
     }
     let task_files = readable_task_files(&batch.0);
-    finish_routine_mode(
-        repo,
-        pipelines,
-        base,
-        (&batch, &task_files),
-        nav,
-        tracking,
-        redraw,
-    )
+    finish_routine_mode(repo, pipelines, base, (&batch, &task_files), nav, tracking)
 }
 
 /// The end of [`begin_routine_queue`]: validate `batch` — the tasks with
@@ -13724,7 +13638,6 @@ fn finish_routine_mode(
     batch: (&RoutineBatch, &[String]),
     nav: &RoutineNav,
     tracking: Tracking,
-    redraw: &mut dyn FnMut(&[String]),
 ) -> Mode {
     let ((tasks, names), task_files) = batch;
     let mut asks = OriginAsks::default();
@@ -13752,7 +13665,7 @@ fn finish_routine_mode(
         .iter()
         .map(|task| task.display_name().to_string())
         .collect();
-    let mut hook = PopupHook::new(&tasks, redraw);
+    let mut hook = PopupHook::new();
     let tracking_off = tracking == Tracking::Off;
     match finish_routine(
         repo,
@@ -21485,7 +21398,6 @@ mod tests {
             &mut groups,
             &mut state,
             Tracking::Ask,
-            &mut |_| {},
         );
         let Mode::Queued { panel, .. } = outcome else {
             panic!("expected the queued popup, got {outcome:?}");
@@ -21546,7 +21458,6 @@ mod tests {
             &mut groups,
             &mut state,
             Tracking::Ask,
-            &mut |_| {},
         );
         assert!(matches!(outcome, Mode::Queued { .. }), "{outcome:?}");
         assert!(!first.exists() && second.exists());
@@ -22109,7 +22020,6 @@ mod tests {
             &mut groups,
             &mut state,
             Tracking::Ask,
-            &mut |_| {},
         );
         assert!(
             matches!(outcome, Mode::Queued { .. }),
@@ -30590,7 +30500,6 @@ mod tests {
                 &mut groups,
                 &mut state,
                 Tracking::Open(BTreeSet::new()),
-                &mut |_| {},
             );
             assert!(matches!(outcome, Mode::Queued { .. }), "{outcome:?}");
 
@@ -31036,14 +30945,14 @@ group_description: search
                     .collect()
             }
 
-            /// The progress row of a popup drawn with `filled` of the bar's
-            /// 44 cells full.
-            fn bar(filled: usize) -> String {
-                format!(
-                    "progress: {}{}",
-                    "█".repeat(filled),
-                    "░".repeat(44 - filled)
-                )
+            /// That nothing in `drawn` is a progress bar: no `progress: `
+            /// label anywhere, and no `█` or `░` cell on any frame but the
+            /// spool's, whose mark is drawn in the same `█`.
+            fn assert_no_bar(drawn: &str) {
+                assert!(!drawn.contains("progress: "), "{drawn}");
+                for frame in crate::screen::spool::testutil::tab_frames(drawn) {
+                    assert!(!frame.contains(['█', '░']), "{frame}");
+                }
             }
 
             fn hook_calls(repo: &Repo) -> Vec<String> {
@@ -31054,19 +30963,301 @@ group_description: search
                     .collect()
             }
 
-            /// The `issue tracking` progress popups in `drawn`, in the order
-            /// they were drawn, each cut down to its rows by [`popup_rows`].
-            /// The question carries the same title, so a frame counts only
-            /// when it holds the bar's `progress: ` label.
-            fn running_popups(drawn: &str) -> Vec<Vec<String>> {
-                drawn
-                    .split("\x1b[?2026h\x1b[H")
-                    .filter(|frame| {
-                        frame.contains(&format!("{TOP_LEFT}─ issue tracking "))
-                            && frame.contains("progress: ")
-                    })
-                    .map(|frame| popup_rows(frame, "issue tracking"))
-                    .collect()
+            /// A keyboard holding a script, which throws away whatever of it
+            /// is still unread when asked to throw typed keys away, as a
+            /// terminal's flush does, and keeps what it threw for the test
+            /// to read. The in-memory keyboard keeps every byte instead.
+            ///
+            /// `on_flush` runs at the first throw, for a test that needs
+            /// something done once the work under the spool has returned and
+            /// before the screen's next pass.
+            struct Flushed {
+                keys: std::io::Cursor<Vec<u8>>,
+                thrown: Vec<u8>,
+                on_flush: Option<Box<dyn FnOnce()>>,
+            }
+
+            impl Flushed {
+                fn new(script: &str) -> Flushed {
+                    Flushed {
+                        keys: keys(script),
+                        thrown: Vec::new(),
+                        on_flush: None,
+                    }
+                }
+            }
+
+            impl std::io::Read for Flushed {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                    self.keys.read(buf)
+                }
+            }
+
+            impl crate::screen::PollableRead for Flushed {
+                fn byte_pending(&self, _: std::time::Duration) -> bool {
+                    true
+                }
+
+                fn discard_typed(&mut self) {
+                    std::io::Read::read_to_end(&mut self.keys, &mut self.thrown).unwrap();
+                    if let Some(on_flush) = self.on_flush.take() {
+                        on_flush();
+                    }
+                }
+            }
+
+            /// The screen state with the issue question open over `cart`'s
+            /// two tasks on the pending screen, as the first `enter` leaves
+            /// it — so the question's own `enter` is the first key, and the
+            /// first work put under the spool, of a screen started on it.
+            fn asking(repo: &Repo) -> (Vec<Group>, ScreenState) {
+                let mut groups = listed(repo);
+                let mut state = ScreenState::new();
+                handle_browse_key(&groups, &mut state, Key::Char(' '));
+                let base = crate::repo::branch_at(&repo.root).unwrap();
+                let mode = begin_submission(
+                    repo,
+                    &Pipelines::builtin(),
+                    &base,
+                    &mut groups,
+                    &mut state,
+                    Tracking::Ask,
+                );
+                assert!(matches!(mode, Mode::IssueQuestion { .. }), "{mode:?}");
+                state.mode = mode;
+                (groups, state)
+            }
+
+            /// The frame the spool was first laid over in `drawn`, the one
+            /// written just before it, and that first spool frame, each as
+            /// it reads with its codes left in. `None` when no spool shows.
+            fn under_and_spool(drawn: &str) -> Option<(&str, &str)> {
+                let tabs = crate::screen::spool::testutil::tab_frames(drawn);
+                let frames: Vec<&str> = drawn.split("\x1b[?2026h\x1b[H").skip(1).collect();
+                let first = frames.iter().position(|frame| !tabs.contains(frame))?;
+                Some((frames[first.checked_sub(1)?], frames[first]))
+            }
+
+            /// `enter` on the question takes it down and runs the hook under
+            /// the loading spool: held back until the spool has drawn, the
+            /// spool turns over the bare, dimmed tab with no question on it,
+            /// draws no progress bar, and the `queued` popup then says the
+            /// hook ran. Drawn over the last frame as it stood, the spool
+            /// would carry the question.
+            #[test]
+            fn enter_on_the_question_turns_the_spool_over_the_bare_tab() {
+                use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
+
+                let (repo, _root_guard) = cart("issue-question-spool");
+                let (groups, state) = asking(&repo);
+                let (mut out, seen) = watched();
+                hold_next_work(move || {
+                    assert!(seen.recv_timeout(BACKSTOP).is_ok(), "no spool");
+                });
+                let mut input = Flushed::new("\r\r");
+
+                run_screen_from(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &repo.root,
+                    (groups, Vec::new()),
+                    state,
+                    &mut crate::screen::frame_writer::FrameWriter::new(),
+                    &mut input,
+                    &mut out,
+                )
+                .unwrap();
+
+                assert!(out.drew_spool());
+                let drawn = String::from_utf8_lossy(&out.bytes).into_owned();
+                let (under, spool) = under_and_spool(&drawn).expect("no spool frame");
+                for frame in [under, spool] {
+                    assert!(frame.contains("─ [groups]"), "{frame}");
+                    assert!(!frame.contains("issue tracking"), "{frame}");
+                }
+                let groups_row = spool.lines().find(|l| l.contains("─ [groups]")).unwrap();
+                assert!(
+                    groups_row.contains(crate::status::DIM),
+                    "the tab is dim: {groups_row:?}"
+                );
+                assert_no_bar(&drawn);
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                assert_eq!(
+                    popup_rows(last_frame(&drawn), "queued")[1],
+                    "hook executed successfully"
+                );
+                assert_eq!(input.thrown, b"\r", "the enter typed during the hook");
+            }
+
+            /// The routines tab's question reads the job stores under the
+            /// spool, with the hook, rather than on the pass after it. A job
+            /// written once the work has returned, at the throw of typed keys
+            /// that follows it, is not on the frame that pass draws, which
+            /// draws from the read already made. Read on that pass instead,
+            /// the job shows, as a row for its routine `gone`, which no
+            /// folder holds.
+            #[test]
+            fn a_routines_question_reads_the_job_stores_under_the_spool() {
+                let (repo, _root_guard) = cart("issue-question-routine-jobs");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let routines = super::super::super::routines::list_routines(&repo).unwrap();
+                let mut nav = RoutineNav::new();
+                nav.selected.insert(routines[0].path.clone());
+                let base = crate::repo::branch_at(&repo.root).unwrap();
+                let mut state = ScreenState::new();
+                state.mode = begin_routine_queue(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &base,
+                    &routines,
+                    &nav,
+                    Tracking::Ask,
+                );
+                assert!(
+                    matches!(state.mode, Mode::IssueQuestion { .. }),
+                    "{:?}",
+                    state.mode
+                );
+                let mut input = Flushed::new("\r");
+                let store = repo.clone();
+                input.on_flush = Some(Box::new(move || {
+                    write_job(&store, crate::jobs::Scope::User, "late-job", "gone");
+                }));
+                let mut out = Vec::new();
+
+                run_screen_from(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &repo.root,
+                    (Vec::new(), routines),
+                    state,
+                    &mut crate::screen::frame_writer::FrameWriter::new(),
+                    &mut input,
+                    &mut out,
+                )
+                .unwrap();
+
+                let drawn = String::from_utf8(out).unwrap();
+                let tabs = crate::screen::spool::testutil::tab_frames(&drawn);
+                let after = tabs
+                    .iter()
+                    .find(|frame| frame.contains("hook executed successfully"))
+                    .expect("no queued popup");
+                assert!(after.contains("─ [routines]"), "{after}");
+                // An orphan job's row is named after its routine, the one
+                // part of it the popup leaves uncovered.
+                assert!(!after.contains("gone"), "{after}");
+            }
+
+            /// A key typed while the hook runs is thrown away when it
+            /// returns even when the hook is quicker than the spool's delay,
+            /// which `under_spool` alone would leave where it was. The `enter`
+            /// after the question's is the one typed during the hook.
+            #[test]
+            fn a_key_typed_during_a_quick_hook_is_thrown_away() {
+                let (repo, _root_guard) = cart("issue-question-quick-typed");
+                let (groups, state) = asking(&repo);
+                let mut input = Flushed::new("\r\r");
+                let mut out = Vec::new();
+
+                run_screen_from(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &repo.root,
+                    (groups, Vec::new()),
+                    state,
+                    &mut crate::screen::frame_writer::FrameWriter::new(),
+                    &mut input,
+                    &mut out,
+                )
+                .unwrap();
+
+                assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
+                assert_eq!(input.thrown, b"\r", "the enter typed during the hook");
+            }
+
+            /// The routines tab's question takes the same `enter`: the spool
+            /// turns over the bare routines pane, and the `queued` popup says
+            /// the hook ran.
+            #[test]
+            fn enter_on_a_routines_question_turns_the_spool_over_the_pane() {
+                use crate::screen::spool::testutil::{BACKSTOP, hold_next_work, watched};
+
+                let (repo, _root_guard) = cart("issue-question-routine-spool");
+                write_routine(
+                    &repo,
+                    "nightly",
+                    "audit",
+                    &task_text(
+                        "audit",
+                        "group: nightly
+group_description: audit
+",
+                        BODY,
+                    ),
+                );
+                let routines = super::super::super::routines::list_routines(&repo).unwrap();
+                let mut nav = RoutineNav::new();
+                nav.selected.insert(routines[0].path.clone());
+                let base = crate::repo::branch_at(&repo.root).unwrap();
+                let mut state = ScreenState::new();
+                state.mode = begin_routine_queue(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &base,
+                    &routines,
+                    &nav,
+                    Tracking::Ask,
+                );
+                assert!(
+                    matches!(state.mode, Mode::IssueQuestion { .. }),
+                    "{:?}",
+                    state.mode
+                );
+                let (mut out, seen) = watched();
+                hold_next_work(move || {
+                    assert!(seen.recv_timeout(BACKSTOP).is_ok(), "no spool");
+                });
+
+                run_screen_from(
+                    &repo,
+                    &Pipelines::builtin(),
+                    &repo.root,
+                    (Vec::new(), routines),
+                    state,
+                    &mut crate::screen::frame_writer::FrameWriter::new(),
+                    &mut Flushed::new("\r"),
+                    &mut out,
+                )
+                .unwrap();
+
+                let drawn = String::from_utf8_lossy(&out.bytes).into_owned();
+                let (under, spool) = under_and_spool(&drawn).expect("no spool frame");
+                for frame in [under, spool] {
+                    assert!(frame.contains("─ [routines]"), "{frame}");
+                    assert!(!frame.contains("issue tracking"), "{frame}");
+                }
+                assert_no_bar(&drawn);
+                assert_eq!(
+                    hook_calls(&repo).len(),
+                    1,
+                    "one call for the routine's task"
+                );
+                assert_eq!(
+                    popup_rows(last_frame(&drawn), "queued")[1],
+                    "hook executed successfully"
+                );
             }
 
             /// `enter` stops at the question before the hook runs: a
@@ -31250,12 +31441,7 @@ ticket: \"#9\"
                 let keys = format!(" \x1b[B \r{} \r", to_search(&repo));
                 let drawn = screen(&repo, listed(&repo), &keys);
                 assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
-                // The ticked group's task is no call the popup counts.
-                assert_eq!(
-                    running_popups(&drawn).last().map(|rows| rows[1].as_str()),
-                    Some(bar(44).as_str()),
-                    "{drawn}"
-                );
+                assert_no_bar(&drawn);
                 let search = queued(&repo, "search-box");
                 assert!(search.tracking_off());
                 assert_eq!(search.extra_str("ticket"), "");
@@ -31346,7 +31532,7 @@ depends_on: [search-old]
                 assert!(task.tracking_off());
                 assert_eq!(queued(&repo, "cart-empty-state").extra_str("ticket"), "");
 
-                assert!(running_popups(&drawn).is_empty(), "{drawn}");
+                assert_no_bar(&drawn);
                 let frame = last_frame(&drawn);
                 assert_eq!(
                     popup_rows(frame, "queued"),
@@ -31376,12 +31562,12 @@ depends_on: [search-old]
                 assert!(frame.contains("[x] cart"), "still selected: {frame}");
             }
 
-            /// `enter` runs the hook and queues. While it runs, the popup
-            /// counts the calls and says nothing else; once it is done it
-            /// says the hook ran above the usual `queued` popup, with no
-            /// ticket row and no key row, since it closes itself.
+            /// `enter` runs the hook and queues. While it runs, no call count
+            /// is drawn; once it is done the screen says the hook ran above
+            /// the usual `queued` popup, with no ticket row and no key row,
+            /// since it closes itself.
             #[test]
-            fn enter_runs_the_hook_counting_tasks_and_queues() {
+            fn enter_runs_the_hook_and_queues() {
                 let (repo, _root_guard) = cart("issue-question-enter");
                 let drawn = screen(&repo, listed(&repo), " \r\r");
                 assert_eq!(hook_calls(&repo), ["cart-empty-state", "cart-totals"]);
@@ -31391,15 +31577,7 @@ depends_on: [search-old]
                 );
                 assert_eq!(queued(&repo, "cart-totals").extra_str("ticket"), "#412");
 
-                assert_eq!(
-                    running_popups(&drawn),
-                    [
-                        ["", bar(0).as_str()],
-                        ["", bar(22).as_str()],
-                        ["", bar(44).as_str()],
-                    ],
-                    "{drawn}"
-                );
+                assert_no_bar(&drawn);
 
                 let frame = last_frame(&drawn);
                 let rows = popup_rows(frame, "queued");
@@ -31450,10 +31628,10 @@ depends_on: [search-old]
             }
 
             /// A task that already names its `ticket:` is `kept` without a
-            /// call, so it is no call returning: the bar stays empty until
-            /// the one task that reaches the hook is answered.
+            /// call: only the other task reaches the hook, and the `queued`
+            /// popup still says it ran.
             #[test]
-            fn a_kept_task_does_not_advance_the_bar() {
+            fn a_kept_task_is_not_handed_to_the_hook() {
                 let (repo, _root_guard) = cart("issue-question-kept");
                 write_pending(
                     &repo,
@@ -31469,19 +31647,18 @@ ticket: \"#9\"
                 );
                 let drawn = screen(&repo, listed(&repo), " \r\r");
                 assert_eq!(hook_calls(&repo), ["cart-totals"]);
+                assert_no_bar(&drawn);
                 assert_eq!(
-                    running_popups(&drawn),
-                    [["", bar(0).as_str()], ["", bar(44).as_str()]],
-                    "{drawn}"
+                    popup_rows(last_frame(&drawn), "queued")[1],
+                    "hook executed successfully"
                 );
             }
 
             /// A hook answering `slug=` with `key_in_names` on prefixes the
             /// names, as the shipped `github.sh` does on every batch — and
             /// the result is still the `queued` popup: no names-prefixed
-            /// note, the box held to the issue popups' width, and the
-            /// `issue tracking` bar filling one call's share as each call
-            /// returns, the epic row counting for nothing.
+            /// note, the box held to the result popups' width, and no
+            /// progress bar while the hook runs.
             #[test]
             fn a_slug_answer_keeps_the_result_to_the_queued_popup() {
                 let (mut repo, _root_guard) = cart("issue-question-slug");
@@ -31499,19 +31676,7 @@ ticket: \"#9\"
                     queued(&repo, "cart-totals").front.group.as_deref(),
                     Some("gh-410-cart")
                 );
-                // The hook answers an epic on the first call; the epic row
-                // is no finished call, so the bar sits at half until the
-                // second call returns.
-                let running = running_popups(&drawn);
-                assert_eq!(
-                    running,
-                    [
-                        ["", bar(0).as_str()],
-                        ["", bar(22).as_str()],
-                        ["", bar(44).as_str()]
-                    ],
-                    "{drawn}"
-                );
+                assert_no_bar(&drawn);
 
                 let frame = last_frame(&drawn);
                 assert!(!frame.contains("names prefixed"), "{frame}");
@@ -31530,7 +31695,7 @@ ticket: \"#9\"
                     .take_while(|c| *c != TOP_RIGHT)
                     .count()
                     + 1;
-                assert_eq!(width, 60, "held to the issue popups' width: {frame}");
+                assert_eq!(width, 60, "held to the result popups' width: {frame}");
             }
 
             /// Queuing a routine asks with the same checklist, over the
@@ -31578,8 +31743,8 @@ group_description: audit
                 let ids = repo.queued_ids();
                 assert_eq!(ids.len(), 1, "{ids:?}");
                 assert!(queued(&repo, ids.first().unwrap()).tracking_off());
-                // No call, so no running popup and no success line.
-                assert!(running_popups(&drawn).is_empty(), "{drawn}");
+                // No call, so no success line.
+                assert_no_bar(&drawn);
                 let frame = last_frame(&drawn);
                 assert_eq!(
                     popup_rows(frame, "queued")[..2],
