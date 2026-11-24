@@ -23,7 +23,7 @@
 #
 # covers: issue_tracking.hook — a bare filename, resolved inside .spoolway/hooks/, fires once per task per event with the full environment set
 # covers: issue_tracking.project_key — opaque, handed to the hook verbatim as SPOOLWAY_PROJECT_KEY
-# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) moves the task to `hook_failed` with the reason `issue_tracking hook exited N`, fires no `paused` event for it, and `queue list --json` names the state `hook_failed`; the task gains a `## Hook error` section holding the run's last output; `spoolway resume --skip-hook` on a failed `done` hook archives the task without running the hook a second time; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a failed `done` hook back to `done` and a failed `queued` hook back to `queued`
+# covers: a non-zero hook exit on `queued` or `done` (and on `started`, unit-tested in `src/dispatch.rs`) moves the task to `hook_failed` with the reason `no output, exit N` when the hook printed nothing, else its first line of output, fires no `paused` event for it, and `queue list --json` names the state `hook_failed`; the task gains a `## Hook error` section holding the run's last output; `spoolway resume --skip-hook` on a failed `done` hook archives the task without running the hook a second time; on `blocked` or `paused` it only records the failure; `spoolway resume` forgets the failed run so the hook fires again, sending a failed `done` hook back to `done` and a failed `queued` hook back to `queued`
 # covers: an `open` hook still running after 60 seconds is stopped and fails `queue add`, all or nothing, naming the limit; `fetch` has the same limit, and `queued`, `started` and `done` hooks are stopped after 10 minutes (unit-tested in `src/dispatch.rs`) and move the task to `hook_failed` with a problem line the dispatcher prints
 # covers: issue_tracking.key_in_names — with it on and the hook answering slug=, `queue add` writes `group: <slug>-<group>` and `branch: task/<slug>-<id>` and stores the hook's url=
 # covers: issue_tracking.ask_to_deactivate — set to false, `enter` on the queue tab draws no `deactivate issue tracking for selected groups:` checklist, the hook opens the group's ticket, and the queued popup opens on `hook executed successfully`
@@ -661,7 +661,8 @@ must "the hook is switched back to the one that only answers open" \
 # ------------------------------------------- a failing hook stops the task
 # A hook that always fails, on each of the four events by hand: a non-zero
 # exit on `queued` or `done` moves the task to `hook_failed`, with the
-# reason keeping only the exit code and the hook's own last output landing
+# reason quoting the hook's first line of output (`no output, exit 1` here)
+# and the hook's own last output landing
 # under the task's `## Hook error` instead, and only records the failure on
 # `blocked` and `paused` — both already stopped for a person, so nothing
 # about stopping them again would mean anything.
@@ -691,10 +692,10 @@ fi
 "$SPOOLWAY" queue list --json > "$LIVE/hook-list.json" 2>&1
 has "queue list --json names the state hook_failed" '"state": "hook_failed"' \
   "$LIVE/hook-list.json"
-has "the reason keeps only the exit code" "issue_tracking hook exited 1" \
+has "the reason says the hook printed nothing" "no output, exit 1" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
-# The old reason began with these same words, so the line above alone would
-# pass against it too; what it no longer carries is the log path.
+# An older reason named a log path under tracking/; the reason is one line of
+# the hook's own words now, and this keeps it from growing one back.
 lacks "and no longer points at a log under tracking/" "see tracking/" \
   "$SPOOLWAY_PROJECT_HOME/queue/hook-queued.md"
 has "the task gains a Hook error section holding the hook's own last output" \
@@ -1067,7 +1068,8 @@ else
 (at \`$(stage_of github-trace)\`)"
 fi
 TRACE_TASK="$SPOOLWAY_PROJECT_HOME/queue/github-trace.md"
-has "the reason keeps only the exit code" "issue_tracking hook exited 1" "$TRACE_TASK"
+has "the reason is the hook's own first line of output" \
+  "hook_error: 'HTTP 403: Resource not accessible by integration'" "$TRACE_TASK"
 lacks "and no longer points at a log under tracking/" "see tracking/" "$TRACE_TASK"
 has "the Hook error section holds the trap's command-failed line" \
   "github.sh: command failed (exit 1)" "$TRACE_TASK"

@@ -15634,7 +15634,7 @@ mod tests {
         add(&repo, "hooked", &[]);
         let mut task = queued(&repo, "hooked");
         task.front.hook_paused = Some(crate::pipeline::QUEUED.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.front.hook_error = Some("error connecting to api.github.com".into());
         task.set_stage_unbanked(crate::pipeline::HOOK_FAILED, "test setup");
         task.save().unwrap();
 
@@ -33399,10 +33399,10 @@ body\n";
         let mut task = queued(&repo, "release");
         task.set_stage(crate::pipeline::DONE, None);
         task.front.hook_paused = Some(crate::pipeline::DONE.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.front.hook_error = Some("error connecting to api.github.com".into());
         task.set_stage(
             crate::pipeline::HOOK_FAILED,
-            Some("issue_tracking hook exited 1"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
 
@@ -33413,7 +33413,7 @@ body\n";
 
         let text = render_route(&route_view(&queued(&repo, "release"), &pipelines, 0).unwrap());
         assert!(
-            text.starts_with("default — hook failed at done: issue_tracking hook exited 1\n"),
+            text.starts_with("default — hook failed at done: error connecting to api.github.com\n"),
             "{text}"
         );
         assert!(!text.contains('▸'), "nothing to mark: {text}");
@@ -33435,14 +33435,14 @@ body\n";
         let mut task = queued(&repo, "release");
         task.set_stage(crate::pipeline::DONE, None);
         task.front.hook_paused = Some(crate::pipeline::DONE.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.front.hook_error = Some("error connecting to api.github.com".into());
         task.append_to_section(
             "## Hook error",
             "  Last output:\n\n      old failure\n\n  Last output:\n\n      no pull requests found\n\n      Last output: from the hook itself\n      github.sh: command failed (exit 1)\n\n",
         );
         task.set_stage(
             crate::pipeline::HOOK_FAILED,
-            Some("issue_tracking hook exited 1"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
 

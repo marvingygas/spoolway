@@ -611,17 +611,18 @@ new default only applies where the key is absent. Delete the line, or set it to 
 up the default.
 
 The script is called once per task per event. A non-zero exit on `queued`, `started` or `done`
-moves the task to `hook_failed` with the reason `issue_tracking hook exited N`. The task file gains a
+moves the task to `hook_failed`. The reason is the first non-blank line of the hook's own output, or
+`no output, exit <code>` when it printed nothing. The task file gains a
 `## Hook error` section holding the run's last 15 log lines under `Last output:`, appended on
 each failure. `spoolway resume` forgets that run, so the hook fires again. A non-zero exit on
 `blocked` or `paused` only records the failure, since both stages are already stopped for a
 person.
 
 A `queued`, `started` or `done` hook that is still running after 10 minutes is stopped and the
-task moves to `hook_failed`. The reason names the hook and the limit:
+task moves to `hook_failed`. The reason reads:
 
 ```
-issue_tracking hook `started` ran 10m and was stopped at the limit of 10m
+the hook ran longer than 10m and was stopped
 ```
 
 While such a hook runs, the task's row names it and how long it has run. The NEXT column reads:
@@ -631,13 +632,23 @@ While such a hook runs, the task's row names it and how long it has run. The NEX
 ```
 
 A `blocked` or `paused` hook that is still running after 10 minutes is stopped and recorded as
-exit code 124. It is not fired again, and the dispatcher prints a line for it once.
-
-Every task a hook moves to `hook_failed` adds a line to the dispatcher's problems, whether the
-hook exited non-zero or ran past its limit:
+exit code 124. It is not fired again, and the dispatcher prints a line for it once:
 
 ```
-`t5`'s `done` hook failed: issue_tracking hook exited 3. fix the hook, then resume the task to run it again.
+issue tracker: the issue for t5 was not updated when it was paused (the hook ran longer than 10m and was stopped). the task is fine.
+```
+
+Every task a hook moves to `hook_failed` adds a line to the dispatcher's problems, whether the
+hook exited non-zero or ran past its limit. It uses the same sentence as the `doctor` row below:
+
+```
+issue tracker: t5 stopped because its issue could not be marked as done (error connecting to api.github.com). fix that, then run `spoolway resume t5`. log: ~/.spoolway/project/tracking/t5 · done.log
+```
+
+A hook the dispatcher cannot start adds this line, and the task is not stopped:
+
+```
+issue tracker: the hook for t5 could not start (<the error>).
 ```
 
 The board shows such a task as `● hook failed`, with `[r] rerun hook  [k] skip hook` in NEXT. No hook event
@@ -646,9 +657,15 @@ fires for the `hook_failed` stage, so a failing hook is never asked to report it
 [Skipping a hook](cli-reference.md#skipping-a-hook) and the board's [Skip panel](dispatcher.md#skip-panel).
 
 A hook run killed without an exit code, by a reboot or `wsl --shutdown` for example, is fired
-again on the next pass. The pass report says so. If three runs in a row are killed this way, the
+again on the next pass. The pass report says so:
+
+```
+issue tracker: marking the issue for t5 as done was interrupted. trying again (1 of 3).
+```
+
+If three runs in a row are killed this way, the
 hook is not fired again. For the `queued`, `started` and `done` events the task then moves to `hook_failed`
-with the reason `issue_tracking hook was killed 3 times in a row without an exit code`. `spoolway resume` clears
+with the reason `the hook was interrupted 3 times in a row`. `spoolway resume` clears
 that count along with the run. A re-fired hook can repeat whatever the killed run already did,
 such as opening a ticket.
 
@@ -687,16 +704,26 @@ Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOL
 `SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`.
 
 Each failed hook run of a task is named once by `spoolway doctor` and by the "before dispatching"
-popup, under `problems`. The row gives the event, the task, the exit code, what clears it and the
-log path:
+popup, under `problems`. The row says what did not happen to the issue, quotes the first non-blank
+line of the hook's own log as the reason, says whether the task is fine or how to restart it, and
+gives the log path. A hook that printed nothing is quoted as `no output, exit <code>`.
+
+A failed `queued`, `started` or `done` hook stops the task on `hook_failed`:
 
 ```
-issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task stopped on `hook_failed`. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
+issue tracker: compact-ctx-launch stopped because its issue could not be marked as started (error connecting to api.github.com). fix that, then run `spoolway resume compact-ctx-launch`. log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 ```
 
-For a `queued`, `started` or `done` hook, `spoolway resume <task>` or `spoolway resume <task> --skip-hook` clears the row. A failed
-`blocked`, `paused` or `open` hook holds nothing, so the row says it clears once the task is done
-and archived. `spoolway issue show` runs produce no row.
+`spoolway resume <task>` or `spoolway resume <task> --skip-hook` clears that row.
+
+A failed `blocked`, `paused` or `open` hook does not stop the task:
+
+```
+issue tracker: the issue for compact-ctx-launch was not updated when it became blocked (error connecting to api.github.com). the task is fine. log: ~/.spoolway/project/tracking/compact-ctx-launch · blocked.log
+```
+
+The `paused` row reads "was not updated when it was paused" and the `open` row reads "could not be
+opened". These rows clear once the task is archived. `spoolway issue show` runs produce no row.
 
 `spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
 file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes

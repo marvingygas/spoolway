@@ -11303,8 +11303,8 @@ mod tests {
                 task.set_stage(DONE, None);
             }
             task.front.hook_paused = Some(event.into());
-            task.front.hook_error = Some("issue_tracking hook exited 1".into());
-            task.set_stage(HOOK_FAILED, Some("issue_tracking hook exited 1"));
+            task.front.hook_error = Some("error connecting to api.github.com".into());
+            task.set_stage(HOOK_FAILED, Some("error connecting to api.github.com"));
             task.save().unwrap();
         };
         fail("release", DONE);
@@ -12669,10 +12669,10 @@ mod tests {
     fn fail_hook(repo: &Repo, event: &str) {
         let mut task = repo.task("t").unwrap();
         task.front.hook_paused = Some(event.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.front.hook_error = Some("error connecting to api.github.com".into());
         task.set_stage(
             crate::pipeline::HOOK_FAILED,
-            Some("issue_tracking hook exited 1"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
     }
@@ -12694,7 +12694,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "passed handover, done hook failed: issue_tracking hook exited 1"
+            "passed handover, done hook failed: error connecting to api.github.com"
         );
     }
 
@@ -12710,7 +12710,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "passed handover, done hook failed: issue_tracking hook exited 1"
+            "passed handover, done hook failed: error connecting to api.github.com"
         );
     }
 
@@ -12724,7 +12724,10 @@ mod tests {
             |_| {},
             |repo, _| fail_hook(repo, crate::pipeline::QUEUED),
         );
-        assert_eq!(line, "queued hook failed: issue_tracking hook exited 1");
+        assert_eq!(
+            line,
+            "queued hook failed: error connecting to api.github.com"
+        );
     }
 
     /// The board's `pause`. An Escape in the pane parks through the same
@@ -15342,7 +15345,7 @@ mod tests {
         add_to(&repo, "hooked", &[], None, None);
         let mut task = repo.task("hooked").unwrap();
         task.front.hook_paused = Some(crate::pipeline::DONE.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.front.hook_error = Some("error connecting to api.github.com".into());
         task.set_stage_unbanked(crate::pipeline::HOOK_FAILED, "test setup");
         task.save().unwrap();
         let before = std::fs::read_to_string(&task.path).unwrap();
@@ -15372,8 +15375,8 @@ mod tests {
             task.set_extra_str("ticket", ticket);
         }
         task.front.hook_paused = Some(event.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
-        task.set_stage(HOOK_FAILED, Some("issue_tracking hook exited 1"));
+        task.front.hook_error = Some("error connecting to api.github.com".into());
+        task.set_stage(HOOK_FAILED, Some("error connecting to api.github.com"));
         task.save().unwrap();
     }
 

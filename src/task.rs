@@ -630,12 +630,13 @@ pub struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_paused: Option<String>,
 
-    /// Why the hook [`Frontmatter::hook_paused`] names failed, in the words
-    /// the dispatcher wrote: `issue_tracking hook exited 1`, say. Written and
-    /// cleared together with that field. It is what the board's RECENT line
-    /// says after `<event> hook failed:`, since the board reads the front
-    /// matter and never the body, where the same reason sits in the status
-    /// log.
+    /// Why the hook [`Frontmatter::hook_paused`] names failed: the hook's own
+    /// first line of output (see `crate::tracking::failure_reason`), or the
+    /// dispatcher's phrase for a run stopped at the time limit or interrupted
+    /// too many times in a row. Written and cleared together with that
+    /// field. It is what the board's RECENT line says after
+    /// `<event> hook failed:`, since the board reads the front matter and
+    /// never the body, where the same reason sits in the status log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_error: Option<String>,
 

@@ -4212,7 +4212,9 @@ mod tests {
         let rows = hook_rows(repo);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(
-            rows[0].starts_with(&format!("`{event}` failed for demo (exit 1)")),
+            rows[0].starts_with(&format!(
+                "demo stopped because its issue could not be marked as {event} ("
+            )),
             "{rows:?}"
         );
         assert!(rows[0].contains("`spoolway resume demo`"), "{rows:?}");
@@ -4235,10 +4237,10 @@ mod tests {
 
         // What `Dispatcher::stop_on_hook_failure` would have written.
         task.front.hook_paused = Some(crate::pipeline::QUEUED.to_string());
-        task.front.hook_error = Some("issue_tracking hook exited 1".to_string());
+        task.front.hook_error = Some("error connecting to api.github.com".to_string());
         task.set_stage(
             crate::pipeline::HOOK_FAILED,
-            Some("issue_tracking hook exited 1"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
 
@@ -4293,10 +4295,7 @@ mod tests {
 
         let before = hook_rows(&repo);
         assert_eq!(before.len(), 1, "{before:?}");
-        assert!(
-            before[0].contains("once the task is done and archived"),
-            "{before:?}"
-        );
+        assert!(before[0].contains("the task is fine."), "{before:?}");
         assert!(!before[0].contains("`spoolway resume demo`"), "{before:?}");
 
         resume(
@@ -4368,7 +4367,7 @@ mod tests {
         task.front.hook_paused = Some(crate::pipeline::STARTED.to_string());
         task.set_stage(
             crate::pipeline::PAUSED,
-            Some("issue_tracking hook exited 1 on `started`"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
 
@@ -4433,10 +4432,10 @@ mod tests {
         assert_eq!(wait_for_exit_code(&repo, &task, crate::pipeline::DONE), 1);
 
         task.front.hook_paused = Some(crate::pipeline::DONE.to_string());
-        task.front.hook_error = Some("issue_tracking hook exited 1".to_string());
+        task.front.hook_error = Some("error connecting to api.github.com".to_string());
         task.set_stage(
             crate::pipeline::HOOK_FAILED,
-            Some("issue_tracking hook exited 1"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
 
@@ -4488,10 +4487,10 @@ mod tests {
         crate::tracking::fire(repo, &task, event, 1).unwrap();
         assert_eq!(wait_for_exit_code(repo, &task, event), 1);
         task.front.hook_paused = Some(event.to_string());
-        task.front.hook_error = Some("issue_tracking hook exited 1".to_string());
+        task.front.hook_error = Some("error connecting to api.github.com".to_string());
         task.set_stage(
             crate::pipeline::HOOK_FAILED,
-            Some("issue_tracking hook exited 1"),
+            Some("error connecting to api.github.com"),
         );
         task.save().unwrap();
     }
@@ -10407,7 +10406,7 @@ mod tests {
         crate::tracking::fire(&repo, &task, crate::pipeline::DONE, 1).unwrap();
         assert_eq!(wait_for_exit_code(&repo, &task, crate::pipeline::DONE), 1);
         task.front.hook_paused = Some(crate::pipeline::DONE.into());
-        task.front.hook_error = Some("issue_tracking hook exited 1".into());
+        task.front.hook_error = Some("error connecting to api.github.com".into());
         task.set_stage(crate::pipeline::HOOK_FAILED, None);
         task.save().unwrap();
 

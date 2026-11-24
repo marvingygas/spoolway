@@ -1021,9 +1021,37 @@ enum TrackingGate {
 /// line, so two runs of the same hook in its log are never unexplained.
 fn refired_note(id: &str, event: &str, kills: u32) -> String {
     format!(
-        "{id}: issue_tracking hook on `{event}` was interrupted without an exit code \
-         ({kills} of {} in a row) — running it again",
+        "{}: marking the issue for {id} as {event} was interrupted. trying again \
+         ({kills} of {}).",
+        crate::commands::HOOK_FAILURE_LABEL,
         crate::tracking::MAX_HOOK_KILLS
+    )
+}
+
+/// The line for a hook [`crate::tracking::fire`] could not start at all.
+fn hook_not_started_line(id: &str, err: &anyhow::Error) -> String {
+    format!(
+        "{}: the hook for {id} could not start ({err:#}).",
+        crate::commands::HOOK_FAILURE_LABEL
+    )
+}
+
+/// The reason a hook run ended after [`crate::tracking::LIFECYCLE_TIMEOUT`],
+/// in the words every hook failure line quotes it in.
+fn timeout_reason() -> String {
+    format!(
+        "the hook ran longer than {} and was stopped",
+        crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT)
+    )
+}
+
+/// The line for a `blocked` or `paused` hook that was stopped at its limit.
+/// Neither event holds the task, so the line says the task is fine.
+fn untracked_event_line(id: &str, event: &str, reason: &str) -> String {
+    format!(
+        "{}: {}",
+        crate::commands::HOOK_FAILURE_LABEL,
+        crate::tracking::not_updated_sentence(id, event, reason)
     )
 }
 
@@ -2630,10 +2658,7 @@ impl<'a> Dispatcher<'a> {
             match crate::tracking::fire(self.repo, task, stage, group_open) {
                 Ok(Some(kills)) => report.actions.push(refired_note(task.id(), stage, kills)),
                 Ok(None) => {}
-                Err(err) => report.problems.push(format!(
-                    "{}: issue_tracking hook on `{stage}`: {err:#}",
-                    task.id()
-                )),
+                Err(err) => report.problems.push(hook_not_started_line(task.id(), &err)),
             }
             // `blocked` and `paused` hooks hold nothing, so no gate below
             // reads them and nothing would ever end one that hangs: the task
@@ -2641,15 +2666,11 @@ impl<'a> Dispatcher<'a> {
             // fired again for the task's next pause. Stopped here at the same
             // limit and said once.
             if (stage == crate::pipeline::BLOCKED || stage == crate::pipeline::PAUSED)
-                && let Some(ran) = crate::tracking::stop_if_overdue(self.repo, task, stage)
+                && crate::tracking::stop_if_overdue(self.repo, task, stage).is_some()
             {
-                report.problems.push(format!(
-                    "{}: issue_tracking hook on `{stage}` ran {} and was stopped at the limit \
-                     of {}",
-                    task.id(),
-                    crate::tracking::minutes(ran),
-                    crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
-                ));
+                report
+                    .problems
+                    .push(untracked_event_line(task.id(), stage, &timeout_reason()));
             }
         }
         if stage == crate::pipeline::QUEUED {
@@ -2733,11 +2754,7 @@ impl<'a> Dispatcher<'a> {
                             kills,
                         )),
                         Ok(None) => {}
-                        Err(err) => report.problems.push(format!(
-                            "{}: issue_tracking hook on `{}`: {err:#}",
-                            task.id(),
-                            crate::pipeline::STARTED
-                        )),
+                        Err(err) => report.problems.push(hook_not_started_line(task.id(), &err)),
                     }
                 }
                 match self.tracking_gate(task, crate::pipeline::STARTED) {
@@ -2931,8 +2948,9 @@ impl<'a> Dispatcher<'a> {
     /// read whether one is configured for this stage, and if so what it
     /// said — and used to ask with the same few lines of code typed out
     /// twice. Reading it here once leaves each call site free to still act
-    /// on the answer differently, which they do — each names its own stage
-    /// in the reason a failure pauses the task with.
+    /// on the answer differently, which they do. No reason names its stage:
+    /// [`Dispatcher::stop_on_hook_failure`]'s line and the board's
+    /// `<event> hook failed:` prefix say which hook it was.
     fn tracking_gate(&self, task: &Task, stage: &str) -> TrackingGate {
         // A trial arm, or a task queued with `tracking: off`:
         // `route_reserved_stage` never calls `fire` for either (see its own
@@ -2952,23 +2970,23 @@ impl<'a> Dispatcher<'a> {
         }
         if let Some(kills) = crate::tracking::killed(self.repo, task, stage) {
             return TrackingGate::Failed(format!(
-                "issue_tracking hook was killed {kills} times in a row without an exit code"
+                "the hook was interrupted {kills} times in a row"
             ));
         }
         // A hook that has run past its limit is killed here, on the pass that
         // notices, and the task pauses with the hook and the limit named. The
         // alternative is the task waiting on `Pending` for ever behind a hook
         // that will never exit.
-        if let Some(ran) = crate::tracking::stop_if_overdue(self.repo, task, stage) {
-            return TrackingGate::Failed(format!(
-                "issue_tracking hook `{stage}` ran {} and was stopped at the limit of {}",
-                crate::tracking::minutes(ran),
-                crate::tracking::minutes(crate::tracking::LIFECYCLE_TIMEOUT),
-            ));
+        if crate::tracking::stop_if_overdue(self.repo, task, stage).is_some() {
+            return TrackingGate::Failed(timeout_reason());
         }
         match crate::tracking::exit_code(self.repo, task, stage) {
             Some(0) => TrackingGate::Clean,
-            Some(code) => TrackingGate::Failed(format!("issue_tracking hook exited {code}")),
+            Some(code) => {
+                let key = crate::command_step::Runs::key(stage, task.id());
+                let log = crate::command_step::Runs::new(&self.repo.tracking_dir()).log_path(&key);
+                TrackingGate::Failed(crate::tracking::failure_reason(&log, code))
+            }
             None => TrackingGate::Pending,
         }
     }
@@ -2989,12 +3007,13 @@ impl<'a> Dispatcher<'a> {
     /// lane and no `last_report` yet either — exactly the shape
     /// `resume_target` already reads as "back to `queued`" on its own.
     ///
-    /// The stop's reason stays one short line — the hook's own last
-    /// output, not a log path a person has to go find, is what explains it:
-    /// the last 15 lines of its combined stdout and stderr, indented the way
+    /// The stop's reason stays one short line, the hook's first line of
+    /// output (see [`crate::tracking::failure_reason`]), and the problem line
+    /// this prints names the run's log. The last 15 lines of the log, its
+    /// combined stdout and stderr, are indented the way
     /// a failed command step's own `## Blocker` tail already is (see the
-    /// `output` tail built in `Dispatcher::tear_down_and_escalate`), appended
-    /// under `## Hook error` so a second failure on the same task grows the
+    /// `output` tail built in `Dispatcher::tear_down_and_escalate`) and
+    /// appended under `## Hook error` so a second failure on the same task grows the
     /// section rather than overwriting it.
     fn stop_on_hook_failure(
         &mut self,
@@ -3005,7 +3024,8 @@ impl<'a> Dispatcher<'a> {
     ) -> Result<()> {
         let key = crate::command_step::Runs::key(stage, task.id());
         let runs = crate::command_step::Runs::new(&self.repo.tracking_dir());
-        let log = std::fs::read_to_string(runs.log_path(&key)).unwrap_or_default();
+        let log_path = runs.log_path(&key);
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
         let tail: String = log
             .lines()
             .rev()
@@ -3025,9 +3045,10 @@ impl<'a> Dispatcher<'a> {
         // stops it, the way `pause_for_missing_start_branch` says its own.
         report.moved = true;
         report.problems.push(format!(
-            "`{}`'s `{stage}` hook failed: {reason}. fix the hook, then resume the task to \
-             run it again.",
-            task.id()
+            "{}: {} log: {}",
+            crate::commands::HOOK_FAILURE_LABEL,
+            crate::tracking::stopped_sentence(task.id(), stage, reason),
+            crate::repo::shorten_home(&log_path),
         ));
         Ok(())
     }
@@ -33753,10 +33774,7 @@ mod tests {
             "resume needs to know which event's run to forget"
         );
         let status_log = task.section("## Status Log").unwrap();
-        assert!(
-            status_log.contains("issue_tracking hook exited 1"),
-            "{status_log}"
-        );
+        assert!(status_log.contains("no output, exit 1"), "{status_log}");
         assert!(
             !status_log.contains("tracking/"),
             "the reason no longer names a log path: {status_log}"
@@ -34059,11 +34077,9 @@ exit 0"#,
 
         let report = run_pass(&repo, &mux);
         assert!(
-            report
-                .actions
-                .iter()
-                .any(|a| a.contains("demo: issue_tracking hook on `done`")
-                    && a.contains("running it again")),
+            report.actions.iter().any(|a| a
+                .contains("marking the issue for demo as done was interrupted")
+                && a.contains("trying again")),
             "the refire must be in the pass report: {:?}",
             report.actions
         );
@@ -34112,7 +34128,7 @@ exit 0"#,
             assert!(
                 task.section("## Status Log")
                     .unwrap()
-                    .contains("killed 3 times in a row without an exit code"),
+                    .contains("the hook was interrupted 3 times in a row"),
                 "{event}: {:?}",
                 task.section("## Status Log")
             );
@@ -34166,10 +34182,12 @@ exit 0"#,
         let problem = report
             .problems
             .iter()
-            .find(|p| p.contains("`demo`'s `queued` hook failed"))
+            .find(|p| p.contains("demo stopped because its issue could not be marked as queued"))
             .unwrap_or_else(|| panic!("no problem line: {:?}", report.problems));
         assert!(
-            problem.contains("`queued`") && problem.contains("11m") && problem.contains("10m"),
+            problem.contains("(the hook ran longer than 10m and was stopped)")
+                && problem.contains("run `spoolway resume demo`")
+                && !problem.contains("issue_tracking"),
             "{problem}"
         );
         assert!(
@@ -34211,10 +34229,10 @@ exit 0"#,
         let report = run_pass(&repo, &mux);
 
         assert!(
-            report
-                .problems
-                .iter()
-                .any(|p| p.contains("hook on `paused`") && p.contains("11m") && p.contains("10m")),
+            report.problems.iter().any(|p| p.contains(
+                "the issue for demo was not updated when it was paused \
+                     (the hook ran longer than 10m and was stopped). the task is fine."
+            ) && !p.contains("issue_tracking")),
             "{:?}",
             report.problems
         );
@@ -34234,9 +34252,33 @@ exit 0"#,
             quiet
                 .problems
                 .iter()
-                .all(|p| !p.contains("hook on `paused`")),
+                .all(|p| !p.contains("when it was paused")),
             "said again: {:?}",
             quiet.problems
+        );
+    }
+
+    /// The two lines about a hook that never ran or ran out of time say so
+    /// in plain words, name the issue's task, and carry neither the
+    /// `issue_tracking` setting's name nor an exit code. Each event reads its
+    /// own way: a `blocked` hook is not worded as a `paused` one.
+    #[test]
+    fn hook_lines_that_are_not_stops_read_in_plain_words() {
+        let err = anyhow::anyhow!("no such file");
+        assert_eq!(
+            hook_not_started_line("demo", &err),
+            "issue tracker: the hook for demo could not start (no such file)."
+        );
+        let reason = timeout_reason();
+        assert_eq!(
+            untracked_event_line("demo", crate::pipeline::BLOCKED, &reason),
+            "issue tracker: the issue for demo was not updated when it became blocked \
+             (the hook ran longer than 10m and was stopped). the task is fine."
+        );
+        assert_eq!(
+            untracked_event_line("demo", crate::pipeline::PAUSED, &reason),
+            "issue tracker: the issue for demo was not updated when it was paused \
+             (the hook ran longer than 10m and was stopped). the task is fine."
         );
     }
 
@@ -34246,7 +34288,11 @@ exit 0"#,
     #[test]
     fn a_failing_hook_adds_a_problem_line() {
         let (mut repo, _root_guard) = fixture("hook-problem-line");
-        write_hook(&repo, "fail.sh", "exit 7");
+        write_hook(
+            &repo,
+            "fail.sh",
+            "echo 'error connecting to api.github.com'\necho 'trace line' >&2\nexit 7",
+        );
         repo.config.issue_tracking.hook = "fail.sh".into();
         let path = add_task(&repo, "demo", crate::pipeline::QUEUED);
         let mux = FakeMux::new(vec![]);
@@ -34261,10 +34307,18 @@ exit 0"#,
         }
         assert_eq!(reload(&path).stage(), crate::pipeline::HOOK_FAILED);
         assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("`demo`'s `queued` hook failed") && p.contains("exited 7")),
+            problems.iter().any(|p| p.starts_with(
+                "issue tracker: demo stopped because its issue could not be marked as \
+                     queued (error connecting to api.github.com). fix that, then run \
+                     `spoolway resume demo`. log: "
+            ) && p.ends_with("queued.log")
+                && !p.contains("exit 7")),
             "{problems:?}"
+        );
+        assert_eq!(
+            reload(&path).front.hook_error.as_deref(),
+            Some("error connecting to api.github.com"),
+            "the board's history line quotes the hook's first line"
         );
     }
 

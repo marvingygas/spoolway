@@ -1206,21 +1206,24 @@ fn issue_tracking_config_checks(
 /// The label every [`hook_failure_checks`] row carries — the words before the
 /// colon in `spoolway doctor`'s `FAIL` line and in the "before dispatching"
 /// popup's `problems` section.
-pub(crate) const HOOK_FAILURE_LABEL: &str = "issue_tracking hooks";
+pub(crate) const HOOK_FAILURE_LABEL: &str = "issue tracker";
 
 /// One failing check per task hook run that exited non-zero — see
-/// [`crate::tracking::failures`] for which runs those are. Each names the
-/// event, the task, the exit code, what clears it and the run's own log.
+/// [`crate::tracking::failures`] for which runs those are. Each says in one
+/// sentence what did not happen to the issue, quotes the hook's own first
+/// line of output as the reason (see [`crate::tracking::failure_reason`]),
+/// says whether the task is fine or how to restart it, and names the run's
+/// own log.
 ///
 /// The text is also what the "before dispatching" popup fingerprints, so a
 /// second failure changes it and a hidden popup asks again.
 ///
 /// The remedy depends on the event. A failing `queued`, `started` or `done`
 /// hook moves its task to `hook_failed` and `spoolway resume` forgets the
-/// run, so the row says to resume. A `blocked` or `paused` hook only records
-/// its failure and an `open` one fails `queue add` itself, so nothing holds
-/// the task and resuming forgets nothing: those runs stay until the task is
-/// archived.
+/// run, so the row says the task stopped and to resume it. A `blocked` or
+/// `paused` hook only records its failure and an `open` one fails `queue add`
+/// itself, so nothing holds the task: the row says the task is fine, and
+/// those runs stay until the task is archived.
 fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
     crate::tracking::failures(repo)
         .into_iter()
@@ -1231,19 +1234,15 @@ fn hook_failure_checks(repo: &Repo) -> Vec<Finding> {
                 exit_code,
                 log,
             } = failure;
-            let remedy = match crate::tracking::STOPPING_EVENTS.contains(&event.as_str()) {
-                true => format!(
-                    "so the task stopped on `hook_failed`. fix what its log names, then run \
-                     `spoolway resume {task}`."
-                ),
-                false => "which holds nothing, so `spoolway resume` does not clear it; it \
-                          clears once the task is done and archived."
-                    .to_string(),
+            let reason = crate::tracking::failure_reason(&log, exit_code);
+            let sentence = match crate::tracking::STOPPING_EVENTS.contains(&event.as_str()) {
+                true => crate::tracking::stopped_sentence(&task, &event, &reason),
+                false => crate::tracking::not_updated_sentence(&task, &event, &reason),
             };
             Finding::Check(
                 HOOK_FAILURE_LABEL.into(),
                 Err(anyhow::anyhow!(
-                    "`{event}` failed for {task} (exit {exit_code}), {remedy} its log: {}",
+                    "{sentence} log: {}",
                     crate::repo::shorten_home(&log)
                 )),
             )
@@ -4814,14 +4813,21 @@ mod tests {
             .collect()
     }
 
-    /// One failing row per failing task hook, naming the event, the task,
-    /// the exit code and the run's `.log` under `tracking/`. A passing run
-    /// and a failed `spoolway issue show` (`fetch-*`) produce none.
+    /// A hook that stops its task: the row says the task stopped, quotes the
+    /// first line of the run's `.log` as the reason and ends on the resume
+    /// command. A passing run and a failed `spoolway issue show` (`fetch-*`)
+    /// produce none.
     #[test]
     fn issue_tracking_checks_names_each_failing_task_hook() {
         let (repo, _root_guard) = scratch_repo("hook-failures");
         seed_hook_run(&repo, "compact-ctx-launch", "started", "1");
         seed_hook_run(&repo, "other", "queued", "0");
+        let log = repo.tracking_dir().join("compact-ctx-launch · started.log");
+        std::fs::write(
+            &log,
+            "\n  error connecting to api.github.com  \ngithub.sh: command failed (exit 1)\n",
+        )
+        .unwrap();
         std::fs::write(
             repo.tracking_dir().join("fetch-o-r-issues-42-0123.exit"),
             "9\n",
@@ -4829,37 +4835,64 @@ mod tests {
         .unwrap();
 
         let rows = hook_rows(&issue_tracking_checks(&repo, &tracking("")));
-        let log = repo.tracking_dir().join("compact-ctx-launch · started.log");
         assert_eq!(
             rows,
             vec![format!(
-                "`started` failed for compact-ctx-launch (exit 1), so the task stopped on \
-                 `hook_failed`. fix what its log names, then run `spoolway resume \
-                 compact-ctx-launch`. its log: {}",
+                "compact-ctx-launch stopped because its issue could not be marked as started \
+                 (error connecting to api.github.com). fix that, then run `spoolway resume \
+                 compact-ctx-launch`. log: {}",
                 crate::repo::shorten_home(&log)
             )]
         );
     }
 
-    /// A `blocked` hook only records its failure, so its row names no
-    /// resume: it says the task's archiving is what clears it.
+    /// A `blocked` hook only records its failure, so its row says the task
+    /// is fine and names no resume. A run with no log has no reason to quote,
+    /// so the row falls back to the exit code.
     #[test]
-    fn a_failing_blocked_hook_row_names_archiving_as_what_clears_it() {
+    fn a_failing_blocked_hook_row_says_the_task_is_fine() {
         let (repo, _root_guard) = scratch_repo("hook-failure-blocked");
         seed_hook_run(&repo, "demo", "blocked", "2");
+        let log = repo.tracking_dir().join("demo · blocked.log");
         let rows = hook_rows(&issue_tracking_checks(&repo, &tracking("")));
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert!(
-            rows[0].starts_with("`blocked` failed for demo (exit 2), which holds nothing"),
-            "{rows:?}"
+        assert_eq!(
+            rows,
+            vec![format!(
+                "the issue for demo was not updated when it became blocked (no output, exit 2). \
+                 the task is fine. log: {}",
+                crate::repo::shorten_home(&log)
+            )]
         );
-        assert!(rows[0].contains("done and archived"), "{rows:?}");
         assert!(!rows[0].contains("`spoolway resume demo`"), "{rows:?}");
 
         // What archiving does: the task leaves the queue and its run files go.
         std::fs::remove_file(repo.queue_dir().join("demo.md")).unwrap();
         crate::tracking::reclaim(&repo, "demo");
         assert!(hook_rows(&issue_tracking_checks(&repo, &tracking(""))).is_empty());
+    }
+
+    /// `paused` and `open` have their own phrases, and a log of only blank
+    /// lines counts as empty.
+    #[test]
+    fn paused_and_open_hook_rows_use_their_own_phrase() {
+        let (repo, _root_guard) = scratch_repo("hook-failure-paused-open");
+        seed_hook_run(&repo, "one", "paused", "1");
+        seed_hook_run(&repo, "two", "open", "3");
+        std::fs::write(repo.tracking_dir().join("one · paused.log"), "\n  \n").unwrap();
+        std::fs::write(repo.tracking_dir().join("two · open.log"), "bad key\n").unwrap();
+        let rows = hook_rows(&issue_tracking_checks(&repo, &tracking("")));
+        assert!(
+            rows[0].starts_with(
+                "the issue for one was not updated when it was paused (no output, exit 1). \
+                 the task is fine."
+            ),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1]
+                .starts_with("the issue for two could not be opened (bad key). the task is fine."),
+            "{rows:?}"
+        );
     }
 
     /// `spoolway config set issue_tracking.*` warns about the value just

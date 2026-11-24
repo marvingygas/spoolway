@@ -620,7 +620,7 @@ spoolway queue route <task>
 spoolway queue route <task> --json
 ```
 
-The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: issue_tracking hook exited 1`, and no step is marked. Each step shows its id, its description and its routes. A step with a `gate:` says which outcome waits for a person: `A pass waits for a person.`, `A fail waits for a person.` or `A pass or a fail waits for a person.` The `blocked` step is not listed.
+The first line names the pipeline and says where the task stands. A task on `hook_failed` reads `hook failed at <event>: <reason>`, such as `hook failed at done: error connecting to api.github.com`, and no step is marked. Each step shows its id, its description and its routes. A step with a `gate:` says which outcome waits for a person: `A pass waits for a person.`, `A fail waits for a person.` or `A pass or a fail waits for a person.` The `blocked` step is not listed.
 
 A step the task walks past is not listed either: one its own `skip:` names, a `first:` step when the task is not its chain's root, and a `last:` step while an open task above this one in its group runs a `last:` step of its own. The step the task is on is the exception, and stays listed and marked even when it is one of these. Every `pass →` and `fail →` route names the step a report really writes, followed past any step the task walks past. If `test` passes to a `last:` step `suite` that passes to `document`, a task with a dependent in its group reads `pass → document` under `test`, and `suite` has no entry.
 
@@ -645,7 +645,7 @@ The last lines apply to a task on `paused` or `blocked`. They name the step `spo
 A task on `hook_failed` has no step to resume at. After the step list it prints the hook's last output, then names the two ways out, each with its board key and its shell command:
 
 ```
-impl — hook failed at done: issue_tracking hook exited 1
+impl — hook failed at done: error connecting to api.github.com
 
   implement         Write the code to satisfy the task's acceptance criteria.
                     pass → review-spec · fail → blocked
@@ -932,8 +932,9 @@ files
 
 problems
   prompt `archivist`: missing
-  issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is
-    paused. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log:
+  issue tracker: compact-ctx-launch stopped because its issue could not be marked as started
+    (error connecting to api.github.com). fix that, then run
+    `spoolway resume compact-ctx-launch`. log:
     ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 
 > start dispatching
@@ -2396,8 +2397,9 @@ A `FAIL` row labelled ``gate of task `<id>` `` names a task whose `gate_at:` nam
 pipeline does not have or that runs a command, with the line `spoolway pipeline check` prints. A task at `done` is not
 reported. The row also shows on the warnings screen before dispatching.
 
-A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
-its event, task, exit code, remedy and log path.
+A `FAIL` row labelled `issue tracker` names each task hook run that exited non-zero. It says what
+did not happen to the issue, quotes the first line of the hook's log as the reason, says whether the
+task is fine or how to restart it, and gives the log path.
 
 A `FAIL` row labelled `the configured hook script has Unix line endings` names a hook whose first
 line ends in a carriage return. A `FAIL` row labelled `the configured hook script is executable`

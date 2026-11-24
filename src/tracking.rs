@@ -1332,6 +1332,112 @@ pub const STOPPING_EVENTS: &[&str] = &[
     crate::pipeline::DONE,
 ];
 
+/// Why a failed hook run failed, in the hook's own words: the first
+/// non-blank line of the run's `.log`, trimmed (see [`crate::fmt::first_line`]).
+/// That is the hook's error when the failing command is the first thing it
+/// prints. A hook that prints success output before it fails is quoted by that
+/// output instead.
+///
+/// A run that printed nothing, or only blank lines, or whose log cannot be
+/// read, has no words to quote, so the answer is `no output, exit <code>`.
+/// Only the one line is returned, so the trace lines after it stay in the log.
+///
+/// The line is the hook's text, not spoolway's, and it is saved in a task's
+/// front matter and drawn on the board. Escape sequences (colour codes, cursor
+/// moves, hyperlinks) are removed whole and the other control characters
+/// (carriage returns, bells) are dropped, so they cannot repaint the board.
+/// That happens before the line is chosen, so a line left empty by it is
+/// skipped like a blank one. A line longer than [`FAILURE_REASON_MAX`]
+/// characters is cut with `…`, so a one-line JSON error body cannot swell the
+/// front matter.
+pub fn failure_reason(log: &Path, exit_code: i32) -> String {
+    let text = std::fs::read(log)
+        .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+        .unwrap_or_default();
+    let text = without_terminal_codes(&text);
+    let line = crate::fmt::first_line(&text);
+    if line.is_empty() {
+        return format!("no output, exit {exit_code}");
+    }
+    match line.char_indices().nth(FAILURE_REASON_MAX) {
+        Some((end, _)) => format!("{}…", line[..end].trim_end()),
+        None => line.to_string(),
+    }
+}
+
+/// The longest hook output line [`failure_reason`] quotes whole.
+const FAILURE_REASON_MAX: usize = 200;
+
+/// `text` with every terminal escape sequence removed whole and every other
+/// control character dropped, keeping newlines.
+///
+/// A CSI sequence is `ESC [`, parameter and intermediate bytes, and one final
+/// byte in `0x40..=0x7E`, so `ESC [ 2 K` goes entirely. It is not skipped up
+/// to the next `m` the way a colour code alone could be, which would eat the
+/// words after a cursor move. An OSC sequence is `ESC ]` up to a bell or
+/// `ESC \`. Any other `ESC` takes the one character after it, unless that is
+/// a newline, which is kept so two lines are not joined. A tab becomes a
+/// space, so words a hook separates with one stay apart.
+fn without_terminal_codes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '\u{7}' => break,
+                            '\u{1b}' => {
+                                chars.next();
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some('\n') => out.push('\n'),
+                _ => {}
+            },
+            '\n' => out.push(c),
+            '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The sentence for a `queued`, `started` or `done` hook that failed: the task
+/// stopped, and the command that restarts it. Doctor's row and the
+/// dispatcher's problem line both print it, so the two cannot word it apart.
+pub fn stopped_sentence(task: &str, event: &str, reason: &str) -> String {
+    format!(
+        "{task} stopped because its issue could not be marked as {event} \
+         ({reason}). fix that, then run `spoolway resume {task}`."
+    )
+}
+
+/// The sentence for a hook that failed on an event that holds nothing
+/// (`blocked`, `paused`, `open`): the issue missed an update and the task is
+/// fine. Doctor's row and the dispatcher's timeout line both print it.
+pub fn not_updated_sentence(task: &str, event: &str, reason: &str) -> String {
+    let what = match event {
+        crate::pipeline::BLOCKED => "was not updated when it became blocked".to_string(),
+        crate::pipeline::PAUSED => "was not updated when it was paused".to_string(),
+        "open" => "could not be opened".to_string(),
+        other => format!("was not updated on `{other}`"),
+    };
+    format!("the issue for {task} {what} ({reason}). the task is fine.")
+}
+
 /// Every task hook run under `tracking/` that exited non-zero, in key order.
 ///
 /// A hook run is left exactly as it exited until something removes it, so
@@ -2458,6 +2564,48 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         stop_and_reclaim(&repo, t.id());
+    }
+
+    /// The reason is the hook's own words but not its control characters or
+    /// its length: the line is saved in front matter and drawn on the board,
+    /// so an escape code or a kilobyte-long JSON body must not reach either.
+    /// Quoting the raw line would keep the escape bytes and the whole body.
+    #[test]
+    fn a_failure_reason_has_no_control_characters_and_a_bounded_length() {
+        let (_repo, root) = fixture("failure-reason-clean");
+        let log = root.join("run.log");
+
+        std::fs::write(&log, "\n\x1b[31merror\x1b[0m connecting\r\nsecond\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "error connecting");
+
+        std::fs::write(&log, "\x1b[2Kerror connecting\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "error connecting");
+
+        std::fs::write(&log, "\x1b]8;;http://x/m\x07link\x1b]8;;\x1b\\ text\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "link text");
+
+        std::fs::write(&log, "\x07\n\x1b[0m\nerror connecting to api.github.com\n").unwrap();
+        assert_eq!(
+            failure_reason(&log, 1),
+            "error connecting to api.github.com"
+        );
+
+        std::fs::write(&log, "HTTP 404\tNot Found\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "HTTP 404 Not Found");
+
+        std::fs::write(&log, "progress\x1b\nerror connecting\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "progress");
+
+        std::fs::write(&log, "\x1b\r\n\x07\n").unwrap();
+        assert_eq!(failure_reason(&log, 3), "no output, exit 3");
+
+        std::fs::write(&log, "x".repeat(FAILURE_REASON_MAX + 50)).unwrap();
+        let reason = failure_reason(&log, 1);
+        assert_eq!(reason.chars().count(), FAILURE_REASON_MAX + 1, "{reason}");
+        assert!(reason.ends_with('…'), "{reason}");
+
+        std::fs::write(&log, "x".repeat(FAILURE_REASON_MAX)).unwrap();
+        assert!(!failure_reason(&log, 1).ends_with('…'));
     }
 
     /// An adopted hook that is already past its limit is stopped with
