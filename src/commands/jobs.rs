@@ -848,7 +848,7 @@ pub(super) fn detail_last(repo: &Repo, name: &str) -> String {
         Some(epoch) => match jiff::Timestamp::from_second(epoch) {
             Ok(when) => format!(
                 "{}  ok",
-                when.to_zoned(jiff::tz::TimeZone::system())
+                when.to_zoned_datetime(jiff::tz::TimeZone::system())
                     .strftime(FIRING_TIME)
             ),
             Err(_) => "never".to_string(),

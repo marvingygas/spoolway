@@ -4271,7 +4271,7 @@ fn build(
     // The ticker sees the queue move: a stage that changed, or a task that
     // left the queue finished. A task entering the queue is already a new row
     // on the table above, so it earns no line here too.
-    let now = jiff::Zoned::now().strftime("%H:%M").to_string();
+    let now = jiff::ZonedDateTime::now().strftime("%H:%M").to_string();
     let mut current: BTreeMap<String, String> = BTreeMap::new();
     for task in &tasks {
         current.insert(task.id().to_string(), task.stage().to_string());
@@ -5192,7 +5192,7 @@ fn paint_empty(
         true => height.saturating_sub(3 + last_rows),
         false => height.saturating_sub(4 + last_rows),
     });
-    let hour = jiff::Zoned::now().hour() as u32;
+    let hour = jiff::ZonedDateTime::now().hour() as u32;
     // No profile names to line "jobs" up with here, so the ledger takes
     // only the column its own label needs.
     let ledger = jobs_ledger(jobs, 0);
@@ -19758,7 +19758,7 @@ mod tests {
                 })
             })
             .collect();
-        let soon = jiff::Zoned::now() + jiff::SignedDuration::from_hours(6);
+        let soon = jiff::ZonedDateTime::now() + jiff::SignedDuration::from_hours(6);
         let job = |name: &str| crate::jobs::ActiveJob {
             name: name.to_string(),
             next: Some(soon.clone()),
