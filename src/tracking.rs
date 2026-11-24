@@ -1343,19 +1343,19 @@ pub const STOPPING_EVENTS: &[&str] = &[
 /// Only the one line is returned, so the trace lines after it stay in the log.
 ///
 /// The line is the hook's text, not spoolway's, and it is saved in a task's
-/// front matter and drawn on the board. Control characters (colour escapes,
-/// carriage returns) are dropped so they cannot repaint the board, and a line
-/// longer than [`FAILURE_REASON_MAX`] characters is cut with `…`, so a
-/// one-line JSON error body cannot swell the front matter.
+/// front matter and drawn on the board. Escape sequences (colour codes, cursor
+/// moves, hyperlinks) are removed whole and the other control characters
+/// (carriage returns, bells) are dropped, so they cannot repaint the board.
+/// That happens before the line is chosen, so a line left empty by it is
+/// skipped like a blank one. A line longer than [`FAILURE_REASON_MAX`]
+/// characters is cut with `…`, so a one-line JSON error body cannot swell the
+/// front matter.
 pub fn failure_reason(log: &Path, exit_code: i32) -> String {
     let text = std::fs::read(log)
         .map(|raw| String::from_utf8_lossy(&raw).into_owned())
         .unwrap_or_default();
-    let line: String = crate::fmt::first_line(&text)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
-    let line = line.trim();
+    let text = without_terminal_codes(&text);
+    let line = crate::fmt::first_line(&text);
     if line.is_empty() {
         return format!("no output, exit {exit_code}");
     }
@@ -1367,6 +1367,49 @@ pub fn failure_reason(log: &Path, exit_code: i32) -> String {
 
 /// The longest hook output line [`failure_reason`] quotes whole.
 const FAILURE_REASON_MAX: usize = 200;
+
+/// `text` with every terminal escape sequence removed whole and every other
+/// control character dropped, keeping newlines.
+///
+/// A CSI sequence is `ESC [`, parameter and intermediate bytes, and one final
+/// byte in `0x40..=0x7E`, so `ESC [ 2 K` goes entirely. It is not skipped up
+/// to the next `m` the way a colour code alone could be, which would eat the
+/// words after a cursor move. An OSC sequence is `ESC ]` up to a bell or
+/// `ESC \`. Any other `ESC` takes the one character after it.
+fn without_terminal_codes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '\u{7}' => break,
+                            '\u{1b}' => {
+                                chars.next();
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\n' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
 
 /// The sentence for a `queued`, `started` or `done` hook that failed: the task
 /// stopped, and the command that restarts it. Doctor's row and the
@@ -2529,7 +2572,19 @@ mod tests {
         let log = root.join("run.log");
 
         std::fs::write(&log, "\n\x1b[31merror\x1b[0m connecting\r\nsecond\n").unwrap();
-        assert_eq!(failure_reason(&log, 1), "[31merror[0m connecting");
+        assert_eq!(failure_reason(&log, 1), "error connecting");
+
+        std::fs::write(&log, "\x1b[2Kerror connecting\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "error connecting");
+
+        std::fs::write(&log, "\x1b]8;;http://x/m\x07link\x1b]8;;\x1b\\ text\n").unwrap();
+        assert_eq!(failure_reason(&log, 1), "link text");
+
+        std::fs::write(&log, "\x07\n\x1b[0m\nerror connecting to api.github.com\n").unwrap();
+        assert_eq!(
+            failure_reason(&log, 1),
+            "error connecting to api.github.com"
+        );
 
         std::fs::write(&log, "\x1b\r\n\x07\n").unwrap();
         assert_eq!(failure_reason(&log, 3), "no output, exit 3");
