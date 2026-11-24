@@ -3331,7 +3331,7 @@ mod tests {
         let body: Vec<&str> = panel.iter().map(|row| popup_row(row)).collect();
         assert!(body.contains(&"problems"), "{body:#?}");
         assert!(
-            body.contains(&"issue_tracking hooks: `started` failed for first (exit 1), so the"),
+            body.contains(&"issue tracker: first stopped because its issue could not be marked"),
             "{body:#?}"
         );
         let (_, _, problems) = cheap_sections(&repo, &pipelines, false, &Ok(None));
