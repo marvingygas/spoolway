@@ -4212,7 +4212,9 @@ mod tests {
         let rows = hook_rows(repo);
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(
-            rows[0].starts_with(&format!("`{event}` failed for demo (exit 1)")),
+            rows[0].starts_with(&format!(
+                "demo stopped because its issue could not be marked as {event} ("
+            )),
             "{rows:?}"
         );
         assert!(rows[0].contains("`spoolway resume demo`"), "{rows:?}");
@@ -4293,10 +4295,7 @@ mod tests {
 
         let before = hook_rows(&repo);
         assert_eq!(before.len(), 1, "{before:?}");
-        assert!(
-            before[0].contains("once the task is done and archived"),
-            "{before:?}"
-        );
+        assert!(before[0].contains("the task is fine."), "{before:?}");
         assert!(!before[0].contains("`spoolway resume demo`"), "{before:?}");
 
         resume(
