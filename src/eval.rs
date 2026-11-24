@@ -5617,9 +5617,16 @@ impl ScreenState {
     /// due to change: the spool's next flip, or the end of its hold over a
     /// result that already landed, while loading. Otherwise the shell's own
     /// once-a-second tick, as every tab waits.
+    ///
+    /// No wait at all while the clock is already past the frame
+    /// [`ScreenState::turn_spool`] last turned to. That reads the clock
+    /// apart from this, and a frame may be written in between, so a flip can
+    /// fall between the two reads: timed from this read alone, the wait
+    /// would then run a whole flip with the frame now due never drawn.
     fn wake_in(&self) -> std::time::Duration {
         let Mode::Loading {
             since,
+            spool: drawn,
             shown,
             landed,
             ..
@@ -5628,6 +5635,9 @@ impl ScreenState {
             return crate::status::POLL;
         };
         let elapsed = since.elapsed();
+        if spool::frame_at(elapsed) != *drawn {
+            return std::time::Duration::ZERO;
+        }
         let flip = spool::until_change(elapsed);
         match (landed, shown) {
             (Some(_), Some(shown)) => flip.min(spool::hold_left(*shown, elapsed)),
@@ -9752,16 +9762,21 @@ mod screen_tests {
 
     /// A terminal the eval loop waits on in real time while a reload runs
     /// under the spool: the first `at_once` bytes of `keys` are typed at
-    /// once, and after that each wait sleeps the whole time it was asked
-    /// for, as a quiet keyboard would, until the screen has drawn every
-    /// frame of the mark in `until`. Then it does what `then` says. Every
-    /// wait it was asked for is kept in `waits`, with whether the spool had
-    /// drawn every frame in `until` yet.
+    /// once, and after that each wait sleeps the time it was asked for, as
+    /// a quiet keyboard would, until the screen has drawn every frame of the
+    /// mark in `until`. Then it does what `then` says. Every wait it was
+    /// asked for is kept in `waits`, with whether the spool had drawn every
+    /// frame in `until` yet, and every frame of the mark drawn in `order`.
+    ///
+    /// Each sleep is cut down to whole milliseconds, as the real terminal's
+    /// `poll` cuts it: the loop then wakes just short of a flip and waits
+    /// again in slices of under a millisecond until the flip has passed.
     struct UnderSpool {
         keys: std::io::Cursor<Vec<u8>>,
         at_once: u64,
         seen: std::sync::mpsc::Receiver<usize>,
         drawn: std::cell::RefCell<std::collections::BTreeSet<usize>>,
+        order: std::cell::RefCell<Vec<usize>>,
         until: Vec<usize>,
         senders: Senders,
         then: std::cell::RefCell<Option<Then>>,
@@ -9783,6 +9798,7 @@ mod screen_tests {
                 at_once: at_once as u64,
                 seen,
                 drawn: Default::default(),
+                order: Default::default(),
                 until: until.to_vec(),
                 senders: senders.clone(),
                 then: std::cell::RefCell::new(Some(then)),
@@ -9809,7 +9825,10 @@ mod screen_tests {
                 self.until,
                 self.drawn.borrow()
             );
-            self.drawn.borrow_mut().extend(self.seen.try_iter());
+            for frame in self.seen.try_iter() {
+                self.drawn.borrow_mut().insert(frame);
+                self.order.borrow_mut().push(frame);
+            }
             let ready = self.until.iter().all(|f| self.drawn.borrow().contains(f));
             self.waits.borrow_mut().push((timeout, ready));
             if ready {
@@ -9828,7 +9847,7 @@ mod screen_tests {
                     _ => {}
                 }
             }
-            std::thread::sleep(timeout);
+            std::thread::sleep(std::time::Duration::from_millis(timeout.as_millis() as u64));
             false
         }
     }
@@ -9902,10 +9921,93 @@ mod screen_tests {
                     "{script:?}: {plain}"
                 );
             }
+            // The mark turns from its first frame: a flip slept through at
+            // the delay would draw frame 1 first.
+            let mut order = input.order.borrow().clone();
+            order.dedup();
+            assert_eq!(order.first(), Some(&0), "{script:?}: {order:?}");
             let last = last_frame(&drawn);
             assert!(!shows_spool(last), "{script:?}: {last}");
             assert!(last.contains("│>default"), "{script:?}: {last}");
         }
+    }
+
+    /// A [`crate::screen::spool::testutil::Watched`] terminal whose second
+    /// frame takes `slow` to write, as over a slow link, and which keeps the
+    /// moment each frame's write began in `frames`.
+    struct SlowSecond {
+        inner: crate::screen::spool::testutil::Watched,
+        slow: std::time::Duration,
+        frames: Vec<std::time::Instant>,
+    }
+
+    impl std::io::Write for SlowSecond {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.starts_with(b"\x1b[?2026h") {
+                if self.frames.len() == 1 {
+                    std::thread::sleep(self.slow);
+                }
+                self.frames.push(std::time::Instant::now());
+            }
+            self.inner.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// A flip that passes while a frame is being written is drawn as soon
+    /// as the write ends, not a whole flip later. Here the frame `r` draws
+    /// takes past the spool's delay to write, so the mark's first frame is
+    /// already due by the time the loop asks how long it may wait for a key.
+    #[test]
+    fn a_flip_passing_during_a_slow_write_is_drawn_at_once() {
+        use crate::screen::spool::{DELAY, FLIP, testutil::watched};
+
+        let (repo, _root_guard) = fixture_with_one_run("screen-loading-slow-write");
+        let senders = Senders::default();
+        let mut first = true;
+        let (inner, seen) = watched();
+        let mut out = SlowSecond {
+            inner,
+            slow: DELAY + FLIP / 5,
+            frames: Vec::new(),
+        };
+        let mut input = UnderSpool::new(
+            "r",
+            1,
+            seen,
+            &[0, 1],
+            &senders,
+            Then::Land(Box::new(load(&repo, &no_filters()))),
+        );
+        run_screen_with(
+            &repo,
+            &Pipelines::builtin(),
+            &no_args(),
+            |filters| {
+                if std::mem::take(&mut first) {
+                    load_now(&repo, filters)
+                } else {
+                    held(&senders)
+                }
+            },
+            &mut crate::screen::frame_writer::FrameWriter::new(),
+            &mut input,
+            &mut out,
+        )
+        .unwrap();
+
+        let drawn = String::from_utf8(out.inner.bytes).unwrap();
+        let all = frames(&drawn);
+        assert!(!shows_spool(all[1]), "{}", all[1]);
+        assert!(shows_spool(all[2]), "{}", all[2]);
+        let late = out.frames[2] - out.frames[1];
+        assert!(
+            late < FLIP / 2,
+            "the spool came {late:?} after the slow frame"
+        );
     }
 
     /// A tab's digit and `q` still act while the spool turns: typed only
@@ -9968,7 +10070,7 @@ mod screen_tests {
                 filters: no_filters(),
                 reset_cursor: false,
                 since: Instant::now() - started,
-                spool: Some(0),
+                spool: crate::screen::spool::frame_at(started),
                 shown: Some(started - shown_ago),
                 landed: None,
             };
