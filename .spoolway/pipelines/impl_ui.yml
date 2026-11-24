@@ -8,6 +8,9 @@
 #                                        Read to choose between pipelines.
 #   task_template     <name>             Task skeleton tasks queued here are written from.
 #                                        Absent: this pipeline's name, then `default`.
+#   add_dirs          <a, b, c>          Extra folders every agent step here is given,
+#                                        on top of dispatch.add_dirs. Comma separated.
+#                                        pi steps are skipped. Absent: none.
 #   steps             <list> <required>  The flow. The first step is the entry, and
 #                                        later steps outrank earlier ones for a slot.
 #
@@ -24,6 +27,10 @@
 #   skills            <a, b, c>          Skills invoked at the top of this step's
 #                                        opening prompt. Comma separated, leading
 #                                        slash optional, names only.
+#                                        Absent: none.
+#   add_dirs          <a, b, c>          Extra folders this step is given, on top of
+#                                        the pipeline's list and dispatch.add_dirs.
+#                                        Comma separated. Refused on a pi step.
 #                                        Absent: none.
 #   session           true               Resumes this prompt's earlier conversation.
 #                     false <default>    Opens a fresh conversation every visit.
