@@ -687,16 +687,26 @@ Every hook run on `queued`, `started`, `blocked`, `paused` or `done` gets `SPOOL
 `SPOOLWAY_GROUP_LAST=1`. Output goes to a log under `~/.spoolway/<project>/tracking/`.
 
 Each failed hook run of a task is named once by `spoolway doctor` and by the "before dispatching"
-popup, under `problems`. The row gives the event, the task, the exit code, what clears it and the
-log path:
+popup, under `problems`. The row says what did not happen to the issue, quotes the first non-blank
+line of the hook's own log as the reason, says whether the task is fine or how to restart it, and
+gives the log path. A hook that printed nothing is quoted as `no output, exit <code>`.
+
+A failed `queued`, `started` or `done` hook stops the task on `hook_failed`:
 
 ```
-issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task stopped on `hook_failed`. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
+issue tracker: compact-ctx-launch stopped because its issue could not be marked as started (error connecting to api.github.com). fix that, then run `spoolway resume compact-ctx-launch`. log: ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 ```
 
-For a `queued`, `started` or `done` hook, `spoolway resume <task>` or `spoolway resume <task> --skip-hook` clears the row. A failed
-`blocked`, `paused` or `open` hook holds nothing, so the row says it clears once the task is done
-and archived. `spoolway issue show` runs produce no row.
+`spoolway resume <task>` or `spoolway resume <task> --skip-hook` clears that row.
+
+A failed `blocked`, `paused` or `open` hook does not stop the task:
+
+```
+issue tracker: the issue for compact-ctx-launch was not updated when it became blocked (error connecting to api.github.com). the task is fine. log: ~/.spoolway/project/tracking/compact-ctx-launch · blocked.log
+```
+
+The `paused` row reads "was not updated when it was paused" and the `open` row reads "could not be
+opened". These rows clear once the task is archived. `spoolway issue show` runs produce no row.
 
 `spoolway doctor` reports a `hook` with a blank `project_key`, a `hook` that is not a bare
 file name, a script with no `fetch` branch, `key_in_names` on with a script that never writes

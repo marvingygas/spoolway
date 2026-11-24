@@ -812,7 +812,7 @@ more: the `Run spoolway sync to apply the last update.` line and the update popu
   ```
 - Delete `~/.spoolway/<label>-<id>/sync-stamp`. Nothing reads it now.
 - Expect `spoolway doctor` to exit non-zero while a task hook has failed. Hook failures left the
-  board and are `FAIL` rows labelled `issue_tracking hooks` in `doctor` and in the popup before
+  board and are `FAIL` rows labelled `issue tracker` in `doctor` and in the popup before
   dispatching. Resume the task to clear a `queued`, `started` or `done` hook; the others clear once
   the task is archived.
 - Review `unattended.max_cost_usd` and `session_blocked_ctx` for every model a `[models]` row

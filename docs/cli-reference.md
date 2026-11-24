@@ -932,8 +932,9 @@ files
 
 problems
   prompt `archivist`: missing
-  issue_tracking hooks: `started` failed for compact-ctx-launch (exit 1), so the task is
-    paused. fix what its log names, then run `spoolway resume compact-ctx-launch`. its log:
+  issue tracker: compact-ctx-launch stopped because its issue could not be marked as started
+    (error connecting to api.github.com). fix that, then run
+    `spoolway resume compact-ctx-launch`. log:
     ~/.spoolway/project/tracking/compact-ctx-launch · started.log
 
 > start dispatching
@@ -2396,8 +2397,9 @@ A `FAIL` row labelled ``gate of task `<id>` `` names a task whose `gate_at:` nam
 pipeline does not have or that runs a command, with the line `spoolway pipeline check` prints. A task at `done` is not
 reported. The row also shows on the warnings screen before dispatching.
 
-A `FAIL` row labelled `issue_tracking hooks` names each task hook run that exited non-zero, with
-its event, task, exit code, remedy and log path.
+A `FAIL` row labelled `issue tracker` names each task hook run that exited non-zero. It says what
+did not happen to the issue, quotes the first line of the hook's log as the reason, says whether the
+task is fine or how to restart it, and gives the log path.
 
 A `FAIL` row labelled `the configured hook script has Unix line endings` names a hook whose first
 line ends in a carriage return. A `FAIL` row labelled `the configured hook script is executable`
